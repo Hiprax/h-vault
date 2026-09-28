@@ -422,10 +422,18 @@ describe('A2 — DELETE /user/2fa must apply completely or not at all', () => {
 
     // The write is made to fail at the database, which is the only failure mode
     // that can genuinely interleave with the revocations. Everything downstream
-    // of it must therefore be unreachable.
-    const spy = vi
-      .spyOn(User, 'findByIdAndUpdate')
-      .mockRejectedValueOnce(new Error('simulated write failure'));
+    // of it must therefore be unreachable. The disabling write is the single
+    // conditional `findOneAndUpdate` that also consumes the code's step (F-28:
+    // the one verifier's compare-and-set is merged into it), so that is the
+    // write the failure is injected into.
+    const original = User.findOneAndUpdate.bind(User) as (...args: unknown[]) => unknown;
+    const spy = vi.spyOn(User, 'findOneAndUpdate').mockImplementation(((...args: unknown[]) => {
+      const update = args[1] as { $set?: Record<string, unknown> } | undefined;
+      if (update?.$set?.['twoFactorEnabled'] === false) {
+        return Promise.reject(new Error('simulated write failure'));
+      }
+      return original(...args);
+    }) as never);
 
     try {
       const { token, cookie } = await getCsrf(agent);
@@ -489,8 +497,9 @@ describe('A2 — DELETE /user/2fa must apply completely or not at all', () => {
 
     // The point of the ordering: a failure at the cookie read happens BEFORE the
     // downgrade, so the account is untouched rather than half-downgraded. Move
-    // the read back below `User.findByIdAndUpdate` and `twoFactorEnabled` is
-    // `false` here while everything a disable is supposed to revoke lives on.
+    // the read back below the disabling `User.findOneAndUpdate` and
+    // `twoFactorEnabled` is `false` here while everything a disable is supposed to
+    // revoke lives on.
     const row = await User.findById(user.id).select('+twoFactorSecret').lean();
     expect(row?.twoFactorEnabled).toBe(true);
     expect(row?.twoFactorSecret).toBeTruthy();

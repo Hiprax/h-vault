@@ -39,6 +39,7 @@ vi.mock('../src/utils/email.js', async (importOriginal) => {
   return {
     ...actual,
     sendAccountUnlockEmail: vi.fn().mockResolvedValue({ success: true, message: 'sent' }),
+    sendSecondFactorLockoutEmail: vi.fn().mockResolvedValue({ success: true, message: 'sent' }),
     sendVerificationEmail: vi.fn().mockResolvedValue({ success: true, message: 'sent' }),
     sendRegistrationAttemptEmail: vi.fn().mockResolvedValue({ success: true, message: 'sent' }),
   };
@@ -67,6 +68,7 @@ import { AuditLog } from '../src/models/AuditLog.js';
 import {
   sendAccountUnlockEmail,
   sendRegistrationAttemptEmail,
+  sendSecondFactorLockoutEmail,
   sendVerificationEmail,
 } from '../src/utils/email.js';
 import { cascadeDeleteUser } from '../src/utils/cascadeDelete.js';
@@ -91,6 +93,7 @@ const cm = new CryptoManager();
 const encKey = process.env['SESSION_SECRET'] ?? 'TestSessionSecret4Testing!!12345';
 
 const mockedUnlockEmail = vi.mocked(sendAccountUnlockEmail);
+const mockedSecondFactorEmail = vi.mocked(sendSecondFactorLockoutEmail);
 const mockedVerificationEmail = vi.mocked(sendVerificationEmail);
 const mockedRegistrationEmail = vi.mocked(sendRegistrationAttemptEmail);
 const mockedCascade = vi.mocked(cascadeDeleteUser);
@@ -233,10 +236,12 @@ describe('authController — login2fa record-integrity guards', () => {
     expect(res.body.message).toBe('TWO_FA_INVALID');
     expect(await RefreshToken.countDocuments({ userId: user.id })).toBe(1);
 
-    // The wrong code still counts toward the shared lockout counter.
-    const after = await User.findById(user.id);
+    // The wrong code still counts, on the SECOND factor's own state (F-03/F-28:
+    // two factors, two states); the password factor is not touched by a code.
+    const after = await User.findById(user.id).select('+secondFactorLockout');
     expect(after).not.toBeNull();
-    expect(after!.failedLoginAttempts).toBe(1);
+    expect(after!.secondFactorLockout?.failedAttempts).toBe(1);
+    expect(after!.failedLoginAttempts).toBe(0);
     expect(
       await AuditLog.countDocuments({ userId: user.id, action: 'login_failed' }),
     ).toBeGreaterThan(0);
@@ -278,6 +283,8 @@ describe('authController — at most one new unlock link per lock episode', () =
     // (`void send(...).then(...)`), so it must keep returning a promise.
     mockedUnlockEmail.mockReset();
     mockedUnlockEmail.mockResolvedValue({ success: true, message: 'sent' });
+    mockedSecondFactorEmail.mockReset();
+    mockedSecondFactorEmail.mockResolvedValue({ success: true, message: 'sent' });
     user = await createTestUser({ emailVerified: true });
   });
 
@@ -333,7 +340,9 @@ describe('authController — at most one new unlock link per lock episode', () =
     // `select: false` on the episode fields, so they are asked for by name;
     // without that the identity assertion below would pass on `undefined`.
     const after = await User.findById(user.id).select('+lockoutEpisodeId');
-    expect(after!.failedLoginAttempts).toBe(11);
+    // Capped at the threshold (F-03 bounded accounting): the failure re-locks
+    // without growing the counter past MAX_LOGIN_ATTEMPTS.
+    expect(after!.failedLoginAttempts).toBe(10);
     expect(after!.lockoutUntil!.getTime()).toBeGreaterThan(Date.now());
     // The re-lock extended the episode instead of starting a new one…
     expect(after!.lockoutEpisodeId).toBe(episode);
@@ -348,35 +357,51 @@ describe('authController — at most one new unlock link per lock episode', () =
     expect(recovered!.failedLoginAttempts).toBe(0);
   });
 
-  it('sends the unlock email when a wrong 2FA code is the attempt that crosses the threshold', async () => {
+  it('sends the second-factor unlock email when a wrong 2FA code is the attempt that crosses the threshold', async () => {
+    // F-03/F-28: the 2FA step counts on the second factor's OWN state, so the
+    // crossing is that factor's, and so is the mail (which tells the owner their
+    // master password was entered): the password's state and mail are untouched.
     const { user: twoFaUser, secretObj } = await create2faUser(['abcdef0123456789']);
-    await User.findByIdAndUpdate(twoFaUser.id, { $set: { failedLoginAttempts: 9 } });
+    await User.findByIdAndUpdate(twoFaUser.id, {
+      $set: { secondFactorLockout: { failedAttempts: 9 } },
+    });
 
     const res = await post2fa(agent, makeTempToken(twoFaUser.id), definitelyWrongCode(secretObj));
 
     expect(res.status).toBe(401);
-    expect(mockedUnlockEmail).toHaveBeenCalledTimes(1);
-    expect(mockedUnlockEmail.mock.calls[0]![0]).toBe(twoFaUser.email);
+    expect(mockedSecondFactorEmail).toHaveBeenCalledTimes(1);
+    expect(mockedSecondFactorEmail.mock.calls[0]![0]).toBe(twoFaUser.email);
+    expect(mockedUnlockEmail).not.toHaveBeenCalled();
 
-    const after = await User.findById(twoFaUser.id);
-    expect(after!.failedLoginAttempts).toBe(10);
-    expect(after!.lockoutUntil!.getTime()).toBeGreaterThan(Date.now());
+    const after = await User.findById(twoFaUser.id).select('+secondFactorLockout');
+    expect(after!.secondFactorLockout?.failedAttempts).toBe(10);
+    expect(after!.secondFactorLockout?.until!.getTime()).toBeGreaterThan(Date.now());
+    expect(after!.failedLoginAttempts).toBe(0);
+    expect(after!.lockoutUntil).toBeUndefined();
   });
 
   it('re-locks the 2FA step without a second email while its link still covers the lockout', async () => {
     // Same correction as the password step above: silence is conditioned on a
     // usable link existing, and the link is proven usable rather than assumed.
+    // F-03/F-28: on the second factor's own state and with a `factor` claim.
     const { user: twoFaUser, secretObj } = await create2faUser(['abcdef0123456789']);
     const episode = crypto.randomUUID();
     await User.findByIdAndUpdate(twoFaUser.id, {
       $set: {
-        failedLoginAttempts: 10,
-        lockoutEpisodeId: episode,
-        lockoutNotifiedAt: new Date(),
+        secondFactorLockout: {
+          failedAttempts: 10,
+          episodeId: episode,
+          notifiedAt: new Date(),
+        },
       },
     });
     const outstandingLink = jwt.sign(
-      { userId: twoFaUser.id, purpose: 'account_unlock', stateHash: generateStateHash(episode) },
+      {
+        userId: twoFaUser.id,
+        purpose: 'account_unlock',
+        stateHash: generateStateHash(episode),
+        factor: 'second_factor',
+      },
       deriveTestPurposeKey('account_unlock'),
       { algorithm: 'HS256', expiresIn: '1h' },
     );
@@ -385,17 +410,19 @@ describe('authController — at most one new unlock link per lock episode', () =
 
     expect(res.status).toBe(401);
     expect(res.body.message).toBe('TWO_FA_INVALID');
+    expect(mockedSecondFactorEmail).not.toHaveBeenCalled();
     expect(mockedUnlockEmail).not.toHaveBeenCalled();
 
-    const after = await User.findById(twoFaUser.id).select('+lockoutEpisodeId');
-    expect(after!.failedLoginAttempts).toBe(11);
-    expect(after!.lockoutUntil!.getTime()).toBeGreaterThan(Date.now());
-    expect(after!.lockoutEpisodeId).toBe(episode);
+    const after = await User.findById(twoFaUser.id).select('+secondFactorLockout');
+    // Capped at the threshold, re-locked, on the SAME episode.
+    expect(after!.secondFactorLockout?.failedAttempts).toBe(10);
+    expect(after!.secondFactorLockout?.until!.getTime()).toBeGreaterThan(Date.now());
+    expect(after!.secondFactorLockout?.episodeId).toBe(episode);
 
     const unlocked = await postUnlock(agent, outstandingLink);
     expect(unlocked.status).toBe(200);
-    const recovered = await User.findById(twoFaUser.id);
-    expect(recovered!.lockoutUntil).toBeUndefined();
+    const recovered = await User.findById(twoFaUser.id).select('+secondFactorLockout');
+    expect(recovered!.secondFactorLockout).toBeUndefined();
   });
 });
 
@@ -974,14 +1001,12 @@ describe('transactional (replica-set) auth branches', () => {
     expect(rows).toHaveLength(0);
   });
 
-  it('rolls the claim back when the account is locked, keeping the cookie', async () => {
-    // The production topology is a replica set, so this is the path that
-    // actually runs in production. Here the account gate lives INSIDE the
-    // transaction, BETWEEN the claim and the successor: a refusal throws from the
-    // callback and `withTransaction` rolls the claim back. No successor is ever
-    // created on this path — the gate runs before `RefreshToken.create` — which is
-    // a stronger property than aborting one, and the assertions below say so by
-    // counting rows.
+  it('serves a locked account on the transactional path: a lockout is not a refusal', async () => {
+    // F-03: this case pinned the transactional 403 `ACCOUNT_LOCKED` refusal (and
+    // that its abort undid the claim). A lockout of either factor no longer
+    // refuses a refresh at all, since the cookie is itself proof of a prior
+    // authentication; what is pinned now is the ordinary rotation on the path
+    // production runs, remembered deadline carried forward.
     const DAY_MS = 24 * 60 * 60 * 1000;
     const user = await createTestUser({ emailVerified: true });
     const absolute = new Date(Date.now() + config.REFRESH_TOKEN_REMEMBER_DAYS * DAY_MS);
@@ -1003,21 +1028,22 @@ describe('transactional (replica-set) auth branches', () => {
       .set('x-csrf-token', csrf.token)
       .set('Cookie', `${csrf.cookie}; refreshToken=${user.refreshToken}`);
 
-    expect(res.status).toBe(403);
-    expect(res.body.message).toBe('ACCOUNT_LOCKED');
+    expect(res.status).toBe(200);
+    expect(res.body.message).not.toBe('ACCOUNT_LOCKED');
     // Proves the branch: the sequential fallback never opens a session.
     expect(sessionSpy).toHaveBeenCalled();
 
-    // The abort undid the claim: one row, unspent, deadline intact.
+    // Rotated: the presented row spent, one successor with the same deadline.
     const rows = await RefreshToken.find({ userId: user.id });
-    expect(rows).toHaveLength(1);
-    expect(rows[0]!.tokenHash).toBe(hashToken(user.refreshToken));
-    expect(rows[0]!.usedAt == null).toBe(true);
-    expect(Math.abs(rows[0]!.absoluteExpiresAt!.getTime() - absolute.getTime())).toBeLessThan(1000);
-
-    // And the browser keeps the cookie — no clear directive, no replacement.
+    expect(rows).toHaveLength(2);
+    const presented = rows.find((row) => row.tokenHash === hashToken(user.refreshToken));
+    expect(presented!.usedAt).toBeInstanceOf(Date);
+    const successor = rows.find((row) => row.tokenHash !== hashToken(user.refreshToken));
+    expect(Math.abs(successor!.absoluteExpiresAt!.getTime() - absolute.getTime())).toBeLessThan(
+      1000,
+    );
     const setCookie = (res.headers['set-cookie'] as unknown as string[] | undefined) ?? [];
-    expect(setCookie.some((c) => c.startsWith('refreshToken='))).toBe(false);
+    expect(setCookie.some((c) => /^refreshToken=[^;]+/.test(c))).toBe(true);
   });
 
   it('aborts the claim for an account mid-erasure, answering 401 and clearing the cookie', async () => {

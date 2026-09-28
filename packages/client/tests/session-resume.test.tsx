@@ -312,12 +312,12 @@ describe('resumeSession', () => {
     expect(useAuthStore.getState().isAuthenticated).toBe(false);
   });
 
-  it('KEEPS the hint when the refresh is refused because the account is locked', async () => {
-    // A lockout is not a dead session: the refresh handler refuses it BEFORE it
-    // claims the presented token, so the cookie the hint stands for is still live
-    // and still worth trying on the next boot. Clearing the hint here would make
-    // the app forget a session the server had deliberately preserved, and the user
-    // would be asked for their email again for a condition that expires by itself.
+  it('KEEPS the hint when a refresh is answered with ACCOUNT_LOCKED', async () => {
+    // A lockout is never a dead session. The server no longer refuses a refresh
+    // for a locked factor at all (F-03: the cookie is itself proof of a prior
+    // sign-in); this pins the client half of the same rule, which `isSessionGone`
+    // keeps as an invariant: were the code ever to arrive here, clearing the hint
+    // would make the app forget a session nobody ended.
     setHint();
     mockRefreshTokenApi.mockRejectedValue(axiosError(403, { message: 'ACCOUNT_LOCKED' }));
 

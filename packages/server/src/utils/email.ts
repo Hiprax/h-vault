@@ -366,7 +366,14 @@ export async function sendAccountUnlockEmail(email: string, token: string): Prom
         </a>
       </div>
       <p style="color: #6b6b6b; font-size: 14px; line-height: 1.6;">
-        This link will expire in 1 hour. Your account will also automatically unlock after 30 minutes.
+        This link will expire in 1 hour. Following it also lets the browser you open it in sign in
+        for the next 10 minutes even if someone keeps guessing. Otherwise sign-ins from new browsers
+        stay locked for 30 minutes at a time while the failed attempts continue. Sessions you
+        already have are not affected, and neither, usually, is a browser that signed in recently.
+      </p>
+      <p style="color: #4a4a4a; line-height: 1.6;">
+        <strong>Do not reset your master password to get back in.</strong> A reset erases everything
+        in your vault; this link is the way back in.
       </p>
       <p style="color: #6b6b6b; font-size: 14px; line-height: 1.6;">
         If you did not attempt to log in, someone may be trying to access your account.
@@ -383,6 +390,63 @@ export async function sendAccountUnlockEmail(email: string, token: string): Prom
   `.trim();
 
   return sendEmail(email, 'Your H-Vault account has been locked', html);
+}
+
+/**
+ * Tells the owner that their master password was accepted and then the second
+ * factor failed often enough to lock the two-factor step.
+ *
+ * That combination is only reachable by someone who KNOWS the master password,
+ * so the mail says so plainly and leads with the remedy that actually evicts
+ * such a person: changing the master password (which the owner can still do from
+ * any signed-in session: a second-factor lockout never refuses a refresh). The
+ * link unlocks the two-factor step only; it never touches the password's own
+ * lockout state.
+ */
+export async function sendSecondFactorLockoutEmail(
+  email: string,
+  token: string,
+): Promise<EmailResult> {
+  const unlockUrl = `${config.APP_URL}/unlock-account?token=${encodeURIComponent(token)}`;
+
+  const html = `
+    <!DOCTYPE html>
+    <html lang="en">
+    <head><meta charset="UTF-8"></head>
+    <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+      <h2 style="color: #1a1a1a;">Two-factor sign-in has been locked</h2>
+      <p style="color: #4a4a4a; line-height: 1.6;">
+        Your master password was entered correctly, and then the two-factor code failed too many
+        times. Two-factor sign-in to your H-Vault account is locked for 30 minutes.
+      </p>
+      <p style="color: #4a4a4a; line-height: 1.6;">
+        <strong>If this was not you, someone knows your master password.</strong> Change it now from
+        a device where you are already signed in (Settings, Change Password): that signs out
+        everyone else.
+      </p>
+      <p style="color: #4a4a4a; line-height: 1.6;">
+        If it was you, use the button below to unlock two-factor sign-in.
+      </p>
+      <div style="text-align: center; margin: 32px 0;">
+        <a href="${unlockUrl}"
+           style="background-color: #2563eb; color: #ffffff; padding: 12px 32px; text-decoration: none; border-radius: 6px; font-weight: 600; display: inline-block;">
+          Unlock two-factor sign-in
+        </a>
+      </div>
+      <p style="color: #6b6b6b; font-size: 14px; line-height: 1.6;">
+        This link will expire in 1 hour.
+      </p>
+      <p style="color: #6b6b6b; font-size: 14px; line-height: 1.6;">
+        If the button above does not work, copy and paste the following link into your browser:
+      </p>
+      <p style="color: #2563eb; font-size: 14px; word-break: break-all;">${escapeHtml(unlockUrl)}</p>
+      <hr style="border: none; border-top: 1px solid #e5e5e5; margin: 24px 0;">
+      <p style="color: #9a9a9a; font-size: 12px;">H-Vault &mdash; Your passwords, secured.</p>
+    </body>
+    </html>
+  `.trim();
+
+  return sendEmail(email, 'Two-factor sign-in to your H-Vault account was locked', html);
 }
 
 /** What the update-available email says. */

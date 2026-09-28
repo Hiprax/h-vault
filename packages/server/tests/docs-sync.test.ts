@@ -17,8 +17,8 @@ const { FOLDER_WRITE_RATE_LIMIT_MAX, VAULT_ITEM_WRITE_RATE_LIMIT_MAX } = rateLim
 /**
  * The limiters the middleware module exports: its MIDDLEWARE (three parameters)
  * named `…Limiter`. The module also exports helpers (`resolveClientKey`,
- * `buildAccountKey`, the `skipAccountLimiter` predicate, …), which is why a bare
- * count of its functions is not the tier count.
+ * `buildRefreshKey`, `closeRateLimitStore`, …), which is why a bare count of its functions is not
+ * the tier count.
  */
 const LIMITER_EXPORTS = Object.entries(rateLimiters).filter(
   ([name, value]) => typeof value === 'function' && name.endsWith('Limiter') && value.length === 3,

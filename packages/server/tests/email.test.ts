@@ -520,6 +520,20 @@ describe('Email utility', () => {
       expect(html).toContain(expectedUrl);
     });
 
+    it('names the link as the remedy and warns that a reset erases the vault', async () => {
+      const { sendAccountUnlockEmail } = await importWithSmtp();
+
+      await sendAccountUnlockEmail('user@example.com', 'token123');
+
+      const html = (mockSendMail as Mock).mock.calls[0]?.[0]?.html as string;
+      expect(html).toContain('Do not reset your master password to get back in.');
+      expect(html).toContain('A reset erases everything');
+      expect(html).toContain('this link is the way back in');
+      // The old promise ("will also automatically unlock after 30 minutes") is
+      // no longer true while guessing continues, so it must not be made.
+      expect(html).not.toContain('automatically unlock after 30 minutes');
+    });
+
     it('should include APP_URL in HTML', async () => {
       const { sendAccountUnlockEmail } = await importWithSmtp();
 
@@ -533,6 +547,45 @@ describe('Email utility', () => {
       const { sendAccountUnlockEmail } = await importWithoutEmail();
 
       const result = await sendAccountUnlockEmail('user@example.com', 'token123');
+
+      expect(result.success).toBe(false);
+      expect(mockSendMail).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── sendSecondFactorLockoutEmail ─────────────────────────────────────────
+
+  describe('sendSecondFactorLockoutEmail', () => {
+    it('tells the owner the master password was entered, with the second-factor link', async () => {
+      const { sendSecondFactorLockoutEmail } = await importWithSmtp();
+
+      const token = 'sf/token&special=true';
+      const result = await sendSecondFactorLockoutEmail('user@example.com', token);
+
+      expect(result.success).toBe(true);
+      expect(mockSendMail).toHaveBeenCalledTimes(1);
+      const sent = (mockSendMail as Mock).mock.calls[0]?.[0] as {
+        to: string;
+        subject: string;
+        html: string;
+      };
+      expect(sent.to).toBe('user@example.com');
+      expect(sent.subject).toBe('Two-factor sign-in to your H-Vault account was locked');
+      // The one fact only this mail can tell: the password itself was right.
+      expect(sent.html).toContain('Your master password was entered correctly');
+      // The remedy that evicts a password holder is named, not only the link.
+      expect(sent.html).toContain('Change Password');
+      expect(sent.html).toContain(
+        `http://localhost:5000/unlock-account?token=${encodeURIComponent(token)}`,
+      );
+      // It is not the password-lockout mail.
+      expect(sent.subject).not.toBe('Your H-Vault account has been locked');
+    });
+
+    it('returns failure and sends nothing when email is not configured', async () => {
+      const { sendSecondFactorLockoutEmail } = await importWithoutEmail();
+
+      const result = await sendSecondFactorLockoutEmail('user@example.com', 'token123');
 
       expect(result.success).toBe(false);
       expect(mockSendMail).not.toHaveBeenCalled();
@@ -758,6 +811,17 @@ describe('email template URL display-text escaping', () => {
     expect(html).toContain('href="http://localhost:5000/app?x=1&y=2/reset-password?token=tok"');
     expect(html).toContain('http://localhost:5000/app?x=1&amp;y=2/reset-password?token=tok</p>');
     expect(html).not.toContain('x=1&y=2/reset-password?token=tok</p>');
+  });
+
+  it('should escape display-text URLs in the second-factor lockout email', async () => {
+    const { sendSecondFactorLockoutEmail } = await importWithSmtp();
+
+    await sendSecondFactorLockoutEmail('user@example.com', 'tok');
+
+    const html = (mockSendMail as Mock).mock.calls[0]?.[0]?.html as string;
+    expect(html).toContain('href="http://localhost:5000/app?x=1&y=2/unlock-account?token=tok"');
+    expect(html).toContain('http://localhost:5000/app?x=1&amp;y=2/unlock-account?token=tok</p>');
+    expect(html).not.toContain('x=1&y=2/unlock-account?token=tok</p>');
   });
 
   it('should escape display-text URLs in account unlock email', async () => {

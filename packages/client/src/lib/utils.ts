@@ -107,10 +107,9 @@ const MAX_ERROR_MESSAGE_LENGTH = 200;
  *
  * **One refusal is translated rather than quoted.** The server's error envelope is
  * flat and its `message` is sometimes an `ERROR_CODES` constant rather than a
- * sentence, and `ACCOUNT_LOCKED` is the one that now reaches ordinary callers: a
- * refresh refused for a lockout no longer ends the session, so the rejection
- * propagates to whatever made the request instead of being swallowed by a logout.
- * Every one of the twenty-five call sites here would otherwise put the bare string
+ * sentence, and `ACCOUNT_LOCKED` is the one that reaches ordinary callers: the
+ * 2FA sign-in step and the signed-in two-factor code checks answer a locked
+ * second factor with it. Every call site here would otherwise put the bare string
  * `ACCOUNT_LOCKED` in a toast. The other codes are left alone deliberately — they
  * accompany a refusal the caller already handles, and translating them all would
  * be a rewrite of every error surface rather than a fix for this one.

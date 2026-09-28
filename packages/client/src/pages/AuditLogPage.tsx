@@ -119,12 +119,26 @@ const ACTION_LABELS: Record<string, string> = {
   trusted_device_grant: 'Trusted Device Added',
   trusted_device_revoke: 'Trusted Device Revoked',
   trusted_device_rejected: 'Trusted Device Rejected',
+  device_proof_revoked: 'Sign-in Proof Revoked',
   document_create: 'Document Uploaded',
   document_update: 'Document Updated',
   document_delete: 'Document Trashed',
   document_restore: 'Document Restored',
   document_purge: 'Document Deleted Permanently',
 };
+
+/**
+ * How many attempts a coalesced row stands for, when it stands for more than one.
+ *
+ * Sign-in attempts made while the password is locked are recorded one row per
+ * minute with a count, so a stranger hammering the account does not bury the
+ * page. Showing the count is what keeps that row honest: "Failed Login" alone
+ * would hide that it was a hundred of them. A row without the field, or with 1,
+ * is a single event and shows nothing extra.
+ */
+function attemptCount(entry: IAuditLogEntry): number | null {
+  return typeof entry.count === 'number' && entry.count > 1 ? entry.count : null;
+}
 
 /**
  * The count of backup codes still available, for the one action that carries it.
@@ -282,6 +296,7 @@ export default function AuditLogPage() {
               <tbody className="divide-y divide-[hsl(var(--border))]">
                 {entries.map((entry) => {
                   const remaining = remainingBackupCodes(entry);
+                  const attempts = attemptCount(entry);
                   return (
                     <tr
                       key={entry._id}
@@ -300,6 +315,11 @@ export default function AuditLogPage() {
                         {remaining !== null && (
                           <span className="ml-2 text-xs text-[hsl(var(--muted-foreground))]">
                             {remaining} left
+                          </span>
+                        )}
+                        {attempts !== null && (
+                          <span className="ml-2 text-xs text-[hsl(var(--muted-foreground))]">
+                            × {attempts}
                           </span>
                         )}
                       </td>

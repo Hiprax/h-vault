@@ -13,6 +13,7 @@ import { createAuditLog } from '../services/auditService.js';
 import { getStorage } from '../services/storage/index.js';
 import { userObjectPrefix } from './documentObjects.js';
 import { revokeTrustedDevices } from './trustedDevices.js';
+import { revokeDeviceProofs } from './deviceProofs.js';
 import { supportsTransactions } from './transactionSupport.js';
 
 const logger = createModuleLogger('cascade-delete');
@@ -180,6 +181,7 @@ export async function cascadeDeleteTransactional(
       await Folder.deleteMany({ userId }, { session });
       await RefreshToken.deleteMany({ userId }, { session });
       await revokeTrustedDevices(userId, session);
+      await revokeDeviceProofs(userId, { session });
       await BackupLog.deleteMany({ userId }, { session });
       // Nothing in this helper is implicit: a collection that is not named here is
       // simply never erased, whatever else the application does with it. Both
@@ -246,6 +248,7 @@ async function cascadeDeleteSequential(
     await Folder.deleteMany({ userId });
     await RefreshToken.deleteMany({ userId });
     await revokeTrustedDevices(userId);
+    await revokeDeviceProofs(userId);
     await BackupLog.deleteMany({ userId });
     // Stated explicitly, for the same reason as on the transactional path above.
     await Document.deleteMany({ userId });

@@ -117,6 +117,13 @@ export function ForgotPasswordPage() {
             Enter the email address associated with your account and we&apos;ll send you a link to
             reset your password.
           </CardDescription>
+          {/* A reset mints a new vault key, so it is total data loss, not recovery.
+              Someone who only needs to get past a lockout must be sent to the
+              unlock link instead, and must hear it before they reset. */}
+          <p className="text-sm text-[hsl(var(--muted-foreground))]">
+            Locked out after too many attempts? Use the unlock link we emailed you instead.
+            Resetting your master password erases everything in your vault.
+          </p>
         </CardHeader>
 
         <form onSubmit={(e) => void form.handleSubmit(handleSubmit)(e)}>

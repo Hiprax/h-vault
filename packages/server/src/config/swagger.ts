@@ -346,6 +346,15 @@ const errorResponse = (description: string): Record<string, unknown> =>
   schemaResponse(description, 'ErrorResponse');
 
 /**
+ * The refusal every site that checks a two-factor code gives while the SECOND
+ * factor is locked (ten wrong codes). Each of them has already verified the
+ * master password on the same request, so naming the lock confirms nothing.
+ */
+const SECOND_FACTOR_LOCKED = errorResponse(
+  '`ACCOUNT_LOCKED`: the second factor is locked after too many wrong codes. The code is not checked and nothing is counted; the lock ends at its deadline or through the unlock link emailed to the owner.',
+);
+
+/**
  * The answers of a request that re-checks the caller's own credentials and then
  * only acknowledges: verifying an unlock and deleting the account. The 404 is the
  * account having been deleted in the meantime ("User not found").
@@ -1435,6 +1444,12 @@ export const swaggerSpec: JsonObject = {
           ipAddress: { type: 'string' },
           userAgent: { type: 'string' },
           timestamp: { type: 'string', format: 'date-time' },
+          count: {
+            type: 'integer',
+            minimum: 1,
+            description:
+              'How many events the row stands for: 1, except for `login_failed` with `metadata.reason` `locked`, which counts every sign-in attempt made during a password lockout within one minute. Rows written before the field existed omit it (read as 1).',
+          },
         },
       },
 
@@ -2569,7 +2584,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Auth'],
         summary: 'Login with credentials',
         description:
-          'Authenticates with email and auth hash. If 2FA is enabled, returns a temporary token for the 2FA step — UNLESS the request carries a valid `trustedDevice` cookie for this account, in which case the 2FA step is skipped and the login completes directly (the cookie is checked strictly after the password comparison, so a wrong password never consumes it). A recognized trusted-device cookie is consumed and rotated, carrying its original expiry forward; an unknown/expired/foreign cookie is cleared and the login falls back to the normal 2FA prompt. Rate limited: 20 req/IP + 20 req/email per 15 min. Progressive delay: 1s at 3+ failures, 3s at 5+, 5s at 7+.',
+          'Authenticates with email and auth hash. If 2FA is enabled, returns a temporary token for the 2FA step — UNLESS the request carries a valid `trustedDevice` cookie for this account, in which case the 2FA step is skipped and the login completes directly (the cookie is checked strictly after the password comparison, so a wrong password never consumes it). A recognized trusted-device cookie is consumed and rotated, carrying its original expiry forward; an unknown/expired/foreign cookie is cleared and the login falls back to the normal 2FA prompt. A completed sign-in also sets (or rotates) the httpOnly `__hv_device` proof cookie (path `/api/v1/auth`, 30 days): while the PASSWORD of the account is locked after too many wrong attempts, a request presenting a live proof for this account is answered normally, and every other request gets exactly the answer a wrong password gets, whether or not the password was right (same status, message, delay and audit row), so a lockout never confirms a guess. A wrong password presented with a proof counts against the proof (five in 15 min revoke it), not against the account. Rate limited: 20 req/IP per 15 min. Progressive delay: 1s at 3+ failures, 3s at 5+, 5s at 7+.',
         requestBody: jsonRequestBody('LoginRequest'),
         responses: {
           200: {
@@ -2587,10 +2602,7 @@ export const swaggerSpec: JsonObject = {
           },
           400: { $ref: '#/components/responses/ValidationError' },
           401: errorResponse(
-            'Invalid email or password. The same status and message answer an account whose deletion is still being completed, and an account whose email is not yet verified; the latter, and only once the password was correct, also carries `data: { reason: "email_not_verified" }` so the client can say what to do.',
-          ),
-          403: errorResponse(
-            '`ACCOUNT_LOCKED`: the account is temporarily locked after too many failed attempts. Answered only when the password was correct; a wrong password during a lockout gets the ordinary 401 and leaves the lockout as it was.',
+            'Invalid email or password. The same status and message answer an account whose deletion is still being completed, an account whose email is not yet verified (and, only once the password was correct and no lockout applies, with `data: { reason: "email_not_verified" }` so the client can say what to do), and EVERY sign-in without a device proof while the password is locked, right password or wrong.',
           ),
           429: { $ref: '#/components/responses/RateLimited' },
         },
@@ -2607,11 +2619,11 @@ export const swaggerSpec: JsonObject = {
         responses: {
           200: {
             description:
-              '2FA verification successful. Sets a httpOnly refresh-token cookie, and — only when the login opted into "remember me" and the code was a TOTP code rather than a backup code — a httpOnly `trustedDevice` cookie (scoped to `/api/v1/auth`) whose raw value is never returned in the response body.',
+              '2FA verification successful. Sets a httpOnly refresh-token cookie, the httpOnly `__hv_device` proof cookie (scoped to `/api/v1/auth`), and — only when the login opted into "remember me" and the code was a TOTP code rather than a backup code — a httpOnly `trustedDevice` cookie (scoped to `/api/v1/auth`). No raw cookie value is ever returned in the response body.',
             headers: {
               'Set-Cookie': {
                 description:
-                  'Sets `refreshToken` (httpOnly, path `/api/v1`) and, for a remembered login completed with a TOTP code, `trustedDevice` (httpOnly, path `/api/v1/auth`). Only the SHA-256 of the trusted-device token is stored server-side.',
+                  'Sets `refreshToken` (httpOnly, path `/api/v1`), `__hv_device` (httpOnly, path `/api/v1/auth`) and, for a remembered login completed with a TOTP code, `trustedDevice` (httpOnly, path `/api/v1/auth`). Only the SHA-256 of the device-proof and trusted-device tokens is stored server-side.',
                 schema: { type: 'string' },
               },
             },
@@ -2626,7 +2638,7 @@ export const swaggerSpec: JsonObject = {
           ),
           401: { $ref: '#/components/responses/Unauthorized' },
           403: errorResponse(
-            '`ACCOUNT_LOCKED`: the account became locked between the password step and this one. The temporary token does not bypass a lockout.',
+            '`ACCOUNT_LOCKED`: the SECOND factor is locked after too many wrong codes (counted here and at every other code check). The password is already proven at this step, so naming the lock confirms nothing; a PASSWORD lockout does not refuse this step.',
           ),
           429: { $ref: '#/components/responses/RateLimited' },
         },
@@ -2638,7 +2650,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Auth'],
         summary: 'Refresh access token',
         description:
-          'Exchanges a valid refresh token (httpOnly cookie) for a new access token. Implements token rotation with reuse detection. The account is evaluated BEFORE the presented token is claimed, so a refusal costs nothing: a temporarily locked account is answered without spending the token or touching the cookie, and the same cookie works again once the lockout is discharged.',
+          'Exchanges a valid refresh token (httpOnly cookie) for a new access token. Implements token rotation with reuse detection (a replayed token revokes its whole family, every trusted device and every device proof of the account). The account is evaluated BEFORE the presented token is claimed, so a refusal costs nothing. A lockout of either factor never refuses a refresh: the cookie is itself proof of a prior authentication.',
         responses: {
           200: {
             description:
@@ -2650,9 +2662,6 @@ export const swaggerSpec: JsonObject = {
             },
           },
           401: { $ref: '#/components/responses/Unauthorized' },
-          403: errorResponse(
-            'The account is temporarily locked. The presented refresh token is NOT spent and the cookie is NOT cleared, so the same session resumes once the lockout is discharged.',
-          ),
           429: { $ref: '#/components/responses/RateLimited' },
         },
       },
@@ -2703,7 +2712,8 @@ export const swaggerSpec: JsonObject = {
         operationId: 'logoutAll',
         tags: ['Auth'],
         summary: 'Logout all other sessions',
-        description: 'Revokes all refresh tokens except the current session.',
+        description:
+          'Revokes all refresh tokens except the current session, every trusted device, and every `__hv_device` proof except the one this browser presented.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         responses: {
           200: successResponse('All other sessions revoked'),
@@ -2776,7 +2786,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Auth'],
         summary: 'Unlock locked account',
         description:
-          'Unlocks an account that was locked after too many failed login attempts. Rate limited: 20 req/IP per 15 min.',
+          'Ends the lockout the emailed link names: the password lockout, or the second-factor lockout when the signed token says `factor: "second_factor"` (a link minted before that claim existed is a password link). Only that factor is discharged. The browser that follows the link also receives a single-use `__hv_device` proof valid for 10 minutes, so it can sign in even if the account is re-locked by further guessing. Rate limited: 20 req/IP per 15 min.',
         requestBody: jsonRequestBody('UnlockAccountRequest'),
         responses: {
           200: successResponse('Account unlocked'),
@@ -3176,7 +3186,7 @@ export const swaggerSpec: JsonObject = {
           'Permanently deletes the account and everything it owns: vault items, folders, documents and their stored objects, uploads in progress, sessions, trusted devices, and its own audit and backup logs. Requires the password, and a current TOTP code (not a backup code) when two-factor authentication is enabled. Cannot be undone. Rate limited: 5 req/user per 15 min, one budget per account shared by every request that re-checks the master password.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: jsonRequestBody('ReauthenticateWithCodeRequest'),
-        responses: ACKNOWLEDGED_REAUTH_RESPONSES,
+        responses: { ...ACKNOWLEDGED_REAUTH_RESPONSES, 403: SECOND_FACTOR_LOCKED },
       },
     },
     '/user/profile': {
@@ -3332,6 +3342,7 @@ export const swaggerSpec: JsonObject = {
           404: { $ref: '#/components/responses/NotFound' },
           200: successResponse('2FA disabled'),
           401: { $ref: '#/components/responses/Unauthorized' },
+          403: SECOND_FACTOR_LOCKED,
           429: { $ref: '#/components/responses/RateLimited' },
         },
       },
@@ -3356,6 +3367,7 @@ export const swaggerSpec: JsonObject = {
           ),
           400: { $ref: '#/components/responses/ValidationError' },
           401: { $ref: '#/components/responses/Unauthorized' },
+          403: SECOND_FACTOR_LOCKED,
           404: { $ref: '#/components/responses/NotFound' },
           429: { $ref: '#/components/responses/RateLimited' },
         },

@@ -29,6 +29,7 @@ import QRCode from 'qrcode';
 import type zxcvbnType from 'zxcvbn';
 import { getZxcvbn } from '../lib/lazyZxcvbn';
 import { cn, getApiErrorMessage } from '../lib/utils';
+import { ACCOUNT_LOCKED_MESSAGE, isAccountLocked } from '../services/auth/sessionFailure';
 import { downloadText } from '../lib/download';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../components/ui/Card';
 import {
@@ -687,6 +688,16 @@ const strengthColors: Record<number, string> = {
 // Theme options
 // ---------------------------------------------------------------------------
 
+/**
+ * The toast for a failed two-factor code check in Settings (turning 2FA off,
+ * regenerating backup codes). A locked second factor gets its own sentence and
+ * remedy; anything else keeps the form's own wording, which deliberately does not
+ * say whether the password or the code was the wrong one.
+ */
+function secondFactorFailureTitle(error: unknown, otherwise: string): string {
+  return isAccountLocked(error) ? ACCOUNT_LOCKED_MESSAGE : otherwise;
+}
+
 const THEME_OPTIONS = [
   { value: 'light' as const, label: 'Light', icon: Sun },
   { value: 'dark' as const, label: 'Dark', icon: Moon },
@@ -1207,8 +1218,8 @@ export default function SettingsPage() {
       const res = await getProfileApi();
       const disableProfileResult = res.data;
       if (disableProfileResult.success) setProfile(disableProfileResult.data);
-    } catch {
-      toast({ title: 'Invalid code or password', type: 'error' });
+    } catch (err) {
+      toast({ title: secondFactorFailureTitle(err, 'Invalid code or password'), type: 'error' });
     } finally {
       setDisabling2fa(false);
     }
@@ -1235,8 +1246,14 @@ export default function SettingsPage() {
         setShowBackupCodes(true);
         toast({ title: 'Backup codes regenerated', type: 'success' });
       }
-    } catch {
-      toast({ title: 'Failed to regenerate backup codes. Check your password.', type: 'error' });
+    } catch (err) {
+      toast({
+        title: secondFactorFailureTitle(
+          err,
+          'Failed to regenerate backup codes. Check your password.',
+        ),
+        type: 'error',
+      });
     } finally {
       setRegeneratingCodes(false);
     }

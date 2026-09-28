@@ -251,6 +251,7 @@ function auditOk(
     userAgent: string;
     timestamp: string;
     metadata?: Record<string, unknown>;
+    count?: number;
   }[],
   totalPages = 1,
 ) {
@@ -654,6 +655,53 @@ describe('AuditLogPage - row rendering', () => {
 
     expect(within(rows[2]!).getByText('Login')).toBeInTheDocument();
     expect(within(rows[2]!).queryByText(/left$/)).toBeNull();
+  });
+
+  it('shows the attempt count of a coalesced row, and nothing for a single event', async () => {
+    // F-03: sign-in attempts made during a password lockout are recorded one row
+    // per minute with a count, so a flood does not bury the page. "Failed Login"
+    // alone would hide that the row was many attempts; a row with count 1, or a
+    // row written before the field existed, is one event and shows no count.
+    mockGetAuditLogApi.mockResolvedValue(
+      auditOk([
+        {
+          _id: 'c1',
+          action: 'login_failed',
+          ipAddress: '198.51.100.7',
+          userAgent: 'curl/8',
+          timestamp: '2025-06-01T12:00:00.000Z',
+          metadata: { reason: 'locked' },
+          count: 37,
+        },
+        {
+          _id: 'c2',
+          action: 'login_failed',
+          ipAddress: '198.51.100.7',
+          userAgent: 'curl/8',
+          timestamp: '2025-06-01T12:01:00.000Z',
+          metadata: { reason: 'invalid_password' },
+          count: 1,
+        },
+        {
+          _id: 'c3',
+          action: 'device_proof_revoked',
+          ipAddress: '10.0.0.4',
+          userAgent: 'Chrome/120',
+          timestamp: '2025-06-01T12:02:00.000Z',
+          metadata: { reason: 'failure_budget' },
+        },
+      ]),
+    );
+
+    renderPage(<AuditLogPage />);
+
+    const table = await screen.findByRole('table');
+    const rows = within(table).getAllByRole('row').slice(1);
+    expect(rows).toHaveLength(3);
+    expect(within(rows[0]!).getByText('× 37')).toBeInTheDocument();
+    expect(within(rows[1]!).queryByText(/^×/)).toBeNull();
+    expect(within(rows[2]!).getByText('Sign-in Proof Revoked')).toBeInTheDocument();
+    expect(within(rows[2]!).queryByText(/^×/)).toBeNull();
   });
 
   it('renders the mapped label for a known action and the raw action for an unknown one', async () => {

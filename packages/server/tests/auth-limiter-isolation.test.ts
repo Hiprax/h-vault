@@ -127,10 +127,10 @@ async function rateLimitKeys(): Promise<string[]> {
 /**
  * Spend `count` slots of the per-IP credential budget.
  *
- * A DIFFERENT email each time, deliberately: `accountLimiter` (20 per email) also
- * sits on `/login`, and reusing one address would let it, rather than
- * `authLimiter`, produce the 429 — the test would then pass while proving
- * something else entirely.
+ * A DIFFERENT email each time, deliberately: a per-email limiter once sat on
+ * `/login` too (removed by F-04), and reusing one address would have let it,
+ * rather than `authLimiter`, produce the 429. Kept so that no account's lockout
+ * state accumulates across the spend either.
  */
 async function spendCredentialBudget(
   app: express.Express,

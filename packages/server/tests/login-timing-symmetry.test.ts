@@ -164,7 +164,7 @@ describe('login progressive-delay symmetry (#1)', () => {
       expect(currentDelayFor(locked.email)).toBe(3000);
     });
 
-    it('still leaves lockout state untouched on the locked branch', async () => {
+    it('keeps the locked branch bounded: no increment, and a fresh deadline is not moved', async () => {
       const locked = await createTestUser({ emailVerified: true });
       const lockoutUntil = new Date(Date.now() + LOCKOUT_MS);
       await User.findByIdAndUpdate(locked.id, {
@@ -173,9 +173,12 @@ describe('login progressive-delay symmetry (#1)', () => {
 
       await failedLogin(locked.email);
 
-      // The throttle only sleeps. It must not extend the lockout or bump the
-      // counter, or the unlock email already issued (its token bound to
-      // lockoutUntil) would be invalidated.
+      // F-03: this pinned that the locked branch wrote nothing at all. The
+      // accounting is now BOUNDED instead of absent: the counter is never
+      // incremented past the threshold, and the deadline moves at most once a
+      // minute (a lockout written this instant is not moved; the once-a-minute
+      // extension is pinned in password-lockout-uniform.test.ts). The unlock
+      // link is bound to the episode, which an extension keeps.
       const after = await User.findById(locked.id);
       expect(after!.failedLoginAttempts).toBe(10);
       expect(after!.lockoutUntil?.getTime()).toBe(lockoutUntil.getTime());

@@ -14,6 +14,7 @@ import { createAuditLog } from '../services/auditService.js';
 import { cascadeDeleteUser } from '../utils/cascadeDelete.js';
 import { supportsTransactions } from '../utils/transactionSupport.js';
 import { revokeTrustedDevices } from '../utils/trustedDevices.js';
+import { revokeDeviceProofs } from '../utils/deviceProofs.js';
 import {
   StaleVaultKeyError,
   acquireVaultRotationLock,
@@ -27,11 +28,18 @@ import {
   vaultKeyVersionOf,
 } from '../utils/controllerHelpers.js';
 import { readStringCookie } from '../utils/cookies.js';
+import { lockoutClearUpdate } from '../utils/lockout.js';
+import {
+  verifySecondFactor,
+  withSecondFactorCas,
+  type SecondFactorVerdict,
+} from '../utils/secondFactor.js';
 import { cryptoManager } from '../utils/cryptoManager.js';
 import { config, isProduction, twoFactorEncryptionKey } from '../config/index.js';
 import { REFRESH_COOKIE_NAME } from '../constants/index.js';
 import {
   APP_NAME,
+  ERROR_CODES,
   BACKUP_CODES_COUNT,
   MAX_SESSIONS,
   MAX_TRUSTED_DEVICES,
@@ -201,11 +209,12 @@ export const getProfile = catchAsync(async (req: Request, res: Response): Promis
     //
     // The `select: false` fields (`authHash`, `twoFactorSecret`,
     // `pendingTwoFactorSecret`, `pendingTwoFactorExpiry`, `backupCodes`,
-    // `lockoutEpisodeId`, `lockoutNotifiedAt`) are absent from the `.lean()` read
-    // above and none of them is added back here. The last two matter most to this
-    // list: the read is an unprojected `.lean()` spread, so `select: false` is the
-    // ONLY thing keeping the unlock-link identity off the wire, and an enumeration
-    // that fell behind the model is how somebody concludes it is safe to drop.
+    // `lockoutEpisodeId`, `lockoutNotifiedAt`, `secondFactorLockout`) are absent
+    // from the `.lean()` read above and none of them is added back here. The last
+    // three matter most to this list: the read is an unprojected `.lean()` spread,
+    // so `select: false` is the ONLY thing keeping the unlock-link identities off
+    // the wire, and an enumeration that fell behind the model is how somebody
+    // concludes it is safe to drop.
     ...(interruptedRotation
       ? {
           pendingEncryptedVaultKey: user.pendingEncryptedVaultKey,
@@ -576,6 +585,9 @@ export const changePassword = catchAsync(async (req: Request, res: Response): Pr
           // (§1.5 site 2). Runs in the same transaction so it commits atomically
           // with the password update.
           await revokeTrustedDevices(userId, session);
+          // Every device proof goes with them: a new master password is a new
+          // footing, and a proof exempts its browser from the password lockout.
+          await revokeDeviceProofs(userId, { session });
           const result = await User.updateOne(vaultKeyWriteFilter, vaultKeyWrite, { session });
           if (result.matchedCount === 0) {
             throw new SupersededVaultKeyWrite();
@@ -596,6 +608,7 @@ export const changePassword = catchAsync(async (req: Request, res: Response): Pr
       // Same revocation as the transactional branch (§1.5 site 2): drop trusted
       // devices so none skips 2FA under the new password.
       await revokeTrustedDevices(userId);
+      await revokeDeviceProofs(userId);
       // A conditional `updateOne` rather than the `user.save()` this branch used
       // to perform, because a hydrated save cannot carry a filter — it writes the
       // document it holds, which is exactly how a superseded wrapper used to land.
@@ -671,6 +684,19 @@ export const changePassword = catchAsync(async (req: Request, res: Response): Pr
     message: 'Password changed successfully. Please log in again.',
   });
 });
+
+/**
+ * Renders a session-level verifier refusal. A locked second factor is a 403
+ * `ACCOUNT_LOCKED`: the caller already proved the master password on this very
+ * request, so naming the lock tells them nothing about the code. A wrong code
+ * keeps the answer every session site has always given. Never returns.
+ */
+function throwSecondFactorRefusal(verdict: Extract<SecondFactorVerdict, { ok: false }>): never {
+  if (verdict.reason === 'locked') {
+    throw httpErrors.forbidden(ERROR_CODES.ACCOUNT_LOCKED);
+  }
+  throw httpErrors.badRequest('Invalid verification code');
+}
 
 export const setup2fa = catchAsync(async (req: Request, res: Response): Promise<void> => {
   const userId = getUserId(req);
@@ -764,27 +790,16 @@ export const verify2fa = catchAsync(async (req: Request, res: Response): Promise
     throw httpErrors.badRequest('2FA setup has expired. Please start the setup process again.');
   }
 
-  // Decrypt the pending secret stored server-side
-  const secret = cryptoManager.decryptTextSync(user.pendingTwoFactorSecret, twoFactorEncryptionKey);
-
-  const totp = new TOTP({
-    algorithm: 'SHA1',
-    digits: 6,
-    period: 30,
-    secret: Secret.fromBase32(secret),
+  // The ONE verifier, at its enrolment site: it checks the PENDING secret, and
+  // it neither counts a wrong code nor refuses on a recorded lockout. The pending
+  // secret is known to whoever called `setup2fa` with the master password moments
+  // ago, so a wrong code here guesses nothing, and counting it would lock out a
+  // user who mistypes while enrolling.
+  const verdict = await verifySecondFactor(user, code, {
+    site: 'verify2fa',
+    acceptBackupCodes: false,
   });
-  // window: 1 allows ±1 time step (±30s) to tolerate minor clock drift
-  const delta = totp.validate({ token: code, window: 1 });
-
-  if (delta === null) {
-    throw httpErrors.badRequest('Invalid verification code');
-  }
-
-  // TOTP replay protection: reject codes that have already been used.
-  // The delta from validate() tells us which time step the code belongs to.
-  // We store the time step and reject codes at or before the stored timestamp.
-  const totpTimeStep = Math.floor(Date.now() / 1000 / 30) + delta;
-  if (user.lastTotpTimestamp != null && totpTimeStep <= user.lastTotpTimestamp) {
+  if (!verdict.ok) {
     throw httpErrors.badRequest('Invalid verification code');
   }
 
@@ -811,36 +826,32 @@ export const verify2fa = catchAsync(async (req: Request, res: Response): Promise
   // 2FA. If two requests race here (e.g. same user, two tabs), exactly one wins
   // the compare-and-set and commits a single set of backup codes. The loser
   // gets null back and returns 409, so the returned backup codes in the
-  // successful response are the ones actually persisted. The filter conditions
-  // on both `twoFactorEnabled: false` AND that this TOTP time step strictly
-  // advances `lastTotpTimestamp`, folding the replay guard into the same atomic
-  // compare-and-set (the earlier read-check is a non-atomic read-then-write that
-  // a same-time-step race could slip past) — a replayed/raced code matches 0
-  // docs and is rejected below.
-  const updated = await User.findOneAndUpdate(
-    {
-      _id: userId,
-      twoFactorEnabled: false,
-      $or: [
-        { lastTotpTimestamp: { $exists: false } },
-        { lastTotpTimestamp: null },
-        { lastTotpTimestamp: { $lt: totpTimeStep } },
-      ],
-    },
+  // successful response are the ones actually persisted. The verifier's fragment
+  // is merged INTO this one write rather than applied beside it: it conditions
+  // the write on the step being unspent (and on the pending secret still being
+  // the one the code was checked against) and records the step, so enabling and
+  // consuming the code stay one atomic statement. The new factor starts with a
+  // clean brake: any second-factor state left from a previous enrolment belonged
+  // to a secret that no longer exists.
+  const cas = withSecondFactorCas(
+    { _id: userId, twoFactorEnabled: false },
     {
       $set: {
         twoFactorSecret: encryptedSecret,
         backupCodes: hashedBackupCodes,
         twoFactorEnabled: true,
-        lastTotpTimestamp: totpTimeStep,
       },
       $unset: {
         pendingTwoFactorSecret: 1,
         pendingTwoFactorExpiry: 1,
+        ...lockoutClearUpdate('second_factor').$unset,
       },
     },
-    { returnDocument: 'after' },
+    verdict,
   );
+  const updated = await User.findOneAndUpdate(cas.filter, cas.update, {
+    returnDocument: 'after',
+  });
 
   if (!updated) {
     throw httpErrors.conflict('Two-factor authentication is already enabled');
@@ -895,31 +906,17 @@ export const disable2fa = catchAsync(async (req: Request, res: Response): Promis
     throw httpErrors.badRequest('Two-factor authentication is not enabled');
   }
 
-  // Decrypt the stored secret
-  const decryptedSecret = cryptoManager.decryptTextSync(
-    user.twoFactorSecret,
-    twoFactorEncryptionKey,
-  );
-  const totp = new TOTP({
-    algorithm: 'SHA1',
-    digits: 6,
-    period: 30,
-    secret: Secret.fromBase32(decryptedSecret),
+  // Through the ONE verifier: a wrong code counts on the second factor's own
+  // brake (this site used to count nothing, so a session holder who knew the
+  // password could guess codes here for free), a locked factor is refused
+  // without reading the code, and a right code comes back as a compare-and-set
+  // merged into the disabling write below, so the step is consumed by the same
+  // statement that removes the factor.
+  const verdict = await verifySecondFactor(user, code, {
+    site: 'disable2fa',
+    acceptBackupCodes: false,
   });
-  // window: 1 allows ±1 time step (±30s) to tolerate minor clock drift
-  const delta = totp.validate({ token: code, window: 1 });
-
-  if (delta === null) {
-    throw httpErrors.badRequest('Invalid verification code');
-  }
-
-  // TOTP replay protection: reject codes that have already been used.
-  // The delta from validate() tells us which time step the code belongs to.
-  // We store the time step and reject codes at or before the stored timestamp.
-  const currentTimeStep = Math.floor(Date.now() / 1000 / 30) + delta;
-  if (user.lastTotpTimestamp != null && currentTimeStep <= user.lastTotpTimestamp) {
-    throw httpErrors.badRequest('Invalid verification code');
-  }
+  if (!verdict.ok) throwSecondFactorRefusal(verdict);
 
   // Disabling 2FA is a downgrade in account security. Every refresh token
   // issued under the 2FA-enabled regime must be revoked so those sessions
@@ -950,13 +947,28 @@ export const disable2fa = catchAsync(async (req: Request, res: Response): Promis
     revokeFilter.tokenHash = { $ne: hashToken(currentToken) };
   }
 
-  // Use findByIdAndUpdate to reliably unset fields. The user document was
-  // fetched with .select('+authHash +twoFactorSecret +backupCodes') which
-  // may not persist $unset correctly via user.save() on partially-selected docs.
-  await User.findByIdAndUpdate(userId, {
-    $set: { twoFactorEnabled: false },
-    $unset: { twoFactorSecret: 1, backupCodes: 1, lastTotpTimestamp: 1 },
-  });
+  // One conditional write: the factor is removed only if the code's step is
+  // still unspent AND the secret is still the one the code was checked against. A
+  // write that matches nothing means a concurrent request spent the same code
+  // (or replaced the factor) first; nothing is written and the code is refused.
+  // The factor's own lockout state goes with it.
+  const cas = withSecondFactorCas(
+    { _id: userId },
+    {
+      $set: { twoFactorEnabled: false },
+      $unset: {
+        twoFactorSecret: 1,
+        backupCodes: 1,
+        lastTotpTimestamp: 1,
+        ...lockoutClearUpdate('second_factor').$unset,
+      },
+    },
+    verdict,
+  );
+  const disabled = await User.findOneAndUpdate(cas.filter, cas.update);
+  if (!disabled) {
+    throw httpErrors.badRequest('Invalid verification code');
+  }
 
   await RefreshToken.deleteMany(revokeFilter);
 
@@ -1006,34 +1018,20 @@ export const regenerateBackupCodes = catchAsync(
       throw httpErrors.unauthorized('Current password is incorrect');
     }
 
-    // Require 2FA code when 2FA is enabled
-    let totpTimeStep: number | undefined;
+    // Require 2FA code when 2FA is enabled, checked by the ONE verifier: a wrong
+    // code counts on the second factor's brake, a locked factor is refused, and a
+    // right one is consumed by the same write that stores the new codes.
+    let verdict: Extract<SecondFactorVerdict, { ok: true }> | undefined;
     if (user.twoFactorSecret) {
       if (!code) {
         throw httpErrors.badRequest('Two-factor authentication code is required');
       }
-      const decryptedSecret = cryptoManager.decryptTextSync(
-        user.twoFactorSecret,
-        twoFactorEncryptionKey,
-      );
-      const totp = new TOTP({
-        algorithm: 'SHA1',
-        digits: 6,
-        period: 30,
-        secret: Secret.fromBase32(decryptedSecret),
+      const checked = await verifySecondFactor(user, code, {
+        site: 'regenerateBackupCodes',
+        acceptBackupCodes: false,
       });
-      const delta = totp.validate({ token: code, window: 1 });
-      if (delta === null) {
-        throw httpErrors.badRequest('Invalid verification code');
-      }
-
-      // TOTP replay protection: reject codes that have already been used.
-      // The delta from validate() tells us which time step the code belongs to.
-      // We store the time step and reject codes at or before the stored timestamp.
-      totpTimeStep = Math.floor(Date.now() / 1000 / 30) + delta;
-      if (user.lastTotpTimestamp != null && totpTimeStep <= user.lastTotpTimestamp) {
-        throw httpErrors.badRequest('Invalid verification code');
-      }
+      if (!checked.ok) throwSecondFactorRefusal(checked);
+      verdict = checked;
     }
 
     // Generate new backup codes (old ones are completely replaced)
@@ -1061,19 +1059,13 @@ export const regenerateBackupCodes = catchAsync(
     // regenerations must not each publish a distinct backup-code set (the returned
     // codes must equal the ones persisted). The earlier read-check is non-atomic
     // and a same-time-step race can slip past.
-    if (totpTimeStep !== undefined) {
-      const updated = await User.findOneAndUpdate(
-        {
-          _id: userId,
-          twoFactorEnabled: true,
-          $or: [
-            { lastTotpTimestamp: { $exists: false } },
-            { lastTotpTimestamp: null },
-            { lastTotpTimestamp: { $lt: totpTimeStep } },
-          ],
-        },
-        { $set: { backupCodes: hashedBackupCodes, lastTotpTimestamp: totpTimeStep } },
+    if (verdict !== undefined) {
+      const cas = withSecondFactorCas(
+        { _id: userId, twoFactorEnabled: true },
+        { $set: { backupCodes: hashedBackupCodes } },
+        verdict,
       );
+      const updated = await User.findOneAndUpdate(cas.filter, cas.update);
       if (!updated) {
         throw httpErrors.badRequest('Invalid verification code');
       }
@@ -1337,39 +1329,35 @@ export const deleteAccount = catchAsync(async (req: Request, res: Response): Pro
     throw httpErrors.unauthorized('Current password is incorrect');
   }
 
-  // Require 2FA code when 2FA is enabled
+  // Require 2FA code when 2FA is enabled, checked by the ONE verifier: a wrong
+  // code counts on the second factor's brake (this site used to count nothing),
+  // a locked factor is refused, and a right one is consumed by the same write
+  // that marks the account for deletion.
+  let verdict: Extract<SecondFactorVerdict, { ok: true }> | undefined;
   if (user.twoFactorEnabled && user.twoFactorSecret) {
     if (!code) {
       throw httpErrors.badRequest('Two-factor authentication code is required');
     }
-    const decryptedSecret = cryptoManager.decryptTextSync(
-      user.twoFactorSecret,
-      twoFactorEncryptionKey,
-    );
-    const totp = new TOTP({
-      algorithm: 'SHA1',
-      digits: 6,
-      period: 30,
-      secret: Secret.fromBase32(decryptedSecret),
+    const checked = await verifySecondFactor(user, code, {
+      site: 'deleteAccount',
+      acceptBackupCodes: false,
     });
-    const delta = totp.validate({ token: code, window: 1 });
-    if (delta === null) {
-      throw httpErrors.badRequest('Invalid verification code');
-    }
-
-    // TOTP replay protection: reject codes that have already been used.
-    // The delta from validate() tells us which time step the code belongs to.
-    // We store the time step and reject codes at or before the stored timestamp.
-    // Since the account is being deleted, we don't need to update lastTotpTimestamp.
-    const currentTimeStep = Math.floor(Date.now() / 1000 / 30) + delta;
-    if (user.lastTotpTimestamp != null && currentTimeStep <= user.lastTotpTimestamp) {
-      throw httpErrors.badRequest('Invalid verification code');
-    }
+    if (!checked.ok) throwSecondFactorRefusal(checked);
+    verdict = checked;
   }
 
   // Phase 1: Mark user as pending deletion. If any subsequent step fails,
-  // a background cleanup job can detect and complete the deletion.
-  await User.updateOne({ _id: userId }, { $set: { deletionPending: true } });
+  // a background cleanup job can detect and complete the deletion. When a code
+  // was verified, the mark is conditional on its step being unspent, so the same
+  // code cannot be spent twice.
+  const pending =
+    verdict === undefined
+      ? { filter: { _id: userId }, update: { $set: { deletionPending: true } } }
+      : withSecondFactorCas({ _id: userId }, { $set: { deletionPending: true } }, verdict);
+  const marked = await User.updateOne(pending.filter, pending.update);
+  if (marked.matchedCount === 0) {
+    throw httpErrors.badRequest('Invalid verification code');
+  }
 
   // Phase 2: Cascade delete all associated data. Uses a MongoDB transaction
   // when the topology supports it (replica set), otherwise falls back to

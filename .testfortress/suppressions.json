@@ -10,19 +10,6 @@
   },
   "entries": [
     {
-      "id": "SUP-0001",
-      "rule": "TYPE-SUPPRESS",
-      "kind": "type-suppression",
-      "file": "packages/server/src/controllers/authController.ts",
-      "symbol": "backupCodes: matchedCode",
-      "maxHits": 1,
-      "reason": "Mongoose's types cannot express a positional filter on an array element, which is what makes this backup-code consumption a compare-and-set rather than a read-then-write. The cast is documented in the four lines above it.",
-      "owner": "maintainer",
-      "created": "2026-08-12",
-      "expires": "2026-10-11",
-      "approvedBy": ["judge:readonly"]
-    },
-    {
       "id": "SUP-0002",
       "rule": "TYPE-SUPPRESS",
       "kind": "type-suppression",
@@ -146,19 +133,6 @@
       "symbol": "no-require-imports",
       "maxHits": 1,
       "reason": "The jsdom Web Crypto polyfill must be installed synchronously before any module under test reads `globalThis.crypto`, which an ESM import cannot guarantee inside a setup file.",
-      "owner": "maintainer",
-      "created": "2026-08-12",
-      "expires": "2026-11-10",
-      "approvedBy": ["judge:readonly"]
-    },
-    {
-      "id": "SUP-0013",
-      "rule": "LINT-SUPPRESS",
-      "kind": "lint-suppression",
-      "file": "packages/server/src/controllers/authController.ts",
-      "symbol": "no-explicit-any, @typescript-eslint/no-unsafe-argument",
-      "maxHits": 1,
-      "reason": "The directive that accompanies SUP-0001's positional-filter cast; removing it would only move the error, not fix it.",
       "owner": "maintainer",
       "created": "2026-08-12",
       "expires": "2026-11-10",

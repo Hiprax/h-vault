@@ -58,6 +58,18 @@ export interface IUserSettings {
   backup: IBackupSettingsDoc;
 }
 
+/**
+ * One factor's lockout state: the counter, the deadline, the episode the unlock
+ * link is bound to, and when that link was mailed. The password factor stores
+ * the same four facts in the legacy top-level fields.
+ */
+interface ISecondFactorLockout {
+  failedAttempts?: number | undefined;
+  until?: Date | undefined;
+  episodeId?: string | undefined;
+  notifiedAt?: Date | undefined;
+}
+
 // ----- Main Interface -----
 
 export interface IUser {
@@ -107,6 +119,26 @@ export interface IUser {
    * lockout ends. Cleared with the rest of the episode.
    */
   lockoutNotifiedAt?: Date | undefined;
+  /**
+   * The SECOND factor's lockout state, kept apart from the four fields above.
+   *
+   * Those four are the PASSWORD factor's state and keep their names, because
+   * moving them would race live increments during a migration, orphan the
+   * pinned sparse `lockoutUntil` index, read as "no lockout" to an N-1 rollback
+   * and invalidate every unlock link in flight (its token is bound to
+   * `lockoutEpisodeId`). This sub-document is the same four facts for the second
+   * factor: written ONLY by a wrong TOTP or backup code (through the one verifier
+   * in `utils/secondFactor.ts`), read ONLY by the second-factor step, and cleared
+   * only by that factor's own discharges. A wrong password never touches it and a
+   * wrong code never touches the password's fields: one shared counter let ten
+   * wrong codes refuse the correct password with a distinct answer, which told a
+   * guesser the password was right.
+   *
+   * Absent means "no state". It is never stored as `null`: an `$inc` on a path
+   * below a `null` parent is refused by the server, so every discharge `$unset`s
+   * the whole sub-document instead.
+   */
+  secondFactorLockout?: ISecondFactorLockout | undefined;
   lastRotationKey?: string | undefined;
   lastRotationAt?: Date | undefined;
   rotationInProgress: boolean;
@@ -280,6 +312,16 @@ const userSettingsSchema = new Schema<IUserSettings>(
   { _id: false },
 );
 
+const secondFactorLockoutSchema = new Schema<ISecondFactorLockout>(
+  {
+    failedAttempts: { type: Number, default: undefined },
+    until: { type: Date, default: undefined },
+    episodeId: { type: String, default: undefined },
+    notifiedAt: { type: Date, default: undefined },
+  },
+  { _id: false },
+);
+
 // ----- Main Schema -----
 
 const userSchema = new Schema<IUser>(
@@ -326,6 +368,10 @@ const userSchema = new Schema<IUser>(
     // link there is.
     lockoutEpisodeId: { type: String, select: false, default: undefined },
     lockoutNotifiedAt: { type: Date, select: false, default: undefined },
+    // `select: false` for the reasons its password twins above carry, and one
+    // more: every reader goes through `utils/lockout.ts`, which asks for it by
+    // name, so a projection that forgets it cannot silently read "not locked".
+    secondFactorLockout: { type: secondFactorLockoutSchema, select: false, default: undefined },
     lastRotationKey: { type: String, default: undefined },
     lastRotationAt: { type: Date, default: undefined },
     rotationInProgress: { type: Boolean, default: false },

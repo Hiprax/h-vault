@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+### Added
+
+- **Device proofs: a password lockout no longer holds back a browser that has signed in recently.** Every completed sign-in, and every use of an emailed unlock link, leaves the browser an httpOnly `__hv_device` cookie proving it authenticated for that account (30 days from its last use: replaced at every completed sign-in and extended by every session refresh in that browser; at most 50 per account; the unlock link's proof is single-use and lasts 10 minutes). A password lockout does not apply to a sign-in that presents one; a second-factor lockout still does. A wrong password presented with a proof counts against the proof, not the account: five in 15 minutes revoke it, recorded in the audit log as the new action `device_proof_revoked`. Proofs are revoked by a password change or reset, by refresh-token reuse detection, by account deletion and by "log out everywhere" (which then gives the calling browser a fresh one, so any copy of its old proof stops working).
+- **The sign-in page, the forgot-password page and the lockout email point at the unlock link.** A constant hint under every refused sign-in ("If this keeps failing, check your inbox for an unlock link"), and a note on the forgot-password page that a reset erases the vault and the unlock link is the way back in.
+- **A second-factor lockout emails the owner** that their master password was entered and the two-factor code then failed, with the remedy (change the master password from a signed-in device) and a link that unlocks the second factor only.
+
+### Changed
+
+- **Behaviour change: during a password lockout, every sign-in from an unrecognised browser gets the ordinary "Invalid email or password", whether or not the password was right.** It used to answer a correct password with `403 ACCOUNT_LOCKED`, which confirmed the password to whoever sent it. The lockout (10 wrong passwords, 30 minutes) is renewed while the guessing continues; browsers holding a device proof sign in normally without clearing it. `POST /auth/login` no longer answers 403.
+- **Behaviour change: a lockout never refuses a session refresh.** Existing sessions keep working during a lockout of either factor; `POST /auth/refresh` no longer answers `403 ACCOUNT_LOCKED`.
+- **Behaviour change: the password and the second factor lock separately.** Ten wrong two-factor codes lock only the two-factor step (`POST /auth/login/2fa` answers `403 ACCOUNT_LOCKED`), and the password step keeps issuing a challenge; wrong passwords never count against the second factor. The codes checked when turning 2FA off, regenerating backup codes or deleting the account now count toward that lockout too, and those three routes answer `403 ACCOUNT_LOCKED` while it runs. The unlock link names the factor it unlocks.
+- **Sign-in attempts made during a lockout are counted and audited, with bounded cost:** one `login_failed` row per account per minute with a `count` (a new field on audit-log entries, shown on the Audit Log page), the counter capped at the threshold, and the deadline extended at most once a minute. The audit actions an unauthenticated request can write (`login_failed`, `trusted_device_rejected`, `account_unlock`) are trimmed back to 5,000 rows per account (oldest removed first) after every hundredth such row a server process writes, so they can no longer push out the rest of the log.
+
+### Removed
+
+- **The per-account sign-in rate limit (20 per e-mail per 15 minutes).** It counted every request naming an address, so twenty requests from anywhere refused the owner's correct password on every device. The per-address limit (20 per IP per 15 minutes) remains; the lockout above brakes guessing across addresses.
+
+### Security
+
+- A two-factor code accepted when turning 2FA off or deleting the account is now consumed, so it can no longer be used a second time at the sign-in step within the same 30 seconds, and every place a code is checked counts wrong codes toward the lockout.
+- Stopped storing an unbounded, attacker-supplied string as a rate-limit key: an oversized e-mail on the sign-in route is refused by validation, and the only rate-limit key stored for it is the caller's address.
+
 ## [0.15.0] - 2026-09-28
 
 ### Added

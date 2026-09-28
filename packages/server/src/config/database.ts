@@ -16,6 +16,7 @@ import '../models/VaultItem.js';
 import '../models/Folder.js';
 import '../models/RefreshToken.js';
 import '../models/TrustedDevice.js';
+import '../models/DeviceProof.js';
 import '../models/AuditLog.js';
 import '../models/BackupLog.js';
 import '../models/JobLock.js';

@@ -1,5 +1,5 @@
 /**
- * `utils/accountStatus.ts` — the three account-level refusal predicates that
+ * `utils/accountStatus.ts` — the account-level refusal predicates that
  * `login`, `login2fa`, the refresh handler and the Passport JWT strategy all read.
  *
  * The four HTTP paths are covered by their own suites; what is pinned here is the
@@ -25,7 +25,8 @@ describe('evaluateAccountStatus', () => {
       {
         deletionPending: false,
         emailUnverified: false,
-        lockedOut: false,
+        passwordLocked: false,
+        secondFactorLocked: false,
       },
     );
   });
@@ -54,24 +55,54 @@ describe('evaluateAccountStatus', () => {
     { at: 'one millisecond before the deadline', offsetMs: -1, expected: true },
     { at: 'exactly at the deadline', offsetMs: 0, expected: false },
     { at: 'one millisecond after the deadline', offsetMs: 1, expected: false },
-  ])('evaluates a lockout $at as lockedOut=$expected', ({ offsetMs, expected }) => {
-    // A deadline that has ARRIVED has been served: `login` discharges it on the
-    // next correct password, and holding the account for one more request would
-    // contradict that. This is the boundary the whole 30-minute promise rests on.
-    const lockoutUntil = new Date(NOW.getTime() - offsetMs);
-    expect(evaluateAccountStatus({ emailVerified: true, lockoutUntil }, NOW).lockedOut).toBe(
-      expected,
+  ])('evaluates each factor $at as locked=$expected', ({ offsetMs, expected }) => {
+    // A deadline that has ARRIVED has been served: each factor discharges it at
+    // its own step, and holding the account for one more request would contradict
+    // that. This is the boundary the whole 30-minute promise rests on, and it is
+    // the SAME boundary for both factors.
+    const until = new Date(NOW.getTime() - offsetMs);
+    const password = evaluateAccountStatus({ emailVerified: true, lockoutUntil: until }, NOW);
+    expect(password.passwordLocked).toBe(expected);
+    expect(password.secondFactorLocked).toBe(false);
+
+    const secondFactor = evaluateAccountStatus(
+      { emailVerified: true, secondFactorLockout: { until } },
+      NOW,
     );
+    expect(secondFactor.secondFactorLocked).toBe(expected);
+    expect(secondFactor.passwordLocked).toBe(false);
   });
 
-  it('reports no lockout when the field is absent or null', () => {
+  it('reads the two factors independently', () => {
+    // Two factors, two states (F-03): a running lockout on one never reads as a
+    // lockout on the other.
+    const running = new Date(NOW.getTime() + 60_000);
+    expect(
+      evaluateAccountStatus(
+        { emailVerified: true, lockoutUntil: running, secondFactorLockout: { until: running } },
+        NOW,
+      ),
+    ).toMatchObject({ passwordLocked: true, secondFactorLocked: true });
+  });
+
+  it('reports no lockout when a field is absent or null', () => {
     // Both spellings occur: a user document that never had one, and a caller that
     // did not project the field (the Passport strategy). Neither may read as a
     // lockout, and neither may throw on `.getTime()`.
-    expect(evaluateAccountStatus({ emailVerified: true }, NOW).lockedOut).toBe(false);
-    expect(evaluateAccountStatus({ emailVerified: true, lockoutUntil: null }, NOW).lockedOut).toBe(
-      false,
-    );
+    expect(evaluateAccountStatus({ emailVerified: true }, NOW)).toMatchObject({
+      passwordLocked: false,
+      secondFactorLocked: false,
+    });
+    expect(
+      evaluateAccountStatus(
+        { emailVerified: true, lockoutUntil: null, secondFactorLockout: null },
+        NOW,
+      ),
+    ).toMatchObject({ passwordLocked: false, secondFactorLocked: false });
+    expect(
+      evaluateAccountStatus({ emailVerified: true, secondFactorLockout: { until: null } }, NOW)
+        .secondFactorLocked,
+    ).toBe(false);
   });
 
   it('defaults `now` to the current instant', () => {
@@ -79,11 +110,15 @@ describe('evaluateAccountStatus', () => {
     // default would make every one of them evaluate against the epoch.
     const future = new Date(Date.now() + 60_000);
     const past = new Date(Date.now() - 60_000);
-    expect(evaluateAccountStatus({ emailVerified: true, lockoutUntil: future }).lockedOut).toBe(
-      true,
-    );
-    expect(evaluateAccountStatus({ emailVerified: true, lockoutUntil: past }).lockedOut).toBe(
+    expect(
+      evaluateAccountStatus({ emailVerified: true, lockoutUntil: future }).passwordLocked,
+    ).toBe(true);
+    expect(evaluateAccountStatus({ emailVerified: true, lockoutUntil: past }).passwordLocked).toBe(
       false,
     );
+    expect(
+      evaluateAccountStatus({ emailVerified: true, secondFactorLockout: { until: future } })
+        .secondFactorLocked,
+    ).toBe(true);
   });
 });

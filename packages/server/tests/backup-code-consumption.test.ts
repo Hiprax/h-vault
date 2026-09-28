@@ -13,7 +13,8 @@ import { TOTP, Secret } from 'otpauth';
 import { CryptoManager } from '@hiprax/crypto';
 import app from '../src/app.js';
 import { User } from '../src/models/User.js';
-import { findMatchingBackupCodeIndex } from '../src/controllers/authController.js';
+// The helper moved with every other second-factor check into the one verifier.
+import { findMatchingBackupCodeIndex } from '../src/utils/secondFactor.js';
 import {
   createTestUser,
   authHeader,

@@ -15,7 +15,6 @@ import { authenticate } from '../middleware/auth.js';
 import {
   authLimiter,
   tokenVerifyLimiter,
-  accountLimiter,
   unlockLimiter,
   refreshLimiter,
   generalAuthLimiter,
@@ -60,7 +59,14 @@ const router = express.Router();
 
 // Public routes with the credential-attempt rate limiter
 router.post('/register', authLimiter, validate(registerSchema, 'body'), register);
-router.post('/login', authLimiter, accountLimiter, validate(loginSchema, 'body'), login);
+// No per-account limiter here, deliberately. One keyed on the submitted e-mail ran
+// BEFORE the handler and counted every request naming an address, so twenty
+// requests from anywhere refused the owner's correct password on every device
+// (and an over-long "e-mail" became an over-long key). Guessing one account across
+// many addresses is braked inside the handler instead, by the account lockout,
+// which answers every unproven attempt uniformly and never refuses a browser that
+// has signed in before. `authLimiter` stays as the pre-handler budget per address.
+router.post('/login', authLimiter, validate(loginSchema, 'body'), login);
 router.post(
   '/login/2fa',
   authLimiter,

@@ -353,12 +353,12 @@ api.interceptors.response.use(
     //
     // The replay is gated on the 403 ACTUALLY being a CSRF rejection. It used to
     // fire on every 403 of a state-changing request, which silently doubled some
-    // of the most expensive requests in the app: `POST /auth/login` answers 403
-    // `ACCOUNT_LOCKED`, so a locked account was sent twice — two bcrypt compares,
-    // two `authLimiter` slots and two `accountLimiter` slots for one visible
-    // attempt, halving the user's real budget precisely when they could least
-    // afford it. Replaying a request the server has already refused on its merits
-    // cannot succeed; it only costs.
+    // of the most expensive requests in the app: a 403 refusal on the merits
+    // (today `ACCOUNT_LOCKED` from a two-factor code check, once also from
+    // `POST /auth/login`) was sent twice — two bcrypt compares and two rate-limit
+    // slots for one visible attempt, halving the user's real budget precisely when
+    // they could least afford it. Replaying a request the server has already
+    // refused on its merits cannot succeed; it only costs.
     const method = originalRequest?.method?.toUpperCase();
     const isStateChanging = method !== undefined && !CSRF_SAFE_METHODS.includes(method);
     if (
@@ -457,11 +457,10 @@ api.interceptors.response.use(
       // session. Anything transient now propagates to the caller with the session
       // intact, so the next request retries normally.
       //
-      // A 403 `ACCOUNT_LOCKED` is deliberately NOT a logout either, even though it
-      // is authoritative: the refusal is about the account, not the token, and the
-      // refresh handler evaluates it BEFORE the claim precisely so the cookie
-      // survives the lockout. `isSessionGone` encodes that exclusion; logging out
-      // here would finish destroying the session the server just protected.
+      // A 403 `ACCOUNT_LOCKED` is deliberately NOT a logout either: a locked factor
+      // never ends a session (the server does not even refuse a refresh for one).
+      // `isSessionGone` encodes that exclusion, so no caller can read the code as
+      // "the session is over".
       if (isSessionGone(refreshError)) {
         await useAuthStore.getState().logout();
       }

@@ -119,8 +119,8 @@ const mockAdapter: AxiosAdapter = (config) => {
 
   if (url === '/forbidden-on-merits') {
     forbiddenOnMeritsHits++;
-    // A 403 the HANDLER raised, not the CSRF middleware — e.g. `POST /auth/login`
-    // answering ACCOUNT_LOCKED.
+    // A 403 the HANDLER raised, not the CSRF middleware — e.g. the 2FA step
+    // answering ACCOUNT_LOCKED for a locked second factor.
     return httpError(403, config, 'ACCOUNT_LOCKED');
   }
 
@@ -467,11 +467,11 @@ describe('existing 401/403 behaviour is unchanged', () => {
 
   /**
    * The replay used to fire on ANY 403 of a state-changing request. That silently
-   * doubled the most expensive requests in the app: `POST /auth/login` answers 403
-   * `ACCOUNT_LOCKED`, so one visible attempt cost two bcrypt compares and two
-   * slots of BOTH the per-IP and per-email login budgets — halving the user's real
-   * allowance exactly when they could least afford it. Replaying a request the
-   * server refused on its merits cannot succeed; it only costs.
+   * doubled the most expensive requests in the app: a 403 refusal on the merits
+   * (then `POST /auth/login`'s `ACCOUNT_LOCKED`, today the 2FA step's) cost two
+   * bcrypt compares and two rate-limit slots for one visible attempt — halving
+   * the user's real allowance exactly when they could least afford it. Replaying a
+   * request the server refused on its merits cannot succeed; it only costs.
    */
   it('does NOT replay a 403 the handler raised on its merits', async () => {
     installLocks();
@@ -540,14 +540,11 @@ describe('a transient refresh failure must not destroy the session', () => {
     expect(mockLogout).not.toHaveBeenCalled();
   });
 
-  it('does NOT log out when the refresh is refused because the account is locked', async () => {
-    // `/auth/refresh` now evaluates the account BEFORE it claims the presented
-    // token, so an `ACCOUNT_LOCKED` refusal leaves the refresh row unspent and
-    // sends no cookie directive: the session on the other side of the lockout is
-    // the same session. Logging out here would `POST /auth/logout` and delete the
-    // row the server had just declined to touch — the client finishing the
-    // destruction the server was careful to avoid, over a thirty-minute
-    // condition the owner can clear from their inbox.
+  it('does NOT log out when a refresh is answered with ACCOUNT_LOCKED', async () => {
+    // A locked factor never ends a session: the server no longer refuses a refresh
+    // for one at all (F-03). `isSessionGone` keeps the exclusion as an invariant,
+    // pinned here at the interceptor: were the code ever to arrive, logging out
+    // would `POST /auth/logout` and delete a session nobody ended.
     refreshShouldFail = true;
     refreshFailStatus = 403;
     refreshFailMessage = 'ACCOUNT_LOCKED';

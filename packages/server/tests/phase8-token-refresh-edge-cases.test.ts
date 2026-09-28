@@ -561,9 +561,9 @@ describe('Token refresh — absolute family deadline (standalone)', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 // Account status is decided BEFORE the token is claimed (standalone path).
 //
-// A lockout is a THIRTY MINUTE condition and a remembered refresh family is a
-// THIRTY DAY one, so the cheap refusal must not destroy the expensive thing.
-// The handler used to claim-and-rotate first and evaluate the account second:
+// A refusal must not destroy the thing it refuses: the handler used to
+// claim-and-rotate first and evaluate the account second (then including a
+// lockout, which since F-03 is never a refusal at all):
 // the presented row was marked `usedAt`, a successor row was written, and only
 // then did the 403 fire — so the successor's raw value died in the unsent
 // response and the presented cookie was already spent. Both halves of the
@@ -605,51 +605,53 @@ describe('Token refresh — account status is evaluated before the claim', () =>
     return absolute;
   }
 
-  it('refuses a locked account with 403 ACCOUNT_LOCKED without spending the presented token', async () => {
+  // F-03: a lockout never refuses a refresh, for either factor. The three cases
+  // below used to pin the 403 `ACCOUNT_LOCKED` refusal (and that it spent
+  // nothing); a live refresh cookie is itself proof of a prior authentication,
+  // and refusing it froze every existing session for as long as a stranger kept
+  // the account locked. What they pin now is that the session is served
+  // normally, remembered deadline and all, and that nothing is revoked.
+
+  it('refreshes normally while the PASSWORD is locked, carrying the remembered deadline', async () => {
     const absolute = await makeRemembered();
     await lockAccount();
 
     const res = await refreshWith(user.refreshToken);
 
-    expect(res.status).toBe(403);
-    expect(res.body.message).toBe('ACCOUNT_LOCKED');
-    expect(res.body.data).toBeUndefined();
-
-    // The presented row is untouched: still unclaimed, still carrying the
-    // remembered family's absolute deadline.
+    expect(res.status).toBe(200);
+    expect(res.body.data.accessToken).toEqual(expect.any(String));
+    expect(JSON.stringify(res.body)).not.toContain('ACCOUNT_LOCKED');
+    // Rotated as usual: the presented row is spent and its successor carries
+    // the remembered family's absolute deadline forward unchanged.
+    const successor = extractRefreshToken(res.headers['set-cookie']);
+    expect(successor).not.toBeNull();
     const rows = await RefreshToken.find({ userId: user.id });
-    expect(rows).toHaveLength(1);
-    const presented = rows[0]!;
-    expect(presented.tokenHash).toBe(hashToken(user.refreshToken));
-    expect(presented.usedAt == null).toBe(true);
-    expect(presented.absoluteExpiresAt).toBeInstanceOf(Date);
-    expect(Math.abs(presented.absoluteExpiresAt!.getTime() - absolute.getTime())).toBeLessThan(
-      1000,
-    );
+    expect(rows).toHaveLength(2);
+    const next = rows.find((row) => row.tokenHash === hashToken(successor!));
+    expect(next?.absoluteExpiresAt?.getTime()).toBe(absolute.getTime());
+    // And the lockout itself is untouched by a refresh.
+    const after = await User.findById(user.id);
+    expect(after!.failedLoginAttempts).toBe(MAX_LOGIN_ATTEMPTS);
+    expect(after!.lockoutUntil!.getTime()).toBeGreaterThan(Date.now());
   });
 
-  it('keeps the refresh cookie on ACCOUNT_LOCKED so the remembered session survives the lockout', async () => {
-    await makeRemembered();
-    await lockAccount();
+  it('refreshes normally while the SECOND FACTOR is locked', async () => {
+    await User.collection.updateOne(
+      { _id: new mongoose.Types.ObjectId(user.id) },
+      {
+        $set: {
+          secondFactorLockout: {
+            failedAttempts: MAX_LOGIN_ATTEMPTS,
+            until: new Date(Date.now() + LOCKOUT_DURATION_MINUTES * 60 * 1000),
+            episodeId: 'e',
+          },
+        },
+      },
+    );
 
     const res = await refreshWith(user.refreshToken);
-    expect(res.status).toBe(403);
-
-    // The negative that matters: NOTHING clears or replaces the cookie. A clear
-    // directive would delete a thirty-day session from the browser over a
-    // thirty-minute condition, and a replacement would hand out a successor the
-    // refusal never committed.
-    const setCookie = (res.headers['set-cookie'] as unknown as string[] | undefined) ?? [];
-    expect(setCookie.some((c) => c.startsWith('refreshToken='))).toBe(false);
-
-    // And the session really does survive: once the deadline passes, the SAME
-    // cookie still refreshes. This is the whole point of the phase.
-    await User.updateOne({ _id: user.id }, { $set: { lockoutUntil: new Date(Date.now() - 1000) } });
-
-    const after = await refreshWith(user.refreshToken);
-    expect(after.status).toBe(200);
-    expect(after.body.data.accessToken).toBeTruthy();
-    expect(extractRefreshToken(after.headers['set-cookie'])).not.toBeNull();
+    expect(res.status).toBe(200);
+    expect(extractRefreshToken(res.headers['set-cookie'])).not.toBeNull();
   });
 
   it('does not revoke the family or the trusted devices when the account is merely locked', async () => {
@@ -662,12 +664,12 @@ describe('Token refresh — account status is evaluated before the claim', () =>
     await lockAccount();
 
     const res = await refreshWith(user.refreshToken);
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(200);
 
     // A lockout is not a compromise signal. Neither the family nor the
     // second-factor grants may be touched — that treatment belongs to reuse
-    // detection alone.
-    expect(await RefreshToken.countDocuments({ userId: user.id })).toBe(1);
+    // detection alone. The family is the spent row plus its successor.
+    expect(await RefreshToken.countDocuments({ userId: user.id })).toBe(2);
     expect(await TrustedDevice.countDocuments({ userId: user.id })).toBe(1);
   });
 

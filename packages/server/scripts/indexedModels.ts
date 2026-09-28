@@ -17,6 +17,7 @@ import { VaultItem } from '../src/models/VaultItem.js';
 import { Folder } from '../src/models/Folder.js';
 import { RefreshToken } from '../src/models/RefreshToken.js';
 import { TrustedDevice } from '../src/models/TrustedDevice.js';
+import { DeviceProof } from '../src/models/DeviceProof.js';
 import { AuditLog } from '../src/models/AuditLog.js';
 import { BackupLog } from '../src/models/BackupLog.js';
 import { JobLock } from '../src/models/JobLock.js';
@@ -32,6 +33,7 @@ export const indexedModels = [
   { name: 'Folder', model: Folder },
   { name: 'RefreshToken', model: RefreshToken },
   { name: 'TrustedDevice', model: TrustedDevice },
+  { name: 'DeviceProof', model: DeviceProof },
   { name: 'AuditLog', model: AuditLog },
   { name: 'BackupLog', model: BackupLog },
   { name: 'JobLock', model: JobLock },

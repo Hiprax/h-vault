@@ -13,6 +13,7 @@
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import request from 'supertest';
+import mongoose from 'mongoose';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import { TOTP, Secret } from 'otpauth';
@@ -260,14 +261,19 @@ describe('Phase 6 — 2FA Negative Paths', () => {
   // ── Login 2FA after account lockout ──────────────────────────────────
 
   describe('2FA operations after account lockout', () => {
-    it('should reject login/2fa when the user is locked out', async () => {
+    it('should reject login/2fa while the SECOND factor is locked out', async () => {
       const { user, secretObj } = await create2faUser([]);
 
-      // Lock the account (e.g. brute-force on another session triggered the lockout)
-      const lockoutUntil = new Date(Date.now() + 30 * 60 * 1000);
-      await User.findByIdAndUpdate(user.id, {
-        $set: { failedLoginAttempts: 10, lockoutUntil },
-      });
+      // Lock the second factor (e.g. wrong codes from another session). F-03/F-28:
+      // the 2FA step reads only the second factor's own state, and answers its
+      // lockout with 403 ACCOUNT_LOCKED because the password is already proven
+      // here; a PASSWORD lockout no longer refuses this step (see
+      // second-factor-lockout.test.ts, "login2fa reads only the second-factor state").
+      const until = new Date(Date.now() + 30 * 60 * 1000);
+      await User.collection.updateOne(
+        { _id: new mongoose.Types.ObjectId(user.id) },
+        { $set: { secondFactorLockout: { failedAttempts: 10, until, episodeId: 'e' } } },
+      );
 
       const totp = new TOTP({ algorithm: 'SHA1', digits: 6, period: 30, secret: secretObj });
       const validCode = totp.generate();

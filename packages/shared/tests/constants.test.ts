@@ -26,7 +26,6 @@ import {
   MAX_LOGIN_ATTEMPTS,
   LOGIN_RATE_LIMIT_WINDOW_MINUTES,
   LOGIN_RATE_LIMIT_MAX_PER_IP,
-  LOGIN_RATE_LIMIT_MAX_PER_ACCOUNT,
   BACKUP_CODES_COUNT,
   DEFAULT_PASSWORD_LENGTH,
   MIN_PASSWORD_LENGTH,
@@ -44,6 +43,8 @@ import {
   CUSTOM_FIELD_TYPES,
   NOTE_FORMATS,
   AUDIT_ACTIONS,
+  STRANGER_WRITABLE_AUDIT_ACTIONS,
+  MAX_STRANGER_AUDIT_ROWS_PER_USER,
   BACKUP_STATUSES,
   ERROR_CODES,
   PAGINATION_DEFAULTS,
@@ -781,10 +782,6 @@ describe('Rate limiting constants', () => {
     expect(LOGIN_RATE_LIMIT_MAX_PER_IP).toBe(20);
   });
 
-  it('LOGIN_RATE_LIMIT_MAX_PER_ACCOUNT is 20', () => {
-    expect(LOGIN_RATE_LIMIT_MAX_PER_ACCOUNT).toBe(20);
-  });
-
   it('the per-IP budget covers several complete 2FA sign-ins', () => {
     // A 2FA sign-in costs two slots (`/auth/login` then `/auth/login/2fa`), so the
     // ceiling has to be comfortably more than twice a plausible number of people
@@ -795,11 +792,11 @@ describe('Rate limiting constants', () => {
     expect(LOGIN_RATE_LIMIT_MAX_PER_IP / SLOTS_PER_2FA_SIGN_IN).toBeGreaterThanOrEqual(10);
   });
 
-  it('the per-IP budget is not looser than the per-account one', () => {
-    // Per-email counting is the precise anti-guessing control and must stay at
-    // least as tight; an IP ceiling below it would make the per-account limiter
-    // unreachable and therefore dead.
-    expect(LOGIN_RATE_LIMIT_MAX_PER_ACCOUNT).toBeLessThanOrEqual(LOGIN_RATE_LIMIT_MAX_PER_IP);
+  it('no per-account (per-e-mail) sign-in limit exists any more (F-04)', async () => {
+    // Keyed on the submitted address, it let anyone refuse the owner's correct
+    // password on every device; the account lockout brakes guessing instead.
+    const constants: Record<string, unknown> = await import('../src/constants/index.js');
+    expect(constants).not.toHaveProperty('LOGIN_RATE_LIMIT_MAX_PER_ACCOUNT');
   });
 });
 
@@ -870,12 +867,32 @@ describe('Enum arrays', () => {
     expect(AUDIT_ACTIONS.length).toBeGreaterThanOrEqual(26);
   });
 
-  it('AUDIT_ACTIONS has exactly 47 distinct operations (keep README in sync)', () => {
+  it('AUDIT_ACTIONS has exactly 48 distinct operations (keep README in sync)', () => {
     // The README "Audit Logging" feature line documents this exact count
-    // ("47 distinct operations"). If a new audit action is added, bump both
-    // this assertion and the README number together.
-    expect(AUDIT_ACTIONS.length).toBe(47);
+    // ("48 distinct operations"). If a new audit action is added, bump both
+    // this assertion and the README number together. 48th: `device_proof_revoked`
+    // (F-03, a device proof revoked by its failure budget).
+    expect(AUDIT_ACTIONS.length).toBe(48);
+    expect(AUDIT_ACTIONS).toContain('device_proof_revoked');
     expect(new Set(AUDIT_ACTIONS).size).toBe(AUDIT_ACTIONS.length);
+  });
+
+  it('caps exactly the three actions an unauthenticated request can write, at 5,000 rows', () => {
+    // F-03: these are the only rows a stranger can make the server write under a
+    // victim's account (a failed sign-in, a rejected trusted-device cookie, a link
+    // unlock). The server trims ONLY them, so a new entry here would let the trim
+    // delete the owner's own history, and a missing one would let a stranger grow
+    // the log without bound. Changing either is a threat-model change (SECURITY.md).
+    expect([...STRANGER_WRITABLE_AUDIT_ACTIONS].sort()).toEqual(
+      ['account_unlock', 'login_failed', 'trusted_device_rejected'].sort(),
+    );
+    for (const action of STRANGER_WRITABLE_AUDIT_ACTIONS) {
+      expect(AUDIT_ACTIONS).toContain(action);
+    }
+    // Owner-only actions are never trimmed.
+    expect(STRANGER_WRITABLE_AUDIT_ACTIONS).not.toContain('login');
+    expect(STRANGER_WRITABLE_AUDIT_ACTIONS).not.toContain('device_proof_revoked');
+    expect(MAX_STRANGER_AUDIT_ROWS_PER_USER).toBe(5_000);
   });
 
   it('audits spending a backup code, separately from regenerating the batch', () => {

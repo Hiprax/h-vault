@@ -19,6 +19,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
+import { AxiosError, AxiosHeaders } from 'axios';
+import { ACCOUNT_LOCKED_MESSAGE } from '../src/services/auth/sessionFailure';
 import React from 'react';
 // Imported rather than written out as a decimal literal. The framing sizes have
 // ONE definition, and `packages/shared/tests/constants.test.ts` scans this whole
@@ -1478,6 +1480,74 @@ describe('SettingsPage — error paths and branches', () => {
     expect(screen.getByText('Enabled')).toBeInTheDocument();
     // The form stays open so the user can correct the code.
     expect(screen.getByText('Disable 2FA')).toBeInTheDocument();
+  });
+
+  /** A real 403 `ACCOUNT_LOCKED` refusal, as the server sends a locked second factor. */
+  function secondFactorLocked(): AxiosError {
+    const error = new AxiosError('Request failed with status code 403');
+    error.response = {
+      status: 403,
+      statusText: 'Forbidden',
+      data: { success: false, message: 'ACCOUNT_LOCKED', statusCode: 403, statusText: 'Forbidden' },
+      headers: new AxiosHeaders(),
+      config: { headers: new AxiosHeaders() },
+    };
+    return error;
+  }
+
+  it('says the second factor is locked, not "Invalid code", when disabling is refused for it', async () => {
+    // F-03/F-28: ten wrong codes anywhere lock the second factor, and this page
+    // must name that (with the unlock link) rather than blame the code the user
+    // just typed, which the server never even checked.
+    setProfile({ twoFactorEnabled: true });
+    mockDisable2faApi.mockRejectedValue(secondFactorLocked());
+    await renderSettings();
+
+    fireEvent.click(screen.getByText('Disable'));
+    fireEvent.change(screen.getByPlaceholderText('Master password'), {
+      target: { value: 'MasterPassword1!' },
+    });
+    fireEvent.change(screen.getByPlaceholderText('6-digit code'), { target: { value: '123456' } });
+    await act(async () => {
+      fireEvent.click(screen.getByText('Disable 2FA'));
+    });
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({ title: ACCOUNT_LOCKED_MESSAGE, type: 'error' }),
+      );
+    });
+    expect(mockToast).not.toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Invalid code or password' }),
+    );
+    expect(screen.getByText('Enabled')).toBeInTheDocument();
+  });
+
+  it('says the second factor is locked when regenerating backup codes is refused for it', async () => {
+    setProfile({ twoFactorEnabled: true });
+    mockRegenerateBackupCodesApi.mockRejectedValue(secondFactorLocked());
+    await renderSettings();
+
+    fireEvent.click(screen.getByText('Regenerate Codes'));
+    await waitFor(() => screen.getByPlaceholderText('Master password'));
+    fireEvent.change(screen.getByPlaceholderText('Master password'), {
+      target: { value: 'MasterPassword1!' },
+    });
+    fireEvent.change(screen.getByPlaceholderText('6-digit 2FA code'), {
+      target: { value: '123456' },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText('Regenerate'));
+    });
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({ title: ACCOUNT_LOCKED_MESSAGE, type: 'error' }),
+      );
+    });
+    expect(mockToast).not.toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Failed to regenerate backup codes. Check your password.' }),
+    );
   });
 
   // -------------------------------------------------------------------------

@@ -399,13 +399,6 @@ describe('the session-recovery screens are standalone screens too', () => {
     expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
   });
 
-  it('when the account is locked', async () => {
-    mockRefreshToken.mockRejectedValue(httpError(403, 'ACCOUNT_LOCKED'));
-    const { container } = renderGuarded();
-    await screen.findByRole('heading', { level: 1, name: 'Account temporarily locked' });
-    expectStandaloneScreen(container, 'Account temporarily locked');
-  });
-
   it('the loading screen shown while a session resumes or a route loads', () => {
     const { container } = render(<LoadingSpinner />);
     const main = screen.getByRole('main');

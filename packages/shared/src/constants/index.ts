@@ -50,12 +50,37 @@ export const TRASH_AUTO_PURGE_DAYS = 30;
 export const MAX_LOGIN_ATTEMPTS = 10;
 
 // ---------------------------------------------------------------------------
+// Device proofs (the `__hv_device` cookie)
+// ---------------------------------------------------------------------------
+//
+// A browser that completed an authentication holds a proof for that account, and
+// a password lockout never brakes a login that presents one: a lockout exists to
+// slow GUESSING, and the owner's own browsers are not guessing.
+
+/** How long a proof minted at a completed sign-in lasts. */
+export const DEVICE_PROOF_DAYS = 30;
+/** How long the single-use proof the unlock link hands its browser lasts. */
+export const UNLOCK_DEVICE_PROOF_MINUTES = 10;
+/**
+ * Wrong passwords a proof survives inside {@link DEVICE_PROOF_FAILURE_WINDOW_MINUTES}.
+ * The failure that reaches it revokes the proof: one typo must not burn a device,
+ * and five must.
+ */
+export const MAX_DEVICE_PROOF_FAILURES = 5;
+export const DEVICE_PROOF_FAILURE_WINDOW_MINUTES = 15;
+/** Proofs one account may hold; the oldest are evicted past it. */
+export const MAX_DEVICE_PROOFS_PER_USER = 50;
+
+// ---------------------------------------------------------------------------
 // Credential-attempt rate limiting
 // ---------------------------------------------------------------------------
 //
-// These three are the SINGLE source of truth for the server's `authLimiter` and
-// `accountLimiter` (`middleware/rateLimiter.ts`), which import them rather than
-// restating the numbers inline.
+// These two are the SINGLE source of truth for the server's `authLimiter`
+// (`middleware/rateLimiter.ts`), which imports them rather than restating the
+// numbers inline. There is deliberately no per-account (per-e-mail) sign-in limit:
+// keyed on the submitted address, it let anyone refuse the owner's correct
+// password on every device; the account lockout brakes guessing across addresses
+// instead, inside the handler.
 //
 // They bound CREDENTIAL ATTEMPTS ONLY — deliberate, human-initiated tries at a
 // password or an email link: register, login, the 2FA step, forgot-password and
@@ -70,11 +95,9 @@ export const LOGIN_RATE_LIMIT_WINDOW_MINUTES = 15;
 // Per-IP ceiling. A 2FA sign-in costs two (`/login` then `/login/2fa`), so this
 // is ~10 complete sign-ins per window from one address — enough headroom for a
 // household or an office behind one NAT, while still far below anything useful
-// for guessing. The precise anti-brute-force controls are elsewhere and unchanged:
-// per-email counting below, `MAX_LOGIN_ATTEMPTS` account lockout, and the
-// progressive per-email delay.
+// for guessing. The precise anti-brute-force controls are elsewhere: the
+// `MAX_LOGIN_ATTEMPTS` account lockout and the progressive per-email delay.
 export const LOGIN_RATE_LIMIT_MAX_PER_IP = 20;
-export const LOGIN_RATE_LIMIT_MAX_PER_ACCOUNT = 20;
 export const BACKUP_CODES_COUNT = 8;
 export const DEFAULT_PASSWORD_LENGTH = 20;
 
@@ -1157,6 +1180,10 @@ export const AUDIT_ACTIONS = [
   'trusted_device_grant',
   'trusted_device_revoke',
   'trusted_device_rejected',
+  // A device proof (the `__hv_device` cookie) revoked because wrong passwords
+  // presented with it reached its budget. Only a browser that once signed in can
+  // write it, so it is not stranger-writable.
+  'device_proof_revoked',
   // The document store's five mutations, and deliberately only five. There is no
   // download action: no read is audited anywhere in this codebase, and one
   // download is many segment requests, so auditing it would bury every other row
@@ -1170,6 +1197,21 @@ export const AUDIT_ACTIONS = [
   'document_purge',
 ] as const;
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];
+
+/**
+ * The audit actions an UNAUTHENTICATED request can write into somebody else's
+ * log: a failed sign-in (including every attempt during a lockout), a rejected
+ * trusted-device cookie, and an unlock by the emailed link. They are capped per
+ * account at {@link MAX_STRANGER_AUDIT_ROWS_PER_USER}, trimmed oldest first, so a
+ * stranger cannot grow an account's log without bound or push the owner's own
+ * history out of it: every other action is untouched by that cap.
+ */
+export const STRANGER_WRITABLE_AUDIT_ACTIONS = [
+  'login_failed',
+  'trusted_device_rejected',
+  'account_unlock',
+] as const satisfies readonly AuditAction[];
+export const MAX_STRANGER_AUDIT_ROWS_PER_USER = 5_000;
 
 export const BACKUP_STATUSES = ['success', 'failed'] as const;
 export type BackupStatus = (typeof BACKUP_STATUSES)[number];

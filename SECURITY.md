@@ -77,39 +77,62 @@ security posture, not a disclaimer.
   your reverse proxy, and the vault payloads are already ciphertext underneath it.
 - **Credential stuffing and online guessing.** Rate limiting, account lockout with progressive
   delays, and 2FA — with the lockout and 2FA paths deliberately built so they do not leak
-  whether an account exists. The failed-attempt count behind that lockout is **one counter
-  shared by both sign-in steps**, and it is the only per-account limit on the second factor, so
-  it is discharged only by a sign-in that actually **completes** — never merely by a correct
-  password, which would let anyone already holding one reset the second factor's only brake
-  between batches of guesses. A lockout that has genuinely been waited out is the single
-  exception, and reaching it costs the full lockout duration. **A lockout is itself a
-  denial-of-service anyone who knows an address can impose**, so its own bound is part of the
-  design and not an afterthought: it expires on its own, and the emailed unlock link is tied to
-  the **lock episode** rather than to the moment the lockout is due to end. Extending a lockout
-  extends the episode, so the link already sent keeps working however long an attacker grinds,
-  and a fresh one is sent only when the outstanding link would expire before the lockout it
-  covers — at most one new link about every half hour, which is what stops that guarantee from
-  becoming a mail-flood vector of its own. The honest bound is per **window** rather than per
-  episode: a link lives an hour and a lockout lasts thirty minutes, so an attacker who keeps an
-  episode alive indefinitely can cause a new link to be sent roughly every half hour. That is
-  the price of the guarantee it replaces — a locked-out owner whose only link had been killed by
-  the attacker's next attempt, with no replacement ever sent — and it is bounded and stated here
-  rather than left to be discovered. The link a replacement supersedes stays valid until its own hour
-  is up, so two can verify at once; that is harmless, because links naming one episode are one
-  capability, and spending either ends the episode and kills the rest. A lockout also costs
-  nothing but the wait: refreshing a session while one stands is refused **before** the
-  presented refresh token is spent, so the sessions the account already had are all still
-  there when it lifts, and the browser keeps the cookie it arrived with. A thirty-minute
-  condition anyone who knows an address can impose must not be able to end a thirty-day one.
-  This matters
-  more here than it would elsewhere, because resetting the master password mints a new vault key,
-  so "just reset it" is not a recovery path but total data loss. The credential budget is kept
-  separate from the budgets for token refresh and vault unlock, so that ordinary use of the app
-  can never spend the allowance you need in order to sign in. A caller-supplied value (a
-  header, a cookie, a rotating token) appears in a rate-limit key only where an IP-keyed tier
-  bounds the same route regardless — the per-account tier keys on the submitted email for that
-  reason, and the refresh tier, which has no such companion, keys on the address alone. Every tier
-  on an authenticated route keys on the account instead, because the account id comes from a
+  whether an account exists. **Each factor has its own lockout.** Ten wrong passwords lock the
+  password step; ten wrong two-factor codes, counted at every place a code is checked (the 2FA
+  sign-in step, turning 2FA off, regenerating backup codes, deleting the account), lock the
+  second-factor step. A wrong password never counts against the second factor and a wrong code
+  never counts against the password, so ten wrong codes can no longer turn the password step
+  into an oracle that confirms the password. A counter is cleared only by a sign-in that actually
+  **completes** — never merely by a correct password, which would let anyone already holding one
+  reset the second factor's brake between batches of guesses — and never while that factor's own
+  lockout is running. A lockout that has genuinely been waited out is discharged at its own step,
+  and reaching it costs the full lockout duration.
+
+  **What a password lockout costs a stranger, and what it costs you.** While the password is
+  locked, every sign-in that does not present a live device proof for the account gets exactly
+  the answer a wrong password gets — the same status, message, delay and audit row — **whether
+  or not the password was right**, so a lockout never tells anyone that a guess was correct. Each
+  such attempt is counted and audited, and the accounting is bounded: the counter stops at the
+  threshold, the deadline is pushed out at most once a minute while the attempts continue, and
+  the attempts of one minute are recorded as **one** audit row with a count. The honest bound on
+  the denial of service is therefore this: **someone who knows your address can keep new,
+  unrecognised browsers out of your account for as long as they keep guessing**, in thirty-minute
+  windows that are renewed while the guessing goes on. What they cannot do: learn whether a
+  password is correct, end or freeze a session you already have (a lockout never refuses a
+  session refresh), or lock out a browser that holds a live device proof for the account (one
+  left by a completed sign-in on this version and used within the last 30 days, not since
+  revoked). Such a browser holds a **device proof** (the `__hv_device` cookie, described below) and signs in
+  normally during a lockout, without clearing it. And the emailed **unlock link** does two
+  things: it ends the lockout, and it hands the browser that follows it a single-use proof valid
+  for ten minutes, so that browser can sign in even if the guessing re-locks the account a
+  second later. The link is tied to the **lock episode** rather than to the moment the lockout is
+  due to end, so the link already sent keeps working however long an attacker grinds, and a
+  fresh one is sent only when the outstanding link would expire before the lockout it covers —
+  at most one new link about every half hour, which stops that guarantee from becoming a
+  mail-flood vector. The link a replacement supersedes stays valid until its own hour is up, so
+  two can verify at once; that is harmless, because links naming one episode are one capability,
+  and spending either ends the episode and kills the rest.
+
+  **A second-factor lockout** is reachable only by someone who has the master password, so it
+  is answered differently: the 2FA step says the account is locked (the password is already
+  proven there, so the answer confirms nothing new), the owner is emailed that their master
+  password was entered and the code then failed, and the remedy that actually evicts such a
+  person — changing the master password from a session you already have — keeps working,
+  because a second-factor lockout never refuses a session refresh either. Its own link unlocks
+  the second factor only.
+
+  This matters more here than it would elsewhere, because resetting the master password mints a
+  new vault key, so "just reset it" is not a recovery path but total data loss; the sign-in page,
+  the forgot-password page and the lockout mail all point at the unlock link instead. The
+  credential budget is kept separate from the budgets for token refresh and vault unlock, so that
+  ordinary use of the app can never spend the allowance you need in order to sign in. No budget
+  ahead of a handler is keyed on anything the caller chose (a header, a cookie, a rotating token,
+  a submitted e-mail): a key the caller picks is a fresh bucket per request, and a key naming a
+  victim is a budget anyone can spend on the victim's behalf. That is why there is no per-account
+  limit on sign-in any more: keyed on the submitted e-mail, it let twenty requests from anywhere
+  refuse the owner's correct password on every device, and it braked nothing the handler's own
+  lockout does not. The sign-in tiers are keyed on the address, and the refresh tier on the
+  address alone. Every tier on an authenticated route keys on the account instead, because the account id comes from a
   verified token: neighbours behind one address never spend each other's budget, and an attacker
   holding a session cannot buy a fresh budget by moving to another address. That covers the
   heavy-operation tier and the confirmation of a new 2FA setup. It also covers every vault-item
@@ -126,6 +149,7 @@ security posture, not a disclaimer.
   parses the address, so it is a dependency this project deliberately keeps current — the
   advisory that stood in exactly that code path (`ip-address`, reachable from every rate-limit
   key) is cleared, and the `/64` bucketing is pinned by a test rather than left to a default.
+
 - **One account reading or changing another's data.** Every route that takes an id scopes its query
   to the authenticated user, and that is asserted **exhaustively rather than by sampling**: the
   route table is built from the real Express router — so a route added tomorrow appears in it
@@ -410,6 +434,49 @@ record keeps its own 30-day expiry, a user who keeps returning can go up to
 `REFRESH_TOKEN_REMEMBER_DAYS + TRUSTED_DEVICE_DAYS` days (60 by default) without re-entering a TOTP.
 This is intended: the master password is still required on every unlock, and either window lapsing
 lands the user back at a full login.
+
+### Device proofs (why a lockout does not lock you out)
+
+Every sign-in that completes, and every use of an emailed unlock link, leaves the browser a
+**device proof**: a random token in an httpOnly cookie (`__hv_device`, `Secure` and
+`SameSite=Strict` in production, sent only to the `/api/v1/auth` routes, of which sign-in,
+unlock, refresh and log-out-everywhere read it). The server stores only its
+SHA-256, bound to one account. A sign-in that presents a live proof for the account it names is not
+braked by that account's password lockout; everything else is. So a stranger holding your account
+locked keeps out browsers that have not signed in to it (or whose proof has lapsed or been revoked),
+not the ones you keep using.
+
+- **Minted on completion, replaced at every sign-in, kept alive while used.** A proof is issued when
+  a sign-in completes (password only, the 2FA step, or a trusted-device skip) and replaced at every
+  later completed sign-in, so a copied cookie keeps working until you next sign in in that browser
+  (or run "log out everywhere", below), and not after. It lasts 30
+  days from its last use: every session refresh in that browser pushes its expiry out again, so a
+  proof does not lapse while you keep using a remembered session (a refresh only extends a proof the
+  browser already holds; it never mints one). An account holds at most 50 (the oldest is dropped
+  first), and the database removes each at its expiry.
+- **Its own failure budget.** A wrong password presented with a proof counts against the proof, not
+  against the account, so a typo on your own laptop does not lock out your other new devices. Five
+  wrong passwords within fifteen minutes revoke the proof, and that is audited as
+  `device_proof_revoked`; the browser is then an ordinary unrecognised one.
+- **The unlock link proves the browser that follows it.** Using the link sets a **single-use** proof
+  that lasts ten minutes, spent by the first correct password it accompanies (even if a second
+  factor is still owed; of two requests racing with it, only one is proven), so the owner can get
+  in even when the guessing re-locks the account seconds after the link is used. A browser that
+  already holds a live proof keeps it instead.
+- **Revoked when the footing changes.** A password change or reset, refresh-token reuse detection (a
+  stolen-cookie signal) and "log out everywhere" revoke every proof on the account, including any
+  copy of the proof in the browser you run them from; "log out everywhere" then hands that browser a
+  fresh proof, so it stays recognised while the copies stop working. Account deletion erases them.
+- **What it does not do.** A proof never skips the password: it only decides whether a password
+  lockout applies. It does not skip the second factor either (that is what a trusted device is
+  for), and a second-factor lockout still refuses the 2FA step whatever proof is presented.
+- **The residual it accepts.** Someone holding a live proof (a stolen cookie, or a shared computer
+  left signed out but not cleared) can try four wrong passwords every fifteen minutes without ever
+  starting the account's lockout or its mail; the fifth revokes the proof and puts them back under
+  the lockout like anyone else, and a copy stays usable for as long as its source browser keeps
+  using its session. That is the device-cookie protocol's trade-off, chosen so that a typo on your
+  own laptop never locks out your other new devices. "Log out everywhere", a password change or a
+  reset revokes every proof and every copy of one.
 
 ### Password breach checking (Have I Been Pwned)
 

@@ -12,7 +12,6 @@ import {
   HIBP_BATCH_MAX_PREFIXES,
   LOGIN_RATE_LIMIT_WINDOW_MINUTES,
   LOGIN_RATE_LIMIT_MAX_PER_IP,
-  LOGIN_RATE_LIMIT_MAX_PER_ACCOUNT,
 } from '@hvault/shared';
 import { MAX_IP_ADDRESS_LENGTH } from '../utils/controllerHelpers.js';
 
@@ -219,87 +218,6 @@ export const authLimiter =
         });
         next(
           httpErrors.tooManyRequests('Too many authentication attempts, please try again later'),
-        );
-      },
-    }),
-  );
-
-/**
- * Read the `email` field from a login request body defensively.
- *
- * In Express 5 (body-parser 2.x), a request with a non-JSON `Content-Type`
- * (e.g. `text/plain`, `multipart/form-data`) or no body at all leaves
- * `req.body === undefined` — body-parser sets `req.body = undefined` and
- * returns early rather than coercing it to `{}`. `accountLimiter` is the
- * first middleware on `POST /login` to touch the body (it runs before
- * `validate`), so an unguarded `(req.body as …).email` would throw a
- * `TypeError` here and surface as a 500 before Zod ever returns a clean 400.
- * The optional chain yields `undefined` for a missing body instead.
- */
-function getRequestEmail(req: Request): unknown {
-  return (req.body as Record<string, unknown> | undefined)?.email;
-}
-
-/**
- * Per-account rate-limit key generator. Keys by lowercased email when present;
- * otherwise falls back to the already-guarded client key (see
- * {@link withClientKeyGuard}). A valid key is always required because
- * express-rate-limit evaluates `skip` and the key generator independently —
- * the `account:no-email:<ip>` form is the safe fallback for the no-email path
- * that {@link skipAccountLimiter} excludes from counting.
- */
-export function buildAccountKey(req: Request): string {
-  const email = getRequestEmail(req);
-  if (typeof email === 'string' && email.length > 0) {
-    return `account:email:${email.toLowerCase()}`;
-  }
-  return `account:no-email:${resolveClientKey(req) ?? ''}`;
-}
-
-/**
- * Skip per-account counting for requests with no usable `email`. Such requests
- * are already constrained by the IP-keyed `authLimiter` (which runs before
- * `accountLimiter` on the route), so counting them against the generous
- * per-account limit would only let the no-email path borrow that bucket. When
- * skipped, the request falls through to `validate`, which returns a clean 400.
- */
-export function skipAccountLimiter(req: Request): boolean {
-  const email = getRequestEmail(req);
-  return typeof email !== 'string' || email.length === 0;
-}
-
-/**
- * Per-account login rate limiter.
- *
- * Allows {@link LOGIN_RATE_LIMIT_MAX_PER_ACCOUNT} login attempts per
- * {@link LOGIN_RATE_LIMIT_WINDOW_MINUTES}-minute window per email address. Stacked
- * on top of {@link authLimiter} on `POST /auth/login`, and the precise control of
- * the two: it cannot be diluted by an attacker rotating IPs, and it cannot be
- * exhausted for one account by traffic aimed at another.
- */
-const accountStore = createStore(CREDENTIAL_WINDOW_MS);
-export const accountLimiter =
-  noopIfNonProduction() ??
-  withClientKeyGuard(
-    'accountLimiter',
-    rateLimit({
-      windowMs: CREDENTIAL_WINDOW_MS,
-      limit: LOGIN_RATE_LIMIT_MAX_PER_ACCOUNT,
-      standardHeaders: true,
-      legacyHeaders: false,
-      ...(accountStore ? { store: accountStore } : {}),
-      validate: { singleCount: false, keyGeneratorIpFallback: false },
-      keyGenerator: buildAccountKey,
-      skip: skipAccountLimiter,
-      handler: (_req, _res, next, options) => {
-        logger.warn('Per-account rate limit exceeded', {
-          windowMs: options.windowMs,
-          limit: options.limit,
-        });
-        next(
-          httpErrors.tooManyRequests(
-            'Too many login attempts for this account, please try again later',
-          ),
         );
       },
     }),

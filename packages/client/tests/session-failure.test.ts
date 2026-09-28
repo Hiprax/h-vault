@@ -21,7 +21,9 @@ import {
   isRateLimited,
   retryAfterSeconds,
   describeTransientFailure,
+  ACCOUNT_LOCKED_MESSAGE,
 } from '../src/services/auth/sessionFailure';
+import { getApiErrorMessage } from '../src/lib/utils';
 
 function axiosError(
   status?: number,
@@ -237,9 +239,9 @@ describe('isCsrfRejection', () => {
     ['TOKEN_INVALID', 'TOKEN_INVALID'],
     ['a prose refusal', 'Forbidden'],
   ])('is FALSE for a 403 whose message is %s', (_label, message) => {
-    // Enumerated deliberately: blindly replaying a 403 doubled every locked-account
-    // login — two bcrypt compares and two slots of both login budgets for one
-    // visible attempt.
+    // Enumerated deliberately: blindly replaying a 403 doubled every refused
+    // request — two bcrypt compares and two rate-limit slots for one visible
+    // attempt.
     expect(isCsrfRejection(axiosError(403, { message }))).toBe(false);
   });
 
@@ -306,16 +308,17 @@ describe('retryAfterSeconds', () => {
 });
 
 describe('describeTransientFailure', () => {
-  it('speaks for a locked account instead of rendering the raw code', () => {
-    // Without this branch the 403 falls through to `getApiErrorMessage`, which
-    // shows the user the string `ACCOUNT_LOCKED`. The sentence has to name the
-    // two ways out, because waiting is not the only one.
-    const message = describeTransientFailure(axiosError(403, { message: 'ACCOUNT_LOCKED' }));
-    expect(message).toMatch(/temporarily locked/i);
-    expect(message).toMatch(/unlock link/i);
-    // And it must not read as a network problem, which is what the generic
-    // fallbacks say.
-    expect(message).not.toMatch(/could not reach|temporarily unavailable/i);
+  it('leaves a locked second factor to getApiErrorMessage, which translates the code', () => {
+    // F-03: this function spoke for `ACCOUNT_LOCKED` while `/auth/refresh` could
+    // answer a lockout. It no longer can (a refresh is never refused for a locked
+    // factor), and the code now comes only from two-factor code checks, whose
+    // callers render errors through `getApiErrorMessage`, so the branch was
+    // removed as dead. The user still never sees the raw constant.
+    expect(describeTransientFailure(axiosError(403, { message: 'ACCOUNT_LOCKED' }))).toBeNull();
+    const shown = getApiErrorMessage(axiosError(403, { message: 'ACCOUNT_LOCKED' }));
+    expect(shown).toBe(ACCOUNT_LOCKED_MESSAGE);
+    expect(shown).toMatch(/unlock link/i);
+    expect(shown).not.toBe('ACCOUNT_LOCKED');
   });
 
   it('stays silent on a 403 that is not a lockout', () => {
@@ -375,12 +378,8 @@ describe('describeTransientFailure', () => {
     // "please try again in a moment", which is how a wrong password and a dead
     // session became indistinguishable in the first place.
     //
-    // The 403 row used to be `ACCOUNT_LOCKED`, and it moved for a reason, not for
-    // convenience: that code is no longer a credential rejection to be left
-    // alone. `/auth/refresh` refuses a lockout WITHOUT spending the presented
-    // token, so it names a temporary account condition this function is now the
-    // right place to describe — see the lockout case at the top of this block.
-    // The rule the table guards is untouched, and the row still exercises a 403.
+    // The 403 row is a plain refusal; `ACCOUNT_LOCKED` has its own case at the top
+    // of this block (it is also null now, and translated elsewhere).
     expect(describeTransientFailure(err)).toBeNull();
   });
 });

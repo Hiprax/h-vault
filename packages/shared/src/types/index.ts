@@ -416,6 +416,12 @@ export interface IAuditLogEntry {
   ipAddress: string;
   userAgent: string;
   timestamp: string;
+  /**
+   * How many events the row stands for: 1, except for the coalesced row of
+   * sign-in attempts made during a password lockout, which counts a minute of
+   * them. Absent on rows written before the field existed (read as 1).
+   */
+  count?: number;
 }
 
 // Backup restore response

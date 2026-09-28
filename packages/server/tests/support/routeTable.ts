@@ -226,7 +226,7 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     path: '/api/v1/auth/login',
     auth: 'none',
     csrf: 'required',
-    limiters: ['authLimiter', 'accountLimiter'],
+    limiters: ['authLimiter'],
     owned: null,
     when: 'always',
   },

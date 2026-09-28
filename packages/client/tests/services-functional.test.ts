@@ -798,12 +798,13 @@ describe('API Client', () => {
     });
 
     // A 403 the handler raised on its merits must NOT be replayed. The
-    // interceptor used to replay EVERY 403 of a state-changing request, and
-    // `POST /auth/login` answers 403 `ACCOUNT_LOCKED` — so a locked account was
-    // sent to the server twice for one visible attempt: two bcrypt compares, two
-    // `authLimiter` slots and two `accountLimiter` slots, halving the user's real
-    // budget exactly when they could least afford it. A replay of a request the
-    // server has already refused on its merits cannot succeed; it only costs.
+    // interceptor used to replay EVERY 403 of a state-changing request, so a
+    // refusal on the merits was sent to the server twice for one visible attempt:
+    // two bcrypt compares and two rate-limit slots, halving the user's real budget
+    // exactly when they could least afford it. The example is the 2FA step's 403
+    // `ACCOUNT_LOCKED` (a locked second factor): F-03 removed the one the sign-in
+    // step used to send, which this test was first written against, and the
+    // property is the same whichever route refuses.
     it('does not replay a 403 that is not a CSRF rejection (ACCOUNT_LOCKED)', async () => {
       vi.resetModules();
       vi.doMock('../src/stores/authStore', () => ({
@@ -822,14 +823,14 @@ describe('API Client', () => {
           csrfFetches += 1;
           return { ...base, data: { data: { csrfToken: `csrf-${String(csrfFetches)}` } } };
         }
-        if (url.includes('/auth/login')) loginHits += 1;
+        if (url.includes('/auth/login/2fa')) loginHits += 1;
         return { ...base, data: { ok: true } };
       };
       axios.defaults.adapter = adapter as never;
       api.defaults.adapter = adapter as never;
 
       // One real login attempt, so the counters below measure the REPLAY only.
-      await api.post('/auth/login', {});
+      await api.post('/auth/login/2fa', {});
       expect(loginHits).toBe(1);
       const csrfFetchesBefore = csrfFetches;
 
@@ -849,7 +850,7 @@ describe('API Client', () => {
           data: { success: false, message: 'ACCOUNT_LOCKED', statusCode: 403 },
         },
         config: {
-          url: '/auth/login',
+          url: '/auth/login/2fa',
           method: 'post',
           headers: {} as Record<string, string>,
           _csrfRetry: undefined as boolean | undefined,

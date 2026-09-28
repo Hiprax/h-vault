@@ -14,6 +14,16 @@ export const REFRESH_COOKIE_NAME = 'refreshToken';
 export const TRUSTED_DEVICE_COOKIE_NAME = 'trustedDevice';
 
 /**
+ * Cookie carrying the raw device-proof token (`models/DeviceProof.ts`): proof that
+ * this browser completed an authentication for one account, which a password
+ * lockout never refuses. Scoped to `path: '/api/v1/auth'` like the trusted-device
+ * cookie, so the browser sends it only to the auth endpoints that read it (the
+ * sign-in steps, the unlock link and log-out-everywhere). httpOnly; the server
+ * stores only its SHA-256.
+ */
+export const DEVICE_PROOF_COOKIE_NAME = '__hv_device';
+
+/**
  * Hard ceiling, in bytes, on the body of a single HIBP Pwned Passwords range
  * response (`utils/hibp.ts`). Applied as BOTH `maxContentLength` and
  * `maxBodyLength` on the outbound `axios` call. It is one of the two outbound

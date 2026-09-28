@@ -22,7 +22,8 @@ import { Folder } from '../src/models/Folder.js';
 import { VaultItem } from '../src/models/VaultItem.js';
 import { AuditLog } from '../src/models/AuditLog.js';
 import { derivePurposeKey } from '../src/utils/token.js';
-import { findMatchingBackupCodeIndex } from '../src/controllers/authController.js';
+// The helper moved with every other second-factor check into the one verifier.
+import { findMatchingBackupCodeIndex } from '../src/utils/secondFactor.js';
 import {
   createTestUser,
   authHeader,

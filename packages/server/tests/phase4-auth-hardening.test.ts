@@ -207,7 +207,7 @@ describe('Phase 4 — Auth anti-enumeration & 2FA hardening', () => {
       expect(lockedRes.body.message).toBe(ghostRes.body.message);
     });
 
-    it('reveals ACCOUNT_LOCKED only when the correct password is supplied', async () => {
+    it('answers the correct password exactly like a wrong one during a lockout (F-03)', async () => {
       const user = await createTestUser({ email: `t8-owner-${crypto.randomUUID()}@example.com` });
       await lock(user.id, new Date(Date.now() + 30 * 60 * 1000));
 
@@ -223,15 +223,18 @@ describe('Phase 4 — Auth anti-enumeration & 2FA hardening', () => {
       expect(wrongRes.status).toBe(401);
       expect(wrongRes.body.message).not.toBe('ACCOUNT_LOCKED');
 
-      // The correct password reveals the lockout to the legitimate owner.
+      // F-03: this used to pin that the CORRECT password earned 403
+      // ACCOUNT_LOCKED, which confirmed a guessed password to whoever sent it.
+      // An unproven browser now gets exactly the wrong-password answer.
       const right = await getCsrf(agent);
       const rightRes = await agent
         .post(`${API}/auth/login`)
         .set('x-csrf-token', right.token)
         .set('Cookie', right.cookie)
         .send({ email: user.email, authHash: user.rawPassword });
-      expect(rightRes.status).toBe(403);
-      expect(rightRes.body.message).toBe('ACCOUNT_LOCKED');
+      expect(rightRes.status).toBe(401);
+      expect(rightRes.body).toEqual(wrongRes.body);
+      expect(rightRes.body.message).not.toBe('ACCOUNT_LOCKED');
     });
 
     it('does not mutate lockout state on a wrong-password attempt against a locked account', async () => {
@@ -255,7 +258,7 @@ describe('Phase 4 — Auth anti-enumeration & 2FA hardening', () => {
   // ── T9 — 2FA brute-force throttling parity ─────────────────────────────────
 
   describe('T9 — 2FA step has account-scoped brute-force throttling', () => {
-    it('locks the account after MAX failed 2FA attempts and then blocks with ACCOUNT_LOCKED', async () => {
+    it('locks the SECOND factor after MAX failed 2FA attempts and then blocks with ACCOUNT_LOCKED', async () => {
       const { user } = await create2faUser(['realbackupcode01']);
 
       // 10 invalid codes (16-char alphanumeric — passes schema, fails verify).
@@ -270,10 +273,13 @@ describe('Phase 4 — Auth anti-enumeration & 2FA hardening', () => {
         expect(res.status).toBe(401);
       }
 
-      const locked = await User.findById(user.id);
-      expect(locked!.failedLoginAttempts).toBe(10);
-      expect(locked!.lockoutUntil).toBeDefined();
-      expect(locked!.lockoutUntil!.getTime()).toBeGreaterThan(Date.now());
+      // F-03/F-28: wrong codes count on the second factor's OWN state; the
+      // password factor, which was proven every time, is untouched.
+      const locked = await User.findById(user.id).select('+secondFactorLockout');
+      expect(locked!.secondFactorLockout?.failedAttempts).toBe(10);
+      expect(locked!.secondFactorLockout?.until!.getTime()).toBeGreaterThan(Date.now());
+      expect(locked!.failedLoginAttempts).toBe(0);
+      expect(locked!.lockoutUntil).toBeUndefined();
 
       // A further attempt (even with a fresh, valid temp token) is now blocked
       // by the lockout check before the code is ever evaluated.
@@ -289,7 +295,7 @@ describe('Phase 4 — Auth anti-enumeration & 2FA hardening', () => {
       expect(blocked.body.message).toBe('ACCOUNT_LOCKED');
     }, 30_000);
 
-    it('increments the shared failed-attempt counter on a single wrong 2FA code', async () => {
+    it("increments the second factor's own counter, never the password's, on a single wrong 2FA code", async () => {
       const { user } = await create2faUser(['realbackupcode02']);
 
       const tempToken = makeTempToken(user.id);
@@ -302,15 +308,20 @@ describe('Phase 4 — Auth anti-enumeration & 2FA hardening', () => {
 
       expect(res.status).toBe(401);
 
-      const after = await User.findById(user.id);
-      expect(after!.failedLoginAttempts).toBe(1);
+      const after = await User.findById(user.id).select('+secondFactorLockout');
+      expect(after!.secondFactorLockout?.failedAttempts).toBe(1);
+      expect(after!.secondFactorLockout?.until).toBeUndefined();
+      expect(after!.failedLoginAttempts).toBe(0);
       expect(after!.lockoutUntil).toBeUndefined();
     });
 
     it('resets the failed-attempt counter on a successful 2FA verification', async () => {
       const { user, secretObj } = await create2faUser([]);
-      // Simulate earlier wrong-code attempts in this 2FA session (below threshold).
-      await User.findByIdAndUpdate(user.id, { $set: { failedLoginAttempts: 4 } });
+      // Simulate earlier failures on BOTH factors (below threshold): a completed
+      // sign-in discharges each factor that is not locked.
+      await User.findByIdAndUpdate(user.id, {
+        $set: { failedLoginAttempts: 4, secondFactorLockout: { failedAttempts: 4 } },
+      });
 
       const totp = new TOTP({ algorithm: 'SHA1', digits: 6, period: 30, secret: secretObj });
       const validCode = totp.generate();
@@ -325,9 +336,10 @@ describe('Phase 4 — Auth anti-enumeration & 2FA hardening', () => {
 
       expect(res.status).toBe(200);
 
-      const after = await User.findById(user.id);
+      const after = await User.findById(user.id).select('+secondFactorLockout');
       expect(after!.failedLoginAttempts).toBe(0);
       expect(after!.lockoutUntil).toBeUndefined();
+      expect(after!.secondFactorLockout).toBeUndefined();
     });
   });
 });
