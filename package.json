@@ -65,6 +65,7 @@
     "type-check": "npm run type-check -w packages/shared && npm run type-check -w packages/server && npm run type-check -w packages/client && npm run type-check:e2e",
     "type-check:e2e": "tsc -p tsconfig.e2e.json",
     "audit:prod": "npm audit --audit-level=moderate --omit=dev",
+    "audit:deps:osv": "node scripts/ci/osv-gate.mjs",
     "secret-scan": "node scripts/ci/secret-scan.mjs",
     "ci": "node scripts/ci/local-ci.mjs",
     "ci:list": "node scripts/ci/local-ci.mjs --list",
@@ -92,6 +93,7 @@
     "audit:bundle": "node scripts/ci/bundle-gate.mjs",
     "audit:secrets": "node scripts/ci/secret-scan.mjs --report",
     "audit:secrets:full": "node scripts/ci/secret-scan.mjs --all --history --report",
+    "audit:secrets:gitleaks": "node scripts/ci/gitleaks-gate.mjs",
     "deadcode:unused": "knip --reporter json"
   },
   "lint-staged": {

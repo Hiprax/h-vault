@@ -1,0 +1,25 @@
+{
+  "results": [
+    {
+      "source": {
+        "path": "/recorded/package-lock.json",
+        "type": "lockfile"
+      },
+      "packages": [
+        {
+          "package": {
+            "name": "minimist",
+            "version": "1.2.8",
+            "ecosystem": "npm"
+          }
+        }
+      ]
+    }
+  ],
+  "experimental_config": {
+    "licenses": {
+      "summary": false,
+      "allowlist": null
+    }
+  }
+}

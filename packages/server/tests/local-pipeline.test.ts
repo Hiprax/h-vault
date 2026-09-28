@@ -41,6 +41,23 @@ import {
 } from '../../../scripts/ci/lib/version.mjs';
 import { evaluateDenominator } from '../../../scripts/ci/lib/scan-denominator.mjs';
 import { extractRelease } from '../../../scripts/ci/changelog-extract.mjs';
+import {
+  OSV_EXIT,
+  OsvReportError,
+  exitCodeFor as osvExitCodeFor,
+  formatFinding as formatOsvFinding,
+  parseOsvReport,
+  summarizeReport,
+} from '../../../scripts/ci/osv-gate.mjs';
+import {
+  COMMIT_FINGERPRINT,
+  GitleaksReportError,
+  LOG_OPTS,
+  exitCodeFor as gitleaksExitCodeFor,
+  formatFinding as formatGitleaksFinding,
+  parseGitleaksSarif,
+  parseIgnoreFile,
+} from '../../../scripts/ci/gitleaks-gate.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..', '..', '..');
@@ -1037,5 +1054,241 @@ describe('secret-scan --staged: the pre-commit hook, run against a real index', 
     expect(result.status).toBe(0);
     expect(result.output).toContain('no secrets in 1 file(s)');
     expect(result.output).not.toContain('nothing to scan');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The two scanner gates: their verdicts are decided from RECORDED reports here,
+// so no test calls the OSV API, runs gitleaks, or needs either binary.
+// ---------------------------------------------------------------------------
+
+/** The skip sentinel; `sast` is the only gate allowed to return it. */
+const SKIP_EXIT = 78;
+
+describe('osv gate: the verdict is read from the report and the exit code together', () => {
+  /**
+   * Recorded with osv-scanner 2.4.0 (`scan source --lockfile <throwaway lockfile>
+   * --format json --all-packages`) against lockfiles naming minimist 1.2.8 and
+   * 1.2.5; only `source.path` was rewritten to `/recorded/package-lock.json`.
+   */
+  const clean = parseOsvReport(
+    read('packages', 'server', 'tests', 'fixtures', 'osv-report-clean.json'),
+  );
+  const vulnerable = parseOsvReport(
+    read('packages', 'server', 'tests', 'fixtures', 'osv-report-vulnerable.json'),
+  );
+
+  it('passes the recorded clean report and counts its packages from the report', () => {
+    expect(clean).toEqual({ packages: 1, vulnerabilities: [] });
+    expect(osvExitCodeFor(OSV_EXIT.CLEAN, clean)).toBe(0);
+    expect(summarizeReport(clean)).toBe('0 vulnerabilities across 1 package');
+    expect(summarizeReport({ packages: 1450, vulnerabilities: [] })).toBe(
+      '0 vulnerabilities across 1,450 packages',
+    );
+  });
+
+  it('fails the recorded vulnerable report and names the package, version and advisory', () => {
+    expect(vulnerable.packages).toBe(1);
+    expect(vulnerable.vulnerabilities).toHaveLength(1);
+    const [finding] = vulnerable.vulnerabilities;
+    expect(finding).toMatchObject({
+      package: 'minimist',
+      version: '1.2.5',
+      id: 'GHSA-xvch-5gv4-984h',
+    });
+    expect(finding!.summary).not.toBe('');
+    expect(formatOsvFinding(finding!)).toBe(
+      `minimist@1.2.5  GHSA-xvch-5gv4-984h  ${finding!.summary}`,
+    );
+    expect(summarizeReport(vulnerable)).toBe('1 vulnerability across 1 package');
+    expect(osvExitCodeFor(OSV_EXIT.VULNERABLE, vulnerable)).toBe(1);
+  });
+
+  it('is red whenever the report lists a vulnerability, whatever the tool exited with', () => {
+    for (const toolExit of [0, 1, 2, 124, 127, 128]) {
+      expect(osvExitCodeFor(toolExit, vulnerable)).toBe(1);
+    }
+  });
+
+  it('never reads a scan that did not complete as clean', () => {
+    // A failed advisory fetch, a scan of nothing, a hang and an exit 1 whose
+    // report names nothing are all "could not run", never a pass.
+    for (const toolExit of [
+      OSV_EXIT.VULNERABLE,
+      OSV_EXIT.GENERAL_ERROR,
+      OSV_EXIT.NO_PACKAGES,
+      124,
+      129,
+      255,
+    ]) {
+      expect(osvExitCodeFor(toolExit, clean)).toBe(2);
+    }
+    expect(osvExitCodeFor(OSV_EXIT.CLEAN, null)).toBe(2);
+    // Without `--all-packages` a clean report lists no packages at all.
+    const unlisted = parseOsvReport('{"results": []}');
+    expect(unlisted).toEqual({ packages: 0, vulnerabilities: [] });
+    expect(osvExitCodeFor(OSV_EXIT.CLEAN, unlisted)).toBe(2);
+  });
+
+  it('never answers with the skip sentinel', () => {
+    for (const toolExit of [0, 1, 2, 78, 124, 127, 128, 255]) {
+      for (const report of [clean, vulnerable, null]) {
+        expect(osvExitCodeFor(toolExit, report)).not.toBe(SKIP_EXIT);
+      }
+    }
+  });
+
+  it('refuses a report it cannot read rather than finding nothing in it', () => {
+    const cases: [string, RegExp][] = [
+      ['not json', /report is not JSON/],
+      ['{}', /no `results` array/],
+      ['{"results": [{"source": {}}]}', /results\[0\] has no `packages` array/],
+      ['{"results": [{"packages": [{"package": {"name": "a"}}]}]}', /names no package and version/],
+      [
+        '{"results": [{"packages": [{"package": {"name": "a", "version": "1"}, "vulnerabilities": {}}]}]}',
+        /a@1: `vulnerabilities` is not an array/,
+      ],
+      [
+        '{"results": [{"packages": [{"package": {"name": "a", "version": "1"}, "vulnerabilities": [{"summary": "x"}]}]}]}',
+        /a@1: a vulnerability has no id/,
+      ],
+    ];
+    for (const [text, message] of cases) {
+      expect(() => parseOsvReport(text)).toThrow(OsvReportError);
+      expect(() => parseOsvReport(text)).toThrow(message);
+    }
+  });
+});
+
+describe('gitleaks gate: only commit-pinned fingerprints, and a finding is never green', () => {
+  const COMMIT = '0123456789abcdef0123456789abcdef01234567';
+
+  /** The shape gitleaks 8.30.1 writes with `--report-format sarif --redact`. */
+  const sarifWith = (results: unknown[]): unknown => ({
+    $schema: 'https://json.schemastore.org/sarif-2.1.0.json',
+    version: '2.1.0',
+    runs: [{ tool: { driver: { name: 'gitleaks', rules: [] } }, results }],
+  });
+  const result = (overrides: { uri?: string; line?: unknown; commit?: unknown } = {}): unknown => ({
+    message: { text: 'generic-api-key has detected secret' },
+    ruleId: 'generic-api-key',
+    locations: [
+      {
+        physicalLocation: {
+          artifactLocation: { uri: overrides.uri ?? 'tests/token.test.ts' },
+          region: { startLine: overrides.line ?? 12, snippet: { text: 'REDACTED' } },
+        },
+      },
+    ],
+    partialFingerprints: { commitSha: overrides.commit ?? COMMIT },
+  });
+
+  it('accepts every line of the committed .gitleaksignore as a commit-pinned fingerprint', () => {
+    const { fingerprints, refused } = parseIgnoreFile(read('.gitleaksignore'));
+    expect(refused).toEqual([]);
+    expect(fingerprints.length).toBeGreaterThan(0);
+    for (const { value } of fingerprints) expect(value).toMatch(COMMIT_FINGERPRINT);
+    // One line per finding: a duplicate would be dead capacity in the ledger.
+    expect(new Set(fingerprints.map((f) => f.value)).size).toBe(fingerprints.length);
+  });
+
+  it('reads .gitleaksignore the way gitleaks does and refuses a global fingerprint', () => {
+    const text = [
+      '# fixture fingerprints',
+      '',
+      `  ${COMMIT}:tests/token.test.ts:generic-api-key:12  `,
+      'tests/token.test.ts:generic-api-key:12',
+      `${COMMIT}:tests/token.test.ts:generic-api-key`,
+      `${COMMIT.toUpperCase()}:tests/token.test.ts:generic-api-key:12`,
+      `${COMMIT}:tests/token.test.ts:generic-api-key:0`,
+    ].join('\n');
+    const { fingerprints, refused } = parseIgnoreFile(text);
+    expect(fingerprints).toEqual([
+      { line: 3, value: `${COMMIT}:tests/token.test.ts:generic-api-key:12` },
+    ]);
+    expect(refused.map((r) => r.line)).toEqual([4, 5, 6, 7]);
+    // Line 5 also has three parts, so it is refused as global too.
+    expect(refused[0]!.reason).toMatch(/global fingerprint ignores this line in every commit/);
+    expect(refused[1]!.reason).toMatch(/global fingerprint/);
+    expect(refused[2]!.reason).toMatch(/not a `<commit>:<file>:<rule>:<line>` fingerprint/);
+    expect(refused[3]!.reason).toMatch(/not a `<commit>:<file>:<rule>:<line>` fingerprint/);
+  });
+
+  it("reads the history with git's own output filters off", () => {
+    // Measured in a throwaway clone: each of `* -diff` in .git/info/attributes, a
+    // textconv driver, `color.ui=always` and `log.showRoot=false` hid findings
+    // from the default options; these flags are what restored all of them. A
+    // `--log-opts` value REPLACES gitleaks' defaults, so those are restated too.
+    const opts = LOG_OPTS.split(' ');
+    for (const flag of [
+      '--full-history',
+      '--all',
+      '--diff-filter=tuxdb',
+      '--text',
+      '--no-textconv',
+      '--no-ext-diff',
+      '--no-color',
+      '--root',
+    ]) {
+      expect(opts).toContain(flag);
+    }
+    // gitleaks splits the value on single spaces: an empty token would reach git.
+    expect(opts).not.toContain('');
+  });
+
+  it('rebuilds the fingerprint gitleaks matches .gitleaksignore against', () => {
+    const findings = parseGitleaksSarif(JSON.stringify(sarifWith([result()])));
+    expect(findings).toEqual([
+      {
+        rule: 'generic-api-key',
+        file: 'tests/token.test.ts',
+        line: 12,
+        commit: COMMIT,
+        fingerprint: `${COMMIT}:tests/token.test.ts:generic-api-key:12`,
+      },
+    ]);
+    expect(findings[0]!.fingerprint).toMatch(COMMIT_FINGERPRINT);
+    expect(formatGitleaksFinding(findings[0]!)).toBe(
+      `generic-api-key | tests/token.test.ts:12 | ${COMMIT}\n` +
+        `    fingerprint: ${COMMIT}:tests/token.test.ts:generic-api-key:12`,
+    );
+    expect(parseGitleaksSarif(sarifWith([]))).toEqual([]);
+  });
+
+  it('refuses a report it cannot read rather than finding nothing in it', () => {
+    const cases: [unknown, RegExp][] = [
+      ['not json', /report is not JSON/],
+      [{}, /report has no `runs`/],
+      [{ runs: [] }, /report has no `runs`/],
+      [{ runs: [{}] }, /runs\[0\] has no `results` array/],
+      [sarifWith([result({ line: '12' })]), /runs\[0\]\.results\[0\] names no rule, file and line/],
+      [sarifWith([result({ commit: '' })]), /names no commit \(was the history scanned\?\)/],
+    ];
+    for (const [input, message] of cases) {
+      expect(() => parseGitleaksSarif(input)).toThrow(GitleaksReportError);
+      expect(() => parseGitleaksSarif(input)).toThrow(message);
+    }
+  });
+
+  it('maps the tool exit and the report to one verdict, and never to the skip sentinel', () => {
+    const finding = parseGitleaksSarif(sarifWith([result()]));
+    expect(gitleaksExitCodeFor(0, [], 0)).toBe(0);
+    // gitleaks exits 1 for leaks AND for a fatal error; the report decides.
+    expect(gitleaksExitCodeFor(1, finding, 0)).toBe(1);
+    expect(gitleaksExitCodeFor(1, [], 0)).toBe(2);
+    expect(gitleaksExitCodeFor(1, null, 0)).toBe(2);
+    expect(gitleaksExitCodeFor(124, null, 0)).toBe(2);
+    // A finding in the report is red whatever the exit code said.
+    expect(gitleaksExitCodeFor(0, finding, 0)).toBe(1);
+    // An allowlist the gate may not use is red even over a clean scan.
+    expect(gitleaksExitCodeFor(0, [], 1)).toBe(1);
+    expect(gitleaksExitCodeFor(2, null, 1)).toBe(1);
+    for (const toolExit of [0, 1, 2, 78, 124, 127]) {
+      for (const findings of [[], finding, null]) {
+        for (const refused of [0, 1]) {
+          expect(gitleaksExitCodeFor(toolExit, findings, refused)).not.toBe(SKIP_EXIT);
+        }
+      }
+    }
   });
 });

@@ -1094,6 +1094,188 @@ describe('the blind spots are pinned rather than trusted', () => {
 });
 
 // ---------------------------------------------------------------------------
+// 4b. `.gitleaksignore` is ledgered LINE BY LINE
+// ---------------------------------------------------------------------------
+/**
+ * Every line of `.gitleaksignore` silences one gitleaks finding, so the file is
+ * a list of suppressions, not one. When the scanner recorded a single marker for
+ * the file's existence, one ledger entry excused every line the file would ever
+ * hold: the second fingerprint, and the hundredth, cost nothing. Each line is now
+ * its own marker with the fingerprint as its text, so each needs an entry whose
+ * `symbol` names it, and capacity counts them.
+ *
+ * The fingerprints below are synthetic (no commit of this repository): a
+ * fingerprint is `<commit>:<file>:<rule>:<line>`.
+ */
+describe('.gitleaksignore: one marker per fingerprint line', () => {
+  const COMMIT_A = 'a'.repeat(40);
+  const COMMIT_B = 'b'.repeat(40);
+  const FP_1 = `${COMMIT_A}:tests/token.test.ts:generic-api-key:12`;
+  const FP_2 = `${COMMIT_A}:tests/token.test.ts:generic-api-key:30`;
+  const FP_OTHER_COMMIT = `${COMMIT_B}:tests/token.test.ts:generic-api-key:12`;
+  const gitleaksEntry = (id: string, symbol: string, maxHits = 1): LedgerEntry =>
+    entry({
+      id,
+      rule: 'IGNORE-FILE-GITLEAKS',
+      kind: 'known-gap',
+      file: '.gitleaksignore',
+      symbol,
+      maxHits,
+    });
+  const gitleaksHits = (r: ScanResult): { line: number }[] =>
+    r.hits.filter((h) => h.rule === 'IGNORE-FILE-GITLEAKS').map((h) => ({ line: h.line }));
+
+  it('reports the one fingerprint line no entry names, and only that line', () => {
+    const result = scan(
+      { ...CLEAN, '.gitleaksignore': `${FP_1}\n${FP_2}\n` },
+      { ledger: { entries: [gitleaksEntry('SUP-0001', FP_1)] } },
+    );
+    expect(gitleaksHits(result)).toEqual([{ line: 1 }, { line: 2 }]);
+    expect(result.violations).toHaveLength(1);
+    expect(result.violations[0]).toMatchObject({
+      file: '.gitleaksignore',
+      line: 2,
+      rule: 'IGNORE-FILE-GITLEAKS',
+      violation: 'UNLEDGERED',
+    });
+    // The ledgered line is excused, not reported alongside it.
+    expect(at(result, '.gitleaksignore', 1)).toEqual([]);
+    expect(result.exitCode).toBe(1);
+  });
+
+  it('passes when every line is ledgered, reading the file the way gitleaks reads it', () => {
+    // gitleaks trims each line and skips blank lines and `#` comments, so those
+    // suppress nothing and must not demand an entry.
+    const result = scan(
+      {
+        ...CLEAN,
+        '.gitleaksignore': `# fixture fingerprints\n\n  ${FP_1}  \n\t\n${FP_2}\n`,
+      },
+      {
+        ledger: {
+          entries: [gitleaksEntry('SUP-0001', FP_1), gitleaksEntry('SUP-0002', FP_2)],
+        },
+      },
+    );
+    expect(gitleaksHits(result)).toEqual([{ line: 3 }, { line: 5 }]);
+    expect(result.violations).toEqual([]);
+    expect(result.summary.suppressions).toEqual({ count: 2, totalHits: 2, entriesTotal: 2 });
+    expect(result.exitCode).toBe(0);
+  });
+
+  it('lets one entry cover the lines of one commit and file only up to its capacity', () => {
+    const prefix = `${COMMIT_A}:tests/token.test.ts:generic-api-key:`;
+    const files = { ...CLEAN, '.gitleaksignore': `${FP_1}\n${FP_2}\n` };
+
+    const covered = scan(files, { ledger: { entries: [gitleaksEntry('SUP-0001', prefix, 2)] } });
+    expect(covered.violations).toEqual([]);
+    expect(covered.summary.suppressions.totalHits).toBe(2);
+    expect(covered.exitCode).toBe(0);
+
+    const short = scan(files, { ledger: { entries: [gitleaksEntry('SUP-0001', prefix, 1)] } });
+    expect(short.violations).toHaveLength(1);
+    expect(short.violations[0]).toMatchObject({
+      file: '.gitleaksignore',
+      line: 2,
+      violation: 'LEDGER-CAPACITY',
+    });
+    expect(short.exitCode).toBe(1);
+  });
+
+  it('never lets a commit-pinned entry excuse the same file and line in another commit', () => {
+    const result = scan(
+      { ...CLEAN, '.gitleaksignore': `${FP_1}\n${FP_OTHER_COMMIT}\n` },
+      {
+        ledger: {
+          entries: [
+            gitleaksEntry('SUP-0001', `${COMMIT_A}:tests/token.test.ts:generic-api-key:`, 1),
+          ],
+        },
+      },
+    );
+    expect(result.violations).toHaveLength(1);
+    expect(result.violations[0]).toMatchObject({ line: 2, violation: 'UNLEDGERED' });
+    expect(result.exitCode).toBe(1);
+  });
+
+  it('no longer lets one entry naming the file excuse every line in it', () => {
+    const result = scan(
+      { ...CLEAN, '.gitleaksignore': `${FP_1}\n${FP_2}\n` },
+      { ledger: { entries: [gitleaksEntry('SUP-0001', '.gitleaksignore', 2)] } },
+    );
+    // Both lines are unexcused, and the entry that used to excuse the whole file
+    // is refused outright: a path is not a fingerprint.
+    expect(result.violations.map((v) => [v.line, v.violation, v.entry])).toEqual([
+      [1, 'UNLEDGERED', undefined],
+      [2, 'UNLEDGERED', undefined],
+      [undefined, 'LEDGER-MALFORMED', 'SUP-0001'],
+    ]);
+    expect(result.exitCode).toBe(1);
+  });
+
+  it('matches a full fingerprint exactly, so line 12 never excuses line 120', () => {
+    const fp120 = `${COMMIT_A}:tests/token.test.ts:generic-api-key:120`;
+    const result = scan(
+      { ...CLEAN, '.gitleaksignore': `${FP_1}\n${fp120}\n` },
+      { ledger: { entries: [gitleaksEntry('SUP-0001', FP_1, 2)] } },
+    );
+    expect(result.violations.map((v) => [v.line, v.violation, v.entry])).toEqual([
+      [2, 'UNLEDGERED', undefined],
+      [undefined, 'LEDGER-UNUSED-CAPACITY', 'SUP-0001'],
+    ]);
+    expect(result.exitCode).toBe(1);
+  });
+
+  it('refuses a symbol that is neither a fingerprint nor a commit-pinned prefix', () => {
+    // A bare rule id or a bare commit would match lines from any file, and a
+    // commit-less symbol would match commits that do not exist yet.
+    for (const symbol of ['generic-api-key', `${COMMIT_A}:`, 'tests/token.test.ts']) {
+      const result = scan(
+        { ...CLEAN, '.gitleaksignore': `${FP_1}\n` },
+        { ledger: { entries: [gitleaksEntry('SUP-0001', symbol)] } },
+      );
+      expect(result.violations.map((v) => [v.line, v.violation, v.entry])).toEqual([
+        [1, 'UNLEDGERED', undefined],
+        [undefined, 'LEDGER-MALFORMED', 'SUP-0001'],
+      ]);
+      expect(result.exitCode).toBe(1);
+    }
+  });
+
+  it('asks for no entry when the file holds only comments and blank lines', () => {
+    const result = scan({ ...CLEAN, '.gitleaksignore': '# nothing ignored yet\n\n' });
+    expect(gitleaksHits(result)).toEqual([]);
+    expect(result.violations).toEqual([]);
+    expect(result.exitCode).toBe(0);
+  });
+
+  it('keeps every other ignore file at one marker for its existence', () => {
+    const files = { ...CLEAN, '.trivyignore': 'CVE-2099-0001\nCVE-2099-0002\n' };
+    const bare = scan(files);
+    expect(bare.hits.filter((h) => h.rule === 'IGNORE-FILE-TRIVY')).toMatchObject([
+      { file: '.trivyignore', line: 0 },
+    ]);
+    expect(bare.exitCode).toBe(1);
+
+    const ledgered = scan(files, {
+      ledger: {
+        entries: [
+          entry({
+            id: 'SUP-0001',
+            rule: 'IGNORE-FILE-TRIVY',
+            kind: 'vulnerability-acceptance',
+            file: '.trivyignore',
+            symbol: '.trivyignore',
+          }),
+        ],
+      },
+    });
+    expect(ledgered.violations).toEqual([]);
+    expect(ledgered.exitCode).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 5. This repository, right now
 // ---------------------------------------------------------------------------
 describe('the real repository', () => {
