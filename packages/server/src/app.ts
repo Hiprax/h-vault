@@ -255,6 +255,8 @@ app.use(
       'token',
       'tempToken',
       'code',
+      // An invitation to register: it admits its address on its own, once.
+      'invitationToken',
       // A restore's entire backup file, as ONE JSON string. It carries
       // `encryptedVaultKey`, `encryptedBWK` and `bwkEncryptedVaultKey` inside it,
       // near the start, where key-by-key masking cannot reach: the string is masked

@@ -81,9 +81,10 @@ stack that publishes exactly one loopback port, and a test suite that gates ever
 | **Remember me / trusted devices** | Opt-in per login. A remembered session lasts 30 days across a browser restart, and on a 2FA account the device may skip the _2FA step_ — never the master password, which is still typed on every unlock. Trust is granted only against a TOTP code: completing the 2FA step with a single-use _backup code_ signs you in and still gives you the 30-day session, but registers no device, because a recovery credential is kept where the authenticator app is not. Trust is a server-side record (only a SHA-256 of an opaque token, revocable centrally), checked strictly _after_ the password succeeds, rotated on use, and dropped on password change/reset, 2FA enable/disable, backup-code regeneration, "log out everywhere", stolen-token reuse detection, and account deletion. Manage or revoke devices from the Sessions page. |
 | **No enumeration oracles**        | Registration, login, lockout, password reset and verification-resend are all built so that response body _and_ response time are identical whether or not the account exists.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | **Account lockout**               | Per factor: 10 wrong passwords lock new sign-ins for 30 minutes, renewed while the guessing goes on, and 10 wrong codes lock the 2FA step. A locked sign-in answers a right and a wrong password identically, so it never confirms a guess; existing sessions are never locked out, and a browser holding a live device proof (left by a completed sign-in on this version, kept for 30 days of use) signs in normally. Progressive delays and an unlock email that also proves the browser that follows it.                                                                                                                                                                                                                                                                                                                                |
-| **CSRF + rate limiting**          | HMAC-SHA256 double-submit tokens with constant-time verification, and [nineteen rate-limit tiers](#rate-limiting), all but two backed by MongoDB, keyed per IP or per account, with IPv6 `/64` aggregation.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| **Registration control**          | `REGISTRATION_MODE` makes registration `open` (the default, warned about at every production boot), `invite` (only an address holding an invitation minted for it, by the operator's CLI or by an account listed in `REGISTRATION_INVITERS`, single-use, 7 days, handed over as a link and never mailed) or `closed`; `REGISTRATION_ALLOWED_DOMAINS` restricts it to your domains.                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| **CSRF + rate limiting**          | HMAC-SHA256 double-submit tokens with constant-time verification, and [twenty rate-limit tiers](#rate-limiting), all but two backed by MongoDB, keyed per IP or per account, with IPv6 `/64` aggregation.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | **Breach detection**              | HaveIBeenPwned via k-anonymity — only a 5-character SHA-1 prefix ever leaves the server.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| **Audit log**                     | A searchable security log covering **48 distinct operations**, with TTL-based retention and a size bound per account: routine vault activity is capped at 100,000 entries (oldest removed first, and a run of identical edits counted into one entry), while security events are never trimmed (failed sign-ins and other entries a stranger can cause are capped separately at 5,000).                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| **Audit log**                     | A searchable security log covering **49 distinct operations**, with TTL-based retention and a size bound per account: routine vault activity is capped at 100,000 entries (oldest removed first, and a run of identical edits counted into one entry), while security events are never trimmed (failed sign-ins and other entries a stranger can cause are capped separately at 5,000).                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | **Account deletion**              | GDPR-complete and password-confirmed: every collection is erased, the bulk in batches and the rest in one small final transaction, an interrupted erasure is finished by the next run, and the record kept of it masks the address.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 
 ### Data
@@ -1008,6 +1009,12 @@ and the boundary above still holds: documents are not in H-Vault's own backups.
 - [ ] Outbound: the app reaches `api.pwnedpasswords.com` (breach checks), `api.github.com` (the
       release check, twice a day; `UPDATE_CHECK_ENABLED=false` turns it off) and your mail server
 
+**Accounts**
+
+- [ ] `REGISTRATION_MODE` is `invite` or `closed` unless you really mean anyone who can reach the
+      server to be able to create an account (`open` is the default, and the log says so at every boot)
+- [ ] `REGISTRATION_ALLOWED_DOMAINS` lists your domains, if accounts should only come from them
+
 **Email** — required for verification, password reset, account unlock and backups
 
 - [ ] `EMAIL_PROVIDER` set, and either all three SMTP fields or both Gmail fields configured
@@ -1075,6 +1082,10 @@ start** rather than run misconfigured.
 | `DOCUMENT_UPLOAD_TTL_HOURS`          | No       | `24`                               | 1–168. How long an unfinished upload is kept before it is abandoned                                                                                                                                                                                                                                                               |
 | `DOCUMENT_ALLOWED_EXTENSIONS`        | No       | — (all allowed)                    | Comma-separated extension allowlist, e.g. `pdf,md,png`. Advisory and enforced in the browser only: the server receives ciphertext and cannot see a filename                                                                                                                                                                       |
 | `AUDIT_LOG_RETENTION_DAYS`           | No       | `365`                              | 1–3650                                                                                                                                                                                                                                                                                                                            |
+| `REGISTRATION_MODE`                  | No       | `open`                             | Who may create an account: `open` (anyone who can reach the server; warned about at every production boot), `invite` (only an address holding an invitation minted for it) or `closed` (registration answers 403). Anything else refuses to boot                                                                                  |
+| `REGISTRATION_ALLOWED_DOMAINS`       | No       | — (any domain)                     | Comma-separated e-mail domains an address must belong to, matched exactly (a subdomain is a different domain). An address outside the list is answered exactly as a registered one is, and nothing is created or mailed                                                                                                           |
+| `REGISTRATION_INVITERS`              | No       | (unset)                            | Up to 10 comma-separated account e-mails that may mint invitations in Settings while `REGISTRATION_MODE=invite`, with their master password, at most 10 a day each. The operator's `invite` command needs no listing                                                                                                              |
+| `VAULT_STORAGE_QUOTA_MB_PER_USER`    | No       | `512`                              | 1–1048576. The bytes one account's vault items and folders may occupy, trashed ones included until they are purged. A change that would cross it is refused with 400; deleting, purging and key rotation never are. Documents have their own quota                                                                                |
 | `LOG_DIRECTORY`                      | No       | `<cwd>/logs`                       | Where the rotating log files go. Relative values resolve against the process's working directory; a blank value is treated as unset. No file transports under `NODE_ENV=test`                                                                                                                                                     |
 | `BREACH_CACHE_TTL_DAYS`              | No       | `30`                               | 1–365. Freshness window for on-demand HIBP breach-range cache entries. An on-demand entry is deleted after four windows (until then it is the fallback when HIBP is unreachable), and at most 20,000 are kept, oldest removed first; seed-imported entries are exempt from both. Run `create-indexes` after changing it           |
 | `BREACH_SEED_AUTO`                   | No       | `false`                            | When `true`, the refresh cron may fetch missing/stale ranges from HIBP (tens of GB over a full corpus). Off by default                                                                                                                                                                                                            |
@@ -1090,6 +1101,14 @@ start** rather than run misconfigured.
 | `UPDATE_NOTIFY_EMAILS`               | No       | (unset)                            | Up to 10 comma-separated account emails that are this server's administrators for release news. Set: only they see update information and the administrator-only release notes, and each is emailed once per newer release (needs email configured). Unset: every signed-in account sees update information and nobody is emailed |
 
 </details>
+
+> **Inviting an account (`REGISTRATION_MODE=invite`).** Mint an invitation for one address with
+> `npm run invite -w packages/server -- someone@example.com`, or inside the production image with
+> `docker compose exec hvault-app node packages/server/dist/cli/invite.js someone@example.com`. It
+> prints the invitation link once: hand it over yourself, because H-Vault never mails an invitation.
+> The link carries the invitation in its fragment (`/register#invite=…`, which browsers never send
+> to a server or write to an access log), works for 7 days, admits that one address, and only once.
+> An account listed in `REGISTRATION_INVITERS` can mint one in Settings the same way.
 
 > **Seeding the breach corpus (optional, for offline breach checks).** Password-breach
 > lookups fall back to on-demand Have I Been Pwned queries until you pre-seed the full
@@ -1134,29 +1153,30 @@ start** rather than run misconfigured.
 ## API reference
 
 Every endpoint is under `/api/v1` (except the Swagger UI at `/api/docs`). The vault, folder, user,
-tools, backup and releases routes all require a Bearer JWT, as do four `/auth` routes — `lock`, `logout`,
-`logout-all` and `verify-unlock`. The rest of `/auth`, plus health, config and the CSRF token, are
+tools, backup and releases routes all require a Bearer JWT, as do five `/auth` routes — `lock`, `logout`,
+`logout-all`, `invitations` and `verify-unlock`. The rest of `/auth`, plus health, config and the CSRF token, are
 public; metrics is gated by a header token rather than a JWT. The **Auth** column below is
 authoritative.
 
 <details open>
 <summary><b>Authentication</b> — <code>/api/v1/auth</code></summary>
 
-| Method | Endpoint                    | Auth | Description                                                       |
-| ------ | --------------------------- | ---- | ----------------------------------------------------------------- |
-| POST   | `/auth/register`            | No   | Create an account with an encrypted vault key                     |
-| POST   | `/auth/login`               | No   | Authenticate (optional `rememberMe`); may return a 2FA temp token |
-| POST   | `/auth/login/2fa`           | No   | Complete 2FA with a TOTP or backup code                           |
-| POST   | `/auth/refresh`             | No   | Rotate the access token (httpOnly refresh cookie)                 |
-| POST   | `/auth/lock`                | Yes  | Lock the vault (records a `vault_lock` audit event)               |
-| POST   | `/auth/logout`              | Yes  | Revoke this session                                               |
-| POST   | `/auth/logout-all`          | Yes  | Revoke every other session                                        |
-| POST   | `/auth/verify-unlock`       | Yes  | Server-side verification of an unlock attempt                     |
-| POST   | `/auth/verify-email`        | No   | Verify an email with a token                                      |
-| POST   | `/auth/forgot-password`     | No   | Request a password-reset email                                    |
-| POST   | `/auth/reset-password`      | No   | Reset the password with a token                                   |
-| POST   | `/auth/unlock-account`      | No   | Unlock a locked-out account with a token                          |
-| POST   | `/auth/resend-verification` | No   | Resend the verification email                                     |
+| Method | Endpoint                    | Auth | Description                                                        |
+| ------ | --------------------------- | ---- | ------------------------------------------------------------------ |
+| POST   | `/auth/register`            | No   | Create an account with an encrypted vault key                      |
+| POST   | `/auth/login`               | No   | Authenticate (optional `rememberMe`); may return a 2FA temp token  |
+| POST   | `/auth/login/2fa`           | No   | Complete 2FA with a TOTP or backup code                            |
+| POST   | `/auth/refresh`             | No   | Rotate the access token (httpOnly refresh cookie)                  |
+| POST   | `/auth/lock`                | Yes  | Lock the vault (records a `vault_lock` audit event)                |
+| POST   | `/auth/logout`              | Yes  | Revoke this session                                                |
+| POST   | `/auth/logout-all`          | Yes  | Revoke every other session                                         |
+| POST   | `/auth/invitations`         | Yes  | Mint an invitation link (invite mode, listed inviters, `authHash`) |
+| POST   | `/auth/verify-unlock`       | Yes  | Server-side verification of an unlock attempt                      |
+| POST   | `/auth/verify-email`        | No   | Verify an email with a token                                       |
+| POST   | `/auth/forgot-password`     | No   | Request a password-reset email                                     |
+| POST   | `/auth/reset-password`      | No   | Reset the password with a token                                    |
+| POST   | `/auth/unlock-account`      | No   | Unlock a locked-out account with a token                           |
+| POST   | `/auth/resend-verification` | No   | Resend the verification email                                      |
 
 </details>
 
@@ -1343,7 +1363,7 @@ are replaced with the generic status text, so an internal failure cannot leak it
 
 ## Rate limiting
 
-Nineteen tiers, all but the two diagnostic ones backed by MongoDB so they hold across a PM2
+Twenty tiers, all but the two diagnostic ones backed by MongoDB so they hold across a PM2
 cluster. IP-keyed limiters collapse an IPv6 address to its `/64` prefix, so rotating the source
 address inside one allocation does not buy an attacker a fresh bucket.
 
@@ -1371,6 +1391,11 @@ Three rules govern where a limiter goes, and all three were learned the hard way
   The route table test reads the real router stack and fails on any body parser that runs ahead of a
   limiter or of its slot, because checking that a limiter is merely present on a route cannot see
   this.
+- **A response that reads a whole vault takes a slot.** A backup download, a backup mailed on
+  demand and a vault export are admitted two at a time per server process and one per account (a
+  second one from the same account is refused with 409, and the scheduled backup queues for the same
+  slots), and the download and the export are streamed with an absolute send deadline, so a client
+  that stops reading gives its slot back.
 
 | Tier             | Limit         | Window | Applied to                                                                                                                                                                                                                                                                                               |
 | ---------------- | ------------- | ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -1386,6 +1411,7 @@ Three rules govern where a limiter goes, and all three were learned the hard way
 | Import           | 60 / user     | 15 min | vault import — a dedicated, larger budget because a big migration is sent as several encrypted batches                                                                                                                                                                                                   |
 | Vault item write | 20,000 / user | 15 min | creating, editing, trashing, restoring and permanently deleting a vault item. Derived: two passes over the most items an account may hold, because the app sends one request per item for a bulk tag or a trash purge, and a smaller budget would stop one part-way through                              |
 | Folder write     | 1,000 / user  | 15 min | creating, renaming, deleting and re-sorting a folder. Derived the same way: two drags that re-sort every folder an account may hold                                                                                                                                                                      |
+| Vault list       | 400 / user    | 15 min | listing vault items and the trash, one page (up to 200 rows) per request. Derived: the fifty pages the largest vault takes at 200 a page, eight times over, for the reloads the app makes on sign-in, unlock, reconnecting and after a bulk action. Not the general tier, which logout shares            |
 | 2FA setup        | 20 / user     | 15 min | confirming the code that finishes 2FA setup                                                                                                                                                                                                                                                              |
 | Document upload  | 120 / user    | 15 min | opening, completing and cancelling a document transfer — three requests per document whatever its size                                                                                                                                                                                                   |
 | Document part    | derived       | 15 min | one sealed segment per request. Sized from the operator's own `MAX_DOCUMENT_SIZE_MB`: parts per document x 3 concurrent transfers x 4 attempts, floored at 120 (156 at the default 100 MB cap). A budget that ignored the concurrency or the retries would refuse a legitimate transfer part-way through |

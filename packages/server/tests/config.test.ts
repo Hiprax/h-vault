@@ -848,6 +848,131 @@ describe('Server Config Validation', () => {
     });
 
     // -------------------------------------------------------------------------
+    // Registration (F-24)
+    // -------------------------------------------------------------------------
+
+    describe('registration', () => {
+      const PRODUCTION = {
+        NODE_ENV: 'production',
+        JWT_ACCESS_SECRET: 'prod-access-secret-very-secure-and-long-enough!!',
+        JWT_REFRESH_SECRET: 'prod-refresh-secret-very-secure-and-long-enough!!',
+        SESSION_SECRET: 'ProdSessionSecretVerySecure!!1234',
+        CORS_ORIGIN: 'https://hvault.example.com',
+      };
+
+      it.each([
+        ['unset', undefined, 'open'],
+        ['an empty assignment', '', 'open'],
+        ['open', 'open', 'open'],
+        ['invite', 'invite', 'invite'],
+        ['closed', 'closed', 'closed'],
+      ])('REGISTRATION_MODE %s resolves to %s', async (_label, value, expected) => {
+        const { config } = await loadConfigWithEnv({ REGISTRATION_MODE: value });
+        expect(config.REGISTRATION_MODE).toBe(expected);
+      });
+
+      it.each(['OPEN', 'invite-only', 'off', '0'])(
+        'refuses to boot with REGISTRATION_MODE=%s rather than guess',
+        async (value) => {
+          await expect(loadConfigWithEnv({ REGISTRATION_MODE: value })).rejects.toThrow(
+            'REGISTRATION_MODE',
+          );
+        },
+      );
+
+      it.each([
+        ['unset', undefined, []],
+        ['an empty assignment', '', []],
+        [
+          'blanks, a leading @, mixed case and a duplicate',
+          ' @Example.ORG , ,example.org,corp.example.net,',
+          ['example.org', 'corp.example.net'],
+        ],
+        ['a punycode domain', 'xn--bcher-kva.example', ['xn--bcher-kva.example']],
+      ])('REGISTRATION_ALLOWED_DOMAINS with %s resolves to %j', async (_label, value, expected) => {
+        const { config } = await loadConfigWithEnv({ REGISTRATION_ALLOWED_DOMAINS: value });
+        expect(config.REGISTRATION_ALLOWED_DOMAINS).toEqual(expected);
+      });
+
+      it.each([
+        ['a bare label', 'localhost'],
+        ['an address rather than a domain', 'admin@example.org'],
+        ['a wildcard', '*.example.org'],
+        ['an empty label', 'example..org'],
+        ['a label ending in a hyphen', 'bad-.example.org'],
+        ['a 64-character label', `${'a'.repeat(64)}.example.org`],
+        ['a name longer than 253 characters', `${'a.'.repeat(126)}example`],
+      ])('refuses to boot with REGISTRATION_ALLOWED_DOMAINS holding %s', async (_label, value) => {
+        await expect(loadConfigWithEnv({ REGISTRATION_ALLOWED_DOMAINS: value })).rejects.toThrow(
+          'REGISTRATION_ALLOWED_DOMAINS entries must be plain domain names',
+        );
+      });
+
+      it('accepts a 63-character label, the longest a domain may carry', async () => {
+        const domain = `${'a'.repeat(63)}.example.org`;
+        const { config } = await loadConfigWithEnv({ REGISTRATION_ALLOWED_DOMAINS: domain });
+        expect(config.REGISTRATION_ALLOWED_DOMAINS).toEqual([domain]);
+      });
+
+      it('normalises REGISTRATION_INVITERS like the other address lists', async () => {
+        const { config } = await loadConfigWithEnv({
+          REGISTRATION_INVITERS: ' Admin@Example.org , ,admin@example.org,second@example.org',
+        });
+        expect(config.REGISTRATION_INVITERS).toEqual(['admin@example.org', 'second@example.org']);
+      });
+
+      const inviterList = (count: number) =>
+        Array.from({ length: count }, (_, index) => `inviter${String(index)}@example.org`).join(
+          ',',
+        );
+
+      it('accepts ten inviters', async () => {
+        const { config } = await loadConfigWithEnv({ REGISTRATION_INVITERS: inviterList(10) });
+        expect(config.REGISTRATION_INVITERS).toHaveLength(10);
+      });
+
+      it('refuses eleven inviters', async () => {
+        await expect(loadConfigWithEnv({ REGISTRATION_INVITERS: inviterList(11) })).rejects.toThrow(
+          'REGISTRATION_INVITERS accepts at most 10 addresses',
+        );
+      });
+
+      it('refuses an inviter entry that is not an address', async () => {
+        await expect(loadConfigWithEnv({ REGISTRATION_INVITERS: 'not-an-email' })).rejects.toThrow(
+          'REGISTRATION_INVITERS',
+        );
+      });
+
+      it('warns once at a production boot while registration is open', async () => {
+        mockWarn.mockClear();
+        await loadConfigWithEnv({ ...PRODUCTION, REGISTRATION_MODE: undefined });
+        const warnings = mockWarn.mock.calls.filter(([message]) =>
+          String(message).includes('REGISTRATION_MODE is open'),
+        );
+        expect(warnings).toHaveLength(1);
+      });
+
+      it.each(['invite', 'closed'])(
+        'does not warn at a production boot with REGISTRATION_MODE=%s',
+        async (mode) => {
+          mockWarn.mockClear();
+          await loadConfigWithEnv({ ...PRODUCTION, REGISTRATION_MODE: mode });
+          expect(mockWarn).not.toHaveBeenCalledWith(
+            expect.stringContaining('REGISTRATION_MODE is open'),
+          );
+        },
+      );
+
+      it('does not warn outside production, where open registration is expected', async () => {
+        mockWarn.mockClear();
+        await loadConfigWithEnv({ REGISTRATION_MODE: 'open' });
+        expect(mockWarn).not.toHaveBeenCalledWith(
+          expect.stringContaining('REGISTRATION_MODE is open'),
+        );
+      });
+    });
+
+    // -------------------------------------------------------------------------
     // The production endpoint rule
     // -------------------------------------------------------------------------
 

@@ -198,6 +198,61 @@ describe('configApi', () => {
     });
   });
 
+  describe('readRegistrationMode', () => {
+    it.each(['open', 'invite', 'closed'] as const)(
+      'returns the mode the server publishes (%s)',
+      async (mode) => {
+        mockGet.mockResolvedValue({
+          data: {
+            success: true,
+            data: { fileEncryption: { maxSizeMB: 100 }, registration: { mode } },
+          },
+        });
+        const { readRegistrationMode } = await importConfigApi();
+        await expect(readRegistrationMode()).resolves.toBe(mode);
+        expect(mockGet).toHaveBeenCalledWith('/config');
+      },
+    );
+
+    it('answers null for a server older than the block, so the page shows the plain form', async () => {
+      mockGet.mockResolvedValue(makeWire(100));
+      const { readRegistrationMode } = await importConfigApi();
+      await expect(readRegistrationMode()).resolves.toBeNull();
+    });
+
+    it('answers null for a mode it does not know rather than guessing, and never rejects', async () => {
+      mockGet.mockResolvedValue({
+        data: {
+          success: true,
+          data: { fileEncryption: { maxSizeMB: 100 }, registration: { mode: 'waitlist' } },
+        },
+      });
+      const { readRegistrationMode } = await importConfigApi();
+      await expect(readRegistrationMode()).resolves.toBeNull();
+    });
+
+    it('answers null when the request fails', async () => {
+      mockGet.mockRejectedValue(new Error('offline'));
+      const { readRegistrationMode } = await importConfigApi();
+      await expect(readRegistrationMode()).resolves.toBeNull();
+    });
+
+    it('reads its block out of an envelope whose other blocks are malformed', async () => {
+      mockGet.mockResolvedValue({
+        data: {
+          success: true,
+          data: {
+            fileEncryption: { maxSizeMB: -5 },
+            documents: { enabled: true, maxSizeMB: -1 },
+            registration: { mode: 'closed' },
+          },
+        },
+      });
+      const { readRegistrationMode } = await importConfigApi();
+      await expect(readRegistrationMode()).resolves.toBe('closed');
+    });
+  });
+
   describe('getDocumentsConfig', () => {
     it('returns the advertised block, numbers and all, when the feature is on', async () => {
       const block = {

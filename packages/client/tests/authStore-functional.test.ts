@@ -278,6 +278,20 @@ describe('authStore.register', () => {
     });
   });
 
+  it('sends the invitation when one is given, and only then', async () => {
+    vi.mocked(registerApi).mockResolvedValue({
+      data: { success: true, data: { emailSent: true } },
+    } as never);
+
+    await useAuthStore.getState().register('user@example.com', 'Master123!', 'invite-token_1');
+    expect(registerApi).toHaveBeenLastCalledWith(
+      expect.objectContaining({ email: 'user@example.com', invitationToken: 'invite-token_1' }),
+    );
+
+    await useAuthStore.getState().register('user@example.com', 'Master123!');
+    expect(vi.mocked(registerApi).mock.lastCall?.[0]).not.toHaveProperty('invitationToken');
+  });
+
   it('should return emailSent: false when server reports email failure', async () => {
     vi.mocked(registerApi).mockResolvedValue({
       data: { success: true, data: { emailSent: false } },

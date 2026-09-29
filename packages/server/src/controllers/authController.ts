@@ -60,6 +60,14 @@ import {
   type LockoutFactor,
 } from '../utils/lockout.js';
 import { verifySecondFactor } from '../utils/secondFactor.js';
+import {
+  INVITATION_INVALID_MESSAGE,
+  REGISTRATION_CLOSED_MESSAGE,
+  claimInvitation,
+  invitationAdmits,
+  isAllowedRegistrationDomain,
+  returnInvitationClaim,
+} from '../utils/invitations.js';
 import { clearCsrfCookie } from '../middleware/csrf.js';
 import {
   APP_VERSION,
@@ -413,11 +421,56 @@ const ALLOWED_REGISTER_FIELDS = new Set([
   'encryptionVersion',
 ]);
 
+/**
+ * The answer every registration gets that is not refused outright, whether or not
+ * it created an account: an address already registered, an address outside the
+ * domain allowlist and a genuinely new account are indistinguishable from here.
+ */
+function sendGenericRegistrationSuccess(res: Response): void {
+  res.status(201).json({
+    success: true,
+    message: 'Registration successful. Please check your email to verify your account.',
+    data: { emailSent: true },
+  });
+}
+
 export const register = catchAsync(async (req: Request, res: Response): Promise<void> => {
   const body = req.body as RegisterInput;
   const sanitized = pickAllowedFields(body, ALLOWED_REGISTER_FIELDS);
   const email = sanitized.email as string;
   const authHash = sanitized.authHash as string;
+
+  // ── Who may register (F-24) ──────────────────────────────────────────────
+  //
+  // Every check below runs BEFORE the account lookup, so none of their answers
+  // can depend on whether the address is registered.
+  //
+  // A closed server refuses honestly: the answer is the same for every address
+  // and involves no account data, so there is nothing to hide behind a fake
+  // success.
+  if (config.REGISTRATION_MODE === 'closed') {
+    throw httpErrors.forbidden(REGISTRATION_CLOSED_MESSAGE);
+  }
+
+  // An address outside the domain allowlist gets exactly what a registered
+  // address gets below: the generic 201 after the same bcrypt work, and no row
+  // and no mail. The allowlist is the operator's business; a refusal naming it
+  // would publish it one guess at a time.
+  if (!isAllowedRegistrationDomain(email)) {
+    await bcrypt.hash(authHash, config.BCRYPT_ROUNDS);
+    sendGenericRegistrationSuccess(res);
+    return;
+  }
+
+  // An invitation is checked, not spent, here: the address may turn out to be
+  // registered already, and that must cost the invitee nothing.
+  const invitationToken = config.REGISTRATION_MODE === 'invite' ? body.invitationToken : undefined;
+  if (
+    config.REGISTRATION_MODE === 'invite' &&
+    (invitationToken === undefined || !(await invitationAdmits(invitationToken, email)))
+  ) {
+    throw httpErrors.forbidden(INVITATION_INVALID_MESSAGE);
+  }
 
   const existingUser = await User.findOne({ email });
   if (existingUser) {
@@ -436,25 +489,38 @@ export const register = catchAsync(async (req: Request, res: Response): Promise<
     });
 
     // Return the same response as a successful registration to prevent email enumeration
-    res.status(201).json({
-      success: true,
-      message: 'Registration successful. Please check your email to verify your account.',
-      data: { emailSent: true },
-    });
+    sendGenericRegistrationSuccess(res);
     return;
   }
 
   const hashedAuth = await bcrypt.hash(authHash, config.BCRYPT_ROUNDS);
 
-  const user = await User.create({
-    ...sanitized,
-    authHash: hashedAuth,
-    // A new account starts caught up: the release notes are for what changed
-    // since someone last used the app, and this account has not used it yet.
-    // Written by the server, never taken from the body (the allowlist above
-    // would drop it anyway).
-    releaseNotesSeenVersion: APP_VERSION,
-  });
+  // Spent now, atomically, and only now: of two registrations presenting one
+  // invitation, exactly one gets past this line.
+  const claimedAt =
+    invitationToken === undefined ? null : await claimInvitation(invitationToken, email);
+  if (invitationToken !== undefined && claimedAt === null) {
+    throw httpErrors.forbidden(INVITATION_INVALID_MESSAGE);
+  }
+
+  let user;
+  try {
+    user = await User.create({
+      ...sanitized,
+      authHash: hashedAuth,
+      // A new account starts caught up: the release notes are for what changed
+      // since someone last used the app, and this account has not used it yet.
+      // Written by the server, never taken from the body (the allowlist above
+      // would drop it anyway).
+      releaseNotesSeenVersion: APP_VERSION,
+    });
+  } catch (err: unknown) {
+    // The account was not created, so the invitation it spent is handed back.
+    if (invitationToken !== undefined && claimedAt !== null) {
+      await returnInvitationClaim(invitationToken, email, claimedAt);
+    }
+    throw err;
+  }
 
   const registerCtx = getRequestContext(req);
   await createAuditLog(
@@ -501,11 +567,7 @@ export const register = catchAsync(async (req: Request, res: Response): Promise<
   // Keep the same message and emailSent value regardless of email delivery
   // outcome to prevent email enumeration. The frontend uses data.emailSent for
   // feedback; it is constant here to match the existing-account path exactly.
-  res.status(201).json({
-    success: true,
-    message: 'Registration successful. Please check your email to verify your account.',
-    data: { emailSent: true },
-  });
+  sendGenericRegistrationSuccess(res);
 });
 
 // ─── Login ───────────────────────────────────────────────────────────────────

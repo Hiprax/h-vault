@@ -9,6 +9,10 @@ import {
   importLimiter,
 } from '../middleware/rateLimiter.js';
 import {
+  holdHeavyResponseSlot,
+  holdingHeavyResponseSlot,
+} from '../middleware/heavyResponseAdmission.js';
+import {
   checkBreachSchema,
   checkBreachBatchSchema,
   exportSchema,
@@ -38,12 +42,15 @@ router.post(
   validate(checkBreachBatchSchema, 'body'),
   checkPasswordBreachBatch,
 );
+// A heavy response like the backup download: one slot after the limiters and the
+// validation, kept until the response has closed and the handler has settled.
 router.post(
   '/export',
   heavyOpLimiter,
   passwordVerifyLimiter,
+  holdHeavyResponseSlot,
   validate(exportSchema, 'body'),
-  exportVault,
+  holdingHeavyResponseSlot(exportVault),
 );
 router.post('/import', importLimiter, validate(importSchema, 'body'), importVault);
 

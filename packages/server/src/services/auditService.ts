@@ -93,6 +93,7 @@ export const AUDIT_ACTION_CLASS = {
   document_delete: 'activity',
   document_restore: 'activity',
   document_purge: 'activity',
+  invitation_create: 'security',
 } as const satisfies Record<AuditAction, AuditClass>;
 
 /** The actions whose class is `activity`, as a type: what the allowlist may name. */

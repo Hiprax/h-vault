@@ -1,8 +1,10 @@
 import { useState, useMemo, useEffect } from 'react';
-import { Link, useNavigate } from 'react-router';
+import { Link, useLocation, useNavigate } from 'react-router';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from '@hvault/shared/zod';
+import { MAX_INVITATION_TOKEN_LENGTH } from '@hvault/shared';
+import type { RegistrationMode } from '@hvault/shared';
 import type zxcvbnType from 'zxcvbn';
 import { getZxcvbn } from '../../lib/lazyZxcvbn';
 import { Eye, EyeOff, AlertTriangle } from 'lucide-react';
@@ -10,6 +12,7 @@ import { BrandLogo } from '../ui/BrandLogo';
 import { useAuthStore } from '../../stores/authStore';
 import { cn, getApiErrorMessage } from '../../lib/utils';
 import { accountEmailSchema } from '../../lib/accountEmail';
+import { readRegistrationMode } from '../../services/api/configApi';
 import { Button } from '../ui/Button';
 import { Input } from '../ui/Input';
 import { Label } from '../ui/Label';
@@ -21,6 +24,18 @@ import { StandalonePage } from '../layout/StandalonePage';
 /*  Schema                                                                    */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * An invitation as the link carries it: the same alphabet and bound the server's
+ * schema enforces (`invitationTokenSchema`), checked here after the form trims, so
+ * the page can say so in its own sentence.
+ */
+function isInvitationToken(value: string): boolean {
+  return value.length <= MAX_INVITATION_TOKEN_LENGTH && /^[A-Za-z0-9_-]+$/.test(value);
+}
+
+/** The fragment an invitation link carries: `#invite=<token>`. */
+const INVITATION_FRAGMENT_PREFIX = '#invite=';
+
 const registerFormSchema = z
   .object({
     email: accountEmailSchema,
@@ -29,6 +44,15 @@ const registerFormSchema = z
     acceptTerms: z.literal(true, {
       message: 'You must acknowledge this to continue',
     }),
+    // The invitation, pasted or taken from the link's fragment. Whether one is
+    // REQUIRED depends on the server's mode, which the submit handler knows; the
+    // schema only refuses something that cannot be one.
+    invitationToken: z
+      .string()
+      .trim()
+      .refine((value) => value === '' || isInvitationToken(value), {
+        message: 'That is not an invitation code.',
+      }),
   })
   .refine((data) => data.masterPassword === data.confirmPassword, {
     message: 'Passwords do not match',
@@ -63,7 +87,12 @@ const strengthColors: Record<number, string> = {
 
 export function RegisterPage() {
   const navigate = useNavigate();
+  const location = useLocation();
   const { register: registerUser } = useAuthStore();
+  // What the server says about who may register, or null until (or unless) it says.
+  const [mode, setMode] = useState<RegistrationMode | null>(null);
+  // Whether this visit arrived through an invitation link.
+  const [invitedByLink, setInvitedByLink] = useState(false);
 
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
@@ -77,8 +106,34 @@ export function RegisterPage() {
       masterPassword: '',
       confirmPassword: '',
       acceptTerms: false as unknown as true,
+      invitationToken: '',
     },
   });
+
+  useEffect(() => {
+    let active = true;
+    void readRegistrationMode().then((value) => {
+      if (active) setMode(value);
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  // An invitation link carries its token in the FRAGMENT, which the browser never
+  // sends to a server. It is moved into the form and the fragment is replaced away
+  // at once, so the token stays in no history entry and no later copy of the URL.
+  useEffect(() => {
+    if (!location.hash.startsWith(INVITATION_FRAGMENT_PREFIX)) return;
+    form.setValue('invitationToken', location.hash.slice(INVITATION_FRAGMENT_PREFIX.length));
+    setInvitedByLink(true);
+    void navigate(
+      { pathname: location.pathname, search: location.search, hash: '' },
+      { replace: true },
+    );
+  }, [location.hash, location.pathname, location.search, form, navigate]);
+
+  const showInvitationField = mode === 'invite' || invitedByLink;
 
   const masterPasswordValue = form.watch('masterPassword');
   const [zxcvbnFn, setZxcvbnFn] = useState<typeof zxcvbnType | null>(null);
@@ -108,7 +163,20 @@ export function RegisterPage() {
         return;
       }
 
-      const { emailSent } = await registerUser(values.email, values.masterPassword);
+      const invitationToken = showInvitationField ? values.invitationToken : '';
+      if (mode === 'invite' && invitationToken === '') {
+        form.setError('invitationToken', {
+          message: 'An invitation is required to register on this server.',
+        });
+        document.getElementById('register-invitation')?.focus();
+        return;
+      }
+
+      const { emailSent } = await registerUser(
+        values.email,
+        values.masterPassword,
+        invitationToken === '' ? undefined : invitationToken,
+      );
       void navigate('/login', {
         replace: true,
         state: { registered: true, emailSent },
@@ -119,6 +187,32 @@ export function RegisterPage() {
       setIsSubmitting(false);
     }
   };
+
+  if (mode === 'closed') {
+    return (
+      <StandalonePage className="py-8">
+        <Card className="w-full max-w-md">
+          <CardHeader className="items-center text-center">
+            <div className="flex h-12 w-12 items-center justify-center rounded-full bg-[hsl(var(--primary)/0.1)]">
+              <BrandLogo className="h-6 w-6 text-[hsl(var(--primary))]" />
+            </div>
+            <CardTitle as="h1">Create Account</CardTitle>
+            <CardDescription>
+              Registration is closed on this server. Ask the person who runs it for an account.
+            </CardDescription>
+          </CardHeader>
+          <CardFooter className="flex-col gap-4">
+            <p className="text-center text-sm text-[hsl(var(--muted-foreground))]">
+              Already have an account?{' '}
+              <Link to="/login" className="font-medium text-[hsl(var(--primary))] hover:underline">
+                Sign in
+              </Link>
+            </p>
+          </CardFooter>
+        </Card>
+      </StandalonePage>
+    );
+  }
 
   return (
     <StandalonePage className="py-8">
@@ -155,6 +249,36 @@ export function RegisterPage() {
                 </p>
               )}
             </div>
+
+            {/* Invitation: on a server that registers by invitation, or when this
+                visit came through an invitation link. */}
+            {showInvitationField && (
+              <div className="space-y-2">
+                <Label
+                  htmlFor="register-invitation"
+                  error={!!form.formState.errors.invitationToken}
+                >
+                  Invitation code
+                </Label>
+                <Input
+                  id="register-invitation"
+                  type="text"
+                  autoComplete="off"
+                  spellCheck={false}
+                  placeholder="Paste the code from your invitation link"
+                  error={!!form.formState.errors.invitationToken}
+                  {...form.register('invitationToken')}
+                />
+                {form.formState.errors.invitationToken && (
+                  <p className="text-sm text-[hsl(var(--destructive))]">
+                    {form.formState.errors.invitationToken.message}
+                  </p>
+                )}
+                <p className="text-xs text-[hsl(var(--muted-foreground))]">
+                  An invitation works for the one address it was made for, once.
+                </p>
+              </div>
+            )}
 
             {/* Master Password */}
             <div className="space-y-2">

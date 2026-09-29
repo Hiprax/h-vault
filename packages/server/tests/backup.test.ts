@@ -1097,7 +1097,14 @@ describe('Backup routes', () => {
       const downloadMeta = downloads[0]?.metadata as Record<string, unknown> | undefined;
       // The row records what was served: the item count must agree with the
       // vault, and the size must be the real payload size, not a placeholder.
-      expect(Object.keys(downloadMeta ?? {}).sort()).toEqual(['fileSizeBytes', 'itemCount']);
+      // `completed` says whether the whole file was sent: an interrupted download is
+      // recorded too (F-25), as `completed: false`.
+      expect(Object.keys(downloadMeta ?? {}).sort()).toEqual([
+        'completed',
+        'fileSizeBytes',
+        'itemCount',
+      ]);
+      expect(downloadMeta?.completed).toBe(true);
       expect(downloadMeta?.itemCount).toBe(await VaultItem.countDocuments({ userId: user.id }));
       expect(downloadMeta?.fileSizeBytes).toBeGreaterThan(0);
     });

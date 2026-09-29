@@ -27,6 +27,7 @@ import {
   vaultKeyVersionFilter,
   vaultKeyVersionOf,
 } from '../utils/controllerHelpers.js';
+import { canInvite } from '../utils/invitations.js';
 import { readStringCookie } from '../utils/cookies.js';
 import { lockoutClearUpdate } from '../utils/lockout.js';
 import {
@@ -215,6 +216,10 @@ export const getProfile = catchAsync(async (req: Request, res: Response): Promis
     // so `select: false` is the ONLY thing keeping the unlock-link identities off
     // the wire, and an enumeration that fell behind the model is how somebody
     // concludes it is safe to drop.
+    // Whether Settings should offer to mint an invitation: the server registers by
+    // invitation AND this account is one of the operator's listed inviters. A
+    // convenience for the UI only; `POST /auth/invitations` decides it again.
+    canInvite: canInvite(user.email),
     ...(interruptedRotation
       ? {
           pendingEncryptedVaultKey: user.pendingEncryptedVaultKey,

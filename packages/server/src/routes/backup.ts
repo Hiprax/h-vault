@@ -11,6 +11,10 @@ import {
   holdingLargeBodySlot,
   parseLargeJsonBody,
 } from '../middleware/largeBodyAdmission.js';
+import {
+  holdHeavyResponseSlot,
+  holdingHeavyResponseSlot,
+} from '../middleware/heavyResponseAdmission.js';
 import { sanitizeRequestBody } from '../middleware/sanitizeBody.js';
 import {
   backupSetupSchema,
@@ -45,8 +49,21 @@ router.put(
   validate(backupSettingsSchema, 'body'),
   updateBackupSettings,
 );
-router.post('/trigger', heavyOpLimiter, triggerBackup);
-router.get('/download', heavyOpLimiter, downloadBackup);
+// The two routes that build a whole backup: each takes one heavy-response slot
+// after its limiter (two per process, one per account) and keeps it until the
+// response has closed and the handler has settled.
+router.post(
+  '/trigger',
+  heavyOpLimiter,
+  holdHeavyResponseSlot,
+  holdingHeavyResponseSlot(triggerBackup),
+);
+router.get(
+  '/download',
+  heavyOpLimiter,
+  holdHeavyResponseSlot,
+  holdingHeavyResponseSlot(downloadBackup),
+);
 router.get(
   '/history',
   generalAuthLimiter,

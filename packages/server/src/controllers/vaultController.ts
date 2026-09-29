@@ -25,6 +25,7 @@ import {
 } from '../utils/controllerHelpers.js';
 import { carriesBoundField } from '../utils/vaultFieldFormat.js';
 import { supportsTransactions } from '../utils/transactionSupport.js';
+import { closingMembers, jsonArrayOf, sendJsonStream } from '../utils/jsonStream.js';
 import { createdRowId, isDuplicateIdError, ROW_ID_TAKEN_MESSAGE } from '../utils/rowIds.js';
 import { MAX_ITEMS_PER_USER } from '@hvault/shared';
 import type {
@@ -151,6 +152,60 @@ async function lowerRotationFence(userId: string): Promise<void> {
   await User.updateOne({ _id: userId }, { $set: { rotationInProgress: false } });
 }
 
+/** Rows the database hands a list-page cursor per round trip (~8 MB of the largest rows). */
+const LIST_CURSOR_BATCH_SIZE = 16;
+
+/**
+ * Sends one page of vault items, serialized from the cursor a row at a time.
+ *
+ * A page is up to 200 rows of up to half a megabyte each, and building it as a lean
+ * array, then a string, then a buffer held it three times over. The rows now go
+ * from the cursor to the socket with backpressure (`utils/jsonStream.ts`). What does
+ * NOT change is the contract the client's walk depends on: the same query (filter,
+ * sort with its `_id` tiebreak, `skip`, `limit`), so the same rows in the same
+ * order and never fewer per page, and the same `pagination` with `totalPages =
+ * ceil(total / limit)`. The client requests page N and trusts `totalPages`, so a
+ * short page would move its next `skip` past rows it never saw.
+ *
+ * The count is read first, so `pagination` is known before the first byte. A
+ * failure after that point destroys the connection rather than appending an error
+ * to a half-sent page.
+ */
+async function sendItemPage(
+  res: Response,
+  filter: Record<string, unknown>,
+  sort: Record<string, 1 | -1>,
+  page: number,
+  limit: number,
+): Promise<void> {
+  const total = await VaultItem.countDocuments(filter);
+  const rows = VaultItem.find(filter)
+    .select('-userId -sourceRefId')
+    .sort(sort)
+    .skip((page - 1) * limit)
+    .limit(limit)
+    // Small driver batches, or the cursor would hold the first 101 rows at once
+    // (the server's default first batch): up to ~50 MB of half-megabyte rows before
+    // the first byte is written.
+    .batchSize(LIST_CURSOR_BATCH_SIZE)
+    .lean()
+    .cursor();
+
+  res.status(200);
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  await sendJsonStream(
+    res,
+    (async function* itemPage() {
+      yield '{"success":true,"data":';
+      yield* jsonArrayOf(rows);
+      yield closingMembers({
+        pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+      });
+    })(),
+    { label: 'Vault list page' },
+  );
+}
+
 // ── Handlers ─────────────────────────────────────────────────────────
 
 export const listItems = catchAsync(async (req: Request, res: Response): Promise<void> => {
@@ -179,7 +234,6 @@ export const listItems = catchAsync(async (req: Request, res: Response): Promise
     filter.deletedAt = null;
   }
 
-  const skip = (page - 1) * limit;
   const sortDirection = sortOrder === 'asc' ? 1 : -1;
   const safeSortBy = resolveSortField(ALLOWED_SORT_FIELDS, sortBy, 'updatedAt');
 
@@ -218,28 +272,7 @@ export const listItems = catchAsync(async (req: Request, res: Response): Promise
   // stopped declaring, so each superseded prefix would linger until a drop migration
   // retired it. It is also the same cost the document list already pays
   // (`documentController`'s `sendDocumentPage`).
-  const [items, total] = await Promise.all([
-    VaultItem.find(filter)
-      .select('-userId -sourceRefId')
-      .sort({ [safeSortBy]: sortDirection, _id: sortDirection })
-      .skip(skip)
-      .limit(limit)
-      .lean(),
-    VaultItem.countDocuments(filter),
-  ]);
-
-  const totalPages = Math.ceil(total / limit);
-
-  res.status(200).json({
-    success: true,
-    data: items,
-    pagination: {
-      page,
-      limit,
-      total,
-      totalPages,
-    },
-  });
+  await sendItemPage(res, filter, { [safeSortBy]: sortDirection, _id: sortDirection }, page, limit);
 });
 
 export const getItem = catchAsync(async (req: Request, res: Response): Promise<void> => {
@@ -572,35 +605,13 @@ export const listTrash = catchAsync(async (req: Request, res: Response): Promise
     deletedAt: { $exists: true, $ne: null },
   };
 
-  const skip = (page - 1) * limit;
   const sortDirection = sortOrder === 'asc' ? 1 : -1;
   const safeSortBy = resolveSortField(ALLOWED_TRASH_SORT_FIELDS, sortBy, 'deletedAt');
 
   // The same `_id` tiebreak `listItems` carries, and the tie is the NORMAL case
   // here rather than an unlucky one: a bulk delete stamps one `deletedAt` across
   // every row it touches. See the note above for what this does and does not buy.
-  const [items, total] = await Promise.all([
-    VaultItem.find(filter)
-      .select('-userId -sourceRefId')
-      .sort({ [safeSortBy]: sortDirection, _id: sortDirection })
-      .skip(skip)
-      .limit(limit)
-      .lean(),
-    VaultItem.countDocuments(filter),
-  ]);
-
-  const totalPages = Math.ceil(total / limit);
-
-  res.status(200).json({
-    success: true,
-    data: items,
-    pagination: {
-      page,
-      limit,
-      total,
-      totalPages,
-    },
-  });
+  await sendItemPage(res, filter, { [safeSortBy]: sortDirection, _id: sortDirection }, page, limit);
 });
 
 export const emptyTrash = catchAsync(async (req: Request, res: Response): Promise<void> => {

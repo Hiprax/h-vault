@@ -1,6 +1,7 @@
 import type { z } from 'zod';
 import type {
   registerSchema,
+  createInvitationSchema,
   loginSchema,
   login2faSchema,
   forgotPasswordSchema,
@@ -76,6 +77,7 @@ import type {
   ReleaseAudience,
   ReleaseChangeKind,
   ReleaseIcon,
+  RegistrationMode,
   Theme,
 } from '../constants/index.js';
 import type {
@@ -90,6 +92,7 @@ import type {
 
 // Auth types
 export type RegisterInput = z.infer<typeof registerSchema>;
+export type CreateInvitationInput = z.infer<typeof createInvitationSchema>;
 export type LoginInput = z.infer<typeof loginSchema>;
 export type Login2faInput = z.infer<typeof login2faSchema>;
 export type ForgotPasswordInput = z.infer<typeof forgotPasswordSchema>;
@@ -337,6 +340,13 @@ export interface IUserProfile {
   pendingEncryptedVaultKey?: string;
   pendingVaultKeyIv?: string;
   pendingVaultKeyTag?: string;
+  /**
+   * Whether this account may mint invitations to register: the server's
+   * `REGISTRATION_MODE` is `invite` and the account is listed in
+   * `REGISTRATION_INVITERS`. Optional (an older server sends none, which reads as
+   * "no"); the minting endpoint decides it again.
+   */
+  canInvite?: boolean;
   settings: IUserSettings;
   createdAt: string;
   updatedAt: string;
@@ -642,6 +652,20 @@ export interface PublicConfig {
     /** Advisory only — the server sees ciphertext and cannot enforce it. */
     allowedExtensions?: string[];
   };
+  /**
+   * Who may register here (`REGISTRATION_MODE`). Optional for the same N-1 reason
+   * as `documents`: an older server sends none, and the client then shows the
+   * form it always showed.
+   */
+  registration?: {
+    mode: RegistrationMode;
+  };
+}
+
+/** What `POST /auth/invitations` answers: the link to hand over, once. */
+export interface CreatedInvitation {
+  link: string;
+  expiresAt: string;
 }
 
 // Health check

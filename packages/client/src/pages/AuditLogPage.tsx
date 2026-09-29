@@ -125,6 +125,7 @@ const ACTION_LABELS: Record<string, string> = {
   document_delete: 'Document Trashed',
   document_restore: 'Document Restored',
   document_purge: 'Document Deleted Permanently',
+  invitation_create: 'Invitation Created',
 };
 
 /**

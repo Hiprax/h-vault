@@ -103,6 +103,7 @@ import {
 } from '../services/crypto/documentCryptoService';
 import { clearSettingsCache } from '../hooks/useUserSettings';
 import { copySecretToClipboard } from '../services/clipboard/clipboardService';
+import { InviteCard } from '../components/settings/InviteCard';
 import { getItemsFetchGeneration, useVaultStore } from '../stores/vaultStore';
 import { passwordDidChange } from '../services/crypto/passwordHistory';
 import { decryptVaultField, encryptVaultField } from '../services/crypto/vaultField';
@@ -2448,6 +2449,12 @@ export default function SettingsPage() {
           </div>
         </CardContent>
       </Card>
+
+      {/* Invitations: only for an account the operator listed as an inviter, on a
+          server that registers by invitation. */}
+      {profile?.canInvite === true && (
+        <InviteCard email={profile.email} clipboardClearSeconds={clipboardClearTimeout} />
+      )}
 
       {/* Security */}
       <Card>

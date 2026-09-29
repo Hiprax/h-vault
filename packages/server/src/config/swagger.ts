@@ -440,6 +440,19 @@ const bulkCountResponse = (
 const RESEAL_LOCK_BUSY =
   ' The same status, with no `data`, also answers a request that arrives while another change re-sealing this account under its vault key holds the account (a vault-key rotation, an import, a backup restore, a document completion or a master-password change): wait for it to finish and retry.';
 
+/** The list budget both vault list routes share, quoted from its constant. */
+const VAULT_LIST_BUDGET = `Rate limited: 400 req/user per 15 min, one budget shared by this route and the other vault list route. A page is sent as it is read from the database, a row at a time; its rows, their order and \`pagination\` are exactly what the query returns.`;
+
+/**
+ * The admission every heavy response shares (download, trigger, export), and the
+ * 409 it refuses a second request from one account with.
+ */
+const HEAVY_RESPONSE_ADMISSION =
+  ' Admitted through a per-process budget of two such responses at once (downloads, exports, backups mailed on demand and scheduled backups share it) and one per account: a further request waits for a slot, while a second one from the same account is refused with 409.';
+const HEAVY_RESPONSE_BUSY = errorResponse(
+  'This account already has a backup download, a mailed backup or an export in progress. No `data`. Wait for it to finish and retry.',
+);
+
 /** The heavy-operation budget, as the vault's bulk routes quote it. */
 const HEAVY_OP_BUDGET =
   'Rate limited: 10 req/user per 15 min, one budget shared with the other heavy operations (bulk delete and bulk move, emptying either trash, export, and triggering or downloading a backup).';
@@ -608,6 +621,44 @@ export const swaggerSpec: JsonObject = {
           },
           kdfAlgorithm: { type: 'string', enum: ['PBKDF2-SHA256'] },
           encryptionVersion: { type: 'integer', default: 1 },
+          invitationToken: {
+            type: 'string',
+            minLength: 1,
+            maxLength: 128,
+            pattern: '^[A-Za-z0-9_-]+$',
+            description:
+              'The invitation, as the invitation link carries it after `#invite=`. Required while the server registers by invitation (REGISTRATION_MODE=invite), where it must have been minted for this exact address, unexpired and unspent; the first registration of that address spends it. Ignored in the other modes.',
+          },
+        },
+      },
+      CreateInvitationRequest: {
+        type: 'object',
+        required: ['authHash', 'email'],
+        properties: {
+          authHash: {
+            type: 'string',
+            minLength: 1,
+            maxLength: 100,
+            description: 'The master-password proof of the inviting account.',
+          },
+          email: {
+            type: 'string',
+            format: 'email',
+            maxLength: 254,
+            description: 'The one address the invitation will admit.',
+          },
+        },
+      },
+      CreatedInvitation: {
+        type: 'object',
+        required: ['link', 'expiresAt'],
+        properties: {
+          link: {
+            type: 'string',
+            description:
+              'The invitation link, `<APP_URL>/register#invite=<token>`. Returned once: the server keeps only a keyed hash of the token and never mails it.',
+          },
+          expiresAt: { type: 'string', format: 'date-time' },
         },
       },
       LoginRequest: {
@@ -1032,6 +1083,11 @@ export const swaggerSpec: JsonObject = {
           },
           pendingVaultKeyIv: { type: 'string' },
           pendingVaultKeyTag: { type: 'string' },
+          canInvite: {
+            type: 'boolean',
+            description:
+              'True when this account may mint invitations (POST /auth/invitations): the server registers by invitation and the account is listed in REGISTRATION_INVITERS.',
+          },
           settings: { $ref: '#/components/schemas/UserSettings' },
           createdAt: { type: 'string', format: 'date-time' },
           updatedAt: { type: 'string', format: 'date-time' },
@@ -1416,6 +1472,15 @@ export const swaggerSpec: JsonObject = {
                 items: { type: 'string' },
                 description: 'Advisory: the server receives ciphertext and never sees a filename.',
               },
+            },
+          },
+          registration: {
+            type: 'object',
+            description:
+              'Who may register (REGISTRATION_MODE): `open`, `invite` (an invitation minted for the address is required) or `closed`. Absent from an older server. The domain allowlist is not published.',
+            required: ['mode'],
+            properties: {
+              mode: { type: 'string', enum: ['open', 'invite', 'closed'] },
             },
           },
         },
@@ -2590,11 +2655,14 @@ export const swaggerSpec: JsonObject = {
         tags: ['Auth'],
         summary: 'Register a new account',
         description:
-          'Creates a new user account. Returns a generic success response for all attempts (prevents email enumeration). Existing accounts receive a notification email instead of an error. Rate limited: 20 req/IP per 15 min, shared with the other credential endpoints.',
+          "Creates a new user account, subject to the operator's REGISTRATION_MODE (published as `registration.mode` on GET /config). Returns the same generic success for every registration that is not refused outright (prevents email enumeration): an existing account receives a notification email instead of an error, and an address outside REGISTRATION_ALLOWED_DOMAINS gets the same answer with nothing created and nothing mailed. A closed server refuses every registration with 403, and a server that registers by invitation refuses one without a valid `invitationToken` for its address with 403; both refusals are decided before the account lookup, so neither says anything about whether the address is registered. Rate limited: 20 req/IP per 15 min, shared with the other credential endpoints.",
         requestBody: jsonRequestBody('RegisterRequest'),
         responses: {
           201: successResponse('Registration initiated (check email for verification link)'),
           400: { $ref: '#/components/responses/ValidationError' },
+          403: errorResponse(
+            'Registration is closed on this server (REGISTRATION_MODE=closed), or the server registers by invitation and the invitation is missing, not for this address, expired or already used. A fixed message for each; no account data is involved.',
+          ),
           429: { $ref: '#/components/responses/RateLimited' },
         },
       },
@@ -2743,6 +2811,35 @@ export const swaggerSpec: JsonObject = {
         },
       },
     },
+    '/auth/invitations': {
+      post: {
+        operationId: 'createInvitation',
+        tags: ['Auth'],
+        summary: 'Mint an invitation to register',
+        description:
+          'While the server registers by invitation (REGISTRATION_MODE=invite), an account listed in REGISTRATION_INVITERS mints a single-use invitation for one address, proving its master password. The response carries the invitation link once (`Cache-Control: no-store`); the server stores only a keyed hash of the token, never mails the link, and audits the mint (`invitation_create`, address masked). The invitation admits only that address, once, for 7 days. At most 10 per inviter per 24 hours. Rate limited: 5 req/user per 15 min (the master-password proof budget).',
+        security: [{ bearerAuth: [], csrfToken: [] }],
+        requestBody: jsonRequestBody('CreateInvitationRequest'),
+        responses: {
+          201: jsonEnvelope('Invitation minted', {
+            $ref: '#/components/schemas/CreatedInvitation',
+          }),
+          400: errorResponse(
+            'The body failed validation, or the address is outside REGISTRATION_ALLOWED_DOMAINS. Nothing is stored.',
+          ),
+          401: errorResponse(
+            'Not authenticated, or the master-password proof is wrong (the failure is audited). Nothing is stored.',
+          ),
+          403: errorResponse('This account is not listed in REGISTRATION_INVITERS.'),
+          409: errorResponse(
+            'The server does not register by invitation, or another invitation for this inviter is being minted at this moment.',
+          ),
+          429: errorResponse(
+            'The master-password proof budget is spent, or this inviter has minted its 10 invitations for the last 24 hours.',
+          ),
+        },
+      },
+    },
     '/auth/verify-email': {
       post: {
         operationId: 'verifyEmail',
@@ -2823,8 +2920,7 @@ export const swaggerSpec: JsonObject = {
         operationId: 'listVaultItems',
         tags: ['Vault'],
         summary: 'List vault items',
-        description:
-          'Returns paginated, filterable, sortable list of vault items. All item data is encrypted.',
+        description: `Returns paginated, filterable, sortable list of vault items. All item data is encrypted. ${VAULT_LIST_BUDGET}`,
         security: [{ bearerAuth: [] }],
         parameters: [
           ...LIST_PAGE_PARAMS,
@@ -2856,6 +2952,7 @@ export const swaggerSpec: JsonObject = {
         responses: {
           200: pageEnvelope('Paginated vault items', '#/components/schemas/VaultItemResponse'),
           401: { $ref: '#/components/responses/Unauthorized' },
+          429: { $ref: '#/components/responses/RateLimited' },
         },
       },
       post: {
@@ -2882,7 +2979,7 @@ export const swaggerSpec: JsonObject = {
         operationId: 'listVaultItemTrash',
         tags: ['Vault'],
         summary: 'List trashed items',
-        description: 'Returns paginated list of soft-deleted vault items.',
+        description: `Returns paginated list of soft-deleted vault items. ${VAULT_LIST_BUDGET}`,
         security: [{ bearerAuth: [] }],
         parameters: [
           ...LIST_PAGE_PARAMS,
@@ -2900,6 +2997,7 @@ export const swaggerSpec: JsonObject = {
         responses: {
           200: pageEnvelope('Paginated trashed items', '#/components/schemas/VaultItemResponse'),
           401: { $ref: '#/components/responses/Unauthorized' },
+          429: { $ref: '#/components/responses/RateLimited' },
         },
       },
     },
@@ -3605,8 +3703,7 @@ export const swaggerSpec: JsonObject = {
         operationId: 'exportVault',
         tags: ['Tools'],
         summary: 'Export vault',
-        description:
-          'Exports every live vault item (not the trash) and every folder, still encrypted, as a JSON file attachment (`Content-Disposition: attachment`). Refused with 413 when the export would exceed EXPORT_MAX_SIZE_MB. Rate limited: 10 req/user per 15 min + 5 req/user per 15 min, one budget per account shared by every request that re-checks the master password.',
+        description: `Exports every live vault item (not the trash) and every folder, still encrypted, as a JSON file attachment (\`Content-Disposition: attachment\`), streamed as it is read from the database (chunked; no \`Content-Length\`), under the same send deadline as the backup download. Refused with 413, before the first byte, when the export would exceed EXPORT_MAX_SIZE_MB. Rate limited: 10 req/user per 15 min + 5 req/user per 15 min, one budget per account shared by every request that re-checks the master password.${HEAVY_RESPONSE_ADMISSION}`,
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: {
           required: true,
@@ -3673,6 +3770,7 @@ export const swaggerSpec: JsonObject = {
           400: { $ref: '#/components/responses/ValidationError' },
           401: { $ref: '#/components/responses/Unauthorized' },
           404: { $ref: '#/components/responses/NotFound' },
+          409: HEAVY_RESPONSE_BUSY,
           413: errorResponse('The export would exceed EXPORT_MAX_SIZE_MB. Nothing is sent.'),
           429: { $ref: '#/components/responses/RateLimited' },
         },
@@ -3788,13 +3886,14 @@ export const swaggerSpec: JsonObject = {
         operationId: 'triggerBackup',
         tags: ['Backup'],
         summary: 'Trigger backup now',
-        description:
-          'Creates and emails an encrypted backup immediately. Rate limited: 10 req/user per 15 min.',
+        description: `Creates and emails an encrypted backup immediately. Rate limited: 10 req/user per 15 min.${HEAVY_RESPONSE_ADMISSION}`,
         security: [{ bearerAuth: [], csrfToken: [] }],
         responses: {
           400: errorResponse('Backup encryption has not been set up yet.'),
           404: { $ref: '#/components/responses/NotFound' },
-          409: errorResponse('A backup is already in progress for this account.'),
+          409: errorResponse(
+            'A backup is already in progress for this account, or this account already has a backup download, a mailed backup or an export in progress (no `data`).',
+          ),
           413: errorResponse('The backup would exceed BACKUP_MAX_SIZE_MB. Nothing is sent.'),
           200: successResponse('Backup triggered'),
           401: { $ref: '#/components/responses/Unauthorized' },
@@ -3807,12 +3906,12 @@ export const swaggerSpec: JsonObject = {
         operationId: 'downloadBackup',
         tags: ['Backup'],
         summary: 'Download backup',
-        description:
-          'Downloads the latest encrypted backup as a file stream. Rate limited: 10 req/user per 15 min.',
+        description: `Downloads the account's encrypted backup, streamed as it is read from the database (chunked; no \`Content-Length\`). The size is decided before the first byte, so an oversized backup is a whole 413. A client that has not taken the file by an absolute deadline (its estimated size at 128 KiB/s, plus 30 s) is cut off, and a failure after the first byte ends the connection rather than appending an error, so a truncated file is never mistaken for a whole one. The download is recorded (\`backup_download\` with \`completed\`) whether or not it finished. Rate limited: 10 req/user per 15 min.${HEAVY_RESPONSE_ADMISSION}`,
         security: [{ bearerAuth: [] }],
         responses: {
           400: errorResponse('Backup encryption has not been set up yet.'),
           404: { $ref: '#/components/responses/NotFound' },
+          409: HEAVY_RESPONSE_BUSY,
           413: errorResponse('The backup would exceed BACKUP_MAX_SIZE_MB. Nothing is sent.'),
           200: {
             description: 'Encrypted backup file',

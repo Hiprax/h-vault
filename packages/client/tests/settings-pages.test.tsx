@@ -557,6 +557,27 @@ describe('SettingsPage', () => {
     });
   });
 
+  // ---- Invitations ----
+
+  it('offers to invite someone only to an account the server lists as an inviter', async () => {
+    setupDefaultProfileMock({ canInvite: true });
+    await renderSettings();
+    expect(await screen.findByText('Invite someone')).toBeInTheDocument();
+    expect(screen.getByLabelText('Invitee email')).toBeInTheDocument();
+  });
+
+  it.each([
+    ['false', { canInvite: false }],
+    ['absent (an older server)', {}],
+  ])('shows no invitation card when canInvite is %s', async (_label, overrides) => {
+    setupDefaultProfileMock(overrides);
+    await renderSettings();
+    await waitFor(() => {
+      expect(screen.getByText('test@example.com')).toBeInTheDocument();
+    });
+    expect(screen.queryByText('Invite someone')).toBeNull();
+  });
+
   // ---- Security Section: Change Password ----
 
   it('reveals the change password form when Change is clicked', async () => {

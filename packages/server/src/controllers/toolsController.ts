@@ -1,6 +1,6 @@
 import type { Request, Response } from 'express';
 import { catchAsync, httpErrors } from '@hiprax/errors';
-import { createModuleLogger } from '../utils/logger.js';
+import { createModuleLogger, errorMessage } from '../utils/logger.js';
 import bcrypt from 'bcryptjs';
 import mongoose from 'mongoose';
 import { VaultItem } from '../models/VaultItem.js';
@@ -25,6 +25,8 @@ import { createdRowId, isDuplicateIdError, ROW_ID_TAKEN_MESSAGE } from '../utils
 import { acquireJobLock, releaseJobLock } from '../utils/jobLock.js';
 import { supportsTransactions } from '../utils/transactionSupport.js';
 import { estimateItemJsonSize, estimateFolderJsonSize } from '../utils/sizeEstimator.js';
+import { closingMembers, forEachRow, jsonArrayOf, sendJsonStream } from '../utils/jsonStream.js';
+import { sendDeadlineMs } from '../utils/heavyResponseBudget.js';
 import { fetchRangeFromHibp } from '../utils/hibp.js';
 import { noteOnDemandRangeInsert } from '../utils/breachRangeCap.js';
 import {
@@ -691,90 +693,105 @@ export const exportVault = catchAsync(async (req: Request, res: Response): Promi
   }
 
   const maxSizeBytes = config.EXPORT_MAX_SIZE_MB * 1024 * 1024;
-  const items: unknown[] = [];
-  let estimatedSize = RESPONSE_WRAPPER_OVERHEAD;
-
-  // Use cursor-based streaming to check size incrementally and avoid loading
-  // the entire result set into memory before discovering it's too large.
-  // We estimate each item's JSON size from its field lengths instead of calling
-  // JSON.stringify per item — this eliminates N wasted serializations in the
-  // hot loop for large vaults. See `estimateItemJsonSize` for the conservative
-  // overhead rationale.
-  const itemCursor = VaultItem.find({ userId, deletedAt: { $exists: false } })
-    .select('-sourceRefId')
-    .lean()
-    .cursor();
-  for await (const item of itemCursor) {
-    estimatedSize += estimateItemJsonSize(item as unknown as Record<string, unknown>);
-    if (estimatedSize > maxSizeBytes) {
-      throw httpErrors.payloadTooLarge(
-        `Export size exceeds the maximum allowed size (${String(config.EXPORT_MAX_SIZE_MB)} MB)`,
-      );
-    }
-    items.push(item);
-  }
-
-  const folders = await Folder.find({ userId }).select('-sourceRefId').lean();
-  for (const folder of folders) {
-    estimatedSize += estimateFolderJsonSize(folder as unknown as Record<string, unknown>);
-  }
-  if (estimatedSize > maxSizeBytes) {
+  const refuseTooLarge = (): never => {
     throw httpErrors.payloadTooLarge(
       `Export size exceeds the maximum allowed size (${String(config.EXPORT_MAX_SIZE_MB)} MB)`,
     );
-  }
-
-  const responsePayload = {
-    items,
-    folders,
-    metadata: {
-      exportDate: new Date().toISOString(),
-      version: APP_VERSION,
-      itemCount: items.length,
-    },
   };
+  const liveItems = () =>
+    VaultItem.find({ userId, deletedAt: { $exists: false } })
+      .select('-sourceRefId')
+      .lean()
+      .cursor();
+  const allFolders = () => Folder.find({ userId }).select('-sourceRefId').lean().cursor();
 
-  // Single JSON serialization used for both the precise final size check AND
-  // the response body. Previously this payload was stringified twice (once
-  // here for size validation, once inside res.json()); now we do it once and
-  // pass the pre-serialized string to res.send() to avoid the double work.
-  const exportJson = JSON.stringify({ success: true, data: responsePayload });
-  const exportSizeBytes = Buffer.byteLength(exportJson, 'utf-8');
-  if (exportSizeBytes > maxSizeBytes) {
-    throw httpErrors.payloadTooLarge(
-      `Export size (${String(Math.ceil(exportSizeBytes / (1024 * 1024)))} MB) exceeds the maximum allowed size (${String(config.EXPORT_MAX_SIZE_MB)} MB)`,
-    );
-  }
-
-  // `portableFormat` is AUDIT METADATA ONLY (validated by exportSchema): its
-  // sole effect is to record a distinct `export_plaintext` action for a
-  // browser-side plaintext export. The response body above is already fully
-  // built and is byte-identical whether or not it is present — nothing below
-  // branches on the value beyond the audit action and its metadata.
-  const exportCtx = getRequestContext(req);
-  await createAuditLog(
-    userId,
-    portableFormat ? 'export_plaintext' : 'export',
-    {
-      itemCount: items.length,
-      folderCount: folders.length,
-      ...(portableFormat ? { portableFormat } : {}),
-    },
-    exportCtx.ip,
-    exportCtx.userAgent,
-  );
-
-  logger.info('Vault exported', { userId, itemCount: items.length });
+  // The size is decided BEFORE the first byte, so a refusal is a whole 413 rather
+  // than a truncated file: a walk of both cursors with the conservative field-length
+  // estimator (see `estimateItemJsonSize`), one row at a time, stopping at the row
+  // that crosses the budget.
+  let estimatedSize = RESPONSE_WRAPPER_OVERHEAD;
+  // `forEachRow` closes each cursor on every exit, the refusal thrown here included.
+  await forEachRow(liveItems(), (item) => {
+    estimatedSize += estimateItemJsonSize(item as unknown as Record<string, unknown>);
+    if (estimatedSize > maxSizeBytes) refuseTooLarge();
+  });
+  await forEachRow(allFolders(), (folder) => {
+    estimatedSize += estimateFolderJsonSize(folder as unknown as Record<string, unknown>);
+    if (estimatedSize > maxSizeBytes) refuseTooLarge();
+  });
 
   // Match the backup download pattern so browsers trigger a download rather
   // than rendering the JSON inline.
   const exportTimestamp = new Date().toISOString().replace(/[:.]/g, '-');
   const exportFilename = `hvault-export-${exportTimestamp}.enc`;
+  res.status(200);
   res.setHeader('Content-Type', 'application/json');
   res.setHeader('Content-Disposition', `attachment; filename="${exportFilename}"`);
-  res.setHeader('Content-Length', String(exportSizeBytes));
 
-  res.status(200).send(exportJson);
+  const exportCtx = getRequestContext(req);
+  const tally = { items: 0, folders: 0 };
+  // An object rather than a `let`: the flag is set inside `record`, which the
+  // compiler cannot see running before the check below.
+  const recording = { done: false };
+  // `portableFormat` is AUDIT METADATA ONLY (validated by exportSchema): its
+  // sole effect is to record a distinct `export_plaintext` action for a
+  // browser-side plaintext export. The response body is byte-identical whether
+  // or not it is present — nothing branches on the value beyond the audit action
+  // and its metadata.
+  const record = async (completed: boolean): Promise<void> => {
+    recording.done = true;
+    await createAuditLog(
+      userId,
+      portableFormat ? 'export_plaintext' : 'export',
+      {
+        itemCount: tally.items,
+        folderCount: tally.folders,
+        completed,
+        ...(portableFormat ? { portableFormat } : {}),
+      },
+      exportCtx.ip,
+      exportCtx.userAgent,
+    );
+  };
+
+  // Streamed from the cursors, with backpressure, under an absolute send deadline
+  // derived from the estimate. Recorded once the content has been produced, before
+  // the final byte; an export that ends early is recorded as `completed: false`,
+  // because what reached the client before the cut still left the server.
+  const outcome = await sendJsonStream(
+    res,
+    (async function* exportDocument() {
+      yield '{"success":true,"data":{"items":';
+      yield* jsonArrayOf(liveItems(), () => {
+        tally.items += 1;
+      });
+      yield ',"folders":';
+      yield* jsonArrayOf(allFolders(), () => {
+        tally.folders += 1;
+      });
+      yield closingMembers({
+        metadata: {
+          exportDate: new Date().toISOString(),
+          version: APP_VERSION,
+          itemCount: tally.items,
+        },
+      });
+      await record(true);
+      yield '}';
+    })(),
+    { deadlineMs: sendDeadlineMs(estimatedSize), label: 'Vault export' },
+  );
+
+  if (!outcome.completed && !recording.done) {
+    try {
+      await record(false);
+    } catch (err: unknown) {
+      logger.error('Could not record an interrupted export', { userId, error: errorMessage(err) });
+    }
+    return;
+  }
+
+  logger.info('Vault exported', { userId, itemCount: tally.items });
 });
 
 interface ImportOperationsParams {

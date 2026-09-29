@@ -8,6 +8,7 @@ import {
   DOCUMENT_PLAINTEXT_CHUNK_BYTES,
   MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER,
   MAX_FOLDERS_PER_USER,
+  PAGINATION_DEFAULTS,
   MAX_ITEMS_PER_USER,
   HIBP_BATCH_MAX_PREFIXES,
   LOGIN_RATE_LIMIT_WINDOW_MINUTES,
@@ -909,6 +910,48 @@ export const folderWriteLimiter =
     FOLDER_WRITE_RATE_LIMIT_MAX,
     VAULT_WRITE_RATE_LIMIT_WINDOW_MS,
     'Too many folder changes, please try again later',
+  );
+
+// ---------------------------------------------------------------------------
+// Vault list pages
+// ---------------------------------------------------------------------------
+
+/** Window the {@link VAULT_LIST_RATE_LIMIT_MAX} budget is spent over. */
+export const VAULT_LIST_RATE_LIMIT_WINDOW_MS = FIFTEEN_MINUTES_MS;
+
+/**
+ * Full walks of the largest vault one user may make in a window: the app loads
+ * the vault and the trash on sign-in, on unlock, when it comes back online and
+ * after a bulk action, and each is a walk of up to fifty pages.
+ */
+export const VAULT_LIST_RELOAD_FACTOR = 8;
+
+/**
+ * List pages one user may request per window: the pages a vault at
+ * `MAX_ITEMS_PER_USER` takes at the largest page size, times
+ * {@link VAULT_LIST_RELOAD_FACTOR} (50 x 8 = 400).
+ */
+export const VAULT_LIST_RATE_LIMIT_MAX =
+  Math.ceil(MAX_ITEMS_PER_USER / PAGINATION_DEFAULTS.MAX_LIMIT) * VAULT_LIST_RELOAD_FACTOR;
+
+/**
+ * `GET /vault/items` and `GET /vault/items/trash`, one budget for both. A page is
+ * up to 200 rows of up to half a megabyte each, and the routes carried no limiter
+ * at all.
+ *
+ * NOT `generalAuthLimiter`, for the reason the write budgets give: that is ONE
+ * 60-a-minute `general:` bucket shared with logout, and a full vault load is up to
+ * a hundred pages (items and trash), so it would refuse the list partway and then
+ * the logout after it.
+ */
+export const vaultListLimiter =
+  noopIfNonProduction() ??
+  createUserKeyedLimiter(
+    'vaultListLimiter',
+    'vaultList:',
+    VAULT_LIST_RATE_LIMIT_MAX,
+    VAULT_LIST_RATE_LIMIT_WINDOW_MS,
+    'Too many vault list requests, please try again later',
   );
 
 /**

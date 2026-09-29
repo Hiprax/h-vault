@@ -21,7 +21,8 @@
     "test:observability": "vitest run --config vitest.observability.config.ts",
     "type-check": "tsc --noEmit --incremental --tsBuildInfoFile ../../.cache/tsbuildinfo/server.src.tsbuildinfo && tsc -p tsconfig.test.json",
     "create-indexes": "tsx scripts/create-indexes.ts",
-    "seed-breaches": "tsx src/cli/seedBreaches.ts"
+    "seed-breaches": "tsx src/cli/seedBreaches.ts",
+    "invite": "tsx src/cli/invite.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "3.1138.0",

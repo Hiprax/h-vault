@@ -429,8 +429,11 @@ describe('Tools routes', () => {
       expect(stem).not.toContain(':');
 
       expect(res.headers['content-type']).toMatch(/^application\/json/);
-      expect(res.headers['content-length']).toBeDefined();
-      expect(Number(res.headers['content-length'])).toBeGreaterThan(0);
+      // Streamed from the cursors (F-25): the length is not known before the first
+      // byte, so the body is chunked rather than announced.
+      expect(res.headers['content-length']).toBeUndefined();
+      expect(res.headers['transfer-encoding']).toBe('chunked');
+      expect(res.text.length).toBeGreaterThan(0);
     });
 
     it('should reject export without authHash', async () => {

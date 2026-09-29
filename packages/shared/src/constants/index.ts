@@ -518,6 +518,20 @@ export const MAX_IN_FLIGHT_LARGE_BODY_REQUESTS = 2;
 // share must.
 export const MAX_IN_FLIGHT_LARGE_BODY_REQUESTS_PER_USER = 1;
 
+// Heavy RESPONSES the server builds concurrently, PER WORKER PROCESS, across all
+// users: a backup download, a backup mailed on demand, a vault export, and the
+// scheduled backup job (which takes the same slots). Each reads a whole vault of
+// up to 25 MB; nine concurrent downloads of a 22 MB vault measured a 564 MB peak
+// against the app's `mem_limit: 1g`. Two is the floor for the same reason the
+// large-body budget's is: with the per-user share below at one, a budget of one
+// would let one account hold all of it. A request past the budget WAITS (its body,
+// if any, is at most the 2 MB global cap and already read); a request past the
+// share is refused with 409.
+export const MAX_IN_FLIGHT_HEAVY_RESPONSES = 2;
+// One account's share of the budget above. Strictly below it, so one account can
+// never hold every slot.
+export const MAX_IN_FLIGHT_HEAVY_RESPONSES_PER_USER = 1;
+
 // The slowest sustained uplink this deployment stands behind, in bytes per second
 // (128 KiB/s is about 1 Mbit/s). It is not a throttle and nothing measures against
 // it: it is the DIVISOR that turns a byte budget into a deadline, and it is named
@@ -1243,6 +1257,9 @@ export const AUDIT_ACTIONS = [
   'document_delete',
   'document_restore',
   'document_purge',
+  // An inviting account minting an invitation to register (REGISTRATION_MODE=
+  // invite). Security, not activity: it is how an account lets another one in.
+  'invitation_create',
 ] as const;
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];
 
@@ -1416,3 +1433,44 @@ export const MAX_RELEASE_WIRE_CODE_LENGTH = 32;
 export const MAX_RELEASE_NOTES_LISTED = 500;
 /** The longest release link the client accepts. */
 export const MAX_RELEASE_URL_LENGTH = 300;
+
+// ── Registration ─────────────────────────────────────────────────────
+
+/**
+ * Who may create an account on a server, set by the operator's
+ * `REGISTRATION_MODE`:
+ *
+ *  - `open`    anyone who can reach the server (the default, kept for
+ *              compatibility; the server warns about it at boot in production);
+ *  - `invite`  only an address holding an invitation minted for it, by the
+ *              operator's CLI or by an account listed in `REGISTRATION_INVITERS`;
+ *  - `closed`  nobody.
+ *
+ * Published on `GET /config` so the register page can say which one applies
+ * before the form is filled.
+ */
+export const REGISTRATION_MODES = ['open', 'invite', 'closed'] as const;
+export type RegistrationMode = (typeof REGISTRATION_MODES)[number];
+
+/** How long an invitation stays usable after it is minted, in days. */
+export const INVITATION_TTL_DAYS = 7;
+
+/**
+ * Invitations one inviting account may mint in any 24 hours. Minting is the one
+ * way an account can let another account in, and each invitee can be an inviter
+ * only if the operator lists it, so this bounds how fast one listed account can
+ * add others.
+ */
+export const MAX_INVITATIONS_PER_INVITER_PER_DAY = 10;
+
+/**
+ * Random bytes in an invitation token. Carried base64url-encoded (43 characters)
+ * in the fragment of the link the inviter hands over.
+ */
+export const INVITATION_TOKEN_BYTES = 32;
+
+/** The longest invitation token the register schema accepts, with room to spare. */
+export const MAX_INVITATION_TOKEN_LENGTH = 128;
+
+/** The most addresses `REGISTRATION_INVITERS` may list. */
+export const MAX_REGISTRATION_INVITERS = 10;

@@ -21,7 +21,8 @@ import { NUMBER_WORDS } from './support/numberWords';
 import * as rateLimiters from '../src/middleware/rateLimiter.js';
 import { swaggerSpec } from '../src/config/swagger.js';
 
-const { FOLDER_WRITE_RATE_LIMIT_MAX, VAULT_ITEM_WRITE_RATE_LIMIT_MAX } = rateLimiters;
+const { FOLDER_WRITE_RATE_LIMIT_MAX, VAULT_ITEM_WRITE_RATE_LIMIT_MAX, VAULT_LIST_RATE_LIMIT_MAX } =
+  rateLimiters;
 /**
  * The limiters the middleware module exports: its MIDDLEWARE (three parameters)
  * named `…Limiter`. The module also exports helpers (`resolveClientKey`,
@@ -177,6 +178,20 @@ describe('README documentation sync', () => {
         expect(text).toContain(`Rate limited: ${formatted(FOLDER_WRITE_RATE_LIMIT_MAX)} req/user`);
       }
     });
+  });
+
+  it('quotes the derived vault list budget from its constant, in the README and on both list routes', () => {
+    // Derived from MAX_ITEMS_PER_USER and the largest page size, so a change to
+    // either moves it, and a hand-copied number would not move with it.
+    const formatted = (count: number): string => count.toLocaleString('en-US');
+    const row = readme.split('\n').find((line) => line.startsWith('| Vault list '));
+    expect(row?.split('|')[2]?.trim()).toBe(`${formatted(VAULT_LIST_RATE_LIMIT_MAX)} / user`);
+    const paths = swaggerSpec.paths as Record<string, Record<string, { description?: unknown }>>;
+    for (const path of ['/vault/items', '/vault/items/trash']) {
+      expect(String(paths[path]?.get?.description)).toContain(
+        `Rate limited: ${formatted(VAULT_LIST_RATE_LIMIT_MAX)} req/user per 15 min`,
+      );
+    }
   });
 
   it('quotes the breach fetch budgets from their constants', () => {

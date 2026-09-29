@@ -6,7 +6,9 @@ import { z } from 'zod';
 import {
   DOCUMENT_CIPHERTEXT_CHUNK_BYTES,
   MAX_DOCUMENT_EXT_LENGTH,
+  MAX_REGISTRATION_INVITERS,
   MIN_SUSTAINED_UPLOAD_BYTES_PER_SECOND,
+  REGISTRATION_MODES,
   emailSchema,
 } from '@hvault/shared';
 import {
@@ -124,6 +126,28 @@ function urlHostname(value: string): string | undefined {
  * check already reports it, and a second issue about schemes would only obscure
  * the first.
  */
+/**
+ * A plain dotted host name: two or more labels of letters, digits and inner
+ * hyphens, 63 characters a label, 253 in all. Checked label by label, with a flat
+ * character class and the edge rules spelled out, rather than one pattern with a
+ * nested quantifier. Internationalised domains are written in their `xn--` form.
+ */
+function isPlainDomainName(domain: string): boolean {
+  if (domain.length > 253) return false;
+  const labels = domain.split('.');
+  return (
+    labels.length >= 2 &&
+    labels.every(
+      (label) =>
+        label.length >= 1 &&
+        label.length <= 63 &&
+        /^[a-z0-9-]+$/.test(label) &&
+        !label.startsWith('-') &&
+        !label.endsWith('-'),
+    )
+  );
+}
+
 function isProductionStorageEndpoint(endpoint: string): boolean {
   if (/^https:\/\//i.test(endpoint)) return true;
   const hostname = urlHostname(endpoint);
@@ -378,6 +402,13 @@ const envSchema = z
     // at least MAX_DOCUMENT_SIZE_MB, so a configuration cannot advertise a size cap
     // it must always reject.
     DOCUMENT_STORAGE_QUOTA_MB_PER_USER: z.coerce.number().int().min(1).max(1_048_576).default(2048),
+    // Per-account quota over the VAULT, in MB (F-24): the bytes every vault item and
+    // folder row occupies, trashed rows included until they are purged. Documents
+    // have their own quota above. A write that would cross it is refused; nothing
+    // that does not grow the vault (a delete, a purge, a rotation) ever is. The
+    // default fits the largest vault the per-account row caps allow at typical item
+    // sizes many times over.
+    VAULT_STORAGE_QUOTA_MB_PER_USER: z.coerce.number().int().min(1).max(1_048_576).default(512),
     // How long a staging upload row survives before its TTL index removes it.
     // Bounded at a week: the row pins quota against the user's budget, and the
     // stored object and the engine-side multipart upload are only reclaimed after
@@ -507,6 +538,60 @@ const envSchema = z
         .array(emailSchema)
         .max(MAX_UPDATE_NOTIFY_EMAILS, {
           message: `UPDATE_NOTIFY_EMAILS accepts at most ${String(MAX_UPDATE_NOTIFY_EMAILS)} addresses`,
+        })
+        .default([])
+        .transform((list) => [...new Set(list)]),
+    ),
+
+    // Registration (F-24): who may create an account on this server. `open`, the
+    // default, is kept for compatibility and warned about at boot in production;
+    // `invite` admits only an address holding an invitation minted for it; `closed`
+    // admits nobody. An empty assignment keeps the default and anything else
+    // refuses to boot, like the other enums here, rather than guessing.
+    REGISTRATION_MODE: z.preprocess(
+      (v) => (v === '' ? undefined : v),
+      z.enum(REGISTRATION_MODES).default('open'),
+    ),
+    // Comma-separated e-mail DOMAINS an address must belong to, exactly (a
+    // subdomain is a different domain), in every mode that registers anyone. Empty
+    // means any domain. Normalised before validation: blanks and empty entries
+    // dropped, a leading `@` removed, lower-cased, duplicates collapsed. A domain
+    // that is not a plain dotted host name refuses to boot: an allowlist entry that
+    // can never match would silently refuse every registration.
+    REGISTRATION_ALLOWED_DOMAINS: z.preprocess(
+      (v) =>
+        typeof v === 'string'
+          ? v
+              .split(',')
+              .map((entry) => entry.trim().toLowerCase().replace(/^@/, ''))
+              .filter((entry) => entry !== '')
+          : v,
+      z
+        .array(
+          z.string().refine(isPlainDomainName, {
+            message:
+              'REGISTRATION_ALLOWED_DOMAINS entries must be plain domain names such as example.org',
+          }),
+        )
+        .default([])
+        .transform((list) => [...new Set(list)]),
+    ),
+    // Comma-separated account e-mails that may mint invitations from the app
+    // (`POST /auth/invitations`) while the mode is `invite`. The operator's CLI
+    // (`npm run invite`) mints without being listed. Normalised like
+    // UPDATE_NOTIFY_EMAILS.
+    REGISTRATION_INVITERS: z.preprocess(
+      (v) =>
+        typeof v === 'string'
+          ? v
+              .split(',')
+              .map((entry) => entry.trim())
+              .filter((entry) => entry !== '')
+          : v,
+      z
+        .array(emailSchema)
+        .max(MAX_REGISTRATION_INVITERS, {
+          message: `REGISTRATION_INVITERS accepts at most ${String(MAX_REGISTRATION_INVITERS)} addresses`,
         })
         .default([])
         .transform((list) => [...new Set(list)]),
@@ -754,6 +839,16 @@ function loadConfig(): EnvConfig {
           'This combination exposes data in transit. Use HTTPS or connect to a local database.',
       );
     }
+  }
+
+  // Open registration on a production server is a decision the operator should
+  // be making knowingly: anyone who can reach it can create accounts, each with its
+  // own storage quota. It stays the default for compatibility, so say so once.
+  if (data.NODE_ENV === 'production' && data.REGISTRATION_MODE === 'open') {
+    logger.warn(
+      'REGISTRATION_MODE is open: anyone who can reach this server can create an account. ' +
+        'Set REGISTRATION_MODE=invite or closed (and REGISTRATION_ALLOWED_DOMAINS) to restrict it.',
+    );
   }
 
   // Warn if TWO_FACTOR_ENCRYPTION_KEY is not set (falls back to SESSION_SECRET)

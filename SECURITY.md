@@ -504,6 +504,52 @@ not the ones you keep using.
   own laptop never locks out your other new devices. "Log out everywhere", a password change or a
   reset revokes every proof and every copy of one.
 
+### Who can create an account
+
+Registration is **open by default**, and that default is kept for compatibility, not because it
+is safe on the open internet: on a server anyone can reach, anyone can create accounts, and each
+account can store data up to its own limits. The server logs a warning about it at every production
+boot. The operator closes it with `REGISTRATION_MODE`:
+
+- **`closed`**: every registration is refused with a 403 and a fixed message. The refusal is
+  decided before any account lookup, so it says nothing about whether an address is registered.
+- **`invite`**: a registration must present an **invitation minted for its exact address**. An
+  invitation is minted only by the operator's command-line tool or by an account the operator lists
+  in `REGISTRATION_INVITERS`, and the latter must prove its master password to do it (at most 10 a
+  day each, audited as `invitation_create` with the address masked). Never by any account: an
+  account that could invite anyone would let every invitee invite others in turn. An invitation is
+  32 random bytes, stored only as a keyed hash (a copy of the database admits nobody), works for 7
+  days, and is spent by the first registration of its address; of two registrations racing for it,
+  exactly one wins. A registration without a valid invitation is refused with a 403 and one fixed
+  message whatever was wrong with it, again before any account lookup. **H-Vault never mails an
+  invitation**: the link (`/register#invite=…`) is handed over by the inviter, and it carries the
+  invitation in the URL fragment, which browsers never send to a server or write to an access log;
+  the register page moves it into the form and removes it from the address bar at once. Anyone who
+  obtains a link before its invitee does can register that address (the account is still unverified
+  until someone controlling the mailbox confirms it), so send it only to the person invited.
+- **`REGISTRATION_ALLOWED_DOMAINS`** restricts every mode that registers anyone to addresses in the
+  listed domains, matched exactly (a subdomain is a different domain). An address outside them is
+  answered exactly as a registered address is: the same generic success, after the same password
+  hashing, with nothing created and nothing mailed, so the list is not revealed one guess at a time.
+
+`GET /config` publishes the mode (so the register page can say "closed" before the form is filled),
+never the domain list or the inviters.
+
+### Heavy responses and list pages
+
+A backup download, a backup mailed on demand, a vault export and the scheduled backup each read a
+whole vault (up to the 25 MB backup limit). They are admitted through **one budget per server
+process: two at a time, one per account**; a second request from an account that has one running
+is refused, and one past the process budget waits. The download and the export are **streamed**
+from the database with backpressure, so the server holds a row at a time rather than the whole
+file, the size limit is decided before the first byte, and a client that has not taken the file
+within a deadline derived from its size (128 KiB/s plus 30 seconds) is cut off, so a client that
+stops reading cannot hold a slot for longer than that. What this does not bound: two accounts can
+still occupy both slots of a process for up to that deadline each, which delays other accounts'
+downloads without refusing them. A transfer that is cut off or fails is recorded in the audit log
+as not completed; part of the file may still have reached the client. The vault item and trash
+lists are streamed the same way and limited to 400 pages per account per 15 minutes.
+
 ### Password breach checking (Have I Been Pwned)
 
 Vault Health checks passwords against the Have I Been Pwned Pwned Passwords corpus using

@@ -111,6 +111,20 @@ export const RESOURCE_SCENARIOS = [
     measured: true,
     subject: 'a full account of MAX_DOCUMENTS_PER_USER documents walked page by page',
   },
+  {
+    id: 'backup-download-concurrency',
+    cases: 1,
+    file: 'tests/resource/backup-download-concurrency.test.ts',
+    measured: true,
+    subject: 'nine accounts downloading a 22 MB backup at once through a real server',
+  },
+  {
+    id: 'vault-list-volume',
+    cases: 1,
+    file: 'tests/resource/vault-list-volume.test.ts',
+    measured: true,
+    subject: 'a 300-row vault list of ~450 KB rows walked at 200 rows a page (~90 MB pages)',
+  },
 ];
 
 /**
@@ -224,6 +238,31 @@ export const RESOURCE_BUDGETS = {
      */
     deliveredFraction: 2.0,
   },
+  backupDownloadConcurrency: {
+    /** Observed 2,629-2,898 ms over three runs. An order-of-magnitude ceiling: it catches a hang. */
+    durationMs: 30_000,
+    /**
+     * THE BUDGET THIS SCENARIO EXISTS FOR, with both bands measured (2026-09-29). The
+     * code before F-25 (every download builds the whole backup as rows, a string and
+     * a buffer, and nothing bounds how many run) grew the process by 334.1 MB for
+     * nine concurrent downloads (peak 774 MB); the admitted, streamed download grows
+     * it by 2.0-51.7 MB over three runs. 150 MB sits 2.9x above the highest good run
+     * and 0.45x below the bad one.
+     */
+    rssGrowthMb: 150,
+  },
+  vaultListVolume: {
+    /** Observed 3,893-4,058 ms over three runs (the old path took the same). Catches a hang. */
+    durationMs: 40_000,
+    /**
+     * Both bands measured (2026-09-29), each page ~90 MB. The code before F-25 (a page
+     * built as a lean array, a string and a buffer) grew the process by 241.1-258.3 MB
+     * over two runs; the page serialized from the cursor, 16 rows per driver batch,
+     * by 70.9-92.1 MB over three. 170 MB sits 1.85x above the highest good run and
+     * 0.7x below the lowest bad one.
+     */
+    rssGrowthMb: 170,
+  },
 };
 
 /**
@@ -261,6 +300,22 @@ export const NOISE_BAND = {
     'documents-part-upload.rssGrowthMb': { min: 82.28, median: 85.32, max: 86.39, spreadPct: 4.8 },
     'documents-list-volume.durationMs': { min: 650, median: 657, max: 683, spreadPct: 5.0 },
     'documents-list-volume.rssGrowthMb': { min: 24.19, median: 28.2, max: 31.2, spreadPct: 24.9 },
+    // The two F-25 scenarios, measured 2026-09-29 on the same host, three runs each of
+    // the scenario files alone (one per forked worker, nothing else running).
+    'backup-download-concurrency.durationMs': {
+      min: 2629,
+      median: 2681,
+      max: 2898,
+      spreadPct: 10.0,
+    },
+    'backup-download-concurrency.rssGrowthMb': {
+      min: 2.0,
+      median: 6.44,
+      max: 51.72,
+      spreadPct: 772.0,
+    },
+    'vault-list-volume.durationMs': { min: 3893, median: 3975, max: 4058, spreadPct: 4.2 },
+    'vault-list-volume.rssGrowthMb': { min: 70.88, median: 81.34, max: 92.14, spreadPct: 26.1 },
   },
   /**
    * The one measurement with NO spread, over eleven runs, and the reason the
@@ -283,5 +338,9 @@ export const NOISE_BAND = {
     // `sendDocumentPage`'s `.skip().limit()` replaced by a full read and a slice.
     'documents-list-volume.documentsDelivered': { runs: 3, value: 125050 },
     'documents-list-volume.deliveredFraction': { runs: 3, value: 25.01 },
+    // The code before F-25: every download buffered whole and unadmitted; every list
+    // page built three times over.
+    'backup-download-concurrency.rssGrowthMb': { runs: 1, min: 334.08, max: 334.08 },
+    'vault-list-volume.rssGrowthMb': { runs: 2, min: 241.08, max: 258.31 },
   },
 };

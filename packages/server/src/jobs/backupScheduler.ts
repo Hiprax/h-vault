@@ -11,6 +11,7 @@ import { acquireJobLock, releaseJobLock } from '../utils/jobLock.js';
 import { trackJob } from '../utils/jobTracker.js';
 import { estimateItemJsonSize, estimateFolderJsonSize } from '../utils/sizeEstimator.js';
 import { collectDocumentSummary, type DocumentSummary } from '../utils/documentSummary.js';
+import { acquireWithin, heavyResponseSemaphore } from '../utils/heavyResponseBudget.js';
 
 const logger = createModuleLogger('jobs/backup');
 
@@ -43,7 +44,46 @@ interface BackupPayload {
   documentSummary: DocumentSummary;
 }
 
-async function processUserBackup(user: {
+/**
+ * How long one account's scheduled backup waits for a heavy-response slot before it
+ * is recorded as failed and the run moves on (5 minutes). Bounded so a burst of
+ * downloads cannot stall the whole run past its 30-minute lock. A plain object so a
+ * test can shorten it; nothing in production writes to it.
+ */
+export const SCHEDULED_BACKUP_SLOT_POLICY = { waitMs: 5 * 60 * 1000 };
+
+type ScheduledUser = Parameters<typeof buildAndMailBackup>[0];
+
+/**
+ * One account's scheduled backup, inside one of the process's heavy-response slots:
+ * the same budget the download, the export and the manual trigger are admitted
+ * through, because this builds the same whole-vault document. It waits for a slot
+ * (a job has no request to refuse) for at most {@link SCHEDULED_BACKUP_SLOT_POLICY}.
+ */
+async function processUserBackup(user: ScheduledUser): Promise<void> {
+  const release = await acquireWithin(heavyResponseSemaphore, SCHEDULED_BACKUP_SLOT_POLICY.waitMs);
+  if (release === null) {
+    const userId = String(user._id);
+    logger.warn(`Backup for user ${userId} skipped: no heavy-response slot became free in time`);
+    await BackupLog.create({
+      userId,
+      status: 'failed',
+      errorMessage: 'The server was busy with other backups; it will retry at the next schedule',
+      sentTo: [],
+      timestamp: new Date(),
+    }).catch((_e: unknown) => {
+      /* best effort */
+    });
+    return;
+  }
+  try {
+    await buildAndMailBackup(user);
+  } finally {
+    release();
+  }
+}
+
+async function buildAndMailBackup(user: {
   _id: unknown;
   email: string;
   encryptedVaultKey: string;

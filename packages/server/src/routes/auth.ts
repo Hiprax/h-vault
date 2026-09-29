@@ -9,6 +9,7 @@ import {
   unlockAccountSchema,
   verifyUnlockSchema,
   resendVerificationSchema,
+  createInvitationSchema,
 } from '@hvault/shared';
 import { validate } from '../middleware/validate.js';
 import { authenticate } from '../middleware/auth.js';
@@ -18,6 +19,7 @@ import {
   unlockLimiter,
   refreshLimiter,
   generalAuthLimiter,
+  passwordVerifyLimiter,
 } from '../middleware/rateLimiter.js';
 import {
   register,
@@ -34,6 +36,7 @@ import {
   verifyUnlock,
   resendVerification,
 } from '../controllers/authController.js';
+import { createInvitation } from '../controllers/invitationController.js';
 
 const router = express.Router();
 
@@ -100,6 +103,18 @@ router.post(
   unlockLimiter,
   validate(verifyUnlockSchema, 'body'),
   verifyUnlock,
+);
+
+// Minting an invitation (REGISTRATION_MODE=invite). Authenticated, and it carries
+// the master-password proof, so it spends the per-account proof budget every other
+// `authHash` route spends; `authenticate` runs first so that budget is keyed by the
+// account, never by anything the body names.
+router.post(
+  '/invitations',
+  authenticate,
+  passwordVerifyLimiter,
+  validate(createInvitationSchema, 'body'),
+  createInvitation,
 );
 
 // Email verification (no auth required, token-based)

@@ -57,6 +57,7 @@ import {
   requirePartContentLength,
 } from '../../src/middleware/documentPartBody.js';
 import { holdLargeBodySlot, parseLargeJsonBody } from '../../src/middleware/largeBodyAdmission.js';
+import { holdHeavyResponseSlot } from '../../src/middleware/heavyResponseAdmission.js';
 import { sanitizeRequestBody } from '../../src/middleware/sanitizeBody.js';
 
 export type HttpMethod = 'get' | 'post' | 'put' | 'delete';
@@ -281,6 +282,16 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
   },
   {
     method: 'post',
+    path: '/api/v1/auth/invitations',
+    auth: 'required',
+    csrf: 'required',
+    limiters: ['passwordVerifyLimiter'],
+    owned: null,
+    when: 'always',
+    note: 'Mints an invitation (REGISTRATION_MODE=invite) behind the master-password proof.',
+  },
+  {
+    method: 'post',
     path: '/api/v1/auth/verify-unlock',
     auth: 'required',
     csrf: 'required',
@@ -340,7 +351,7 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     path: '/api/v1/vault/items',
     auth: 'required',
     csrf: 'exempt',
-    limiters: [],
+    limiters: ['vaultListLimiter'],
     owned: null,
     when: 'always',
   },
@@ -349,7 +360,7 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     path: '/api/v1/vault/items/trash',
     auth: 'required',
     csrf: 'exempt',
-    limiters: [],
+    limiters: ['vaultListLimiter'],
     owned: null,
     when: 'always',
   },
@@ -660,6 +671,12 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     auth: 'required',
     csrf: 'required',
     limiters: ['heavyOpLimiter', 'passwordVerifyLimiter'],
+    chain: [
+      'heavyOpLimiter',
+      'passwordVerifyLimiter',
+      'holdHeavyResponseSlot',
+      'heavyResponseHandler',
+    ],
     owned: null,
     when: 'always',
   },
@@ -701,6 +718,7 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     auth: 'required',
     csrf: 'required',
     limiters: ['heavyOpLimiter'],
+    chain: ['heavyOpLimiter', 'holdHeavyResponseSlot', 'heavyResponseHandler'],
     owned: null,
     when: 'always',
   },
@@ -710,6 +728,7 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     auth: 'required',
     csrf: 'exempt',
     limiters: ['heavyOpLimiter'],
+    chain: ['heavyOpLimiter', 'holdHeavyResponseSlot', 'heavyResponseHandler'],
     owned: null,
     when: 'always',
   },
@@ -1136,6 +1155,7 @@ const ADMISSION_NAMES = new Map<unknown, string>([
   [holdPartUploadSlot, 'holdPartUploadSlot'],
   [parsePartUploadBody, 'parsePartUploadBody'],
   [holdLargeBodySlot, 'holdLargeBodySlot'],
+  [holdHeavyResponseSlot, 'holdHeavyResponseSlot'],
   [parseLargeJsonBody, 'parseLargeJsonBody'],
   [sanitizeRequestBody, BODY_SANITIZER],
 ]);
@@ -1150,6 +1170,7 @@ const NAMED_BODY_PARSERS: ReadonlySet<string> = new Set([
 export const SLOT_HOLDERS: ReadonlySet<string> = new Set([
   'holdPartUploadSlot',
   'holdLargeBodySlot',
+  'holdHeavyResponseSlot',
 ]);
 
 /**
@@ -1185,6 +1206,9 @@ export const UNNAMED_PARSER_PREFIX = 'unnamedBodyParser:';
 /** The name `holdingLargeBodySlot` gives the handler it wraps. */
 const LARGE_BODY_HANDLER = 'largeBodyHandler';
 
+/** The name `holdingHeavyResponseSlot` gives the handler it wraps. */
+const HEAVY_RESPONSE_HANDLER = 'heavyResponseHandler';
+
 /** The name `holdingPartUploadSlot` gives the handler it wraps. */
 const PART_UPLOAD_HANDLER = 'partUploadHandler';
 
@@ -1198,6 +1222,7 @@ const PART_UPLOAD_HANDLER = 'partUploadHandler';
 export const SLOT_HANDLERS: ReadonlyMap<string, string> = new Map([
   ['holdPartUploadSlot', PART_UPLOAD_HANDLER],
   ['holdLargeBodySlot', LARGE_BODY_HANDLER],
+  ['holdHeavyResponseSlot', HEAVY_RESPONSE_HANDLER],
 ]);
 
 const SLOT_HANDLER_NAMES: ReadonlySet<string> = new Set(SLOT_HANDLERS.values());

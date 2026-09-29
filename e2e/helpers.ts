@@ -44,7 +44,7 @@ export const TEST_PASSWORD = 'E2E-Test-P@ssword-2025!';
  * that is slow is not a bug the assertion should catch; a genuinely broken sign-in
  * fails on the ASSERTION (wrong URL, visible error), not on the clock.
  */
-const PBKDF2_STEP_TIMEOUT_MS = 90_000;
+export const PBKDF2_STEP_TIMEOUT_MS = 90_000;
 
 /**
  * Budget for an assertion that gates the FIRST mount of a lazily-loaded route.

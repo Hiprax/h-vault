@@ -184,6 +184,28 @@ export interface IUser {
    */
   releaseNotesSeenVersion?: string | undefined;
   deletionPending?: boolean | undefined;
+  /**
+   * The bytes this account's vault rows occupy (F-24): every item and folder,
+   * trashed ones included until they are purged, each counted as its stored BSON
+   * size without its placement fields (`utils/vaultQuota.ts` defines the measure).
+   * Written ONLY through `utils/vaultQuota.ts`: a conditional reservation before a
+   * write that grows the vault, a correction after it, and the hourly recount.
+   *
+   * ABSENT means "not installed yet" (an account created before the quota existed),
+   * never zero and never "over quota": the first write that needs it installs it
+   * from the rows, and the recount and migration v3 install it for idle accounts.
+   */
+  vaultBytes?: number | undefined;
+  /**
+   * Bumped by every write of {@link vaultBytes}. The recount writes its total only
+   * if this has not moved since it read the counter, so a recount can never erase a
+   * reservation that landed while it was counting.
+   */
+  quotaEpoch?: number | undefined;
+  /** When the recount last wrote {@link vaultBytes}; it takes the oldest (and absent) first. */
+  quotaRecountedAt?: Date | undefined;
+  /** When {@link vaultBytes} was last written by a write path; the recount leaves a busy account alone. */
+  vaultBytesWrittenAt?: Date | undefined;
   passwordChangedAt: Date;
   settings: IUserSettings;
   createdAt: Date;
@@ -398,6 +420,15 @@ const userSchema = new Schema<IUser>(
       default: undefined,
     },
     deletionPending: { type: Boolean, default: undefined },
+    // No schema default on any of the four: ABSENT is the state "not installed yet"
+    // that the quota helper installs from the rows, and a default would make every
+    // hydrated legacy account read as an empty vault (see the docblocks on `IUser`).
+    // The three bookkeeping fields are `select: false` because the profile answers
+    // with a spread of the whole document.
+    vaultBytes: { type: Number, default: undefined },
+    quotaEpoch: { type: Number, default: undefined, select: false },
+    quotaRecountedAt: { type: Date, default: undefined, select: false },
+    vaultBytesWrittenAt: { type: Date, default: undefined, select: false },
     passwordChangedAt: { type: Date, required: true, default: () => new Date(0) },
     settings: { type: userSettingsSchema, default: () => ({}) },
   },
@@ -435,6 +466,9 @@ userSchema.index({
 // mid-deletion and is planner-eligible for the exact-equality query (avoiding a
 // full COLLSCAN of `users`).
 userSchema.index({ deletionPending: 1 }, { partialFilterExpression: { deletionPending: true } });
+// The hourly vault-quota recount takes the accounts recounted longest ago (and those
+// never recounted, which sort first) in bounded batches.
+userSchema.index({ quotaRecountedAt: 1 });
 
 // ----- Model -----
 

@@ -1,6 +1,5 @@
 import express from 'express';
-import type { NextFunction, Request, RequestHandler, Response } from 'express';
-import { httpErrors } from '@hiprax/errors';
+import type { RequestHandler } from 'express';
 import {
   MAX_IN_FLIGHT_LARGE_BODY_REQUESTS,
   MAX_IN_FLIGHT_LARGE_BODY_REQUESTS_PER_USER,
@@ -8,8 +7,7 @@ import {
 import { createModuleLogger } from '../utils/logger.js';
 import { createKeyedQuota, createSemaphore } from '../utils/partSemaphore.js';
 import type { KeyedQuota, Semaphore } from '../utils/partSemaphore.js';
-import { admitWithinBudget, createHandlerSettledRelease } from './admission.js';
-import type { SlotHandler } from './admission.js';
+import { createSlotHolder } from './admission.js';
 
 const logger = createModuleLogger('large-body-admission');
 
@@ -114,17 +112,19 @@ export const largeBodyUserQuota: KeyedQuota = createKeyedQuota(
 export const LARGE_BODY_BUSY_MESSAGE =
   'Wait for the restore or vault key rotation already in progress on this account to finish, then try again.';
 
-/** When a large-body slot comes back: once the response closed AND the handler settled. */
-const settledRelease = createHandlerSettledRelease();
-
-/**
- * The identity a large-body request is charged to. `authenticate` is mounted at
- * ROUTER level on both routers, so `req.user` is always set here; the shared
- * fallback is the direction that fails CLOSED, exactly as the part holder's is.
- */
-function largeBodyIdentity(req: Request): string {
-  return req.user?._id ?? 'anonymous';
-}
+/** The holder and its wrapper, built on the one copy of the slot mechanics. */
+const largeBodySlot = createSlotHolder({
+  semaphore: largeBodySemaphore,
+  quota: largeBodyUserQuota,
+  busyMessage: LARGE_BODY_BUSY_MESSAGE,
+  logRefusal() {
+    logger.warn('Large-body request refused: the account already has one in flight', {
+      limit: MAX_IN_FLIGHT_LARGE_BODY_REQUESTS_PER_USER,
+    });
+  },
+  handlerName: 'largeBodyHandler',
+  unadmittedMessage: 'Large-body handler reached without an admission slot',
+});
 
 /**
  * Charges this account's share, then holds one {@link largeBodySemaphore} slot from
@@ -140,40 +140,11 @@ function largeBodyIdentity(req: Request): string {
  * send a full body, drop the connection, and send the next, with every one of them
  * resident at once.
  */
-export function holdLargeBodySlot(req: Request, res: Response, next: NextFunction): void {
-  admitWithinBudget(res, next, {
-    semaphore: largeBodySemaphore,
-    quota: largeBodyUserQuota,
-    identity: largeBodyIdentity(req),
-    refuse(_refused, fail) {
-      // The identity is deliberately NOT logged, as the rate limiters omit their key.
-      logger.warn('Large-body request refused: the account already has one in flight', {
-        limit: MAX_IN_FLIGHT_LARGE_BODY_REQUESTS_PER_USER,
-      });
-      fail(httpErrors.conflict(LARGE_BODY_BUSY_MESSAGE));
-    },
-    granted() {
-      settledRelease.admit(res);
-    },
-    closed(release) {
-      settledRelease.closed(res, release);
-    },
-  });
-}
+export const holdLargeBodySlot = largeBodySlot.hold;
 
 /**
  * Wraps the handler of a large-body route so the slot {@link holdLargeBodySlot}
  * took is held until the handler has SETTLED, not merely until the response closed.
  * A handler reached with no slot is refused with 500 rather than run.
  */
-export function holdingLargeBodySlot(handler: SlotHandler): RequestHandler {
-  return async function largeBodyHandler(req, res, next): Promise<void> {
-    await settledRelease.run(
-      handler,
-      req,
-      res,
-      next,
-      'Large-body handler reached without an admission slot',
-    );
-  };
-}
+export const holdingLargeBodySlot = largeBodySlot.holding;

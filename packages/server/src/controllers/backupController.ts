@@ -1,6 +1,6 @@
 import type { Request, Response } from 'express';
 import { catchAsync, httpErrors } from '@hiprax/errors';
-import { createModuleLogger } from '../utils/logger.js';
+import { createModuleLogger, errorMessage } from '../utils/logger.js';
 import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
 import { User } from '../models/User.js';
@@ -27,7 +27,9 @@ import {
 } from '../utils/controllerHelpers.js';
 import { carriesBoundField } from '../utils/vaultFieldFormat.js';
 import { estimateItemJsonSize, estimateFolderJsonSize } from '../utils/sizeEstimator.js';
-import { collectDocumentSummary } from '../utils/documentSummary.js';
+import { collectDocumentSummary, type DocumentSummary } from '../utils/documentSummary.js';
+import { closingMembers, forEachRow, jsonArrayOf, sendJsonStream } from '../utils/jsonStream.js';
+import { sendDeadlineMs } from '../utils/heavyResponseBudget.js';
 import { hasCycle } from '../utils/folderGraph.js';
 import {
   APP_VERSION,
@@ -134,6 +136,149 @@ async function countNetNewRestoreRows(
   return netNew;
 }
 
+/** The rows a backup carries: every folder, and every live (untrashed) item. */
+const backupFolderRows = (userId: string) =>
+  Folder.find({ userId }).select('-sourceRefId').lean().cursor();
+const backupItemRows = (userId: string) =>
+  VaultItem.find({ userId, deletedAt: { $exists: false } })
+    .select('-sourceRefId')
+    .lean()
+    .cursor();
+
+/** What a backup document counted while it was produced. */
+interface BackupTally {
+  itemCount: number;
+  folderCount: number;
+}
+
+type BackupAccount = NonNullable<Awaited<ReturnType<typeof readBackupAccount>>>;
+
+/** The account a backup is built for, with the key material the file carries. */
+function readBackupAccount(userId: string) {
+  return User.findById(userId).lean();
+}
+
+/** Room left in an envelope's counts for the digits a full vault's counts take. */
+const ENVELOPE_COUNT_DIGITS = 16;
+
+/** The members a backup document closes with: wrapped keys, counts, the document summary. */
+function backupClosingMembers(
+  user: BackupAccount,
+  tally: BackupTally,
+  documentSummary: DocumentSummary,
+): Record<string, unknown> {
+  return {
+    encryptedVaultKey: user.encryptedVaultKey,
+    vaultKeyIv: user.vaultKeyIv,
+    vaultKeyTag: user.vaultKeyTag,
+    backupEncryption: {
+      encryptedBWK: user.settings.backup.encryptedBWK,
+      bwkIv: user.settings.backup.bwkIv,
+      bwkTag: user.settings.backup.bwkTag,
+      bwkSalt: user.settings.backup.bwkSalt,
+      bwkEncryptedVaultKey: user.settings.backup.bwkEncryptedVaultKey,
+      bwkVaultKeyIv: user.settings.backup.bwkVaultKeyIv,
+      bwkVaultKeyTag: user.settings.backup.bwkVaultKeyTag,
+    },
+    metadata: { itemCount: tally.itemCount, folderCount: tally.folderCount },
+    // The documents this backup does NOT contain. Optional and additive on the
+    // wire: a backup written before this field existed must still restore, which
+    // is why nothing downstream may require it. See `utils/documentSummary.ts`
+    // for why a backup mentions documents at all.
+    documentSummary,
+  };
+}
+
+/** The document's opening, up to the items array. */
+const backupHead = (): string =>
+  `{"version":${JSON.stringify(APP_VERSION)},"exportDate":${JSON.stringify(new Date().toISOString())},"items":`;
+
+/**
+ * The size check a backup is refused by, run BEFORE the first byte is produced, so
+ * a refusal is a whole 413 envelope rather than a truncated file.
+ *
+ * The envelope (head, empty arrays, wrapped keys, counts, document summary) is
+ * measured exactly; the rows are walked on both cursors with the conservative
+ * field-length estimator (`utils/sizeEstimator.ts`, the same one the export uses),
+ * one row at a time in bounded memory, stopping at the first row that crosses the
+ * budget, so an oversized vault is refused after a fraction of it has been read.
+ * Returns the estimate, which the download's send deadline is derived from.
+ */
+async function estimateBackupBytes(
+  userId: string,
+  user: BackupAccount,
+  documentSummary: DocumentSummary,
+  maxSizeBytes: number,
+): Promise<number> {
+  const envelope =
+    Buffer.byteLength(
+      backupHead() +
+        '[],"folders":[]' +
+        closingMembers(
+          backupClosingMembers(user, { itemCount: 0, folderCount: 0 }, documentSummary),
+        ),
+      'utf8',
+    ) + ENVELOPE_COUNT_DIGITS;
+  let estimatedSize = envelope;
+  const refuseDuringCollection = (): never => {
+    throw httpErrors.payloadTooLarge(
+      'Backup size exceeds the maximum allowed size during collection',
+    );
+  };
+  // `forEachRow` closes each cursor on every exit, the refusal thrown here included.
+  await forEachRow(backupFolderRows(userId), (folder) => {
+    estimatedSize += estimateFolderJsonSize(folder as unknown as Record<string, unknown>);
+    if (estimatedSize > maxSizeBytes) refuseDuringCollection();
+  });
+  await forEachRow(backupItemRows(userId), (item) => {
+    estimatedSize += estimateItemJsonSize(item as unknown as Record<string, unknown>);
+    if (estimatedSize > maxSizeBytes) refuseDuringCollection();
+  });
+  if (estimatedSize > maxSizeBytes) {
+    throw httpErrors.payloadTooLarge(
+      `Backup size exceeds the maximum allowed size (${String(config.BACKUP_MAX_SIZE_MB)} MB)`,
+    );
+  }
+  return estimatedSize;
+}
+
+/**
+ * The backup document, a chunk at a time: its fixed head, the items and the folders
+ * straight from their cursors, then the account's wrapped keys, the counts and the
+ * document summary. The same member order a whole-object `JSON.stringify` of it
+ * produced, and the client verifies the file's `integrity` HMAC over its own
+ * re-serialisation after parsing, so the layout of the bytes is not part of any
+ * contract.
+ *
+ * `beforeLastChunk` runs once every row has been produced and before the closing
+ * brace is, which is where the download records itself: after the content, and
+ * before the client can observe the end of the response.
+ */
+async function* backupDocument(
+  userId: string,
+  user: BackupAccount,
+  documentSummary: DocumentSummary,
+  tally: BackupTally,
+  beforeLastChunk?: () => Promise<void>,
+): AsyncGenerator<string> {
+  yield backupHead();
+  yield* jsonArrayOf(backupItemRows(userId), () => {
+    tally.itemCount += 1;
+  });
+  yield ',"folders":';
+  yield* jsonArrayOf(backupFolderRows(userId), () => {
+    tally.folderCount += 1;
+  });
+  yield closingMembers(backupClosingMembers(user, tally, documentSummary)).slice(0, -1);
+  await beforeLastChunk?.();
+  yield '}';
+}
+
+/**
+ * The whole backup as one string, for the one caller that needs the file whole:
+ * the mailed backup, whose attachment has to be complete before it is sent. The
+ * download streams the same document instead.
+ */
 async function collectBackupData(
   userId: string,
   maxSizeBytes: number,
@@ -141,76 +286,14 @@ async function collectBackupData(
   json: string;
   itemCount: number;
 }> {
-  const user = await User.findById(userId).lean();
-
-  // Stream both folders and vault items via cursors and accumulate against a
-  // shared size budget. Folders run first because items frequently reference
-  // them in the final payload structure. Both share the same field-length
-  // estimator (see `utils/sizeEstimator.ts`) used by the export endpoint, so
-  // we never serialize per-row in the hot loop.
-  const items: unknown[] = [];
-  const folders: unknown[] = [];
-  let estimatedSize = 0;
-
-  const folderCursor = Folder.find({ userId }).select('-sourceRefId').lean().cursor();
-  for await (const folder of folderCursor) {
-    estimatedSize += estimateFolderJsonSize(folder as unknown as Record<string, unknown>);
-    if (estimatedSize > maxSizeBytes) {
-      throw httpErrors.payloadTooLarge(
-        `Backup size exceeds the maximum allowed size during collection`,
-      );
-    }
-    folders.push(folder);
-  }
-
-  const itemCursor = VaultItem.find({ userId, deletedAt: { $exists: false } })
-    .select('-sourceRefId')
-    .lean()
-    .cursor();
-  for await (const item of itemCursor) {
-    estimatedSize += estimateItemJsonSize(item as unknown as Record<string, unknown>);
-    if (estimatedSize > maxSizeBytes) {
-      throw httpErrors.payloadTooLarge(
-        `Backup size exceeds the maximum allowed size during collection`,
-      );
-    }
-    items.push(item);
-  }
-
+  const user = await readBackupAccount(userId);
+  if (!user) throw httpErrors.notFound('User not found');
   const documentSummary = await collectDocumentSummary(userId);
-
-  const backupPayload = {
-    version: APP_VERSION,
-    exportDate: new Date().toISOString(),
-    items,
-    folders,
-    encryptedVaultKey: user?.encryptedVaultKey,
-    vaultKeyIv: user?.vaultKeyIv,
-    vaultKeyTag: user?.vaultKeyTag,
-    backupEncryption: {
-      encryptedBWK: user?.settings.backup.encryptedBWK,
-      bwkIv: user?.settings.backup.bwkIv,
-      bwkTag: user?.settings.backup.bwkTag,
-      bwkSalt: user?.settings.backup.bwkSalt,
-      bwkEncryptedVaultKey: user?.settings.backup.bwkEncryptedVaultKey,
-      bwkVaultKeyIv: user?.settings.backup.bwkVaultKeyIv,
-      bwkVaultKeyTag: user?.settings.backup.bwkVaultKeyTag,
-    },
-    metadata: {
-      itemCount: items.length,
-      folderCount: folders.length,
-    },
-    // The documents this backup does NOT contain. Optional and additive on the
-    // wire: a backup written before this field existed must still restore, which
-    // is why nothing downstream may require it. See `utils/documentSummary.ts`
-    // for why a backup mentions documents at all.
-    documentSummary,
-  };
-
-  return {
-    json: JSON.stringify(backupPayload),
-    itemCount: items.length,
-  };
+  await estimateBackupBytes(userId, user, documentSummary, maxSizeBytes);
+  const tally: BackupTally = { itemCount: 0, folderCount: 0 };
+  let json = '';
+  for await (const chunk of backupDocument(userId, user, documentSummary, tally)) json += chunk;
+  return { json, itemCount: tally.itemCount };
 }
 
 /**
@@ -575,10 +658,26 @@ export const triggerBackup = catchAsync(async (req: Request, res: Response): Pro
   });
 });
 
+/**
+ * `GET /backup/download`: the backup file, STREAMED.
+ *
+ * Admitted through the heavy-response budget (`middleware/heavyResponseAdmission.ts`)
+ * before this runs. The size is decided first, by an estimate pass over the rows
+ * (`estimateBackupBytes`), so an oversized vault is refused with a whole 413 before
+ * a byte of the file exists; then the document is sent from the cursors with
+ * backpressure, under an absolute send deadline derived from that estimate.
+ *
+ * The download is recorded (a `BackupLog` row and the `backup_download` audit
+ * entry) once the content has been produced, before the final byte, so it is on
+ * record by the time the client sees the file end. A transfer that ends early (the
+ * client left, the deadline passed, a cursor failed) is recorded too, as failed and
+ * `completed: false`: whatever reached the client before the cut is still a copy of
+ * the vault that left the server.
+ */
 export const downloadBackup = catchAsync(async (req: Request, res: Response): Promise<void> => {
   const userId = getUserId(req);
 
-  const user = await User.findById(userId).lean();
+  const user = await readBackupAccount(userId);
 
   if (!user) {
     throw httpErrors.notFound('User not found');
@@ -589,41 +688,64 @@ export const downloadBackup = catchAsync(async (req: Request, res: Response): Pr
   }
 
   const maxSizeBytes = config.BACKUP_MAX_SIZE_MB * 1024 * 1024;
-  const { json, itemCount } = await collectBackupData(userId, maxSizeBytes);
-  const fileSizeBytes = Buffer.byteLength(json, 'utf8');
-
-  // Final size check on the complete serialized payload (includes metadata overhead)
-  if (fileSizeBytes > maxSizeBytes) {
-    throw httpErrors.payloadTooLarge(
-      `Backup size exceeds the maximum allowed size (${String(config.BACKUP_MAX_SIZE_MB)} MB)`,
-    );
-  }
-
-  await BackupLog.create({
-    userId,
-    status: 'success',
-    fileSizeBytes,
-    itemCount,
-    sentTo: ['download'],
-  });
+  const documentSummary = await collectDocumentSummary(userId);
+  const estimate = await estimateBackupBytes(userId, user, documentSummary, maxSizeBytes);
 
   const downloadCtx = getRequestContext(req);
-  await createAuditLog(
-    userId,
-    'backup_download',
-    { fileSizeBytes, itemCount },
-    downloadCtx.ip,
-    downloadCtx.userAgent,
-  );
+  const tally: BackupTally = { itemCount: 0, folderCount: 0 };
+  // An object rather than a `let`: the flag is set inside `record`, which the
+  // compiler cannot see running before the check below.
+  const recording = { done: false };
+  const record = async (completed: boolean, fileSizeBytes: number): Promise<void> => {
+    recording.done = true;
+    await BackupLog.create({
+      userId,
+      status: completed ? 'success' : 'failed',
+      fileSizeBytes,
+      itemCount: tally.itemCount,
+      sentTo: ['download'],
+      ...(completed ? {} : { errorMessage: 'The download ended before the whole file was sent' }),
+    });
+    await createAuditLog(
+      userId,
+      'backup_download',
+      { fileSizeBytes, itemCount: tally.itemCount, completed },
+      downloadCtx.ip,
+      downloadCtx.userAgent,
+    );
+  };
 
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
   const filename = `hvault-backup-${timestamp}.enc`;
 
+  res.status(200);
   res.setHeader('Content-Type', 'application/json');
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-  res.setHeader('Content-Length', String(fileSizeBytes));
 
-  res.status(200).send(json);
+  let produced = 0;
+  const outcome = await sendJsonStream(
+    res,
+    (async function* counting() {
+      for await (const chunk of backupDocument(userId, user, documentSummary, tally, () =>
+        record(true, produced + 1),
+      )) {
+        produced += Buffer.byteLength(chunk, 'utf8');
+        yield chunk;
+      }
+    })(),
+    { deadlineMs: sendDeadlineMs(estimate), label: 'Backup download' },
+  );
+
+  if (!outcome.completed && !recording.done) {
+    try {
+      await record(false, outcome.bytes);
+    } catch (err: unknown) {
+      logger.error('Could not record an interrupted backup download', {
+        userId,
+        error: errorMessage(err),
+      });
+    }
+  }
 });
 
 export const getBackupHistory = catchAsync(async (req: Request, res: Response): Promise<void> => {

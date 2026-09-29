@@ -6,6 +6,7 @@ import {
   heavyOpLimiter,
   passwordVerifyLimiter,
   vaultItemWriteLimiter,
+  vaultListLimiter,
 } from '../middleware/rateLimiter.js';
 import {
   LARGE_JSON_BODY_LIMIT_BYTES,
@@ -55,8 +56,8 @@ router.use(authenticate);
 
 // ── Item CRUD ────────────────────────────────────────────────────────
 
-router.get('/items', validate(listVaultItemsSchema, 'query'), listItems);
-router.get('/items/trash', validate(listTrashSchema, 'query'), listTrash);
+router.get('/items', vaultListLimiter, validate(listVaultItemsSchema, 'query'), listItems);
+router.get('/items/trash', vaultListLimiter, validate(listTrashSchema, 'query'), listTrash);
 router.get('/items/:id', validateObjectId(), getItem);
 // Every item mutation writes an audit row that is kept for 365 days, so each one
 // carries `vaultItemWriteLimiter` (per user; see its docblock for why it is not
