@@ -120,6 +120,7 @@ import { startTrashCleanupJob } from '../src/jobs/trashCleanup.js';
 import { sendEmail } from '../src/utils/email.js';
 import { createTestUser, sampleVaultItem, sampleFolder } from './helpers.js';
 import { useReplicaSetConnection } from './mongoHarness.js';
+import { seedConfirmedRecipients } from './support/backupRecipients.js';
 
 const mockedSchedule = vi.mocked(cron.schedule);
 const mockedSendEmail = vi.mocked(sendEmail);
@@ -317,7 +318,9 @@ describe('backupScheduler — processUserBackup edge and error paths', () => {
 
     const good = 'good-recipient@example.com';
     const bad = 'bad-recipient@example.com';
-    const user = await createBackupUser({ backupEmails: [good, bad] });
+    const user = await createBackupUser();
+    // F-05: the scheduler mails CONFIRMED recipients only; both of these have confirmed.
+    await seedConfirmedRecipients(user._id, [good, bad]);
     await VaultItem.create({ ...sampleVaultItem(), userId: user._id });
 
     mockedSendEmail.mockImplementation(async (to: string) =>

@@ -150,6 +150,22 @@ export const MAX_SESSIONS = 50;
 export const MAX_TRUSTED_DEVICES = 10;
 export const AUTH_TAG_BYTES = 16;
 export const MAX_BACKUP_EMAILS = 10;
+// How many emails the backup feature may send on behalf of ONE account in one UTC
+// day: every mailed backup (one per recipient), every recipient confirmation and
+// every "backup not sent" notice to the owner. A request-rate limiter bounds a
+// burst, not a day, and each of these is a message the server writes to an
+// address on the account's behalf, so the day is what has to be bounded. Counted
+// by a per-account day counter claimed before each send, never by log rows.
+export const MAX_BACKUP_MAILS_PER_USER_PER_DAY = 30;
+// Where a backup recipient stands. `pending`: the owner approved the address with
+// the master password (or it was carried over from before recipients were
+// confirmed, in which case the owner has NOT yet approved it) and the address has
+// not confirmed. `confirmed`: the address followed its confirmation link, or it is
+// the account's own verified address. `suspended`: a password reset, a password
+// change or "log out everywhere" happened since; it receives nothing until the
+// owner approves the list again with the master password.
+export const BACKUP_RECIPIENT_STATES = ['pending', 'confirmed', 'suspended'] as const;
+export type BackupRecipientState = (typeof BACKUP_RECIPIENT_STATES)[number];
 export const MAX_ITEMS_PER_USER = 10_000;
 export const MAX_FOLDERS_PER_USER = 500;
 export const MAX_SORT_ORDER = 10_000;
@@ -1260,6 +1276,14 @@ export const AUDIT_ACTIONS = [
   // An inviting account minting an invitation to register (REGISTRATION_MODE=
   // invite). Security, not activity: it is how an account lets another one in.
   'invitation_create',
+  // Where mailed backups go. Each is a change to where the whole vault leaves the
+  // server, so all three are security rows: the owner approving the recipient list
+  // with the master password, a recipient confirming its address through the
+  // mailed link, and a password reset, password change or "log out everywhere"
+  // suspending every third-party recipient until the owner approves them again.
+  'backup_recipients_update',
+  'backup_recipient_confirmed',
+  'backup_recipients_suspended',
 ] as const;
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];
 

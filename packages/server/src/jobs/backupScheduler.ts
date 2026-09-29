@@ -4,7 +4,7 @@ import { User } from '../models/User.js';
 import { VaultItem } from '../models/VaultItem.js';
 import { Folder } from '../models/Folder.js';
 import { BackupLog } from '../models/BackupLog.js';
-import { sendEmail, escapeHtml } from '../utils/email.js';
+import { sendEmail, escapeHtml, isEmailConfigured } from '../utils/email.js';
 import { config } from '../config/index.js';
 import { APP_VERSION, maskEmail } from '@hvault/shared';
 import { acquireJobLock, releaseJobLock } from '../utils/jobLock.js';
@@ -12,6 +12,16 @@ import { trackJob } from '../utils/jobTracker.js';
 import { estimateItemJsonSize, estimateFolderJsonSize } from '../utils/sizeEstimator.js';
 import { collectDocumentSummary, type DocumentSummary } from '../utils/documentSummary.js';
 import { acquireWithin, heavyResponseSemaphore } from '../utils/heavyResponseBudget.js';
+import { claimOutboundMail } from '../utils/outboundMailBudget.js';
+import {
+  confirmedRecipientsFor,
+  currentRecipientsFor,
+  noteBackupDelivered,
+  recordUndeliverableBackup,
+  type UndeliverableReason,
+} from '../utils/backupRecipients.js';
+import { recordJobAuditEntries } from '../services/auditService.js';
+import type { IBackupRecipientDoc } from '../models/User.js';
 
 const logger = createModuleLogger('jobs/backup');
 
@@ -61,6 +71,17 @@ type ScheduledUser = Parameters<typeof buildAndMailBackup>[0];
  * (a job has no request to refuse) for at most {@link SCHEDULED_BACKUP_SLOT_POLICY}.
  */
 async function processUserBackup(user: ScheduledUser): Promise<void> {
+  // Who may receive it is decided BEFORE a slot is taken: a run that can mail
+  // nobody is recorded without reading the vault or holding a slot another
+  // account's backup is waiting for.
+  if (confirmedRecipientsFor(user).length === 0) {
+    const userId = String(user._id);
+    logger.info(`Backup for user ${userId} not sent: no recipient has confirmed`);
+    await recordUndeliverable(userId, 'no_confirmed_recipient').catch((err: unknown) => {
+      logger.error(`Could not record the undeliverable backup of user ${userId}: ${String(err)}`);
+    });
+    return;
+  }
   const release = await acquireWithin(heavyResponseSemaphore, SCHEDULED_BACKUP_SLOT_POLICY.waitMs);
   if (release === null) {
     const userId = String(user._id);
@@ -83,16 +104,35 @@ async function processUserBackup(user: ScheduledUser): Promise<void> {
   }
 }
 
+/**
+ * Records a scheduled run that mails nothing (see `recordUndeliverableBackup`),
+ * with the audit row written the way jobs write theirs.
+ */
+function recordUndeliverable(userId: string, reason: UndeliverableReason): Promise<void> {
+  return recordUndeliverableBackup(userId, reason, (metadata) =>
+    recordJobAuditEntries([
+      {
+        userId,
+        action: 'backup_failed',
+        metadata,
+        ipAddress: 'system',
+        userAgent: 'system/backup-scheduler',
+      },
+    ]),
+  );
+}
+
 async function buildAndMailBackup(user: {
   _id: unknown;
   email: string;
+  emailVerified?: boolean;
   encryptedVaultKey: string;
   vaultKeyIv: string;
   vaultKeyTag: string;
   settings: {
     backup: {
       enabled: boolean;
-      backupEmails?: string[];
+      backupRecipients?: IBackupRecipientDoc[];
       encryptedBWK?: string;
       bwkIv?: string;
       bwkTag?: string;
@@ -104,9 +144,10 @@ async function buildAndMailBackup(user: {
   };
 }): Promise<void> {
   const userId = String(user._id);
-  const emails = user.settings.backup.backupEmails?.length
-    ? user.settings.backup.backupEmails
-    : [user.email];
+  // The ONE recipient rule the manual trigger uses too: confirmed entries only, the
+  // account's own verified address when there is no list, and NEVER the account
+  // address as a stand-in for a list nobody on has confirmed.
+  let emails = confirmedRecipientsFor(user);
 
   try {
     const maxSizeBytes = config.BACKUP_MAX_SIZE_MB * 1024 * 1024;
@@ -222,6 +263,24 @@ async function buildAndMailBackup(user: {
       return;
     }
 
+    // Who may receive it NOW, read fresh from the primary: the account was read at
+    // the start of the run and the slot may have been waited for, and a recovery
+    // that suspended a recipient in between must stop the mail to it.
+    emails = await currentRecipientsFor(userId);
+    if (emails.length === 0) {
+      logger.info(`Backup for user ${userId} not sent: no recipient is confirmed any more`);
+      await recordUndeliverable(userId, 'no_confirmed_recipient');
+      return;
+    }
+
+    // The day's outbound budget, for every recipient at once, before the first send
+    // (not claimed with email off: nothing would be sent).
+    if (isEmailConfigured() && !(await claimOutboundMail(userId, emails.length))) {
+      logger.info(`Backup for user ${userId} not sent: the daily email limit is reached`);
+      await recordUndeliverable(userId, 'daily_mail_budget');
+      return;
+    }
+
     let emailsSentCount = 0;
     const failedEmails: string[] = [];
 
@@ -274,6 +333,7 @@ async function buildAndMailBackup(user: {
         'settings.backup.lastBackupAt': new Date(),
         'settings.backup.lastBackupStatus': 'success',
       });
+      await noteBackupDelivered(userId);
     } catch (statusError) {
       await User.findByIdAndUpdate(userId, {
         'settings.backup.lastBackupAt': new Date(),

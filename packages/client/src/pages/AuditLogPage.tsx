@@ -91,6 +91,12 @@ const ACTION_COLORS: Record<string, string> = {
   '2fa_backup_code_used': 'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400',
   '2fa_backup_codes_regenerated':
     'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400',
+  // Where mailed backups go: a changed list and suspended recipients are things the
+  // owner should notice (amber); an address confirming is the expected next step.
+  backup_recipients_update: 'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400',
+  backup_recipient_confirmed: 'bg-cyan-100 text-cyan-800 dark:bg-cyan-900/30 dark:text-cyan-400',
+  backup_recipients_suspended:
+    'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400',
 };
 
 const ACTION_LABELS: Record<string, string> = {
@@ -126,6 +132,9 @@ const ACTION_LABELS: Record<string, string> = {
   document_restore: 'Document Restored',
   document_purge: 'Document Deleted Permanently',
   invitation_create: 'Invitation Created',
+  backup_recipients_update: 'Backup Recipients Changed',
+  backup_recipient_confirmed: 'Backup Recipient Confirmed',
+  backup_recipients_suspended: 'Backup Recipients Suspended',
 };
 
 /**

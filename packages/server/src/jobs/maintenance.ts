@@ -6,6 +6,7 @@ import { trimActivityAuditRows, trimStrangerAuditRows } from '../services/auditS
 import { acquireJobLock, releaseJobLock } from '../utils/jobLock.js';
 import { trackJob } from '../utils/jobTracker.js';
 import { capOnDemandRanges } from '../utils/breachRangeCap.js';
+import { sendOwedRecipientConfirmations } from '../utils/backupRecipients.js';
 
 const logger = createModuleLogger('jobs/maintenance');
 
@@ -154,6 +155,11 @@ export async function trimEveryAccountsAuditLog(
 const MAINTENANCE_STEPS: readonly MaintenanceStep[] = [
   { name: 'audit-trim', run: () => trimEveryAccountsAuditLog() },
   { name: 'hibp-range-cap', run: () => capOnDemandRanges() },
+  // Phase 6 (F-05): the confirmation mails backup recipients are still owed —
+  // only ever for addresses the owner approved with the master password, within
+  // each account's daily email budget. Last and short (one minute): the two steps
+  // above budget 13 of the lock's 15 minutes.
+  { name: 'backup-recipient-confirmations', run: () => sendOwedRecipientConfirmations() },
 ];
 
 /**
@@ -200,7 +206,8 @@ export async function runMaintenance(
  * Schedules {@link runMaintenance} hourly at :15 UTC — off :00, where the backup
  * scheduler, the token cleanup and the nightly trash purge fire, and off :30, the
  * document collector's minute. Started on the primary worker only, like every other cron,
- * and unconditionally: none of its steps needs object storage or SMTP.
+ * and unconditionally: no step needs object storage, and the one step that sends
+ * mail (recipient confirmations) does nothing while email is not configured.
  */
 export function startMaintenanceJob(): ScheduledTask {
   const task = cron.schedule(

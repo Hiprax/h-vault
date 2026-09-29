@@ -72,6 +72,7 @@ import {
   seedItem,
   type TestUser,
 } from './helpers.js';
+import { seedConfirmedRecipients } from './support/backupRecipients.js';
 
 const BWK_SETUP = {
   encryptedBWK: 'test-encrypted-bwk-data',
@@ -290,9 +291,8 @@ describe('app.ts / backup / folder / migrations — uncovered behaviour', () => 
   describe('POST /api/v1/backup/trigger — e-mail delivery', () => {
     it('records a partial delivery failure in the response, the BackupLog and the audit log', async () => {
       await configureBackup(agent, user);
-      await put(agent, '/api/v1/backup/settings', user.accessToken, {
-        backupEmails: ['good@example.com', 'bad@example.com'],
-      });
+      // F-05: only CONFIRMED recipients are mailed; these two have confirmed.
+      await seedConfirmedRecipients(user.id, ['good@example.com', 'bad@example.com']);
       await seedItem(user.id);
 
       cfgState.emailConfigured = true;
@@ -331,9 +331,7 @@ describe('app.ts / backup / folder / migrations — uncovered behaviour', () => 
 
     it('marks the backup failed when every recipient delivery fails', async () => {
       await configureBackup(agent, user);
-      await put(agent, '/api/v1/backup/settings', user.accessToken, {
-        backupEmails: ['a@example.com', 'b@example.com'],
-      });
+      await seedConfirmedRecipients(user.id, ['a@example.com', 'b@example.com']);
 
       cfgState.emailConfigured = true;
       mockSendEmail.mockResolvedValue({ success: false, message: 'transporter_not_configured' });

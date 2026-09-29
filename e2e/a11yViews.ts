@@ -36,12 +36,12 @@ export interface A11yView {
  *
  * The order is not arbitrary, and four constraints fix it:
  *
- *   - The SEVEN unauthenticated pages come first, and they have to. Three of them
+ *   - The EIGHT unauthenticated pages come first, and they have to. Three of them
  *     — the sign-in page, the registration page and `/forgot-password` — sit
  *     behind `PublicOnlyRoute` (`App.tsx`), which REDIRECTS a signed-in visitor
  *     away, so before the sign-in is not merely the cheaper place to scan them,
  *     it is the only point in the walk where they render at all. The remaining
- *     four are top-level routes that a signed-in browser could reach, but only
+ *     five are top-level routes that a signed-in browser could reach, but only
  *     through a full `page.goto()`, which reloads the SPA and drops the
  *     in-memory vault key; scanning them here costs nothing and keeps the
  *     authenticated walk on SPA navigation throughout.
@@ -78,6 +78,14 @@ export const A11Y_VIEWS = [
     id: 'unlock-account',
     description:
       'the account-unlock page after the server rejected its token, settled on the failure card',
+  },
+  {
+    // The page a backup recipient opens from its confirmation email (F-05). Its
+    // token rides in the URL FRAGMENT, and the server refuses this one, so the
+    // settled state is the failure card, like the two views above.
+    id: 'confirm-recipient',
+    description:
+      'the backup-recipient confirmation page after the server rejected its fragment token, settled on the failure card',
   },
   {
     // Signed OUT, which decides what the page draws: its single link is

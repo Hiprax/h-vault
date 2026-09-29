@@ -550,7 +550,9 @@ export const DEFECTS = {
 
   'test:resource': {
     // The exact refactor this gate was built for, and the reason it is worth its
-    // minute: `collectBackupData`'s item cursor replaced by `find().lean()`.
+    // minute: the backup size guard's item cursor (`estimateBackupBytes`, the pass
+    // that decides a 413 before the first byte is produced) replaced by
+    // `find().lean()`.
     //
     // Nothing else in the repository notices. The endpoint returns the same 413
     // for the same oversized vault, with the same message; every backup test
@@ -571,15 +573,17 @@ export const DEFECTS = {
     mutate: {
       'packages/server/src/controllers/backupController.ts': (text) =>
         text.replace(
-          `  const itemCursor = VaultItem.find({ userId, deletedAt: { $exists: false } })
-    .select('-sourceRefId')
-    .lean()
-    .cursor();
-  for await (const item of itemCursor) {`,
+          `  await forEachRow(backupItemRows(userId), (item) => {
+    estimatedSize += estimateItemJsonSize(item as unknown as Record<string, unknown>);
+    if (estimatedSize > maxSizeBytes) refuseDuringCollection();
+  });`,
           `  const allItems = await VaultItem.find({ userId, deletedAt: { $exists: false } })
     .select('-sourceRefId')
     .lean();
-  for (const item of allItems) {`,
+  for (const item of allItems) {
+    estimatedSize += estimateItemJsonSize(item as unknown as Record<string, unknown>);
+    if (estimatedSize > maxSizeBytes) refuseDuringCollection();
+  }`,
         ),
     },
     // The assertion's own failure text, which a PASSING run cannot contain — the

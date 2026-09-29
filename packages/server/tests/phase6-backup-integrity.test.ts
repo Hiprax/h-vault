@@ -24,6 +24,7 @@ import {
   getCsrf,
   type TestUser,
 } from './helpers.js';
+import { seedConfirmedRecipients } from './support/backupRecipients.js';
 
 const API = '/api/v1';
 
@@ -362,18 +363,14 @@ describe('Phase 6 — Backup Integrity and Edge Cases', () => {
     it('should report partial failure when some recipient emails fail', async () => {
       await setupBackup(user.accessToken, user.rawPassword);
 
-      // Configure multiple backup emails
+      // Three recipients that have CONFIRMED (F-05: only confirmed ones are mailed;
+      // how an address gets there is `backup-recipients.test.ts`'s subject).
       const agent = request.agent(app);
-      const csrf1 = await getCsrf(agent);
-      const settingsRes = await agent
-        .put(`${API}/backup/settings`)
-        .set('Authorization', authHeader(user.accessToken))
-        .set('x-csrf-token', csrf1.token)
-        .set('Cookie', csrf1.cookie)
-        .send({
-          backupEmails: ['ok@example.com', 'fails@example.com', 'ok2@example.com'],
-        });
-      expect(settingsRes.status).toBe(200);
+      await seedConfirmedRecipients(user.id, [
+        'ok@example.com',
+        'fails@example.com',
+        'ok2@example.com',
+      ]);
 
       // Stub sendEmail: success for "ok*" addresses, failure for "fails@" address.
       // Use the emailConfigured module re-export so the controller thinks email

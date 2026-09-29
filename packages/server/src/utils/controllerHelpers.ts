@@ -1,10 +1,12 @@
 import type { Request, Response } from 'express';
+import bcrypt from 'bcryptjs';
 import { ErrorHandler, httpErrors } from '@hiprax/errors';
 import { User } from '../models/User.js';
 import { Folder } from '../models/Folder.js';
 import { JobLock } from '../models/JobLock.js';
 import { acquireJobLock, releaseJobLock } from './jobLock.js';
 import { createModuleLogger } from './logger.js';
+import { createAuditLog } from '../services/auditService.js';
 
 const logger = createModuleLogger('controller-helpers');
 
@@ -513,6 +515,35 @@ export function getRequestContext(req: Request): { ip: string; userAgent: string
       ? rawUserAgent.slice(0, MAX_USER_AGENT_LENGTH)
       : rawUserAgent;
   return { ip, userAgent };
+}
+
+/**
+ * The master-password proof a request that changes the account's footing must
+ * carry: `authHash` checked against the stored bcrypt digest. On a mismatch it
+ * records `password_verification_failed` with the endpoint that was asked, and
+ * throws 401 — so every such route answers a wrong password the same way and none
+ * forgets the audit row.
+ *
+ * The caller reads `user` with `+authHash` (the field is `select: false`).
+ *
+ * @param endpoint The name the audit row carries (`backup_setup`, `backup_recipients`, …).
+ */
+export async function assertMasterPasswordProof(
+  req: Request,
+  user: { _id: unknown; authHash: string },
+  authHash: string,
+  endpoint: string,
+): Promise<void> {
+  if (await bcrypt.compare(authHash, user.authHash)) return;
+  const ctx = getRequestContext(req);
+  await createAuditLog(
+    String(user._id),
+    'password_verification_failed',
+    { endpoint },
+    ctx.ip,
+    ctx.userAgent,
+  );
+  throw httpErrors.unauthorized('Current password is incorrect');
 }
 
 /**

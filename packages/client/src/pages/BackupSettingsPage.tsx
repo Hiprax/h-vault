@@ -32,7 +32,7 @@ import {
 import { useToast } from '../components/ui/Toast';
 import { getProfileApi } from '../services/api/userApi';
 import { api } from '../services/api/client';
-import { getBackupHistoryApi } from '../services/api/backupApi';
+import { getBackupHistoryApi, updateBackupRecipientsApi } from '../services/api/backupApi';
 import { Pagination } from '../components/ui/Pagination';
 import { cryptoService } from '../services/crypto/cryptoService';
 import { decryptVaultField, isBoundField } from '../services/crypto/vaultField';
@@ -40,7 +40,7 @@ import { useAuthStore } from '../stores/authStore';
 import { noteStaleVaultKey } from '../stores/uiStore';
 import { resolveBackupSignature, type BackupSignatureVerdict } from '../lib/backupSignature';
 import { MAX_BACKUP_EMAILS } from '@hvault/shared';
-import type { IBackupLogEntry, ItemType } from '@hvault/shared';
+import type { IBackupLogEntry, IBackupRecipient, ItemType } from '@hvault/shared';
 
 /**
  * Whether a backup row's retained previous passwords include a format-v2 entry.
@@ -160,13 +160,41 @@ const strengthColors: Record<number, string> = {
  */
 const HISTORY_PAGE_SIZE = 10;
 
+/**
+ * How a recipient address on the list stands, in words and a colour. An address
+ * typed in but not saved yet has no server state at all.
+ */
+function recipientStatus(
+  email: string,
+  recipients: readonly IBackupRecipient[],
+): { label: string; className: string } {
+  const recipient = recipients.find((entry) => entry.email === email);
+  if (!recipient) {
+    return { label: 'Not saved yet', className: 'text-[hsl(var(--muted-foreground))]' };
+  }
+  if (recipient.state === 'confirmed') {
+    return { label: 'Confirmed', className: 'text-green-700 dark:text-green-400' };
+  }
+  if (recipient.state === 'suspended') {
+    return { label: 'Suspended', className: 'text-red-700 dark:text-red-400' };
+  }
+  return recipient.approved
+    ? { label: 'Waiting for confirmation', className: 'text-amber-700 dark:text-amber-400' }
+    : { label: 'Needs your approval', className: 'text-amber-700 dark:text-amber-400' };
+}
+
 export default function BackupSettingsPage() {
   const navigate = useNavigate();
   const { toast } = useToast();
   const [loading, setLoading] = useState(true);
   const [backupEnabled, setBackupEnabled] = useState(false);
   const [scheduleHour, setScheduleHour] = useState(3);
+  // The list being edited, and the list as the server last reported it (with each
+  // address's confirmation state). They differ until the edit is saved.
   const [backupEmails, setBackupEmails] = useState<string[]>([]);
+  const [recipients, setRecipients] = useState<IBackupRecipient[]>([]);
+  const [recipientsMasterPassword, setRecipientsMasterPassword] = useState('');
+  const [savingRecipients, setSavingRecipients] = useState(false);
   const [newEmailInput, setNewEmailInput] = useState('');
   const [isConfigured, setIsConfigured] = useState(false);
   const [backupPassword, setBackupPassword] = useState('');
@@ -286,12 +314,9 @@ export default function BackupSettingsPage() {
         const backup = profileResult.data.settings.backup;
         setBackupEnabled(backup.enabled);
         setScheduleHour(backup.scheduleHour);
-        // Backward compat: prefer backupEmails, fall back to old backupEmail field
-        const legacyEmail = (backup as unknown as Record<string, unknown>).backupEmail;
-        setBackupEmails(
-          backup.backupEmails ??
-            (typeof legacyEmail === 'string' && legacyEmail ? [legacyEmail] : []),
-        );
+        const stored = backup.backupRecipients ?? [];
+        setRecipients(stored);
+        setBackupEmails(stored.map((entry) => entry.email));
         setIsConfigured(backup.isConfigured);
       } catch {
         toast({ title: 'Failed to load backup settings', type: 'error' });
@@ -439,18 +464,75 @@ export default function BackupSettingsPage() {
   const handleSave = useCallback(async () => {
     setSaving(true);
     try {
+      // The recipients are NOT part of this save: they change only with the
+      // master password, through the recipients' own save below.
       await api.put('/backup/settings', {
         enabled: backupEnabled,
         scheduleHour,
-        backupEmails,
       });
       toast({ title: 'Backup settings saved', type: 'success' });
-    } catch {
-      toast({ title: 'Failed to save backup settings', type: 'error' });
+    } catch (err: unknown) {
+      toast({
+        title: 'Failed to save backup settings',
+        description: getApiErrorMessage(err, 'An unexpected error occurred. Please try again.'),
+        type: 'error',
+      });
     } finally {
       setSaving(false);
     }
-  }, [backupEnabled, scheduleHour, backupEmails, toast]);
+  }, [backupEnabled, scheduleHour, toast]);
+
+  // Whether saving the recipients would change anything on the server: the list
+  // was edited, or an address on it is waiting for the owner (suspended by a
+  // password change or sign-out everywhere, or carried over from an older version).
+  const recipientsNeedSaving = useMemo(() => {
+    const saved = recipients.map((entry) => entry.email);
+    const edited =
+      saved.length !== backupEmails.length || saved.some((email, i) => email !== backupEmails[i]);
+    const awaitingOwner = recipients.some(
+      (entry) => entry.state === 'suspended' || (entry.state === 'pending' && !entry.approved),
+    );
+    return edited || awaitingOwner;
+  }, [recipients, backupEmails]);
+
+  const handleSaveRecipients = useCallback(async () => {
+    const user = useAuthStore.getState().user;
+    if (!user?.email || !recipientsMasterPassword) {
+      toast({ title: 'Master password is required to change backup recipients', type: 'error' });
+      return;
+    }
+    setSavingRecipients(true);
+    let authKey: ArrayBuffer | undefined;
+    try {
+      const derived = await cryptoService.deriveKeys(recipientsMasterPassword, user.email);
+      authKey = derived.authKey;
+      const res = await updateBackupRecipientsApi({
+        authHash: cryptoService.getAuthHash(authKey),
+        backupEmails,
+      });
+      if (!res.data.success) throw new Error('Failed to save backup recipients');
+      const { recipients: saved, confirmationsSent, confirmationsPending } = res.data.data;
+      setRecipients(saved);
+      setBackupEmails(saved.map((entry) => entry.email));
+      setRecipientsMasterPassword('');
+      const sentNote =
+        confirmationsSent > 0
+          ? ` Confirmation email sent to ${String(confirmationsSent)} address${confirmationsSent === 1 ? '' : 'es'}.`
+          : '';
+      const pendingNote =
+        confirmationsPending > 0 ? ` ${String(confirmationsPending)} more will be sent later.` : '';
+      toast({ title: `Backup recipients saved.${sentNote}${pendingNote}`, type: 'success' });
+    } catch (err: unknown) {
+      toast({
+        title: 'Failed to save backup recipients',
+        description: getApiErrorMessage(err, 'An unexpected error occurred. Please try again.'),
+        type: 'error',
+      });
+    } finally {
+      setSavingRecipients(false);
+      if (authKey) cryptoService.clearKey(authKey);
+    }
+  }, [recipientsMasterPassword, backupEmails, toast]);
 
   const handleTriggerBackup = useCallback(async () => {
     setTriggering(true);
@@ -479,8 +561,14 @@ export default function BackupSettingsPage() {
       } else {
         toast({ title: 'Backup triggered successfully', type: 'success' });
       }
-    } catch {
-      toast({ title: 'Failed to trigger backup', type: 'error' });
+    } catch (err: unknown) {
+      // A 4xx is shown as the server wrote it: "no recipient has confirmed yet" and
+      // "the daily email limit is reached" each name what to do next.
+      toast({
+        title: 'Failed to trigger backup',
+        description: getApiErrorMessage(err, 'An unexpected error occurred. Please try again.'),
+        type: 'error',
+      });
     } finally {
       setTriggering(false);
       // In the `finally`: the server writes a `BackupLog` row on every path that
@@ -1388,11 +1476,11 @@ export default function BackupSettingsPage() {
             />
           </div>
 
-          {/* Backup emails */}
+          {/* Backup recipients */}
           <div>
             <div className="mb-1 flex items-center gap-2">
               <Mail className="h-4 w-4 text-[hsl(var(--muted-foreground))]" />
-              <span className="text-sm text-[hsl(var(--foreground))]">Backup Emails</span>
+              <span className="text-sm text-[hsl(var(--foreground))]">Backup Recipients</span>
               <span className="text-xs text-[hsl(var(--muted-foreground))]">
                 ({String(backupEmails.length)}/{String(MAX_BACKUP_EMAILS)})
               </span>
@@ -1404,7 +1492,14 @@ export default function BackupSettingsPage() {
                     key={email}
                     className="flex items-center justify-between rounded-md border border-[hsl(var(--border))] px-3 py-1.5"
                   >
-                    <span className="text-sm text-[hsl(var(--foreground))]">{email}</span>
+                    <span className="flex min-w-0 flex-col">
+                      <span className="truncate text-sm text-[hsl(var(--foreground))]">
+                        {email}
+                      </span>
+                      <span className={cn('text-xs', recipientStatus(email, recipients).className)}>
+                        {recipientStatus(email, recipients).label}
+                      </span>
+                    </span>
                     <button
                       type="button"
                       onClick={() => handleRemoveEmail(index)}
@@ -1443,8 +1538,36 @@ export default function BackupSettingsPage() {
               </div>
             )}
             <p className="mt-1 text-xs text-[hsl(var(--muted-foreground))]">
-              Defaults to your account email if none specified
+              With no recipients listed, backups go to your account email. Every other address
+              receives a backup only after it confirms, by following the link emailed to it. After a
+              password reset, a password change or signing out everywhere, other addresses are
+              suspended until you save the list again.
             </p>
+            <div className="mt-3 space-y-2">
+              <label
+                htmlFor="recipients-master-password"
+                className="block text-sm text-[hsl(var(--foreground))]"
+              >
+                Master password (required to change recipients)
+              </label>
+              <input
+                id="recipients-master-password"
+                type="password"
+                autoComplete="current-password"
+                value={recipientsMasterPassword}
+                onChange={(e) => setRecipientsMasterPassword(e.target.value)}
+                placeholder="Master password to save recipients"
+                className={inputClass}
+              />
+              <button
+                type="button"
+                onClick={() => void handleSaveRecipients()}
+                disabled={savingRecipients || !recipientsNeedSaving || !recipientsMasterPassword}
+                className="rounded-md bg-[hsl(var(--primary))] px-4 py-2 text-sm font-medium text-[hsl(var(--primary-foreground))] hover:opacity-90 disabled:opacity-50"
+              >
+                {savingRecipients ? 'Saving...' : 'Save Recipients'}
+              </button>
+            </div>
           </div>
 
           {/* Action buttons */}

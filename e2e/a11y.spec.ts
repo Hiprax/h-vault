@@ -133,7 +133,7 @@ const AUDIT_PAGE_SIZE = 20;
  * there and reported here. And the interesting views are all BEHIND a sign-in
  * that involves a 600,000-iteration key derivation, a vault key held only in
  * memory, and ciphertext that has to make a round trip; a suite that scanned only
- * what a signed-out browser can reach would miss most of the thirty-seven views below.
+ * what a signed-out browser can reach would miss most of the thirty-eight views below.
  *
  * ## One test, one registration
  *
@@ -141,13 +141,13 @@ const AUDIT_PAGE_SIZE = 20;
  * wall clock and the suite runs single-worker, so the whole authenticated walk
  * shares one account. Each view is a `test.step`, and every scan asserts SOFTLY
  * (`expect.soft`) so one failing view does not hide the state of the other
- * thirty-six — an accessibility report that stops at the first finding is a
- * report somebody has to run thirty-seven times.
+ * thirty-seven — an accessibility report that stops at the first finding is a
+ * report somebody has to run thirty-eight times.
  */
 
 test.describe('accessibility: every primary view and modal', () => {
   test('has no moderate, serious or critical axe violations', async ({ page }, testInfo) => {
-    // Two 600k-iteration derivations for the sign-in, thirty-seven axe runs over a
+    // Two 600k-iteration derivations for the sign-in, thirty-eight axe runs over a
     // fully rendered SPA, and three real documents uploaded through the browser's
     // own AES-GCM to the storage engine the harness starts.
     // `registerAndSignInViaUI` raises the timeout to its own floor; this raises it
@@ -177,7 +177,7 @@ test.describe('accessibility: every primary view and modal', () => {
     /**
      * Scans the current DOM and records it.
      *
-     * Soft, so the walk continues: thirty-six more views are worth more than
+     * Soft, so the walk continues: thirty-seven more views are worth more than
      * failing fast on the first, and the run still fails at the end.
      */
     const scan = async (view: string): Promise<void> => {
@@ -247,6 +247,16 @@ test.describe('accessibility: every primary view and modal', () => {
           timeout: 60_000,
         });
         await scan('unlock-account');
+      });
+
+      await test.step('confirm backup recipient', async () => {
+        // The token is read from the FRAGMENT (never the query string) and refused
+        // by the server, so the failure card is the settled state to scan.
+        await page.goto(`/backup/confirm-recipient#token=${REJECTED_TOKEN}`);
+        await expect(page.getByRole('heading', { name: 'Confirmation Failed' })).toBeVisible({
+          timeout: 60_000,
+        });
+        await scan('confirm-recipient');
       });
 
       await test.step('not found', async () => {

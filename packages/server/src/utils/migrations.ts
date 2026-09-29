@@ -1,5 +1,7 @@
+import crypto from 'node:crypto';
 import mongoose from 'mongoose';
-import { maskEmail } from '@hvault/shared';
+import { MAX_BACKUP_EMAILS, maskEmail } from '@hvault/shared';
+import { z } from 'zod';
 import { createModuleLogger } from './logger.js';
 import { Migration } from '../models/Migration.js';
 import { JobLock } from '../models/JobLock.js';
@@ -52,7 +54,165 @@ const migrations: MigrationDefinition[] = [
       await maskLegacyErasureRecords();
     },
   },
+  // v3 is the vault-quota counter install of the tenant-admission work, not yet
+  // written; versions are applied by set membership, never by "greater than the
+  // highest applied", so a v3 added later still runs on a database that has v4.
+  {
+    version: 4,
+    name: 'backup-recipients',
+    up: migrateBackupRecipients,
+  },
 ];
+
+/** How many accounts one write batch of migration v4 converts. */
+const BACKUP_RECIPIENT_MIGRATION_BATCH = 500;
+/** A recipient address as the recipient schema accepts it. */
+const MIGRATED_RECIPIENT_EMAIL = z.email().max(254);
+
+/**
+ * v4 — backup recipients become entries that must confirm (F-05).
+ *
+ * Every account that stored a plain `settings.backup.backupEmails` list gets
+ * `settings.backup.backupRecipients` instead: its own verified address
+ * `confirmed`, every other address `pending` and NOT approved (invalid entries
+ * dropped, duplicates merged, at most MAX_BACKUP_EMAILS kept), and the old field
+ * removed. The older single `backupEmail` is REMOVED WITHOUT BEING COPIED: no
+ * release this one replaces ever mailed it (only the list was read), so copying
+ * it would bring back an address its owner had replaced, and would stop the
+ * backups an account with no list receives at its own address today. It sends NO
+ * mail and owes none: a
+ * confirmation is only ever mailed for an address the OWNER approves with the
+ * master password, because the recipient's click proves the recipient agrees,
+ * never that the owner put the address there. Until the owner approves the list
+ * those addresses receive nothing, the account's own address keeps receiving, and
+ * a run with neither tells the owner.
+ *
+ * Raw collection reads and writes (the model no longer declares the old fields),
+ * in batches, each write conditioned on the account not having a recipient list
+ * yet, so a re-run, or a list the owner saved meanwhile, is left alone.
+ */
+async function migrateBackupRecipients(): Promise<void> {
+  const users = mongoose.connection.collection('users');
+  // The index the hourly confirmation step is HINTED onto, built here as v2 builds
+  // its own: production runs with `autoIndex` off, and a deployment that has not
+  // run `create-indexes` yet must not have that step throw every hour. The spec is
+  // a literal, the same one `models/User.ts` declares; an existing identical index
+  // is a no-op, and one of the same name built differently is left to
+  // `create-indexes` to report.
+  try {
+    await users.createIndex(
+      { 'settings.backup.backupRecipients.confirmationDue': 1 },
+      { partialFilterExpression: { 'settings.backup.backupRecipients.confirmationDue': true } },
+    );
+  } catch (error: unknown) {
+    if (!hasCode(error, INDEX_OPTIONS_CONFLICT) && !hasCode(error, INDEX_KEY_SPECS_CONFLICT)) {
+      throw error;
+    }
+  }
+  // No recipient list yet, or an EMPTY one (a hydrated save of the new schema
+  // cannot write one, but nothing else guarantees it), beside an old list.
+  const noRecipients = {
+    $or: [
+      { 'settings.backup.backupRecipients': { $exists: false } },
+      { 'settings.backup.backupRecipients': { $size: 0 } },
+    ],
+  };
+  const cursor = users.find(
+    { ...noRecipients, 'settings.backup.backupEmails.0': { $exists: true } },
+    { projection: { email: 1, emailVerified: 1, 'settings.backup.backupEmails': 1 } },
+  );
+  let batch: mongoose.mongo.AnyBulkWriteOperation[] = [];
+  let converted = 0;
+  const now = new Date();
+  for await (const account of cursor) {
+    // The query guarantees `settings.backup.backupEmails.0` exists, so the path is
+    // there; the value is still raw data, and anything but an array lists nobody.
+    const { backupEmails } = (account.settings as { backup: { backupEmails: unknown } }).backup;
+    const listed: unknown[] = Array.isArray(backupEmails) ? backupEmails : [];
+    const email = String(account.email);
+    const verified = account.emailVerified === true;
+    // The same rules the recipient schema applies, because every later hydrated
+    // save of the account re-validates these entries: one bad entry would make
+    // that save fail.
+    const addresses = [
+      ...new Set(
+        listed
+          .filter((value): value is string => typeof value === 'string')
+          .map((value) => value.trim().toLowerCase())
+          .filter((value) => MIGRATED_RECIPIENT_EMAIL.safeParse(value).success),
+      ),
+    ].slice(0, MAX_BACKUP_EMAILS);
+    const recipients = addresses.map((address) =>
+      address === email && verified
+        ? {
+            email: address,
+            state: 'confirmed',
+            confirmedAt: now,
+            approvedAt: now,
+            confirmationDue: false,
+            confirmationSentAt: null,
+            confirmationAttempts: 0,
+            nonce: crypto.randomBytes(32).toString('hex'),
+          }
+        : {
+            email: address,
+            state: 'pending',
+            confirmedAt: null,
+            approvedAt: null,
+            confirmationDue: false,
+            confirmationSentAt: null,
+            confirmationAttempts: 0,
+            nonce: crypto.randomBytes(32).toString('hex'),
+          },
+    );
+    batch.push({
+      updateOne: {
+        filter: { _id: account._id, ...noRecipients },
+        update: {
+          $set: {
+            'settings.backup.backupRecipients': recipients,
+            'settings.backup.recipientsRevision': 1,
+          },
+          $unset: { 'settings.backup.backupEmails': '', 'settings.backup.backupEmail': '' },
+        },
+      },
+    });
+    if (batch.length >= BACKUP_RECIPIENT_MIGRATION_BATCH) {
+      converted += (await users.bulkWrite(batch, { ordered: false })).modifiedCount;
+      batch = [];
+    }
+  }
+  if (batch.length > 0) {
+    converted += (await users.bulkWrite(batch, { ordered: false })).modifiedCount;
+  }
+  // Every other account carries only the old schema's EMPTY default (`[]`) and
+  // perhaps a stale single `backupEmail` nothing ever read: nothing to convert, so
+  // both just go. An account with no list keeps mailing its own verified address,
+  // as it always did. A non-empty old list is kept only on an account it has not
+  // been converted for yet (a batch that failed), so the next run still finds it.
+  const cleared = await users.updateMany(
+    {
+      $and: [
+        {
+          $or: [
+            { 'settings.backup.backupEmails': { $exists: true } },
+            { 'settings.backup.backupEmail': { $exists: true } },
+          ],
+        },
+        {
+          $or: [
+            { 'settings.backup.backupEmails.0': { $exists: false } },
+            { 'settings.backup.backupRecipients.0': { $exists: true } },
+          ],
+        },
+      ],
+    },
+    { $unset: { 'settings.backup.backupEmails': '', 'settings.backup.backupEmail': '' } },
+  );
+  logger.info(
+    `Migration v4: converted the backup recipients of ${String(converted)} account(s); cleared the empty legacy field on ${String(cleared.modifiedCount)}`,
+  );
+}
 
 /** `IndexNotFound`: dropping an index that is not there. */
 const INDEX_NOT_FOUND = 27;

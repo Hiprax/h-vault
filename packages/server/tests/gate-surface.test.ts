@@ -1820,6 +1820,7 @@ describe('machine-readable reports', () => {
       'reset-password',
       'verify-email',
       'unlock-account',
+      'confirm-recipient',
       'not-found',
       'vault-list',
       'item-detail',
@@ -1879,7 +1880,7 @@ describe('machine-readable reports', () => {
     // `/forgot-password` sits behind `PublicOnlyRoute` (as `login` and `register`
     // already did), which redirects a signed-in visitor away, so before the
     // sign-in is the ONLY point in the walk where it renders at all. The other
-    // four are reachable only through a full `page.goto`, which reloads the SPA
+    // five are reachable only through a full `page.goto`, which reloads the SPA
     // and drops the in-memory vault key; put any of them after the sign-in and
     // the walk continues against a locked vault, scanning unlock screens under
     // other views' names.
@@ -1888,6 +1889,7 @@ describe('machine-readable reports', () => {
       'reset-password',
       'verify-email',
       'unlock-account',
+      'confirm-recipient',
       'not-found',
     ]) {
       expect(A11Y_VIEW_IDS.indexOf(view), view).toBeLessThan(A11Y_VIEW_IDS.indexOf('vault-list'));

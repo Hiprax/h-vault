@@ -3,6 +3,7 @@ import {
   createAuthenticatedUser,
   authGet,
   authMutate,
+  getCsrf,
   createItem,
   createFolder,
   type AuthenticatedUser,
@@ -137,27 +138,31 @@ test.describe('Backup Setup', () => {
 // ─── 2. Backup Settings ─────────────────────────────────────────────────────
 
 test.describe('Backup Settings', () => {
-  test('should update backup settings (enabled, scheduleHour, backupEmails)', async ({
-    request,
-  }) => {
+  test('should update backup settings (enabled, scheduleHour)', async ({ request }) => {
     const user = await createAuthenticatedUser(request);
     await setupBackupForUser(request, user);
 
     const res = await authMutate(request, user, 'put', '/api/v1/backup/settings', {
       enabled: true,
       scheduleHour: 3,
-      backupEmails: ['backup1@test.local', 'backup2@test.local'],
     });
 
     expect(res.ok()).toBe(true);
     const body = (await res.json()) as {
       success: boolean;
-      data: { enabled: boolean; scheduleHour: number; backupEmails: string[] };
+      data: {
+        enabled: boolean;
+        scheduleHour: number;
+        backupEmails: string[];
+        backupRecipients: unknown[];
+      };
     };
     expect(body.success).toBe(true);
     expect(body.data.enabled).toBe(true);
     expect(body.data.scheduleHour).toBe(3);
-    expect(body.data.backupEmails).toEqual(['backup1@test.local', 'backup2@test.local']);
+    // F-05: the deprecated list is always empty; recipients are their own route.
+    expect(body.data.backupEmails).toEqual([]);
+    expect(body.data.backupRecipients).toEqual([]);
   });
 
   test('should reject enabling backups without encryption configured', async ({ request }) => {
@@ -173,29 +178,76 @@ test.describe('Backup Settings', () => {
     expect(body.message).toMatch(/encryption.*configured/i);
   });
 
-  test('should update backup emails list', async ({ request }) => {
+  // F-05 (PLAN.md 6.1): recipients left PUT /backup/settings. A body still carrying
+  // them is refused, never silently stripped.
+  test('refuses backup emails on the settings route, naming the recipients route', async ({
+    request,
+  }) => {
     const user = await createAuthenticatedUser(request);
+    await setupBackupForUser(request, user);
 
     const res = await authMutate(request, user, 'put', '/api/v1/backup/settings', {
+      enabled: true,
+      scheduleHour: 3,
       backupEmails: ['a@test.local', 'b@test.local', 'c@test.local'],
     });
 
-    expect(res.ok()).toBe(true);
-    const body = (await res.json()) as { data: { backupEmails: string[] } };
-    expect(body.data.backupEmails).toHaveLength(3);
+    expect(res.status()).toBe(400);
+    const body = (await res.json()) as { message: string };
+    expect(body.message).toContain('PUT /api/v1/backup/recipients');
   });
 
-  test('should reject more than MAX_BACKUP_EMAILS', async ({ request }) => {
+  test('replaces the recipients with the master-password proof: own address confirmed, others pending', async ({
+    request,
+  }) => {
+    const user = await createAuthenticatedUser(request);
+
+    const refused = await authMutate(request, user, 'put', '/api/v1/backup/recipients', {
+      authHash: 'not-the-master-password',
+      backupEmails: ['a@test.local'],
+    });
+    expect(refused.status()).toBe(401);
+
+    const res = await authMutate(request, user, 'put', '/api/v1/backup/recipients', {
+      authHash: user.authHash,
+      backupEmails: [user.email, 'a@test.local'],
+    });
+
+    expect(res.ok()).toBe(true);
+    const body = (await res.json()) as {
+      data: { recipients: { email: string; state: string; approved: boolean }[] };
+    };
+    expect(body.data.recipients.map(({ email, state }) => ({ email, state }))).toEqual([
+      { email: user.email, state: 'confirmed' },
+      { email: 'a@test.local', state: 'pending' },
+    ]);
+    expect(JSON.stringify(body)).not.toContain('nonce');
+  });
+
+  test('should reject more than MAX_BACKUP_EMAILS recipients', async ({ request }) => {
     const user = await createAuthenticatedUser(request);
 
     // MAX_BACKUP_EMAILS = 10; send 11
     const tooManyEmails = Array.from({ length: 11 }, (_, i) => `e${String(i)}@test.local`);
 
-    const res = await authMutate(request, user, 'put', '/api/v1/backup/settings', {
+    const res = await authMutate(request, user, 'put', '/api/v1/backup/recipients', {
+      authHash: user.authHash,
       backupEmails: tooManyEmails,
     });
 
     expect(res.ok()).toBe(false);
+    expect(res.status()).toBe(400);
+  });
+
+  test('refuses a confirmation token it did not issue, without needing a session', async ({
+    request,
+  }) => {
+    const csrf = await getCsrf(request);
+    const res = await request.post('/api/v1/backup/recipients/confirm', {
+      data: { token: 'not.a.token' },
+      headers: { 'content-type': 'application/json', 'x-csrf-token': csrf },
+    });
+
     expect(res.status()).toBe(400);
   });
 });

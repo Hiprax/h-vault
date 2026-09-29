@@ -11,8 +11,10 @@ import { createAuditLog } from '../services/auditService.js';
 import { sendEmail, escapeHtml } from '../utils/email.js';
 import { config, emailConfigured } from '../config/index.js';
 import { acquireJobLock, releaseJobLock } from '../utils/jobLock.js';
+import { trackJob } from '../utils/jobTracker.js';
 import {
   StaleVaultKeyError,
+  assertMasterPasswordProof,
   acquireVaultRotationLock,
   assertVaultKeyVersion,
   assertVaultNotRotating,
@@ -31,17 +33,34 @@ import { collectDocumentSummary, type DocumentSummary } from '../utils/documentS
 import { closingMembers, forEachRow, jsonArrayOf, sendJsonStream } from '../utils/jsonStream.js';
 import { sendDeadlineMs } from '../utils/heavyResponseBudget.js';
 import { hasCycle } from '../utils/folderGraph.js';
+import { claimOutboundMail } from '../utils/outboundMailBudget.js';
+import {
+  applyRecipientList,
+  confirmRecipientToken,
+  confirmedRecipientsFor,
+  currentRecipientsFor,
+  noteBackupDelivered,
+  publicBackupSettings,
+  publicRecipients,
+  recordUndeliverableBackup,
+  sendDueConfirmations,
+  type UndeliverableReason,
+} from '../utils/backupRecipients.js';
 import {
   APP_VERSION,
   ITEM_TYPES,
   MAX_IMPORT_ITEMS,
   MAX_ITEMS_PER_USER,
   MAX_FOLDERS_PER_USER,
+  MAX_BACKUP_MAILS_PER_USER_PER_DAY,
+  ERROR_CODES,
   maskEmail,
 } from '@hvault/shared';
 import type {
   BackupSetupInput,
   BackupSettingsInput,
+  BackupRecipientsInput,
+  ConfirmBackupRecipientInput,
   BackupChangePasswordInput,
   BackupHistoryInput,
   RestoreBackupInput,
@@ -335,18 +354,7 @@ export const setupBackup = catchAsync(async (req: Request, res: Response): Promi
     throw httpErrors.notFound('User not found');
   }
 
-  const isMatch = await bcrypt.compare(body.authHash, existingUser.authHash);
-  if (!isMatch) {
-    const failCtx = getRequestContext(req);
-    await createAuditLog(
-      userId,
-      'password_verification_failed',
-      { endpoint: 'backup_setup' },
-      failCtx.ip,
-      failCtx.userAgent,
-    );
-    throw httpErrors.unauthorized('Current password is incorrect');
-  }
+  await assertMasterPasswordProof(req, existingUser, body.authHash, 'backup_setup');
 
   // ── The vault-key guard pair ───────────────────────────────────────────────
   //
@@ -435,18 +443,14 @@ export const updateBackupSettings = catchAsync(
     const body = req.body as BackupSettingsInput;
 
     const setFields: Record<string, unknown> = {};
-    const unsetFields: Record<string, unknown> = {};
 
+    // The recipients are NOT set here: `backupSettingsSchema` refuses a body that
+    // carries them (400 naming `PUT /backup/recipients`), before this runs.
     if (body.enabled !== undefined) {
       setFields['settings.backup.enabled'] = body.enabled;
     }
     if (body.scheduleHour !== undefined) {
       setFields['settings.backup.scheduleHour'] = body.scheduleHour;
-    }
-    if (body.backupEmails !== undefined) {
-      setFields['settings.backup.backupEmails'] = body.backupEmails;
-      // Clean up deprecated backupEmail field
-      unsetFields['settings.backup.backupEmail'] = 1;
     }
 
     if (Object.keys(setFields).length === 0) {
@@ -464,12 +468,11 @@ export const updateBackupSettings = catchAsync(
       }
     }
 
-    const updateOp: Record<string, unknown> = { $set: setFields };
-    if (Object.keys(unsetFields).length > 0) {
-      updateOp.$unset = unsetFields;
-    }
-
-    const user = await User.findByIdAndUpdate(userId, updateOp, { returnDocument: 'after' })
+    const user = await User.findByIdAndUpdate(
+      userId,
+      { $set: setFields },
+      { returnDocument: 'after' },
+    )
       .select('-__v')
       .lean();
 
@@ -491,7 +494,131 @@ export const updateBackupSettings = catchAsync(
     res.status(200).json({
       success: true,
       message: 'Backup settings updated',
-      data: user.settings.backup,
+      data: publicBackupSettings(user.settings.backup),
+    });
+  },
+);
+
+/**
+ * `PUT /backup/recipients`: replaces where mailed backups go (F-05).
+ *
+ * Behind the master-password proof, because this is where the whole vault leaves
+ * the server: a stolen session alone must not be able to name a new address.
+ * Every address other than the account's own verified one is stored UNCONFIRMED
+ * and is mailed a confirmation link now (inside the daily email budget; whatever
+ * is not sent now the hourly maintenance step sends). Nothing is mailed a backup
+ * before it confirms. The audit row names the addresses masked.
+ */
+export const updateBackupRecipients = catchAsync(
+  async (req: Request, res: Response): Promise<void> => {
+    const userId = getUserId(req);
+    const body = req.body as BackupRecipientsInput;
+
+    const user = await User.findById(userId).select('+authHash').lean();
+    if (!user) {
+      throw httpErrors.notFound('User not found');
+    }
+    await assertMasterPasswordProof(req, user, body.authHash, 'backup_recipients');
+
+    const update = await applyRecipientList(userId, body.backupEmails, user.authHash);
+    // The confirmation mails go out now, but the request waits for them only so
+    // long: the list is already stored, and a relay that hangs must not hold the
+    // response. Whatever is still owed when the wait ends is sent by this same run
+    // in the background, or by the hourly maintenance step.
+    // A failure here (the database, not the relay: `sendEmail` never throws) must not
+    // turn a stored list into a 500; the mails simply stay owed for the hourly step.
+    const sending = sendDueConfirmations(userId).catch((err: unknown) => {
+      logger.error('Sending recipient confirmations failed; they stay owed', {
+        userId,
+        error: errorMessage(err),
+      });
+      return null;
+    });
+    trackJob(sending.then(() => undefined));
+    const confirmations = await Promise.race([
+      sending,
+      new Promise<null>((resolve) => {
+        setTimeout(() => resolve(null), INLINE_CONFIRMATION_WAIT_MS).unref();
+      }),
+    ]);
+
+    const ctx = getRequestContext(req);
+    await createAuditLog(
+      userId,
+      'backup_recipients_update',
+      {
+        recipients: update.recipients.map((entry) => maskEmail(entry.email)),
+        added: update.added.length,
+        removed: update.removed.length,
+        reinstated: update.reinstated.map((email) => maskEmail(email)),
+      },
+      ctx.ip,
+      ctx.userAgent,
+    );
+    logger.info('Backup recipients updated', {
+      userId,
+      recipients: update.recipients.length,
+      confirmationsSent: confirmations?.sent ?? 'in progress',
+    });
+
+    const stored = await User.findById(userId).select('settings.backup.backupRecipients').lean();
+    const storedList = stored?.settings.backup.backupRecipients ?? [];
+    const recipients = publicRecipients(storedList);
+    res.status(200).json({
+      success: true,
+      message: 'Backup recipients saved',
+      data: {
+        recipients,
+        confirmationsSent: confirmations?.sent ?? 0,
+        // Still being sent when the wait ended (or the run failed): the entries still
+        // marked owed as the list stands now.
+        confirmationsPending:
+          confirmations?.pending ?? storedList.filter((entry) => entry.confirmationDue).length,
+      },
+    });
+  },
+);
+
+/** How long a recipient-list update waits for its confirmation mails before answering. */
+const INLINE_CONFIRMATION_WAIT_MS = 15_000;
+
+/** What the owner's audit row carries instead of the recipient's address and browser. */
+const RECIPIENT_CONTEXT_WITHHELD = 'withheld';
+
+/**
+ * `POST /backup/recipients/confirm`: a recipient following its confirmation link.
+ *
+ * PUBLIC: mounted before `authenticate`, because the recipient usually has no
+ * account here. The token alone decides, and it is single use (see
+ * `confirmRecipientToken`). Every refusal is the same 400, and the success body
+ * says nothing about the account.
+ */
+export const confirmBackupRecipient = catchAsync(
+  async (req: Request, res: Response): Promise<void> => {
+    const { token } = req.body as ConfirmBackupRecipientInput;
+
+    const confirmed = await confirmRecipientToken(token);
+    if (!confirmed) {
+      throw httpErrors.badRequest(ERROR_CODES.TOKEN_INVALID);
+    }
+
+    // The row lands in the OWNER's log, but the request came from the RECIPIENT:
+    // its network address and browser are a third party's, and are not recorded.
+    await createAuditLog(
+      confirmed.userId,
+      'backup_recipient_confirmed',
+      { recipient: maskEmail(confirmed.email) },
+      RECIPIENT_CONTEXT_WITHHELD,
+      RECIPIENT_CONTEXT_WITHHELD,
+    );
+    logger.info('Backup recipient confirmed', {
+      userId: confirmed.userId,
+      recipient: maskEmail(confirmed.email),
+    });
+
+    res.status(200).json({
+      success: true,
+      message: 'This address will now receive the encrypted backups it was asked to receive.',
     });
   },
 );
@@ -516,19 +643,42 @@ export const triggerBackup = catchAsync(async (req: Request, res: Response): Pro
     throw httpErrors.conflict('A backup is already in progress for this account');
   }
 
-  // Collect response data inside try, release lock in finally, then send response.
-  // This ensures the lock is released before the HTTP response reaches the client.
-  let responseData: {
-    itemCount: number;
-    fileSizeBytes: number;
-    emailSent: boolean;
-    emailsSent: number;
-    emailsFailed: number;
-    failedEmails: string[];
-    emails: string[];
+  // The run happens inside the lock; its OUTCOME is answered after the lock is
+  // released, so the lock is gone before the response reaches the client. A run that
+  // mailed nothing on purpose comes back as the reason, recorded, and is answered 409.
+  const triggerCtx = getRequestContext(req);
+  const recordUndeliverable = async (
+    reason: UndeliverableReason,
+  ): Promise<{ undeliverable: UndeliverableReason }> => {
+    await recordUndeliverableBackup(userId, reason, (metadata) =>
+      createAuditLog(userId, 'backup_failed', metadata, triggerCtx.ip, triggerCtx.userAgent),
+    );
+    return { undeliverable: reason };
   };
 
-  try {
+  const runBackup = async (): Promise<
+    | {
+        sent: {
+          itemCount: number;
+          fileSizeBytes: number;
+          emailSent: boolean;
+          emailsSent: number;
+          emailsFailed: number;
+          failedEmails: string[];
+          emails: string[];
+        };
+      }
+    | { undeliverable: UndeliverableReason }
+  > => {
+    // Only CONFIRMED recipients (or, with no list at all, the account's own
+    // verified address). Decided before the backup is built, so a run that could
+    // mail nobody costs no vault read, and never widened to the account address
+    // when a list exists but nobody on it has confirmed.
+    let emails = confirmedRecipientsFor(user);
+    if (emailConfigured && emails.length === 0) {
+      return recordUndeliverable('no_confirmed_recipient');
+    }
+
     const maxSizeBytes = config.BACKUP_MAX_SIZE_MB * 1024 * 1024;
     const { json, itemCount } = await collectBackupData(userId, maxSizeBytes);
     const fileSizeBytes = Buffer.byteLength(json, 'utf8');
@@ -540,10 +690,22 @@ export const triggerBackup = catchAsync(async (req: Request, res: Response): Pro
       );
     }
 
-    // Determine recipient emails
-    const emails = user.settings.backup.backupEmails?.length
-      ? user.settings.backup.backupEmails
-      : [user.email];
+    // Re-read who may receive it NOW, from the primary: a reset, a password change
+    // or "log out everywhere" that suspended a recipient while the backup was being
+    // built must stop the mail to it. The budget is claimed for, and the mail sent
+    // to, this list.
+    if (emailConfigured) {
+      emails = await currentRecipientsFor(userId);
+      if (emails.length === 0) {
+        return recordUndeliverable('no_confirmed_recipient');
+      }
+    }
+
+    // The day's outbound budget, claimed for every recipient at once and before the
+    // first send: a run the budget cannot cover sends nothing at all.
+    if (emailConfigured && !(await claimOutboundMail(userId, emails.length))) {
+      return recordUndeliverable('daily_mail_budget');
+    }
 
     let emailsSentCount = 0;
     let emailsFailedCount = 0;
@@ -581,6 +743,7 @@ export const triggerBackup = catchAsync(async (req: Request, res: Response): Pro
     }
 
     const emailSent = emailsSentCount > 0;
+    if (emailSent) await noteBackupDelivered(userId);
     const status = emailSent ? 'success' : emailConfigured ? 'failed' : 'success';
 
     await BackupLog.create({
@@ -601,7 +764,6 @@ export const triggerBackup = catchAsync(async (req: Request, res: Response): Pro
       },
     });
 
-    const triggerCtx = getRequestContext(req);
     await createAuditLog(
       userId,
       'backup_triggered',
@@ -624,29 +786,46 @@ export const triggerBackup = catchAsync(async (req: Request, res: Response): Pro
       emailsFailedCount,
     });
 
-    responseData = {
-      itemCount,
-      fileSizeBytes,
-      emailSent,
-      emailsSent: emailsSentCount,
-      emailsFailed: emailsFailedCount,
-      failedEmails,
-      emails,
+    return {
+      sent: {
+        itemCount,
+        fileSizeBytes,
+        emailSent,
+        emailsSent: emailsSentCount,
+        emailsFailed: emailsFailedCount,
+        failedEmails,
+        emails,
+      },
     };
+  };
+
+  let outcome: Awaited<ReturnType<typeof runBackup>>;
+  try {
+    outcome = await runBackup();
   } finally {
     await releaseJobLock(backupJobName, lockId);
   }
 
+  if ('undeliverable' in outcome) {
+    throw httpErrors.conflict(
+      outcome.undeliverable === 'no_confirmed_recipient'
+        ? 'No backup recipient is confirmed, so nothing was sent. Review the recipients in Backup settings.'
+        : `The daily backup email limit (${String(MAX_BACKUP_MAILS_PER_USER_PER_DAY)} per account) is reached. Nothing was sent; try again tomorrow.`,
+    );
+  }
+  const responseData = outcome.sent;
+
   res.status(200).json({
     success: true,
-    message:
-      responseData.emailsSent === responseData.emails.length
+    // "Not configured" is decided first: with email off nothing was sent to anyone,
+    // which must never read as "sent to every recipient" (0 of 0).
+    message: !emailConfigured
+      ? 'Backup created successfully (email not configured)'
+      : responseData.emailsSent === responseData.emails.length
         ? 'Backup created and sent successfully'
         : responseData.emailsSent > 0
           ? `Backup created. Sent to ${String(responseData.emailsSent)}/${String(responseData.emails.length)} recipients`
-          : emailConfigured
-            ? 'Backup created but all email deliveries failed'
-            : 'Backup created successfully (email not configured)',
+          : 'Backup created but all email deliveries failed',
     data: {
       itemCount: responseData.itemCount,
       fileSizeBytes: responseData.fileSizeBytes,

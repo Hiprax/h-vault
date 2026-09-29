@@ -87,6 +87,7 @@ import { Document } from '../src/models/Document.js';
 import { buildObjectKey } from '../src/utils/documentObjects.js';
 import { createInMemoryStorage } from './helpers/inMemoryStorage.js';
 import { DOCUMENT_PLAINTEXT_CHUNK_BYTES, maskEmail } from '@hvault/shared';
+import { seedConfirmedRecipients } from './support/backupRecipients.js';
 
 const mockedSchedule = vi.mocked(cron.schedule);
 const mockedSendEmail = vi.mocked(sendEmail);
@@ -433,14 +434,14 @@ describe('backupScheduler', () => {
     expect(logs[0]!.fileSizeBytes).toBeGreaterThan(0);
   });
 
-  it('should use backupEmails when specified instead of user email', async () => {
+  // F-05: the recipients are `backupRecipients`, and only CONFIRMED ones are mailed.
+  it('should mail the confirmed recipients instead of the account address', async () => {
     startBackupScheduler();
     const callback = getScheduledCallback();
 
     const backupEmails = ['backup-recipient@example.com'];
-    const user = await createBackupUser({
-      backup: { backupEmails },
-    });
+    const user = await createBackupUser();
+    await seedConfirmedRecipients(user._id, backupEmails);
     await createVaultItem(user._id);
 
     await callback();

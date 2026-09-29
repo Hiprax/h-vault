@@ -22,6 +22,7 @@ import {
   recordProofFailure,
   revokeDeviceProofs,
 } from '../utils/deviceProofs.js';
+import { suspendThirdPartyRecipients } from '../utils/backupRecipients.js';
 import { supportsTransactions } from '../utils/transactionSupport.js';
 import {
   generateAccessToken,
@@ -1656,6 +1657,12 @@ export const logoutAll = catchAsync(async (req: Request, res: Response): Promise
     }
   }
 
+  // "Log out everywhere" is what an owner does on suspecting somebody else holds a
+  // session; a session could not add a recipient without the master password, but
+  // anybody who ever knew it could have, so every third-party recipient is
+  // suspended until the owner approves the list again.
+  const suspendedRecipients = await suspendThirdPartyRecipients(userId);
+
   clearCsrfCookie(res);
 
   const logoutAllCtx = getRequestContext(req);
@@ -1666,6 +1673,15 @@ export const logoutAll = catchAsync(async (req: Request, res: Response): Promise
     logoutAllCtx.ip,
     logoutAllCtx.userAgent,
   );
+  if (suspendedRecipients > 0) {
+    await createAuditLog(
+      userId,
+      'backup_recipients_suspended',
+      { count: suspendedRecipients, reason: 'logout_all' },
+      logoutAllCtx.ip,
+      logoutAllCtx.userAgent,
+    );
+  }
 
   logger.info('All other sessions revoked', { userId, count: result.deletedCount });
 
@@ -1851,6 +1867,12 @@ export const resetPassword = catchAsync(async (req: Request, res: Response): Pro
   await revokeTrustedDevices(user._id);
   // And every device proof: a reset changes the footing every one was granted on.
   await revokeDeviceProofs(user._id);
+  // And every third-party backup recipient: suspended, its mailed links dead, until
+  // the owner approves the list again with the new master password. Before the
+  // save, like the revocations: a failure after it leaves the account suspended
+  // rather than still mailing an address somebody who held it may have added. (The
+  // save below writes only the paths it changed, so it cannot put them back.)
+  let suspendedRecipients = await suspendThirdPartyRecipients(user._id);
 
   user.authHash = hashedAuth;
   user.encryptedVaultKey = newEncryptedVaultKey;
@@ -1882,6 +1904,11 @@ export const resetPassword = catchAsync(async (req: Request, res: Response): Pro
   clearLockoutStateOnDocument(user, 'password');
   user.passwordChangedAt = new Date();
   await user.save();
+  // And once more AFTER the new credential is stored: a recipient-list update
+  // carrying a proof of the OLD password could have landed between the first
+  // suspension and the save (its write is conditioned on the credential it proved,
+  // so none can land after this point).
+  suspendedRecipients += await suspendThirdPartyRecipients(user._id);
 
   const resetCtx = getRequestContext(req);
   await createAuditLog(
@@ -1891,6 +1918,15 @@ export const resetPassword = catchAsync(async (req: Request, res: Response): Pro
     resetCtx.ip,
     resetCtx.userAgent,
   );
+  if (suspendedRecipients > 0) {
+    await createAuditLog(
+      user._id.toString(),
+      'backup_recipients_suspended',
+      { count: suspendedRecipients, reason: 'password_reset' },
+      resetCtx.ip,
+      resetCtx.userAgent,
+    );
+  }
 
   logger.info('Password reset completed', { userId: user._id.toString() });
 

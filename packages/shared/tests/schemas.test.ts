@@ -44,6 +44,9 @@ import {
   checkBreachSchema,
   backupSetupSchema,
   backupSettingsSchema,
+  backupRecipientsSchema,
+  confirmBackupRecipientSchema,
+  BACKUP_RECIPIENTS_MOVED_MESSAGE,
   backupChangePasswordSchema,
   backupHistorySchema,
   auditLogQuerySchema,
@@ -63,6 +66,7 @@ import {
   BACKUP_HISTORY_PAGE_LIMIT,
   BACKUP_HISTORY_MAX_LIMIT,
   MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH,
+  MAX_BACKUP_EMAILS,
 } from '../src/constants/index.js';
 
 const VALID_OBJECT_ID = 'a'.repeat(24);
@@ -2840,11 +2844,7 @@ describe('backupSettingsSchema', () => {
   });
 
   it('accepts valid settings', () => {
-    const result = backupSettingsSchema.safeParse({
-      enabled: true,
-      scheduleHour: 14,
-      backupEmails: ['user@example.com'],
-    });
+    const result = backupSettingsSchema.safeParse({ enabled: true, scheduleHour: 14 });
     expect(result.success).toBe(true);
   });
 
@@ -2856,32 +2856,117 @@ describe('backupSettingsSchema', () => {
     expect(backupSettingsSchema.safeParse({ scheduleHour: 24 }).success).toBe(false);
   });
 
-  it('accepts valid backupEmails array', () => {
-    const result = backupSettingsSchema.safeParse({ backupEmails: ['a@b.com', 'c@d.com'] });
-    expect(result.success).toBe(true);
+  // F-05 (PLAN.md 6.1): recipients moved to `backupRecipientsSchema`, behind the
+  // master-password proof. Any `backupEmails` here is REFUSED, never stripped, and
+  // every shape is refused with the sentence that names the route to use instead.
+  it.each([
+    ['a valid list', { enabled: true, scheduleHour: 14, backupEmails: ['user@example.com'] }],
+    ['an empty list', { backupEmails: [] }],
+    ['an invalid address', { backupEmails: ['not-email'] }],
+    [
+      'eleven entries',
+      { backupEmails: Array.from({ length: 11 }, (_, i) => `u${String(i)}@x.io`) },
+    ],
+    ['an over-long entry', { backupEmails: ['a'.repeat(300)] }],
+    ['a non-string entry', { backupEmails: [42] }],
+    ['a non-array value', { backupEmails: 'user@example.com' }],
+  ])('refuses %s in backupEmails, naming PUT /backup/recipients', (_label, body) => {
+    const result = backupSettingsSchema.safeParse(body);
+    expect(result.success).toBe(false);
+    expect(result.error!.issues.map((issue) => issue.message)).toContain(
+      BACKUP_RECIPIENTS_MOVED_MESSAGE,
+    );
+    expect(
+      result.error!.issues.every((issue) => issue.message === BACKUP_RECIPIENTS_MOVED_MESSAGE),
+    ).toBe(true);
+    // Every issue points at the field, so the 400's message reads "backupEmails: …".
+    expect(
+      result.error!.issues.every((issue) => issue.path.join('.').startsWith('backupEmails')),
+    ).toBe(true);
+  });
+});
+
+it('refuses a valid list with exactly one custom issue on the field', () => {
+  const result = backupSettingsSchema.safeParse({ backupEmails: ['user@example.com'] });
+  expect(result.success).toBe(false);
+  expect(result.error!.issues).toEqual([
+    expect.objectContaining({
+      code: 'custom',
+      path: ['backupEmails'],
+      message: BACKUP_RECIPIENTS_MOVED_MESSAGE,
+    }),
+  ]);
+});
+
+describe('backupRecipientsSchema', () => {
+  const proof = 'h'.repeat(44);
+
+  it('accepts the proof and a list, lowercasing each address', () => {
+    const result = backupRecipientsSchema.parse({
+      authHash: proof,
+      backupEmails: ['User@Example.COM'],
+    });
+    expect(result).toEqual({ authHash: proof, backupEmails: ['user@example.com'] });
   });
 
-  it('rejects invalid email in backupEmails', () => {
-    expect(backupSettingsSchema.safeParse({ backupEmails: ['not-email'] }).success).toBe(false);
+  it('accepts an empty list (backups then go to the account address)', () => {
+    expect(backupRecipientsSchema.safeParse({ authHash: proof, backupEmails: [] }).success).toBe(
+      true,
+    );
   });
 
-  it('lowercases backupEmails', () => {
-    const result = backupSettingsSchema.parse({ backupEmails: ['User@Example.COM'] });
-    expect(result.backupEmails![0]).toBe('user@example.com');
+  it('requires the proof: absent, empty and 101 characters are refused, 100 accepted', () => {
+    expect(backupRecipientsSchema.safeParse({ backupEmails: [] }).success).toBe(false);
+    expect(backupRecipientsSchema.safeParse({ authHash: '', backupEmails: [] }).success).toBe(
+      false,
+    );
+    expect(
+      backupRecipientsSchema.safeParse({ authHash: 'h'.repeat(101), backupEmails: [] }).success,
+    ).toBe(false);
+    expect(
+      backupRecipientsSchema.safeParse({ authHash: 'h'.repeat(100), backupEmails: [] }).success,
+    ).toBe(true);
   });
 
-  it('rejects backupEmails over 10 entries', () => {
-    const emails = Array.from({ length: 11 }, (_, i) => `user${String(i)}@example.com`);
-    expect(backupSettingsSchema.safeParse({ backupEmails: emails }).success).toBe(false);
+  it('requires the list', () => {
+    expect(backupRecipientsSchema.safeParse({ authHash: proof }).success).toBe(false);
   });
 
-  it('rejects backupEmail over 254 chars in array', () => {
-    const longEmail = 'a'.repeat(243) + '@example.com';
-    expect(backupSettingsSchema.safeParse({ backupEmails: [longEmail] }).success).toBe(false);
+  it(`accepts ${String(MAX_BACKUP_EMAILS)} addresses and refuses one more`, () => {
+    const list = (n: number) => Array.from({ length: n }, (_, i) => `u${String(i)}@example.com`);
+    expect(
+      backupRecipientsSchema.safeParse({ authHash: proof, backupEmails: list(MAX_BACKUP_EMAILS) })
+        .success,
+    ).toBe(true);
+    expect(
+      backupRecipientsSchema.safeParse({
+        authHash: proof,
+        backupEmails: list(MAX_BACKUP_EMAILS + 1),
+      }).success,
+    ).toBe(false);
   });
 
-  it('accepts empty backupEmails array', () => {
-    expect(backupSettingsSchema.safeParse({ backupEmails: [] }).success).toBe(true);
+  it('refuses an invalid address and one over 254 characters, and accepts one of 254', () => {
+    const at254 = `${'a'.repeat(254 - '@example.com'.length)}@example.com`;
+    expect(
+      backupRecipientsSchema.safeParse({ authHash: proof, backupEmails: ['nope'] }).success,
+    ).toBe(false);
+    expect(
+      backupRecipientsSchema.safeParse({ authHash: proof, backupEmails: [at254] }).success,
+    ).toBe(true);
+    expect(
+      backupRecipientsSchema.safeParse({ authHash: proof, backupEmails: [`a${at254}`] }).success,
+    ).toBe(false);
+  });
+});
+
+describe('confirmBackupRecipientSchema', () => {
+  it('accepts a token of 1 to 2000 characters and refuses empty and 2001', () => {
+    expect(confirmBackupRecipientSchema.safeParse({ token: 't' }).success).toBe(true);
+    expect(confirmBackupRecipientSchema.safeParse({ token: 't'.repeat(2000) }).success).toBe(true);
+    expect(confirmBackupRecipientSchema.safeParse({ token: 't'.repeat(2001) }).success).toBe(false);
+    expect(confirmBackupRecipientSchema.safeParse({ token: '' }).success).toBe(false);
+    expect(confirmBackupRecipientSchema.safeParse({}).success).toBe(false);
   });
 });
 

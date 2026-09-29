@@ -2583,7 +2583,8 @@ describe('BackupSettingsPage', () => {
   it('renders backup email input', async () => {
     await renderBackup();
     await waitFor(() => {
-      expect(screen.getByText('Backup Emails')).toBeInTheDocument();
+      // F-05: the list is "Backup Recipients" (each address shows whether it has confirmed).
+      expect(screen.getByText('Backup Recipients')).toBeInTheDocument();
       expect(screen.getByPlaceholderText('Add backup email')).toBeInTheDocument();
     });
   });

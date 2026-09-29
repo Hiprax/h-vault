@@ -44,7 +44,7 @@ export const INVITATION_INVALID_MESSAGE =
  * purpose-derived like every other token key here, so it shares nothing with the
  * signing keys beside it.
  */
-export function hashInvitationToken(token: string): string {
+function hashInvitationToken(token: string): string {
   return crypto
     .createHmac('sha256', derivePurposeKey(config.JWT_REFRESH_SECRET, 'invitation'))
     .update(token)

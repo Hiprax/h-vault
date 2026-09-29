@@ -1100,11 +1100,23 @@ export const swaggerSpec: JsonObject = {
             type: 'object',
             readOnly: true,
             description:
-              'Ignored if sent; change it through the /backup endpoints. The profile returns the backup schedule and state plus the backup wrapping key still sealed under the backup password (opaque ciphertext, returned so the browser can check a backup password locally). The reply to PUT /user/settings carries the whole stored subdocument instead, which also holds the vault key sealed under the backup key (`bwkEncryptedVaultKey`, `bwkVaultKeyIv`, `bwkVaultKeyTag`); every key field in it is ciphertext the account owner already holds.',
+              'Ignored if sent; change it through the /backup endpoints. The profile returns the backup schedule and state plus the backup wrapping key still sealed under the backup password (opaque ciphertext, returned so the browser can check a backup password locally). The replies to PUT /user/settings and PUT /backup/settings carry the stored subdocument instead, which also holds the vault key sealed under the backup key (`bwkEncryptedVaultKey`, `bwkVaultKeyIv`, `bwkVaultKeyTag`); every key field in it is ciphertext the account owner already holds. In every reply the recipients are `backupRecipients` (address, state, confirmation time, owner approval; never a confirmation nonce) and `backupEmails` is an empty array.',
             properties: {
               enabled: { type: 'boolean' },
               scheduleHour: { type: 'integer', minimum: 0, maximum: 23 },
-              backupEmails: { type: 'array', items: { type: 'string', format: 'email' } },
+              backupEmails: {
+                type: 'array',
+                deprecated: true,
+                items: { type: 'string', format: 'email' },
+                description:
+                  'Deprecated: always an empty array. The recipients, and whether each has confirmed, are `backupRecipients`.',
+              },
+              backupRecipients: {
+                type: 'array',
+                items: { $ref: '#/components/schemas/BackupRecipient' },
+                description:
+                  'Where mailed backups go. Only `confirmed` addresses receive one; with no recipients at all, backups go to the account address.',
+              },
               lastBackupAt: { type: 'string', format: 'date-time', nullable: true },
               lastBackupStatus: { type: 'string', nullable: true },
               isConfigured: { type: 'boolean' },
@@ -1753,9 +1765,72 @@ export const swaggerSpec: JsonObject = {
           scheduleHour: { type: 'integer', minimum: 0, maximum: 23 },
           backupEmails: {
             type: 'array',
+            deprecated: true,
             items: { type: 'string', format: 'email', maxLength: 254 },
             maxItems: 10,
+            description:
+              'REFUSED: a body carrying this field is answered 400 and nothing in it is stored. Recipients are changed with PUT /backup/recipients, which requires the master password.',
           },
+        },
+      },
+      BackupRecipient: {
+        type: 'object',
+        required: ['email', 'state', 'confirmedAt', 'approved'],
+        properties: {
+          email: { type: 'string', format: 'email' },
+          state: {
+            type: 'string',
+            enum: ['pending', 'confirmed', 'suspended'],
+            description:
+              '`confirmed`: receives backups (it followed its confirmation link, or it is the account address). `pending`: waiting for the address to confirm, or, when `approved` is false, for the owner to approve it. `suspended`: a password reset, a password change or "log out everywhere" happened since; waits for the owner to approve the list again.',
+          },
+          confirmedAt: { type: 'string', format: 'date-time', nullable: true },
+          approved: {
+            type: 'boolean',
+            description:
+              'Whether the owner approved this address with the master password since it last changed state.',
+          },
+        },
+      },
+      BackupRecipientsRequest: {
+        type: 'object',
+        required: ['authHash', 'backupEmails'],
+        properties: {
+          authHash: {
+            type: 'string',
+            minLength: 1,
+            maxLength: 100,
+            description:
+              'The auth hash of the master password, re-checked before anything is stored.',
+          },
+          backupEmails: {
+            type: 'array',
+            items: { type: 'string', format: 'email', maxLength: 254 },
+            maxItems: 10,
+            description:
+              'The whole list. Addresses left out are removed; duplicates are stored once.',
+          },
+        },
+      },
+      BackupRecipientsResponse: {
+        type: 'object',
+        required: ['recipients', 'confirmationsSent', 'confirmationsPending'],
+        properties: {
+          recipients: { type: 'array', items: { $ref: '#/components/schemas/BackupRecipient' } },
+          confirmationsSent: { type: 'integer', minimum: 0 },
+          confirmationsPending: {
+            type: 'integer',
+            minimum: 0,
+            description:
+              'Confirmation emails still owed (the daily email limit, the mail relay, or email not configured); the server sends them hourly.',
+          },
+        },
+      },
+      ConfirmBackupRecipientRequest: {
+        type: 'object',
+        required: ['token'],
+        properties: {
+          token: { type: 'string', minLength: 1, maxLength: 2000 },
         },
       },
       BackupChangePasswordRequest: {
@@ -2802,7 +2877,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Auth'],
         summary: 'Logout all other sessions',
         description:
-          'Revokes all refresh tokens except the current session, every trusted device, and every `__hv_device` proof except the one this browser presented.',
+          'Revokes all refresh tokens except the current session, every trusted device, and every `__hv_device` proof except the one this browser presented. Suspends every backup recipient other than the account address until the owner saves the list again (PUT /backup/recipients).',
         security: [{ bearerAuth: [], csrfToken: [] }],
         responses: {
           200: successResponse('All other sessions revoked'),
@@ -2889,7 +2964,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Auth'],
         summary: 'Reset password with token',
         description:
-          'Resets the master password using a valid reset token. Rate limited: 20 req/IP per 15 min.',
+          'Resets the master password using a valid reset token. Suspends every backup recipient other than the account address until the owner saves the list again (PUT /backup/recipients). Rate limited: 20 req/IP per 15 min.',
         requestBody: jsonRequestBody('ResetPasswordRequest'),
         responses: {
           200: successResponse('Password reset successful'),
@@ -3348,7 +3423,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['User'],
         summary: 'Change master password',
         description:
-          'Changes the master password, re-wrapping the SAME vault key under a key derived from the new one. Requires current auth hash for verification. Every refresh token and every trusted device granted under the old password is revoked. Rate limited: 5 req/user per 15 min, one budget per account shared by every request that re-checks the master password.',
+          'Changes the master password, re-wrapping the SAME vault key under a key derived from the new one. Requires current auth hash for verification. Every refresh token and every trusted device granted under the old password is revoked, and every backup recipient other than the account address is suspended until the owner saves the list again (PUT /backup/recipients). Rate limited: 5 req/user per 15 min, one budget per account shared by every request that re-checks the master password.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: jsonRequestBody('ChangePasswordRequest'),
         responses: {
@@ -3857,7 +3932,8 @@ export const swaggerSpec: JsonObject = {
         operationId: 'updateBackupSettings',
         tags: ['Backup'],
         summary: 'Update backup settings',
-        description: 'Updates backup schedule and email settings.',
+        description:
+          'Updates the backup schedule and switch. Rate limited: 60 req/user per minute. A body that carries `backupEmails` is refused with 400 naming PUT /backup/recipients, and nothing in it is stored.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: jsonRequestBody('BackupSettingsRequest'),
         responses: {
@@ -3881,18 +3957,60 @@ export const swaggerSpec: JsonObject = {
         },
       },
     },
+    '/backup/recipients': {
+      put: {
+        operationId: 'updateBackupRecipients',
+        tags: ['Backup'],
+        summary: 'Replace the backup recipients',
+        description:
+          "Replaces where mailed backups go. Requires the master-password proof. The account's own address is confirmed at once and an address that has already confirmed stays confirmed; every other address is stored unconfirmed and is emailed a single-use confirmation link (valid 24 hours), and receives no backup until it follows it. Confirmation emails count toward the account's daily limit of 30 backup emails; any not sent now are sent hourly. Saving the list is also how suspended addresses are approved again. Rate limited: 5 req/user per 15 min, one budget per account shared by every request that re-checks the master password.",
+        security: [{ bearerAuth: [], csrfToken: [] }],
+        requestBody: jsonRequestBody('BackupRecipientsRequest'),
+        responses: {
+          200: jsonEnvelope(
+            'Recipients saved',
+            { $ref: '#/components/schemas/BackupRecipientsResponse' },
+            { message: { type: 'string' } },
+          ),
+          400: { $ref: '#/components/responses/ValidationError' },
+          401: { $ref: '#/components/responses/Unauthorized' },
+          404: { $ref: '#/components/responses/NotFound' },
+          409: errorResponse(
+            'The recipients changed while this update was being saved (a confirmation or a suspension landed in between). Nothing was stored; reload and retry.',
+          ),
+          429: { $ref: '#/components/responses/RateLimited' },
+        },
+      },
+    },
+    '/backup/recipients/confirm': {
+      post: {
+        operationId: 'confirmBackupRecipient',
+        tags: ['Backup'],
+        summary: 'Confirm a backup recipient address',
+        description:
+          'Called by the page a confirmation link opens (the token travels in the URL fragment). Needs no session: the token is the whole credential, bound to one account, one address and that address\'s current state, and it works once. A password reset, a password change or "log out everywhere" invalidates every link already sent. Rate limited: 20 req/IP per 15 min.',
+        requestBody: jsonRequestBody('ConfirmBackupRecipientRequest'),
+        responses: {
+          200: successResponse('Address confirmed (the body names no account)'),
+          400: errorResponse(
+            'The token is invalid, expired, already used, superseded, or its address is no longer waiting to confirm. All of these are answered the same way.',
+          ),
+          429: { $ref: '#/components/responses/RateLimited' },
+        },
+      },
+    },
     '/backup/trigger': {
       post: {
         operationId: 'triggerBackup',
         tags: ['Backup'],
         summary: 'Trigger backup now',
-        description: `Creates and emails an encrypted backup immediately. Rate limited: 10 req/user per 15 min.${HEAVY_RESPONSE_ADMISSION}`,
+        description: `Creates and emails an encrypted backup immediately, to the CONFIRMED recipients only (with no recipients at all, to the account address; never to it as a stand-in for recipients that have not confirmed). Every recipient counts toward the account's daily limit of 30 backup emails. Rate limited: 10 req/user per 15 min.${HEAVY_RESPONSE_ADMISSION}`,
         security: [{ bearerAuth: [], csrfToken: [] }],
         responses: {
           400: errorResponse('Backup encryption has not been set up yet.'),
           404: { $ref: '#/components/responses/NotFound' },
           409: errorResponse(
-            'A backup is already in progress for this account, or this account already has a backup download, a mailed backup or an export in progress (no `data`).',
+            'A backup is already in progress for this account, or this account already has a backup download, a mailed backup or an export in progress (no `data`); or nothing was sent because no recipient has confirmed yet (the run is recorded as failed and the account address is told, at most once until the recipients change or a backup is delivered, within the daily limit), or because the daily limit of 30 backup emails is reached.',
           ),
           413: errorResponse('The backup would exceed BACKUP_MAX_SIZE_MB. Nothing is sent.'),
           200: successResponse('Backup triggered'),

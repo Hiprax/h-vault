@@ -16,6 +16,11 @@ import { supportsTransactions } from '../utils/transactionSupport.js';
 import { revokeTrustedDevices } from '../utils/trustedDevices.js';
 import { revokeDeviceProofs } from '../utils/deviceProofs.js';
 import {
+  publicBackupSettings,
+  publicRecipients,
+  suspendThirdPartyRecipients,
+} from '../utils/backupRecipients.js';
+import {
   StaleVaultKeyError,
   acquireVaultRotationLock,
   assertVaultKeyVersion,
@@ -232,7 +237,11 @@ export const getProfile = catchAsync(async (req: Request, res: Response): Promis
       backup: {
         enabled: backupSettings.enabled,
         scheduleHour: backupSettings.scheduleHour,
-        backupEmails: backupSettings.backupEmails,
+        // Deprecated and always empty (the response schema keeps the property, so
+        // an older client reading it finds an empty list rather than a missing one).
+        // The recipients, and whether each has confirmed, are `backupRecipients`.
+        backupEmails: [],
+        backupRecipients: publicRecipients(backupSettings.backupRecipients),
         lastBackupAt: backupSettings.lastBackupAt,
         lastBackupStatus: backupSettings.lastBackupStatus,
         isConfigured,
@@ -321,7 +330,12 @@ export const updateSettings = catchAsync(async (req: Request, res: Response): Pr
     // Normalised for the same reason as `getProfile`: a settings write that
     // touched only `theme` still returns the whole subdocument, which for an
     // older account is missing every field added since it was created.
-    data: withSettingsDefaults(user.settings),
+    data: {
+      ...withSettingsDefaults(user.settings),
+      // The stored backup subdocument, with its recipient list rebuilt field by
+      // field so no entry's confirmation nonce can reach the wire.
+      backup: publicBackupSettings(user.settings.backup),
+    },
   });
 });
 
@@ -481,6 +495,8 @@ export const changePassword = catchAsync(async (req: Request, res: Response): Pr
   let guardedVaultKeyVersion = 0;
   let staleVaultKey: StaleVaultKeyError | null = null;
   let interruptedRotationNotCarried = false;
+  // How many third-party backup recipients this change suspended, once committed.
+  let suspendedRecipients = 0;
 
   /**
    * The interrupted rotation's key, re-wrapped by the client under the new MEK —
@@ -593,6 +609,10 @@ export const changePassword = catchAsync(async (req: Request, res: Response): Pr
           // Every device proof goes with them: a new master password is a new
           // footing, and a proof exempts its browser from the password lockout.
           await revokeDeviceProofs(userId, { session });
+          // A new master password is a change of footing: every third-party backup
+          // recipient is suspended (its mailed links die) until the owner approves
+          // the list again. In the transaction, so it commits with the password.
+          suspendedRecipients = await suspendThirdPartyRecipients(userId, session);
           const result = await User.updateOne(vaultKeyWriteFilter, vaultKeyWrite, { session });
           if (result.matchedCount === 0) {
             throw new SupersededVaultKeyWrite();
@@ -601,6 +621,8 @@ export const changePassword = catchAsync(async (req: Request, res: Response): Pr
       } catch (error) {
         if (!(error instanceof SupersededVaultKeyWrite)) throw error;
         supersededMidWrite = true;
+        // Aborted: the suspension was rolled back with everything else.
+        suspendedRecipients = 0;
       } finally {
         await session.endSession();
       }
@@ -614,6 +636,8 @@ export const changePassword = catchAsync(async (req: Request, res: Response): Pr
       // devices so none skips 2FA under the new password.
       await revokeTrustedDevices(userId);
       await revokeDeviceProofs(userId);
+      // Suspended BEFORE the write too, the same fail-safe order as the revocations.
+      suspendedRecipients = await suspendThirdPartyRecipients(userId);
       // A conditional `updateOne` rather than the `user.save()` this branch used
       // to perform, because a hydrated save cannot carry a filter — it writes the
       // document it holds, which is exactly how a superseded wrapper used to land.
@@ -625,6 +649,14 @@ export const changePassword = catchAsync(async (req: Request, res: Response): Pr
       // and `authHash` stores a 60-character bcrypt digest.
       const result = await User.updateOne(vaultKeyWriteFilter, vaultKeyWrite);
       supersededMidWrite = result.matchedCount === 0;
+      // Once more after the new credential is stored: a recipient-list update
+      // proving the OLD password could have landed between the first suspension
+      // and this write (its own write is conditioned on the credential it proved,
+      // so none can land after it). The transactional branch needs no second pass:
+      // the list update's write cannot interleave with the transaction's.
+      if (!supersededMidWrite) {
+        suspendedRecipients += await suspendThirdPartyRecipients(userId);
+      }
     }
   } catch (error) {
     // Caught NARROWLY, by type. A blanket catch here would turn any failure in
@@ -643,6 +675,17 @@ export const changePassword = catchAsync(async (req: Request, res: Response): Pr
     // next request the moment this one lands must not race the release round trip
     // and be refused by a span that has already finished.
     await releaseVaultRotationLock(userId, rotationLockId);
+  }
+
+  if (suspendedRecipients > 0) {
+    const suspendCtx = getRequestContext(req);
+    await createAuditLog(
+      userId,
+      'backup_recipients_suspended',
+      { count: suspendedRecipients, reason: 'password_change' },
+      suspendCtx.ip,
+      suspendCtx.userAgent,
+    );
   }
 
   if (interruptedRotationNotCarried) {

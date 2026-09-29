@@ -16,7 +16,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import React from 'react';
 
@@ -1913,6 +1913,41 @@ describe('SessionsPage', () => {
 // ==========================================================================
 
 describe('AuditLogPage', () => {
+  it('names the three backup-recipient events (F-05) in words, never as raw action codes', async () => {
+    mockGetAuditLogApi.mockResolvedValue({
+      data: {
+        success: true,
+        data: [
+          ['r1', 'backup_recipients_update'],
+          ['r2', 'backup_recipient_confirmed'],
+          ['r3', 'backup_recipients_suspended'],
+        ].map(([_id, action]) => ({
+          _id,
+          action,
+          ipAddress: '192.168.1.1',
+          userAgent: 'Chrome/120',
+          timestamp: '2026-09-01T12:00:00.000Z',
+        })),
+        pagination: { page: 1, limit: 20, total: 3, totalPages: 1 },
+      },
+    });
+
+    const { default: AuditLogPage } = await import('../src/pages/AuditLogPage');
+    await act(async () => {
+      renderWithRouter(<AuditLogPage />);
+    });
+
+    const table = await screen.findByRole('table');
+    for (const [label, colour] of [
+      ['Backup Recipients Changed', 'bg-amber-100'],
+      ['Backup Recipient Confirmed', 'bg-cyan-100'],
+      ['Backup Recipients Suspended', 'bg-amber-100'],
+    ] as const) {
+      expect(within(table).getByText(label)).toHaveClass(colour);
+    }
+    expect(within(table).queryByText('backup_recipients_update')).not.toBeInTheDocument();
+  });
+
   it('renders "Audit Log" heading', async () => {
     mockGetAuditLogApi.mockResolvedValue({
       data: {

@@ -39,6 +39,8 @@ import type {
   checkBreachBatchSchema,
   backupSetupSchema,
   backupSettingsSchema,
+  backupRecipientsSchema,
+  confirmBackupRecipientSchema,
   backupChangePasswordSchema,
   restoreBackupSchema,
   auditLogQuerySchema,
@@ -72,6 +74,7 @@ import type { paginationSchema } from '../schemas/common.js';
 import type {
   ItemType,
   AuditAction,
+  BackupRecipientState,
   BackupStatus,
   ErrorCode,
   ReleaseAudience,
@@ -132,6 +135,8 @@ export type CheckBreachInput = z.infer<typeof checkBreachSchema>;
 export type CheckBreachBatchInput = z.infer<typeof checkBreachBatchSchema>;
 export type BackupSetupInput = z.infer<typeof backupSetupSchema>;
 export type BackupSettingsInput = z.infer<typeof backupSettingsSchema>;
+export type BackupRecipientsInput = z.infer<typeof backupRecipientsSchema>;
+export type ConfirmBackupRecipientInput = z.infer<typeof confirmBackupRecipientSchema>;
 export type BackupChangePasswordInput = z.infer<typeof backupChangePasswordSchema>;
 export type RestoreBackupInput = z.infer<typeof restoreBackupSchema>;
 export type AuditLogQueryInput = z.infer<typeof auditLogQuerySchema>;
@@ -373,12 +378,33 @@ export interface IUserSettings {
   backup: IBackupSettings;
 }
 
+/**
+ * One backup recipient as the server reports it. Never carries the entry's
+ * confirmation nonce: only the mailed link does, inside a signed token.
+ */
+export interface IBackupRecipient {
+  email: string;
+  state: BackupRecipientState;
+  /** When the address confirmed (or was recognised as the account's own); null while it has not. */
+  confirmedAt: string | null;
+  /**
+   * Whether the owner has approved this address with the master password since
+   * it last changed state. False for an address carried over from before
+   * recipients were confirmed, and for a suspended one: both wait for the owner.
+   */
+  approved: boolean;
+}
+
 export interface IBackupSettings {
   enabled: boolean;
   scheduleHour: number;
-  /** @deprecated Use backupEmails instead. Kept for backward compat reading old data. */
-  backupEmail?: string;
+  /**
+   * @deprecated Always empty. The recipients are {@link backupRecipients}; this
+   * field stays in the response only so older clients reading it keep working.
+   */
   backupEmails?: string[];
+  /** Where mailed backups go, and whether each address has confirmed. */
+  backupRecipients?: IBackupRecipient[];
   encryptedBWK?: string;
   bwkIv?: string;
   bwkTag?: string;

@@ -94,6 +94,10 @@ export const AUDIT_ACTION_CLASS = {
   document_restore: 'activity',
   document_purge: 'activity',
   invitation_create: 'security',
+  // Where mailed backups go: each changes where the whole vault leaves the server.
+  backup_recipients_update: 'security',
+  backup_recipient_confirmed: 'security',
+  backup_recipients_suspended: 'security',
 } as const satisfies Record<AuditAction, AuditClass>;
 
 /** The actions whose class is `activity`, as a type: what the allowlist may name. */

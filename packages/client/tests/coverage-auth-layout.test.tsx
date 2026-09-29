@@ -108,6 +108,9 @@ vi.mock('../src/services/api/configApi', () => ({
   // AppLayout asks this before it can decide whether the Documents entry exists.
   // It never rejects in production, and the stub keeps that contract.
   getDocumentsConfig: mockGetDocumentsConfig,
+  // The register page asks which registration mode the server runs (F-24); it
+  // never rejects in production either (null = "the server did not say").
+  readRegistrationMode: () => Promise.resolve('open'),
 }));
 
 vi.mock('../src/services/crypto/fileCryptoService', async (importOriginal) => {

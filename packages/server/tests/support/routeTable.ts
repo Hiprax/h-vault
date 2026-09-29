@@ -693,7 +693,27 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     note: "Takes owned update ids in the BODY; covered by cross-user-isolation.test.ts's import suite.",
   },
 
-  // ── /api/v1/backup (router-level `authenticate`) ──────────────────────
+  // ── /api/v1/backup (router-level `authenticate`, below the one public route) ──
+  {
+    // A backup recipient following its confirmation link (F-05): mounted ABOVE the
+    // router's `authenticate`, because the recipient usually has no account here.
+    method: 'post',
+    path: '/api/v1/backup/recipients/confirm',
+    auth: 'none',
+    csrf: 'required',
+    limiters: ['tokenVerifyLimiter'],
+    owned: null,
+    when: 'always',
+  },
+  {
+    method: 'put',
+    path: '/api/v1/backup/recipients',
+    auth: 'required',
+    csrf: 'required',
+    limiters: ['passwordVerifyLimiter'],
+    owned: null,
+    when: 'always',
+  },
   {
     method: 'post',
     path: '/api/v1/backup/setup',

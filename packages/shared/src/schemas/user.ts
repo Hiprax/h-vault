@@ -224,10 +224,64 @@ export const backupSetupSchema = z
     }
   });
 
-export const backupSettingsSchema = z.object({
-  enabled: z.boolean().optional(),
-  scheduleHour: z.number().int().min(0).max(23).optional(),
-  backupEmails: z.array(z.email().max(254).toLowerCase().trim()).max(MAX_BACKUP_EMAILS).optional(),
+/**
+ * The sentence a `PUT /backup/settings` body carrying `backupEmails` is refused
+ * with. Exported so the server's docs and tests quote the one wording.
+ */
+export const BACKUP_RECIPIENTS_MOVED_MESSAGE =
+  'Backup recipients are changed with PUT /api/v1/backup/recipients, which requires your master password.';
+
+/**
+ * One backup recipient address, as every recipient route accepts it. No `.trim()`:
+ * the address format is checked first and refuses surrounding space, so a trim
+ * after it could never change a value (the client trims before sending).
+ */
+const backupRecipientEmailSchema = z.email().max(254).toLowerCase();
+
+export const backupSettingsSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    scheduleHour: z.number().int().min(0).max(23).optional(),
+    // REFUSED, never silently stripped. The recipient list moved to
+    // `PUT /backup/recipients`, behind the master-password proof, because where a
+    // mailed backup goes is where the whole vault leaves the server. Dropping the
+    // key from this schema would not refuse it: strip mode would discard it, an
+    // older tab's combined save (`{enabled, scheduleHour, backupEmails}`) would
+    // answer 200, and the user would believe recipients were saved that never
+    // were. So the key stays declared and any value at all is a 400 whose message
+    // names the route to use instead. No inner bound: Zod skips later checks once
+    // one has failed, so an over-long list or entry would be refused with a
+    // message that did not say where recipients went (the body limit bounds size).
+    backupEmails: z
+      .array(z.string({ error: BACKUP_RECIPIENTS_MOVED_MESSAGE }), {
+        error: BACKUP_RECIPIENTS_MOVED_MESSAGE,
+      })
+      .optional(),
+  })
+  .superRefine((data, ctx) => {
+    if (data.backupEmails !== undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['backupEmails'],
+        message: BACKUP_RECIPIENTS_MOVED_MESSAGE,
+      });
+    }
+  });
+
+/**
+ * `PUT /backup/recipients`: the whole recipient list, and the master-password
+ * proof that has to accompany any change to it. Every address other than the
+ * account's own verified one is stored unconfirmed and is mailed a confirmation
+ * link; none receives a backup before following it.
+ */
+export const backupRecipientsSchema = z.object({
+  authHash: z.string().min(1).max(100),
+  backupEmails: z.array(backupRecipientEmailSchema).max(MAX_BACKUP_EMAILS),
+});
+
+/** `POST /backup/recipients/confirm`: the token from a recipient's confirmation link. */
+export const confirmBackupRecipientSchema = z.object({
+  token: z.string().min(1).max(2000),
 });
 
 export const backupChangePasswordSchema = z

@@ -8,11 +8,12 @@ import {
   LOCK_ON_HIDDEN_DELAY_MINUTES,
   CLIPBOARD_CLEAR_SECONDS,
   DEFAULT_PASSWORD_LENGTH,
+  BACKUP_RECIPIENT_STATES,
   MAX_BACKUP_EMAILS,
   MAX_RELEASE_VERSION_LENGTH,
   SHOW_RELEASE_NOTES_DEFAULT,
 } from '@hvault/shared';
-import type { Theme, BackupStatus } from '@hvault/shared';
+import type { Theme, BackupStatus, BackupRecipientState } from '@hvault/shared';
 
 // ----- Sub-interfaces -----
 
@@ -29,10 +30,57 @@ interface IPasswordGenOptions {
   minSymbols: number;
 }
 
+/**
+ * One address mailed backups may go to (F-05). The rules that move an entry
+ * between states live in `utils/backupRecipients.ts` and nowhere else.
+ */
+export interface IBackupRecipientDoc {
+  email: string;
+  state: BackupRecipientState;
+  /** When the address confirmed, or was recognised as the account's own verified address. */
+  confirmedAt?: Date | null | undefined;
+  /**
+   * When the OWNER last approved this address with the master password. Null for
+   * an address carried over by migration v4 (the owner never approved it under
+   * these rules, and a recipient's click must not be what grandfathers it in) and
+   * for a suspended one.
+   */
+  approvedAt?: Date | null | undefined;
+  /** A confirmation mail is owed to this address (approved, pending, not yet mailed). */
+  confirmationDue?: boolean | undefined;
+  /** When the confirmation now outstanding was claimed for sending. */
+  confirmationSentAt?: Date | null | undefined;
+  /**
+   * How many times sending this entry's confirmation has FAILED since the owner
+   * last approved it. After a few the job stops retrying (each attempt spends the
+   * account's daily email budget), until the owner saves the list again.
+   */
+  confirmationAttempts?: number | undefined;
+  /**
+   * What the confirmation token is bound to, beside the account and the address.
+   * ROTATED on every state change, so a link minted before one (a confirmation
+   * already used, a recovery that suspended the entry) is refused afterwards.
+   */
+  nonce?: string | undefined;
+}
+
 interface IBackupSettingsDoc {
   enabled: boolean;
   scheduleHour: number;
-  backupEmails?: string[] | undefined;
+  backupRecipients?: IBackupRecipientDoc[] | undefined;
+  /**
+   * Bumped by EVERY write of {@link backupRecipients}. The owner's list update
+   * reads it and writes only while it has not moved, so a confirmation, a
+   * suspension or the confirmation job landing in between is never overwritten
+   * by a list computed from what came before it.
+   */
+  recipientsRevision?: number | undefined;
+  /**
+   * When the owner was last told that a backup was NOT mailed because nobody on the
+   * list has confirmed. Told once per such episode: cleared whenever the list is
+   * saved, a recipient confirms, recipients are suspended or a backup is delivered.
+   */
+  undeliverableNoticedAt?: Date | null | undefined;
   encryptedBWK?: string | undefined;
   bwkIv?: string | undefined;
   bwkTag?: string | undefined;
@@ -206,6 +254,12 @@ export interface IUser {
   quotaRecountedAt?: Date | undefined;
   /** When {@link vaultBytes} was last written by a write path; the recount leaves a busy account alone. */
   vaultBytesWrittenAt?: Date | undefined;
+  /**
+   * The backup feature's emails sent for this account on one UTC day (F-05):
+   * `utils/outboundMailBudget.ts` claims each send here before it happens.
+   * Absent means none today.
+   */
+  outboundMail?: { day: string; count: number } | undefined;
   passwordChangedAt: Date;
   settings: IUserSettings;
   createdAt: Date;
@@ -288,18 +342,42 @@ const passwordGenOptionsCrossFieldValidator = {
   message: 'Password length must be at least the sum of the required character minimums',
 };
 
+const backupRecipientSchema = new Schema<IBackupRecipientDoc>(
+  {
+    email: { type: String, required: true, lowercase: true, trim: true, maxlength: 254 },
+    state: { type: String, required: true, enum: BACKUP_RECIPIENT_STATES },
+    confirmedAt: { type: Date, default: null },
+    approvedAt: { type: Date, default: null },
+    confirmationDue: { type: Boolean, default: false },
+    confirmationSentAt: { type: Date, default: null },
+    confirmationAttempts: { type: Number, default: 0, min: 0 },
+    // `select: false` because the profile, the settings replies and the list update
+    // all answer from reads of this document; every one of them also builds the
+    // recipient list it returns field by field, so this is the second of two
+    // things keeping the nonce off the wire, not the only one.
+    nonce: { type: String, select: false, maxlength: 128 },
+  },
+  { _id: false },
+);
+
 const backupSettingsSchema = new Schema<IBackupSettingsDoc>(
   {
     enabled: { type: Boolean, default: false },
     scheduleHour: { type: Number, default: 3, min: 0, max: 23 },
-    backupEmails: {
-      type: [{ type: String, maxlength: 254 }],
-      default: [],
+    // No default: ABSENT is "never configured", which `confirmedRecipientsFor`
+    // reads as the account's own verified address, and migration v4 converts only
+    // documents that do not carry the field yet.
+    backupRecipients: {
+      type: [backupRecipientSchema],
+      default: undefined,
       validate: {
-        validator: (v: string[]) => v.length <= MAX_BACKUP_EMAILS,
-        message: `backupEmails cannot exceed ${String(MAX_BACKUP_EMAILS)} entries`,
+        validator: (v: IBackupRecipientDoc[] | undefined) =>
+          v === undefined || v.length <= MAX_BACKUP_EMAILS,
+        message: `backupRecipients cannot exceed ${String(MAX_BACKUP_EMAILS)} entries`,
       },
     },
+    recipientsRevision: { type: Number, default: undefined },
+    undeliverableNoticedAt: { type: Date, default: undefined },
     encryptedBWK: { type: String, maxlength: 500 },
     bwkIv: { type: String, maxlength: 24 },
     bwkTag: { type: String, maxlength: 32 },
@@ -429,6 +507,16 @@ const userSchema = new Schema<IUser>(
     quotaEpoch: { type: Number, default: undefined, select: false },
     quotaRecountedAt: { type: Date, default: undefined, select: false },
     vaultBytesWrittenAt: { type: Date, default: undefined, select: false },
+    // No default and `select: false`: absent is "nothing sent today", and nothing
+    // but the budget helper reads it (the profile spreads the whole document).
+    outboundMail: {
+      type: new Schema<{ day: string; count: number }>(
+        { day: { type: String, maxlength: 10 }, count: { type: Number, min: 0 } },
+        { _id: false },
+      ),
+      default: undefined,
+      select: false,
+    },
     passwordChangedAt: { type: Date, required: true, default: () => new Date(0) },
     settings: { type: userSettingsSchema, default: () => ({}) },
   },
@@ -469,6 +557,13 @@ userSchema.index({ deletionPending: 1 }, { partialFilterExpression: { deletionPe
 // The hourly vault-quota recount takes the accounts recounted longest ago (and those
 // never recounted, which sort first) in bounded batches.
 userSchema.index({ quotaRecountedAt: 1 });
+// The hourly confirmation step (`jobs/maintenance.ts`) finds the accounts that owe a
+// recipient a confirmation mail. Partial, so it holds only those few accounts and the
+// step never walks `users`.
+userSchema.index(
+  { 'settings.backup.backupRecipients.confirmationDue': 1 },
+  { partialFilterExpression: { 'settings.backup.backupRecipients.confirmationDue': true } },
+);
 
 // ----- Model -----
 

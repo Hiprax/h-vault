@@ -26,7 +26,7 @@ const logger = createModuleLogger('heavy-response-admission');
  * (a 409 carrying `data.vaultKeyVersion` means "your vault key is stale" to every
  * client consumer, and this is not that).
  */
-export const HEAVY_RESPONSE_BUSY_MESSAGE =
+const HEAVY_RESPONSE_BUSY_MESSAGE =
   'Wait for the backup or export already in progress on this account to finish, then try again.';
 
 const heavyResponseSlot = createSlotHolder({

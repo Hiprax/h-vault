@@ -158,35 +158,56 @@ describe('Backup settings maxlength validators', () => {
     expect(err!.errors['settings.backup.bwkVaultKeyTag']).toBeDefined();
   });
 
-  it('should reject backupEmails array exceeding 10 entries', async () => {
-    const emails = Array.from({ length: 11 }, (_, i) => `user${String(i)}@example.com`);
+  // F-05 (PLAN.md 6.2): the plain `backupEmails` list became `backupRecipients`,
+  // one entry per address with its confirmation state; the same bounds hold (at
+  // most MAX_BACKUP_EMAILS entries, an address of at most 254 characters), plus
+  // the closed list of states.
+  const recipient = (email: string, state = 'pending') => ({ email, state });
+
+  it('should reject backupRecipients exceeding 10 entries', async () => {
+    const entries = Array.from({ length: 11 }, (_, i) => recipient(`user${String(i)}@example.com`));
     const user = new User({
       ...validUserData,
-      settings: { backup: { backupEmails: emails } },
+      settings: { backup: { backupRecipients: entries } },
     });
     const err = await getValidationError(user);
     expect(err).toBeDefined();
-    expect(err!.errors['settings.backup.backupEmails']).toBeDefined();
+    expect(err!.errors['settings.backup.backupRecipients']).toBeDefined();
   });
 
-  it('should accept backupEmails array with exactly 10 entries', async () => {
-    const emails = Array.from({ length: 10 }, (_, i) => `user${String(i)}@example.com`);
+  it('should accept backupRecipients with exactly 10 entries', async () => {
+    const entries = Array.from({ length: 10 }, (_, i) => recipient(`user${String(i)}@example.com`));
     const user = new User({
       ...validUserData,
-      settings: { backup: { backupEmails: emails } },
+      settings: { backup: { backupRecipients: entries } },
     });
     const err = await getValidationError(user);
     expect(err).toBeUndefined();
   });
 
-  it('should reject individual backupEmail exceeding 254 characters', async () => {
-    const longEmail = 'a'.repeat(255);
+  it('should reject a recipient address exceeding 254 characters', async () => {
     const user = new User({
       ...validUserData,
-      settings: { backup: { backupEmails: [longEmail] } },
+      settings: { backup: { backupRecipients: [recipient('a'.repeat(255))] } },
     });
     const err = await getValidationError(user);
     expect(err).toBeDefined();
+    expect(err!.errors['settings.backup.backupRecipients.0.email']).toBeDefined();
+  });
+
+  it('should reject a recipient state outside the closed list', async () => {
+    const user = new User({
+      ...validUserData,
+      settings: { backup: { backupRecipients: [recipient('a@example.com', 'trusted')] } },
+    });
+    const err = await getValidationError(user);
+    expect(err).toBeDefined();
+    expect(err!.errors['settings.backup.backupRecipients.0.state']).toBeDefined();
+  });
+
+  it('keeps no backupRecipients list on a new account (absent means "never configured")', () => {
+    const user = new User(validUserData);
+    expect(user.settings.backup.backupRecipients).toBeUndefined();
   });
 
   it('should accept valid backup settings within limits', async () => {

@@ -149,10 +149,25 @@ import { MAX_BACKUP_EMAILS } from '@hvault/shared';
 
 type BackupSettings = Record<string, unknown>;
 
+/** A recipient as the server reports it (F-05): address, state, confirmation, owner approval. */
+function recipient(
+  email: string,
+  state: 'pending' | 'confirmed' | 'suspended' = 'confirmed',
+  approved = true,
+): Record<string, unknown> {
+  return {
+    email,
+    state,
+    confirmedAt: state === 'confirmed' ? '2026-09-01T00:00:00.000Z' : null,
+    approved,
+  };
+}
+
 const CONFIGURED_BACKUP: BackupSettings = {
   enabled: true,
   scheduleHour: 3,
-  backupEmails: ['backup@example.com'],
+  backupEmails: [],
+  backupRecipients: [recipient('backup@example.com')],
   isConfigured: true,
   encryptedBWK: 'server-ebwk',
   bwkIv: 'server-biv',
@@ -448,7 +463,32 @@ describe('BackupSettingsPage — emails, download, restore branches', () => {
   // Backup email editor
   // =========================================================================
 
-  it('adds a backup email, lowercasing and trimming it, and persists it on save', async () => {
+  /** Types the master password into the recipients' field and saves the list. */
+  async function saveRecipients(password = 'master-pw'): Promise<void> {
+    fireEvent.change(screen.getByLabelText('Master password (required to change recipients)'), {
+      target: { value: password },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText('Save Recipients'));
+    });
+  }
+
+  function recipientsReply(recipients: Record<string, unknown>[], sent = 0, pending = 0) {
+    return {
+      data: {
+        success: true,
+        data: { recipients, confirmationsSent: sent, confirmationsPending: pending },
+      },
+    };
+  }
+
+  it('adds a backup email, lowercasing and trimming it, and saves the list with the master-password proof', async () => {
+    mockApiPut.mockResolvedValue(
+      recipientsReply(
+        [recipient('backup@example.com'), recipient('second@example.com', 'pending')],
+        1,
+      ),
+    );
     await renderBackup();
     await waitFor(() => screen.getByPlaceholderText('Add backup email'));
 
@@ -457,10 +497,47 @@ describe('BackupSettingsPage — emails, download, restore branches', () => {
     });
     fireEvent.click(screen.getByText('Add'));
 
-    // Normalized in the list and the input reset.
+    // Normalized in the list, marked unsaved, and the input reset.
     expect(screen.getByText('second@example.com')).toBeInTheDocument();
+    expect(screen.getByText('Not saved yet')).toBeInTheDocument();
     expect((screen.getByPlaceholderText('Add backup email') as HTMLInputElement).value).toBe('');
 
+    await saveRecipients();
+
+    await waitFor(() => {
+      expect(mockApiPut).toHaveBeenCalledWith('/backup/recipients', {
+        authHash: 'mock-auth-hash',
+        backupEmails: ['backup@example.com', 'second@example.com'],
+      });
+    });
+    expect(vi.mocked(cryptoService.deriveKeys)).toHaveBeenCalledWith(
+      'master-pw',
+      'test@example.com',
+    );
+    // The server's answer replaces the list: the new address now waits to confirm.
+    expect(await screen.findByText('Waiting for confirmation')).toBeInTheDocument();
+    expect(mockToast).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: 'Backup recipients saved. Confirmation email sent to 1 address.',
+        type: 'success',
+      }),
+    );
+    // The derived proof key is zeroed, and the password field is cleared.
+    expect(zeroedKeys().length).toBeGreaterThan(0);
+    expect(
+      (screen.getByLabelText('Master password (required to change recipients)') as HTMLInputElement)
+        .value,
+    ).toBe('');
+  });
+
+  it('never sends recipients with the schedule: Save Settings carries only the switch and the hour', async () => {
+    await renderBackup();
+    await waitFor(() => screen.getByText('Save Settings'));
+
+    fireEvent.change(screen.getByPlaceholderText('Add backup email'), {
+      target: { value: 'sneaky@example.com' },
+    });
+    fireEvent.click(screen.getByText('Add'));
     await act(async () => {
       fireEvent.click(screen.getByText('Save Settings'));
     });
@@ -469,9 +546,9 @@ describe('BackupSettingsPage — emails, download, restore branches', () => {
       expect(mockApiPut).toHaveBeenCalledWith('/backup/settings', {
         enabled: true,
         scheduleHour: 3,
-        backupEmails: ['backup@example.com', 'second@example.com'],
       });
     });
+    expect(mockApiPut.mock.calls.some(([url]) => url === '/backup/recipients')).toBe(false);
   });
 
   it('adds the email on Enter without submitting the form', async () => {
@@ -504,9 +581,11 @@ describe('BackupSettingsPage — emails, download, restore branches', () => {
   });
 
   it('hides the add-email input once MAX_BACKUP_EMAILS are configured', async () => {
-    const emails = Array.from({ length: MAX_BACKUP_EMAILS }, (_, i) => `u${String(i)}@example.com`);
+    const recipients = Array.from({ length: MAX_BACKUP_EMAILS }, (_, i) =>
+      recipient(`u${String(i)}@example.com`),
+    );
     mockGetProfileApi.mockResolvedValue(
-      profileWith({ ...CONFIGURED_BACKUP, backupEmails: emails }),
+      profileWith({ ...CONFIGURED_BACKUP, backupRecipients: recipients }),
     );
 
     await renderBackup();
@@ -519,24 +598,271 @@ describe('BackupSettingsPage — emails, download, restore branches', () => {
 
   it('removes a backup email and saves the shortened list', async () => {
     mockGetProfileApi.mockResolvedValue(
-      profileWith({ ...CONFIGURED_BACKUP, backupEmails: ['a@example.com', 'b@example.com'] }),
+      profileWith({
+        ...CONFIGURED_BACKUP,
+        backupRecipients: [recipient('a@example.com'), recipient('b@example.com')],
+      }),
     );
+    mockApiPut.mockResolvedValue(recipientsReply([recipient('b@example.com')]));
     await renderBackup();
     await waitFor(() => screen.getByLabelText('Remove a@example.com'));
 
     fireEvent.click(screen.getByLabelText('Remove a@example.com'));
     expect(screen.queryByText('a@example.com')).not.toBeInTheDocument();
 
-    await act(async () => {
-      fireEvent.click(screen.getByText('Save Settings'));
-    });
+    await saveRecipients();
 
     await waitFor(() => {
-      expect(mockApiPut).toHaveBeenCalledWith(
-        '/backup/settings',
-        expect.objectContaining({ backupEmails: ['b@example.com'] }),
+      expect(mockApiPut).toHaveBeenCalledWith('/backup/recipients', {
+        authHash: 'mock-auth-hash',
+        backupEmails: ['b@example.com'],
+      });
+    });
+  });
+
+  it('labels every recipient state the server reports', async () => {
+    mockGetProfileApi.mockResolvedValue(
+      profileWith({
+        ...CONFIGURED_BACKUP,
+        backupRecipients: [
+          recipient('ok@example.com', 'confirmed'),
+          recipient('wait@example.com', 'pending', true),
+          recipient('old@example.com', 'pending', false),
+          recipient('held@example.com', 'suspended', false),
+        ],
+      }),
+    );
+
+    await renderBackup();
+
+    expect(await screen.findByText('Confirmed')).toHaveClass('text-green-700');
+    expect(screen.getByText('Waiting for confirmation')).toHaveClass('text-amber-700');
+    expect(screen.getByText('Needs your approval')).toHaveClass('text-amber-700');
+    expect(screen.getByText('Suspended')).toHaveClass('text-red-700');
+  });
+
+  it('offers to approve an address carried over from an older version without any edit', async () => {
+    mockGetProfileApi.mockResolvedValue(
+      profileWith({
+        ...CONFIGURED_BACKUP,
+        backupRecipients: [recipient('old@example.com', 'pending', false)],
+      }),
+    );
+    mockApiPut.mockResolvedValue(recipientsReply([recipient('old@example.com', 'pending')], 0, 1));
+    await renderBackup();
+    const save = await screen.findByText('Save Recipients');
+    fireEvent.change(screen.getByLabelText('Master password (required to change recipients)'), {
+      target: { value: 'master-pw' },
+    });
+    expect(save).not.toBeDisabled();
+
+    await saveRecipients();
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: 'Backup recipients saved. 1 more will be sent later.',
+          type: 'success',
+        }),
       );
     });
+    // The save finished: the button is back to its label, not left "Saving...".
+    expect(screen.getByText('Save Recipients')).toBeInTheDocument();
+    expect(screen.queryByText('Saving...')).not.toBeInTheDocument();
+  });
+
+  it('keeps Save Recipients disabled for a list of confirmed and waiting addresses the owner already approved', async () => {
+    mockGetProfileApi.mockResolvedValue(
+      profileWith({
+        ...CONFIGURED_BACKUP,
+        backupRecipients: [
+          recipient('ok@example.com'),
+          recipient('wait@example.com', 'pending', true),
+          // Confirmed without a stored owner approval (data from an older version): a
+          // confirmed address never waits for the owner.
+          recipient('old-confirmed@example.com', 'confirmed', false),
+        ],
+      }),
+    );
+    await renderBackup();
+    const save = await screen.findByText('Save Recipients');
+    fireEvent.change(screen.getByLabelText('Master password (required to change recipients)'), {
+      target: { value: 'master-pw' },
+    });
+
+    expect(save).toBeDisabled();
+  });
+
+  it('keeps Save Recipients disabled until something needs saving AND the master password is typed', async () => {
+    await renderBackup();
+    const save = await screen.findByText('Save Recipients');
+
+    // Nothing edited, nothing waiting for the owner: disabled even with a password.
+    fireEvent.change(screen.getByLabelText('Master password (required to change recipients)'), {
+      target: { value: 'master-pw' },
+    });
+    expect(save).toBeDisabled();
+
+    // Edited but no password: disabled.
+    fireEvent.change(screen.getByLabelText('Master password (required to change recipients)'), {
+      target: { value: '' },
+    });
+    fireEvent.change(screen.getByPlaceholderText('Add backup email'), {
+      target: { value: 'new@example.com' },
+    });
+    fireEvent.click(screen.getByText('Add'));
+    expect(save).toBeDisabled();
+
+    // Edited and the password typed: enabled.
+    fireEvent.change(screen.getByLabelText('Master password (required to change recipients)'), {
+      target: { value: 'master-pw' },
+    });
+    expect(save).not.toBeDisabled();
+  });
+
+  it('offers to re-approve suspended recipients without any edit', async () => {
+    mockGetProfileApi.mockResolvedValue(
+      profileWith({
+        ...CONFIGURED_BACKUP,
+        backupRecipients: [recipient('held@example.com', 'suspended', false)],
+      }),
+    );
+    mockApiPut.mockResolvedValue(recipientsReply([recipient('held@example.com', 'confirmed')]));
+    await renderBackup();
+    await screen.findByText('Suspended');
+
+    await saveRecipients();
+
+    await waitFor(() => {
+      expect(mockApiPut).toHaveBeenCalledWith('/backup/recipients', {
+        authHash: 'mock-auth-hash',
+        backupEmails: ['held@example.com'],
+      });
+    });
+    expect(await screen.findByText('Confirmed')).toBeInTheDocument();
+  });
+
+  it("shows the server's sentence when saving the recipients is refused, and keeps the edit", async () => {
+    mockApiPut.mockRejectedValue(
+      Object.assign(new Error('Request failed with status code 401'), {
+        isAxiosError: true,
+        response: {
+          status: 401,
+          data: { success: false, message: 'Current password is incorrect' },
+        },
+      }),
+    );
+    await renderBackup();
+    await waitFor(() => screen.getByPlaceholderText('Add backup email'));
+    fireEvent.change(screen.getByPlaceholderText('Add backup email'), {
+      target: { value: 'new@example.com' },
+    });
+    fireEvent.click(screen.getByText('Add'));
+
+    await saveRecipients('wrong-pw');
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({ title: 'Failed to save backup recipients', type: 'error' }),
+      );
+    });
+    expect(screen.getByText('new@example.com')).toBeInTheDocument();
+    expect(screen.getByText('Not saved yet')).toBeInTheDocument();
+  });
+
+  it('names every confirmation sent and every one still owed in the saved toast', async () => {
+    mockApiPut.mockResolvedValue(
+      recipientsReply(
+        [
+          recipient('backup@example.com'),
+          recipient('x@example.com', 'pending'),
+          recipient('y@example.com', 'pending'),
+          recipient('z@example.com', 'pending'),
+        ],
+        2,
+        1,
+      ),
+    );
+    await renderBackup();
+    await waitFor(() => screen.getByPlaceholderText('Add backup email'));
+    for (const email of ['x@example.com', 'y@example.com', 'z@example.com']) {
+      fireEvent.change(screen.getByPlaceholderText('Add backup email'), {
+        target: { value: email },
+      });
+      fireEvent.click(screen.getByText('Add'));
+    }
+
+    await saveRecipients();
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title:
+            'Backup recipients saved. Confirmation email sent to 2 addresses. 1 more will be sent later.',
+          type: 'success',
+        }),
+      );
+    });
+  });
+
+  it('reports a failure, and keeps the list as edited, when the server answers success: false', async () => {
+    mockApiPut.mockResolvedValue({ data: { success: false, message: 'nope' } });
+    await renderBackup();
+    await waitFor(() => screen.getByPlaceholderText('Add backup email'));
+    fireEvent.change(screen.getByPlaceholderText('Add backup email'), {
+      target: { value: 'new@example.com' },
+    });
+    fireEvent.click(screen.getByText('Add'));
+
+    await saveRecipients();
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({ title: 'Failed to save backup recipients', type: 'error' }),
+      );
+    });
+    expect(screen.getByText('Not saved yet')).toBeInTheDocument();
+  });
+
+  it('sends nothing and zeroes nothing it never derived when deriving the proof fails', async () => {
+    vi.mocked(cryptoService.deriveKeys).mockRejectedValueOnce(new Error('derivation failed'));
+    await renderBackup();
+    await waitFor(() => screen.getByPlaceholderText('Add backup email'));
+    fireEvent.change(screen.getByPlaceholderText('Add backup email'), {
+      target: { value: 'new@example.com' },
+    });
+    fireEvent.click(screen.getByText('Add'));
+    vi.mocked(cryptoService.clearKey).mockClear();
+
+    await saveRecipients();
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({ title: 'Failed to save backup recipients', type: 'error' }),
+      );
+    });
+    expect(mockApiPut.mock.calls.some(([url]) => url === '/backup/recipients')).toBe(false);
+    expect(vi.mocked(cryptoService.clearKey)).not.toHaveBeenCalled();
+  });
+
+  it('refuses to save the recipients when no user is loaded, and sends nothing', async () => {
+    await renderBackup();
+    await waitFor(() => screen.getByPlaceholderText('Add backup email'));
+    fireEvent.change(screen.getByPlaceholderText('Add backup email'), {
+      target: { value: 'new@example.com' },
+    });
+    fireEvent.click(screen.getByText('Add'));
+    useAuthStore.setState({ user: null });
+
+    await saveRecipients();
+
+    expect(mockToast).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: 'Master password is required to change backup recipients',
+        type: 'error',
+      }),
+    );
+    expect(mockApiPut.mock.calls.some(([url]) => url === '/backup/recipients')).toBe(false);
   });
 
   it('saves the edited schedule hour', async () => {

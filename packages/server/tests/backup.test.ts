@@ -235,7 +235,11 @@ describe('Backup routes', () => {
       expect(res.body.data.scheduleHour).toBe(6);
     });
 
-    it('should update backup emails', async () => {
+    // F-05 (PLAN.md 6.1): recipients left this route for PUT /backup/recipients,
+    // which requires the master-password proof. A body still carrying them is
+    // REFUSED (never silently stripped), whatever else it carries and whether or
+    // not backup encryption is configured.
+    it('refuses backup emails, naming the route that now changes them', async () => {
       await setupBackupForUser(agent, user.accessToken);
 
       const { csrfToken, csrfCookie } = await getCsrf(agent);
@@ -247,12 +251,13 @@ describe('Backup routes', () => {
         .set('Cookie', csrfCookie)
         .send({ backupEmails: ['backup@example.com'] });
 
-      expect(res.status).toBe(200);
-      expect(res.body.success).toBe(true);
-      expect(res.body.data.backupEmails).toEqual(['backup@example.com']);
+      expect(res.status).toBe(400);
+      expect(res.body.message).toContain('PUT /api/v1/backup/recipients');
+      const stored = await User.findById(user.id).lean();
+      expect(stored!.settings.backup.backupRecipients).toBeUndefined();
     });
 
-    it('should allow updating backup emails without encryption setup', async () => {
+    it('refuses backup emails without encryption setup too, and stores nothing', async () => {
       // No setupBackupForUser — encryption is NOT configured
       const { csrfToken, csrfCookie } = await getCsrf(agent);
 
@@ -263,9 +268,44 @@ describe('Backup routes', () => {
         .set('Cookie', csrfCookie)
         .send({ backupEmails: ['user@example.com', 'other@example.com'] });
 
+      expect(res.status).toBe(400);
+      expect(res.body.message).toContain('PUT /api/v1/backup/recipients');
+      const raw = await User.collection.findOne({ email: user.email });
+      expect(JSON.stringify(raw)).not.toContain('other@example.com');
+    });
+
+    it('answers with the public backup settings: an empty deprecated list and no recipient nonce', async () => {
+      await setupBackupForUser(agent, user.accessToken);
+      await User.collection.updateOne(
+        { email: user.email },
+        {
+          $set: {
+            'settings.backup.backupRecipients': [
+              { email: 'kept@example.com', state: 'confirmed', nonce: 'stored-nonce-value' },
+            ],
+            'settings.backup.recipientsRevision': 4,
+            'settings.backup.undeliverableNoticedAt': new Date(),
+          },
+        },
+      );
+      const { csrfToken, csrfCookie } = await getCsrf(agent);
+
+      const res = await agent
+        .put('/api/v1/backup/settings')
+        .set('Authorization', authHeader(user.accessToken))
+        .set('x-csrf-token', csrfToken)
+        .set('Cookie', csrfCookie)
+        .send({ scheduleHour: 7 });
+
       expect(res.status).toBe(200);
-      expect(res.body.success).toBe(true);
-      expect(res.body.data.backupEmails).toEqual(['user@example.com', 'other@example.com']);
+      expect(res.body.data.backupEmails).toEqual([]);
+      expect(res.body.data.backupRecipients).toEqual([
+        { email: 'kept@example.com', state: 'confirmed', confirmedAt: null, approved: false },
+      ]);
+      expect(JSON.stringify(res.body)).not.toContain('stored-nonce-value');
+      // The recipients' bookkeeping stays on the server.
+      expect(res.body.data).not.toHaveProperty('recipientsRevision');
+      expect(res.body.data).not.toHaveProperty('undeliverableNoticedAt');
     });
 
     it('should reject enabling backup without encryption setup', async () => {

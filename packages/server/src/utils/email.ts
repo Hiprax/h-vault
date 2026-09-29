@@ -219,6 +219,24 @@ export async function sendEmail(
   }
 }
 
+// ── Links ─────────────────────────────────────────────────────────────
+
+/**
+ * A link into the application that carries a one-time token, with the token in
+ * the URL FRAGMENT: `${APP_URL}${path}#token=<token>`.
+ *
+ * A fragment is never sent to a server, so the token cannot land in an access log,
+ * a proxy's log or a `Referer` header on the way to the page; the page reads it
+ * from `location.hash`, removes it from the address bar and POSTs it. A query
+ * string does all three of those things with it.
+ *
+ * @param path   The application path, starting with `/`.
+ * @param token  The token; percent-encoded here.
+ */
+export function tokenLink(path: string, token: string): string {
+  return `${config.APP_URL}${path}#token=${encodeURIComponent(token)}`;
+}
+
 // ── Specialised senders ────────────────────────────────────────────────
 
 /**
@@ -509,4 +527,88 @@ docker compose up -d --build --wait</pre>
   `.trim();
 
   return sendEmail(email, `H-Vault ${update.latest} is available`, html);
+}
+
+/**
+ * Asks an address to confirm that it agrees to receive an account's encrypted
+ * backups. Sent to the RECIPIENT, who may have no account here: it names the
+ * account only masked, and ignoring it is the way to decline (nothing is ever
+ * mailed to an address that has not followed its link).
+ *
+ * @param email         The recipient address.
+ * @param link          The confirmation link, built by {@link tokenLink}.
+ * @param maskedOwner   The requesting account's address, masked.
+ */
+export async function sendBackupRecipientConfirmationEmail(
+  email: string,
+  link: string,
+  maskedOwner: string,
+): Promise<EmailResult> {
+  const safeLink = escapeHtml(link);
+  const owner = escapeHtml(maskedOwner);
+  const html = `
+    <!DOCTYPE html>
+    <html lang="en">
+    <head><meta charset="UTF-8"></head>
+    <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+      <h2 style="color: #1a1a1a;">Confirm this address for encrypted backups</h2>
+      <p style="color: #4a4a4a; line-height: 1.6;">
+        The H-Vault account ${owner} asked to send its encrypted vault backups to this address.
+        Nothing will be sent here unless you confirm.
+      </p>
+      <div style="text-align: center; margin: 32px 0;">
+        <a href="${safeLink}"
+           style="background-color: #2563eb; color: #ffffff; padding: 12px 32px; text-decoration: none; border-radius: 6px; font-weight: 600; display: inline-block;">
+          Confirm this address
+        </a>
+      </div>
+      <p style="color: #6b6b6b; font-size: 14px; line-height: 1.6;">
+        If you do not recognise this request, ignore this email: no backup will be sent to you.
+        This link expires in 24 hours and works once.
+      </p>
+      <p style="color: #6b6b6b; font-size: 14px; line-height: 1.6;">
+        If the button above does not work, copy and paste the following link into your browser:
+      </p>
+      <p style="color: #2563eb; font-size: 14px; word-break: break-all;">${safeLink}</p>
+      <hr style="border: none; border-top: 1px solid #e5e5e5; margin: 24px 0;">
+      <p style="color: #9a9a9a; font-size: 12px;">H-Vault &mdash; Your passwords, secured.</p>
+    </body>
+    </html>
+  `.trim();
+
+  return sendEmail(email, 'Confirm this address for H-Vault backups', html);
+}
+
+/**
+ * Tells the account owner that a backup was NOT mailed because no address on the
+ * recipient list has confirmed. Sent to the account's own address, with no
+ * attachment: the backup is never rerouted there, because the owner chose to send
+ * it somewhere else. A fixed text, so nothing in it comes from the request.
+ */
+export async function sendBackupNotSentNotice(email: string): Promise<EmailResult> {
+  const safeAppName = escapeHtml(config.APP_NAME);
+  const settingsUrl = escapeHtml(`${config.APP_URL}/settings/backup`);
+  const html = `
+    <!DOCTYPE html>
+    <html lang="en">
+    <head><meta charset="UTF-8"></head>
+    <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+      <h2 style="color: #1a1a1a;">Your backup was not sent</h2>
+      <p style="color: #4a4a4a; line-height: 1.6;">
+        ${safeAppName} did not email your encrypted backup because no address on your backup
+        recipient list has confirmed it wants to receive it. A recipient confirms by following the
+        link it was emailed. After a password reset, a password change or signing out everywhere,
+        the recipients are suspended until you approve the list again with your master password.
+      </p>
+      <p style="color: #4a4a4a; line-height: 1.6;">
+        Review the list in <a href="${settingsUrl}" style="color: #2563eb;">Backup settings</a>.
+        You can also download a backup there at any time.
+      </p>
+      <hr style="border: none; border-top: 1px solid #e5e5e5; margin: 24px 0;">
+      <p style="color: #9a9a9a; font-size: 12px;">H-Vault &mdash; Your passwords, secured.</p>
+    </body>
+    </html>
+  `.trim();
+
+  return sendEmail(email, `${config.APP_NAME} - Backup not sent`, html);
 }

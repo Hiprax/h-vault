@@ -884,7 +884,9 @@ describe('User routes', () => {
         $set: {
           'settings.backup.enabled': true,
           'settings.backup.scheduleHour': 3,
-          'settings.backup.backupEmails': ['backup@example.com'],
+          'settings.backup.backupRecipients': [
+            { email: 'backup@example.com', state: 'confirmed', nonce: 'never-on-the-wire' },
+          ],
           'settings.backup.encryptedBWK': 'opaque-bwk-ciphertext',
           'settings.backup.bwkIv': 'opaque-bwk-iv',
           'settings.backup.bwkTag': 'opaque-bwk-tag',
@@ -906,7 +908,13 @@ describe('User routes', () => {
       // Standard backup settings should be present
       expect(backup.enabled).toBe(true);
       expect(backup.scheduleHour).toBe(3);
-      expect(backup.backupEmails).toEqual(['backup@example.com']);
+      // F-05: the deprecated list is always empty; the recipients, with their
+      // confirmation state and never their nonce, are `backupRecipients`.
+      expect(backup.backupEmails).toEqual([]);
+      expect(backup.backupRecipients).toEqual([
+        { email: 'backup@example.com', state: 'confirmed', confirmedAt: null, approved: false },
+      ]);
+      expect(JSON.stringify(res.body)).not.toContain('never-on-the-wire');
       expect(backup.isConfigured).toBe(true);
 
       // BWK fields must be present so the client can verify the backup

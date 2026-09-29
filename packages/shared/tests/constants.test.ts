@@ -876,13 +876,19 @@ describe('Enum arrays', () => {
     expect(AUDIT_ACTIONS.length).toBeGreaterThanOrEqual(26);
   });
 
-  it('AUDIT_ACTIONS has exactly 48 distinct operations (keep README in sync)', () => {
+  it('AUDIT_ACTIONS has exactly 52 distinct operations (keep README in sync)', () => {
     // The README "Audit Logging" feature line documents this exact count
-    // ("48 distinct operations"). If a new audit action is added, bump both
+    // ("52 distinct operations"). If a new audit action is added, bump both
     // this assertion and the README number together. 48th: `device_proof_revoked`
-    // (F-03, a device proof revoked by its failure budget).
-    expect(AUDIT_ACTIONS.length).toBe(48);
+    // (F-03, a device proof revoked by its failure budget); 49th:
+    // `invitation_create` (F-24); 50th-52nd: the backup recipient list approved,
+    // a recipient confirmed, recipients suspended by a recovery (F-05).
+    expect(AUDIT_ACTIONS.length).toBe(52);
     expect(AUDIT_ACTIONS).toContain('device_proof_revoked');
+    expect(AUDIT_ACTIONS).toContain('invitation_create');
+    expect(AUDIT_ACTIONS).toContain('backup_recipients_update');
+    expect(AUDIT_ACTIONS).toContain('backup_recipient_confirmed');
+    expect(AUDIT_ACTIONS).toContain('backup_recipients_suspended');
     expect(new Set(AUDIT_ACTIONS).size).toBe(AUDIT_ACTIONS.length);
   });
 

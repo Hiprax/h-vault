@@ -198,6 +198,9 @@ security posture, not a disclaimer.
   not: it is assembled on the server, which has neither the backup password nor the key
   derived from it, so there is nothing there to sign with. That is why restoring an emailed
   backup asks for confirmation; see the next bullet for what the confirmation means.
+- **A stolen session redirecting your backups.** Where mailed backups go changes only with your
+  master password, and no address other than your own receives one before it has confirmed; see
+  [Where mailed backups go](#where-mailed-backups-go).
 - **Tampered backup files.** Restore rejects dangling and self-referential folder links,
   and breaks any folder cycle a malicious file plants. It also checks the integrity
   signature before anything is sent — but the sentence that matters is **which key it is
@@ -549,6 +552,68 @@ still occupy both slots of a process for up to that deadline each, which delays 
 downloads without refusing them. A transfer that is cut off or fails is recorded in the audit log
 as not completed; part of the file may still have reached the client. The vault item and trash
 lists are streamed the same way and limited to 400 pages per account per 15 minutes.
+
+### Where mailed backups go
+
+A mailed backup is your whole vault, encrypted, leaving the server as an attachment, so the list
+of addresses it goes to is guarded like a credential:
+
+- **Only the master password changes the list.** A session alone (a stolen access token, an
+  unlocked browser left behind) cannot add, remove or re-approve a recipient: the list is saved
+  through its own request, which re-checks your master password, and the settings request that
+  used to carry it now refuses it.
+- **Every address other than your own confirms before it receives anything.** Saving the list
+  emails each new address a link that works once and for 24 hours; the address receives no backup
+  until it follows it. The link is bound to your account, that address and a random value that
+  changes every time the address changes state, and it carries its token in the part of the URL
+  that is never sent to a server, so the token reaches no access log. Your own verified address is
+  confirmed at once.
+- **Nothing is rerouted.** With no recipients listed, backups go to your account address, as they
+  always did. When recipients are listed and none has confirmed, nothing is sent: the run is
+  recorded as failed and you are emailed about it at most once (within the daily budget below) until the list changes or a backup is delivered.
+  The list is read again, fresh, immediately before a backup is mailed, so a suspension that lands
+  while it is being built stops the mail to that address.
+- **Recovery cuts every other address off.** A password reset, a password change and "log out
+  everywhere" suspend every recipient except your own address, and every confirmation link already
+  sent stops working. You approve the list again with your master password: an address that had
+  confirmed is then confirmed again without a new email (its consent was never in question, and the
+  links sent before stay dead), and one that never confirmed is sent a new link. A save that
+  carried a proof of your old password is refused once the new one is stored, so it cannot undo
+  the suspension.
+- **Outbound backup email is budgeted: 30 messages per account per UTC day**, counting every
+  mailed backup once per recipient, every confirmation and every "backup not sent" notice. A
+  confirmation the mail relay refuses is sent at most three times in all (the first attempt and two retries).
+- **Addresses from before this control wait for you.** Recipients stored by an earlier version are
+  carried over unconfirmed and are NOT emailed: a recipient's click proves the recipient agrees,
+  never that you put the address there, so nothing is sent to them until you save the list again.
+
+What this does not protect against:
+
+- **Somebody who knows your master password** can add their own address and confirm it. The
+  confirmation proves the recipient agrees, not that you do. The remedy is to change the master
+  password, which suspends every recipient but your own; then review the list before approving it
+  again.
+- **The budget is per account, not per server.** Every account can make the server send up to 30
+  of these messages a day, and with open registration anybody can create accounts; the
+  registration settings in [Who can create an account](#who-can-create-an-account) are what bound
+  that.
+- **A session can pause your off-site copies.** "Log out everywhere" needs only a session and
+  suspends every third-party recipient; while your own address is on the list it keeps receiving,
+  so no "not sent" notice follows. A session can likewise spend the day's email budget on manual
+  backups, delaying that day's scheduled one.
+- **A mail already handed to the relay is not recalled.** The list is re-read just before the
+  budget is claimed; a suspension that lands while the messages are being sent does not stop the
+  ones already handed over.
+- **A confirmation mail is delivered at most once.** A server that stops between claiming a
+  confirmation and sending it leaves that address unmailed until you save the list again once its
+  link would have expired.
+- **Refresh-token reuse and turning two-factor authentication off do not suspend recipients.** A
+  reused refresh token is a stolen session, which could never change recipients; turning 2FA off
+  needs the master password and a code, and is an owner's action.
+- **The confirmation is recorded in your audit log without the recipient's network address or
+  browser**, which are a third party's.
+- **Rolling back to 0.15.x** after this version has started once mails backups to the account
+  address only: the older version does not read the new list.
 
 ### Password breach checking (Have I Been Pwned)
 
