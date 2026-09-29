@@ -14,11 +14,12 @@ export interface IAuditLog {
   userAgent: string;
   timestamp: Date;
   /**
-   * How many attempts this row stands for. 1 for an ordinary row; a coalesced
-   * row (`auditService.recordLockedAttempt`) counts every locked sign-in attempt
-   * of one minute, so a stranger hammering a locked account costs one row a
-   * minute rather than one per request. Rows written before the field existed
-   * read as 1.
+   * How many events this row stands for. 1 for an ordinary row. A coalesced row
+   * counts more: `auditService.recordLockedAttempt` counts every locked sign-in
+   * attempt of one minute, so a stranger hammering a locked account costs one row
+   * a minute rather than one per request, and `createAuditLog` counts an
+   * uninterrupted run of identical metadata-only edits by one actor into the
+   * run's row. Rows written before the field existed read as 1.
    */
   count: number;
   /**
@@ -69,8 +70,19 @@ const auditLogSchema = new Schema<IAuditLog>(
 
 // ----- Indexes -----
 
-auditLogSchema.index({ userId: 1, timestamp: -1 });
-auditLogSchema.index({ userId: 1, action: 1, timestamp: -1 });
+/**
+ * The two page sorts of `GET /user/audit-log` (unfiltered, and filtered by
+ * action), each ending in `_id`. The page is cut with `skip`/`limit`, so its sort
+ * must be a TOTAL order, `{timestamp: -1, _id: -1}`, and without `_id` in the
+ * index that order needs a blocking in-memory SORT over every row the account
+ * has, which on an unbounded log is exactly the cost F-02 is about. With it the
+ * page is an index walk. The indexes these replace (`{userId, timestamp}` and
+ * `{userId, action, timestamp}`) are dropped by migration v2, since
+ * `create-indexes` only ever builds. The same two serve the per-account trims in
+ * `auditService` and the cascade's batched delete.
+ */
+auditLogSchema.index({ userId: 1, timestamp: -1, _id: -1 });
+auditLogSchema.index({ userId: 1, action: 1, timestamp: -1, _id: -1 });
 /**
  * One row per coalescing bucket. Partial, so the index holds only the coalesced
  * rows (every other row has no key and costs it nothing), and unique, so two

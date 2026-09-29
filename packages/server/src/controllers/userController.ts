@@ -1277,9 +1277,13 @@ export const getAuditLog = catchAsync(async (req: Request, res: Response): Promi
     // tick and an import writes N audit rows from one `Date.now()`, so ties are
     // the normal case rather than a curiosity — and a row that moves across a
     // page boundary between two requests is one the reader either sees twice or
-    // never sees at all. The reasoning, and why the index is deliberately left
-    // alone rather than extended with `_id`, is written out at
-    // `documentController.sendDocumentPage` and `vaultController`'s own sort.
+    // never sees at all (see `documentController.sendDocumentPage`).
+    //
+    // Unlike the item and document lists, whose rows a per-account cap bounds,
+    // this sort IS index-served: `models/AuditLog.ts` carries `_id` at the end of
+    // both `{userId, timestamp}` and `{userId, action, timestamp}` (migration v2
+    // dropped the pair without it), so a page walks the index rather than
+    // sorting every row the account has in memory.
     AuditLog.find(filter)
       .select('-userId')
       .sort({ timestamp: -1, _id: -1 })

@@ -130,7 +130,16 @@ function sleep(ms: number): Promise<void> {
  * milliseconds), which at most ten attempts per lock episode can sample.
  */
 async function applyFailedLoginDelay(email: string): Promise<void> {
-  const attempts = recordFailedLoginAttempt(email);
+  await applyProgressiveDelay(recordFailedLoginAttempt(email));
+}
+
+/**
+ * Sleeps for the progressive delay `attempts` failures earn (skipped in the test
+ * environment). The ONE place the delay is applied, for both steps: the password
+ * step passes the per-email throttle's count (see `applyFailedLoginDelay`), the
+ * 2FA step the second factor's durable counter.
+ */
+async function applyProgressiveDelay(attempts: number): Promise<void> {
   if (isTest) return;
 
   const delay = getProgressiveDelay(attempts);
@@ -1060,12 +1069,7 @@ export const login2fa = catchAsync(async (req: Request, res: Response): Promise<
     // no enumeration vector to equalize here: reaching this code requires a
     // valid, device-bound temp token, which is only ever issued for an account
     // that exists and whose password already verified.
-    if (!isTest) {
-      const delay = getProgressiveDelay(verdict.attempts);
-      if (delay > 0) {
-        await sleep(delay);
-      }
-    }
+    await applyProgressiveDelay(verdict.attempts);
 
     throw httpErrors.unauthorized(ERROR_CODES.TWO_FA_INVALID);
   }

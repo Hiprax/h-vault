@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import mongoose from 'mongoose';
-import { DOCUMENT_PLAINTEXT_CHUNK_BYTES, DOCUMENT_TAG_BYTES } from '@hvault/shared';
+import { DOCUMENT_PLAINTEXT_CHUNK_BYTES, DOCUMENT_TAG_BYTES, maskEmail } from '@hvault/shared';
 
 // Capture logger output so the "logs prominently" test can assert the operator
 // signal, and so the cascade modules resolve a logger. Hoisted so the (also
@@ -208,7 +208,10 @@ describe('cascadeDeleteUser', () => {
     expect(systemLogs.length).toBeGreaterThanOrEqual(1);
     const logMeta = systemLogs[0]!.metadata as Record<string, unknown>;
     expect(logMeta.deletedUserId).toBe(userId);
-    expect(logMeta.deletedEmail).toBe(userEmail);
+    // Masked, under its own name (F-02): an erasure record that kept the address
+    // in clear for a year would not have erased it.
+    expect(logMeta.maskedEmail).toBe(maskEmail(userEmail));
+    expect(logMeta).not.toHaveProperty('deletedEmail');
   });
 
   it('does not affect other users data (cross-user isolation)', async () => {
@@ -275,13 +278,13 @@ describe('cascadeDeleteUser', () => {
 
   it('re-sets deletionPending on sequential failure', async () => {
     // MongoMemoryServer is standalone, so cascadeDeleteUser routes to the
-    // SEQUENTIAL path. Enter it with the flag CLEARED — the one state where the
-    // catch-block re-set is load-bearing rather than a no-op.
+    // SEQUENTIAL path. Enter it with the flag CLEARED, and make the cascade's own
+    // first write (the `deletionPending` mark, F-02) the one that fails: that is the
+    // one state where the catch-block re-set is load-bearing rather than a no-op.
     await User.updateOne({ _id: userId }, { $set: { deletionPending: false } });
 
-    // Force the first sequential delete to throw so the catch block runs.
-    const deleteSpy = vi
-      .spyOn(VaultItem, 'deleteMany')
+    const markSpy = vi
+      .spyOn(User, 'updateOne')
       .mockRejectedValueOnce(new Error('forced sequential failure'));
 
     let result: boolean;
@@ -294,13 +297,14 @@ describe('cascadeDeleteUser', () => {
         auditAction: 'account_delete',
       });
     } finally {
-      deleteSpy.mockRestore();
+      markSpy.mockRestore();
     }
 
     // The cascade did not complete...
     expect(result).toBe(false);
-    // ...the user still exists (nothing was deleted)...
+    // ...the user still exists (the mark failed before any data went)...
     const userAfter = await User.findById(userId).lean();
+    expect(await VaultItem.countDocuments({ userId })).toBeGreaterThan(0);
     expect(userAfter).not.toBeNull();
     // ...and deletionPending was restored so the next cleanup cycle retries.
     expect(userAfter!.deletionPending).toBe(true);
@@ -462,8 +466,9 @@ describe('cascadeDeleteTransactional — deletionPending re-set on failure', () 
     const target = await createTestUser();
     await RefreshToken.deleteMany({ userId: target.id });
 
-    // Drive the backstop: enter the cascade with the flag unset, the one state
-    // in which the abort-time re-set is load-bearing rather than a no-op.
+    // Enter the cascade with the flag unset. The cascade's own first write sets
+    // it again, so what this pins is that a FAILING re-set in the catch is
+    // attempted (`updates === 2`), logged, and never escapes.
     await User.updateOne({ _id: target.id }, { $set: { deletionPending: false } });
 
     // Force the very first write inside the transaction to throw. This
@@ -505,9 +510,15 @@ describe('cascadeDeleteTransactional — deletionPending re-set on failure', () 
     const deleteSpy = vi
       .spyOn(VaultItem, 'deleteMany')
       .mockRejectedValueOnce(new Error('forced transactional failure'));
-    const updateSpy = vi
-      .spyOn(User, 'updateOne')
-      .mockRejectedValueOnce(new Error('re-set failure'));
+    // The cascade's FIRST write is its own `deletionPending` mark (F-02), so the
+    // failure is aimed at the second `updateOne`: the re-set in the catch.
+    const originalUpdateOne = User.updateOne.bind(User) as (...args: unknown[]) => unknown;
+    let updates = 0;
+    const updateSpy = vi.spyOn(User, 'updateOne').mockImplementation(((...args: unknown[]) => {
+      updates += 1;
+      if (updates === 2) return Promise.reject(new Error('re-set failure'));
+      return originalUpdateOne(...args);
+    }) as never);
 
     let result: boolean;
     try {
@@ -526,6 +537,7 @@ describe('cascadeDeleteTransactional — deletionPending re-set on failure', () 
     // The catch must still return false (cascade did not complete) without
     // letting the inner re-set failure escape the function.
     expect(result).toBe(false);
+    expect(updates).toBe(2);
 
     // The operator MUST get a prominent signal that this user now needs manual
     // intervention — the whole point of the inner catch. Asserting the log call
@@ -702,7 +714,11 @@ describe('cascadeDeleteUser — the document store', () => {
     expect(keysFor(userId)).toHaveLength(1);
   });
 
-  it('does not touch a single stored object when the row deletion itself fails', async () => {
+  // Restated for F-02 (PLAN.md 3.2): erasure is forward-only, so a failure after
+  // the batches leaves the document ROWS already gone. What must still hold is the
+  // ordering this feature exists for: no stored object is touched until the erasure
+  // completes, and the re-run's prefix sweep reclaims it.
+  it('does not touch a single stored object when the row deletion itself fails, and the re-run sweeps it', async () => {
     const seeded = await seedDocument(userId);
     await User.updateOne({ _id: userId }, { $set: { deletionPending: false } });
 
@@ -718,14 +734,16 @@ describe('cascadeDeleteUser — the document store', () => {
     }
 
     expect(result).toBe(false);
-    // The rows survived, so the objects MUST survive with them: an object deleted
-    // beside a row that still exists is a document that can never be opened again,
-    // and it is the one ordering this feature must never produce.
-    expect(await Document.countDocuments({ userId })).toBe(1);
+    // The object survives the failed run: it is swept only once the erasure has
+    // finished, never while a run that failed may have left a row naming it.
     expect(keysFor(userId)).toEqual([seeded.objectKey]);
-    // The account is still there and still flagged, so the zombie loop retries it.
+    // The account is still there and flagged, so the zombie loop retries it.
     const userAfter = await User.findById(userId).lean();
     expect(userAfter?.deletionPending).toBe(true);
+
+    expect(await erase()).toBe(true);
+    expect(await Document.countDocuments({ userId })).toBe(0);
+    expect(keysFor(userId)).toEqual([]);
   });
 });
 
@@ -762,15 +780,18 @@ describe('cascadeDeleteUser — transactional path with the document store', () 
     expect(keysFor(user.id)).toEqual([]);
   });
 
-  it('rolls both document collections back on an abort and sweeps nothing', async () => {
+  // Restated for F-02 (PLAN.md 3.2): the document collections are erased in
+  // batches BEFORE the final transaction, so an abort no longer rolls them back.
+  // The invariant kept: an aborted erasure sweeps no object, leaves the account
+  // pending, and the re-run finishes the rows and then the objects.
+  it('an abort sweeps no object and leaves the account pending; the re-run finishes rows and objects', async () => {
     const user = await createTestUser();
     const seeded = await seedDocument(user.id);
     const staged = await seedUpload(user.id);
     const untouched = [seeded.objectKey, staged.objectKey].sort();
     await User.updateOne({ _id: user.id }, { $set: { deletionPending: false } });
 
-    // Fail a write that runs AFTER both document deletions, so the abort is what
-    // has to put them back. A failure before them would prove nothing.
+    // Fail the straggler sweep INSIDE the transaction.
     const auditSpy = vi
       .spyOn(AuditLog, 'deleteMany')
       .mockRejectedValueOnce(new Error('forced transactional failure'));
@@ -789,10 +810,23 @@ describe('cascadeDeleteUser — transactional path with the document store', () 
     }
 
     expect(result).toBe(false);
-    expect(await Document.countDocuments({ userId: user.id })).toBe(1);
-    expect(await DocumentUpload.countDocuments({ userId: user.id })).toBe(1);
     expect(keysFor(user.id)).toEqual(untouched);
     const userAfter = await User.findById(user.id).lean();
     expect(userAfter?.deletionPending).toBe(true);
+    expect(await AuditLog.countDocuments({ userId: null, action: 'account_delete' })).toBe(0);
+
+    expect(
+      await cascadeDeleteUser({
+        userId: user.id,
+        userEmail: user.email,
+        ip: '127.0.0.1',
+        userAgent: 'test-agent',
+        auditAction: 'account_delete',
+      }),
+    ).toBe(true);
+    expect(await Document.countDocuments({ userId: user.id })).toBe(0);
+    expect(await DocumentUpload.countDocuments({ userId: user.id })).toBe(0);
+    expect(keysFor(user.id)).toEqual([]);
+    expect(await AuditLog.countDocuments({ userId: null, action: 'account_delete' })).toBe(1);
   });
 });

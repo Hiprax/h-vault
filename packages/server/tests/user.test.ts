@@ -9,7 +9,7 @@ import { RefreshToken } from '../src/models/RefreshToken.js';
 import { TrustedDevice } from '../src/models/TrustedDevice.js';
 import { User } from '../src/models/User.js';
 import { hashToken } from '../src/utils/token.js';
-import { MAX_SESSIONS, MAX_TRUSTED_DEVICES } from '@hvault/shared';
+import { MAX_SESSIONS, MAX_TRUSTED_DEVICES, maskEmail } from '@hvault/shared';
 import { createTestUser, authHeader, getCsrf as getCsrfBase } from './helpers.js';
 import type { TestUser } from './helpers.js';
 import { advanceClockBy, withTestClock } from './clock.js';
@@ -1898,7 +1898,8 @@ describe('User routes', () => {
       expect(deletions[0]?.userId).toBeNull();
       expect(deletions[0]?.metadata).toMatchObject({
         deletedUserId: user.id,
-        deletedEmail: user.email,
+        // Masked (F-02): the erasure record never keeps the address in clear.
+        maskedEmail: maskEmail(user.email),
       });
 
       // ...and the account itself is gone.

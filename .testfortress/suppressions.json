@@ -657,6 +657,19 @@
       "created": "2026-09-28",
       "expires": "2026-12-27",
       "approvedBy": ["judge:readonly"]
+    },
+    {
+      "id": "SUP-0061",
+      "rule": "BASELINE-REDUCTION",
+      "kind": "known-gap",
+      "file": ".testfortress/baseline.json",
+      "symbol": "packages/client coverage.linesTotal 10942 -> 10940",
+      "maxHits": 1,
+      "reason": "The client denominator fell by two because the authn-lockout change (commit 374f784) deleted client code, and the baseline was last recorded at 225c193, before it. MEASURED, not argued: `git archive` of each commit to /tmp, the client vitest.config.ts coverage run (v8, include src/**, so every source file is reported whether or not a test loads it) over one test file, per-file LF diffed. 225c193 totals 10942, identical to the baseline, which validates the method; 374f784 totals 10940, identical to the working-tree `npm run ci` run. Every moved file is in 374f784: src/components/layout/ProtectedRoute.tsx 51 -> 44 (the locked-account screen was removed with the refresh-time lockout refusal: a refresh is never refused for a lockout any more, so there is nothing for that screen to show), src/services/auth/sessionFailure.ts 48 -> 47 (the lockout sentence removed from describeTransientFailure for the same reason), offset by src/components/auth/LoginPage.tsx 60 -> 63 (the unlock-link hint), src/pages/AuditLogPage.tsx 40 -> 42 (the coalesced-row count) and src/pages/SettingsPage.tsx 834 -> 835 (the second-factor failure title). NOTHING STOPPED BEING MEASURED: the measured file set is 204 files at both commits, packages/client/vitest.config.ts is untouched, and no client percentage fell (branch 93.85 -> 93.87, line and function unchanged in the same ci run). Keeping the deleted screen to hold the denominator would be dead code retained for a metric, which is what this ledger exists to make visible. REMOVAL CONDITION: delete at expiry (the integrity scan raises LEDGER-EXPIRED on that date); the reduction is recorded once and the field ratchets upward from 10940.",
+      "owner": "maintainer",
+      "created": "2026-09-29",
+      "expires": "2026-12-28",
+      "approvedBy": ["judge:readonly"]
     }
   ]
 }

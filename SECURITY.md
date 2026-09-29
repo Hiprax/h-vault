@@ -136,19 +136,45 @@ security posture, not a disclaimer.
   verified token: neighbours behind one address never spend each other's budget, and an attacker
   holding a session cannot buy a fresh budget by moving to another address. That covers the
   heavy-operation tier and the confirmation of a new 2FA setup. It also covers every vault-item
-  and folder write: each one leaves an audit row that is kept for a year, so each is bounded per
-  account, at a ceiling sized for the app's own one-request-per-item bulk actions. That bounds how
-  fast one account can grow the log, not how large it gets: at the two ceilings it is 21,000 rows
-  per quarter hour, about two million a day, each kept for the year. Ceilings much lower than that
-  need the bulk actions to become single requests first. Getting the key wrong on any of these
-  tiers turns a limiter into a lockout of the legitimate user, an open door for the attacker, or
-  both. Every IP-keyed tier buckets IPv6 by its **`/64` prefix** rather than by
+  and folder write: each one leaves an audit row, so each is bounded per account, at a ceiling
+  sized for the app's own one-request-per-item bulk actions. That bounds how fast one account can
+  grow the log; how large it can grow is bounded separately (see **The audit log's size** below).
+  Getting the key wrong on any of these tiers turns a limiter into a lockout of the legitimate
+  user, an open door for the attacker, or both. Every IP-keyed tier buckets IPv6 by its **`/64` prefix** rather than by
   the individual address, because a single routed IPv6 allocation hands one attacker 18
   quintillion addresses: keyed on the full `/128`, an IP-keyed limiter is not a limiter at all,
   it is a counter that never reaches two. That aggregation happens inside the library that
   parses the address, so it is a dependency this project deliberately keeps current — the
   advisory that stood in exactly that code path (`ip-address`, reachable from every rate-limit
   key) is cleared, and the `/64` bucketing is pinned by a test rather than left to a default.
+
+- **The audit log's size.** A rate bounds how fast the log grows, not how large it gets, so the
+  log is also bounded by size, and its entries come in two classes. **Activity** entries (what an
+  account did to its own items, folders, documents and backups) are capped at **100,000 per
+  account**, oldest removed first: an hourly maintenance job trims every account back to the cap,
+  and the server also trims an account on every hundredth such entry, so an account can sit above
+  the cap by at most about an hour of its write ceilings (longer only on an instance so large that
+  one pass over every account takes more than its ten-minute budget). A run of identical metadata-only edits (a
+  favourite toggled, a folder moved or reordered) by one browser, each within a minute of the last,
+  is recorded as one entry with a count; an edit that changes an item's or a folder's encrypted
+  contents always gets an entry of its own, and two browsers editing the same item never share
+  one. **Security** entries (sign-ins and sign-outs, password, 2FA, session and trusted-device
+  events, exports and imports, backup setup, download and restore, settings) are never trimmed and
+  never merged, so flooding edits can push only older edits out of the log, never a record of how
+  the account was accessed. The exceptions are the entries a stranger can cause, which are capped
+  separately at 5,000 per account and trimmed the same way. The residual, stated at its size:
+  every other security entry takes the account's password or a signed-in session, and is bounded
+  only by its route's rate limit and the retention period (365 days by default), not by a cap. A
+  session can write, without re-entering the master password, sign-outs, session and
+  trusted-device revocations and settings changes (one shared budget of 60 a minute, up to 86,400
+  a day), imports (60 per 15 minutes, 5,760 a day), backup downloads (10 per 15 minutes, shared
+  with the other heavy operations, 960 a day), backup restores and failed password checks (one
+  budget of 5 per 15 minutes, 480 a day) and failed unlocks (5 per 5 minutes, 1,440 a day): about
+  95,000 entries a day at most. Anyone who knows the master password can also write sign-in
+  entries, and those are limited per client address (20 per 15 minutes), not per account, so an
+  attacker who holds the password and many addresses can grow an account's log further. Both are
+  stated here rather than closed: capping them would mean trimming records of how the account was
+  used.
 
 - **One account reading or changing another's data.** Every route that takes an id scopes its query
   to the authenticated user, and that is asserted **exhaustively rather than by sampling**: the
@@ -884,11 +910,30 @@ orders look interchangeable and are not:
   entry marked for the next run rather than removing an entry whose file is still there.
 - **Deleting an account** is the one path that runs the other way round: every entry is
   removed with the rest of the account's data first, and only then are the account's files
-  swept from storage by prefix. Because the entries are already gone, a file the sweep cannot
-  reach is already unreadable rather than a document still standing. The erasure is reported
-  as complete in that case — it is — and the failure is logged for the operator, with the
-  remainder reclaimed by the scheduled clean-up. On a deployment with no document store
-  configured the sweep does nothing at all.
+  swept from storage by prefix. A file is never swept while an attempt that failed part-way could
+  have left an entry naming it: the sweep runs only once the whole erasure has finished. Because
+  the entries are already gone, a file the sweep cannot reach is already unreadable rather than a
+  document still standing. The erasure is reported as complete in that case — it is — and the
+  failure is logged for the operator, with the remainder reclaimed by the scheduled clean-up. On a
+  deployment with no document store configured the sweep does nothing at all.
+
+The erasure is **forward-only rather than all-or-nothing**. An account's history can be large (a
+year of audit entries, thousands of items, a stale session record per refresh), and a single
+database transaction sized by all of it is one the database aborts at its time limit, which would
+leave the account impossible to delete. So the bulk of the account is removed in small batches
+first, and only a short final step (anything written while the batches ran, the trusted devices
+and the account itself) runs as one transaction. A failure part-way therefore leaves some of the
+account's data already gone and the account still there, marked, and the next run finishes it.
+The one record that outlives the account names it by id and keeps the address only **masked**
+(the first and last character of the part before the `@`, and the domain), together with the
+address and browser the deletion was requested from. A local part of one or two characters is
+shown in full by that mask. Records written by earlier versions, which kept the address in clear,
+are rewritten to the masked form when the server first starts on this version. A very large
+account can take long enough to erase that the request asking for it times out at a proxy first;
+the erasure carries on, and the marker below covers the time it takes. A scheduled backup that is
+already being mailed when an erasure begins can still finish, and its log entry, which names the
+recipients, then outlives the account for the retention period; a backup for an account already
+marked is never started.
 
 An account whose erasure did not finish keeps the marker that says so, and that marker is the
 only durable record that its data still needs removing — which is why nothing clears it before

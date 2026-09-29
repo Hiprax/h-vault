@@ -1400,7 +1400,9 @@ describe('Folder Routes', () => {
       // One row naming the folder, and no echo of the new encrypted name or IV
       // the request carried.
       expect(updates).toHaveLength(1);
-      expect(updates[0]?.metadata).toEqual({ folderId: folder._id });
+      // `contentChanged: true`: this update carries a new encrypted name, so the
+      // audit service keeps it as a row of its own (F-02 coalescing allowlist).
+      expect(updates[0]?.metadata).toEqual({ folderId: folder._id, contentChanged: true });
     });
 
     it('should create audit log on folder delete', async () => {

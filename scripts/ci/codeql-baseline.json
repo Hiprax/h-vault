@@ -13,7 +13,7 @@
       "file": "packages/client/tests/fuzz/parsers.fuzz.test.ts"
     },
     {
-      "fingerprint": "js/sql-injection::packages/server/src/controllers/authController.ts::a88598472695f57d:1",
+      "fingerprint": "js/sql-injection::packages/server/src/controllers/authController.ts::9413d9f8ea340fd2:1",
       "rule": "js/sql-injection",
       "file": "packages/server/src/controllers/authController.ts"
     },

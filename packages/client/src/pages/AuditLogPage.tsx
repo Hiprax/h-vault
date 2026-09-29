@@ -128,13 +128,15 @@ const ACTION_LABELS: Record<string, string> = {
 };
 
 /**
- * How many attempts a coalesced row stands for, when it stands for more than one.
+ * How many events a coalesced row stands for, when it stands for more than one.
  *
  * Sign-in attempts made while the password is locked are recorded one row per
  * minute with a count, so a stranger hammering the account does not bury the
- * page. Showing the count is what keeps that row honest: "Failed Login" alone
- * would hide that it was a hundred of them. A row without the field, or with 1,
- * is a single event and shows nothing extra.
+ * page; a run of identical metadata-only edits (a favourite toggled, a folder
+ * moved or reordered) by one browser is recorded as one row with a count, for
+ * the same reason. Showing the count is what keeps such a row honest: "Failed
+ * Login" alone would hide that it was a hundred of them. A row without the field,
+ * or with 1, is a single event and shows nothing extra.
  */
 function attemptCount(entry: IAuditLogEntry): number | null {
   return typeof entry.count === 'number' && entry.count > 1 ? entry.count : null;

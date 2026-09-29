@@ -417,9 +417,12 @@ export interface IAuditLogEntry {
   userAgent: string;
   timestamp: string;
   /**
-   * How many events the row stands for: 1, except for the coalesced row of
-   * sign-in attempts made during a password lockout, which counts a minute of
-   * them. Absent on rows written before the field existed (read as 1).
+   * How many events the row stands for: 1, except for a coalesced row. The
+   * sign-in attempts made during a password lockout are counted into one row a
+   * minute (its time is the first attempt's); an uninterrupted run of identical
+   * metadata-only edits of one item or folder by one actor (same address and user
+   * agent, each within a minute of the last) is counted into one row (its time is
+   * the latest edit's). Absent on rows written before the field existed (read as 1).
    */
   count?: number;
 }

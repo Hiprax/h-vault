@@ -45,6 +45,8 @@ import {
   AUDIT_ACTIONS,
   STRANGER_WRITABLE_AUDIT_ACTIONS,
   MAX_STRANGER_AUDIT_ROWS_PER_USER,
+  MAX_ACTIVITY_AUDIT_ROWS_PER_USER,
+  AUDIT_COALESCE_WINDOW_MS,
   BACKUP_STATUSES,
   ERROR_CODES,
   PAGINATION_DEFAULTS,
@@ -893,6 +895,14 @@ describe('Enum arrays', () => {
     expect(STRANGER_WRITABLE_AUDIT_ACTIONS).not.toContain('login');
     expect(STRANGER_WRITABLE_AUDIT_ACTIONS).not.toContain('device_proof_revoked');
     expect(MAX_STRANGER_AUDIT_ROWS_PER_USER).toBe(5_000);
+  });
+
+  it("caps an account's activity rows well above its stranger rows, and coalesces within a minute", () => {
+    // F-02: the activity class is what an account writes about its own data, so its
+    // cap is the generous one; the stranger cap bounds what anyone else can write.
+    expect(MAX_ACTIVITY_AUDIT_ROWS_PER_USER).toBe(100_000);
+    expect(MAX_ACTIVITY_AUDIT_ROWS_PER_USER).toBeGreaterThan(MAX_STRANGER_AUDIT_ROWS_PER_USER);
+    expect(AUDIT_COALESCE_WINDOW_MS).toBe(60_000);
   });
 
   it('audits spending a backup code, separately from regenerating the batch', () => {

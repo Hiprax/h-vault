@@ -11,6 +11,7 @@ import { startTokenCleanupJob } from './jobs/tokenCleanup.js';
 import { startBackupScheduler } from './jobs/backupScheduler.js';
 import { initBreachRangeCache } from './jobs/breachSeed.js';
 import { startUpdateCheckJob } from './jobs/updateCheck.js';
+import { startMaintenanceJob } from './jobs/maintenance.js';
 import { closeRateLimitStore } from './middleware/rateLimiter.js';
 import { runMigrations } from './utils/migrations.js';
 import { getRunningJobs } from './utils/jobTracker.js';
@@ -53,6 +54,9 @@ async function startServer(): Promise<void> {
     // turned it off with UPDATE_CHECK_ENABLED=false. Its result is stored in the
     // database, so every worker answers from it, not only this one.
     const updateCheckTask = isPrimaryWorker ? startUpdateCheckJob() : null;
+    // Hourly housekeeping (the audit-log caps first). Started unconditionally on
+    // the primary worker: none of its steps needs object storage or SMTP.
+    const maintenanceTask = isPrimaryWorker ? startMaintenanceJob() : null;
     if (!isPrimaryWorker) {
       logger.info(
         'Skipping background jobs on worker instance ' +
@@ -120,6 +124,7 @@ async function startServer(): Promise<void> {
         documentCleanupTask,
         // Stops its cron AND clears the pending boot check.
         updateCheckTask,
+        maintenanceTask,
       ],
       server,
       activeConnections,

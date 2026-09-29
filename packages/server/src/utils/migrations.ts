@@ -1,3 +1,5 @@
+import mongoose from 'mongoose';
+import { maskEmail } from '@hvault/shared';
 import { createModuleLogger } from './logger.js';
 import { Migration } from '../models/Migration.js';
 import { JobLock } from '../models/JobLock.js';
@@ -42,7 +44,129 @@ const migrations: MigrationDefinition[] = [
       return Promise.resolve();
     },
   },
+  {
+    version: 2,
+    name: 'audit-log-bounds',
+    async up() {
+      await migrateAuditLogIndexTiebreak();
+      await maskLegacyErasureRecords();
+    },
+  },
 ];
+
+/** `IndexNotFound`: dropping an index that is not there. */
+const INDEX_NOT_FOUND = 27;
+/** `NamespaceNotFound`: dropping an index of a collection that does not exist. */
+const NAMESPACE_NOT_FOUND = 26;
+/** `IndexOptionsConflict`: an index on these keys exists with other options or name. */
+const INDEX_OPTIONS_CONFLICT = 85;
+/** `IndexKeySpecsConflict`: an index of this name exists on other keys. */
+const INDEX_KEY_SPECS_CONFLICT = 86;
+
+function hasCode(error: unknown, code: number): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === code;
+}
+
+/**
+ * v2 — the audit log's two page indexes gain `_id` (F-02), and the two they
+ * replace are dropped.
+ *
+ * `GET /user/audit-log` sorts `{timestamp: -1, _id: -1}`, a total order its
+ * `skip`/`limit` pages need; the old `{userId, timestamp}` and `{userId, action,
+ * timestamp}` cannot serve the `_id` half, so every page was a blocking sort over
+ * every row the account had. `models/AuditLog.ts` now declares the extended pair,
+ * but `create-indexes` only ever BUILDS, so without this the two superseded
+ * indexes would linger on every existing deployment and cost every audit insert
+ * for nothing.
+ *
+ * The new pair is built FIRST, here, and only then are the old ones dropped: a
+ * deployment that boots before its operator has run `create-indexes` (PM2, where
+ * that step is manual) must never pass through a moment with neither, and
+ * `createIndex` of an index that already exists is a no-op. The specs are written
+ * out rather than read from the model, because a migration records what one
+ * version of the schema needed and must not change meaning when the model does.
+ * Only these two indexes are named: building the model's whole index set here
+ * could fail the boot on an operator's own TTL (a changed retention is an options
+ * conflict until `create-indexes` resolves it).
+ *
+ * Idempotent: every step tolerates having already happened, and a collection
+ * that does not exist yet is simply created with the right indexes.
+ */
+async function migrateAuditLogIndexTiebreak(): Promise<void> {
+  const auditLogs = mongoose.connection.collection('audit_logs');
+  for (const keys of [
+    { userId: 1, timestamp: -1, _id: -1 },
+    { userId: 1, action: 1, timestamp: -1, _id: -1 },
+  ] as const) {
+    try {
+      await auditLogs.createIndex(keys);
+    } catch (error: unknown) {
+      // An operator who built one by hand under another name or options already
+      // has what the page needs; refusing the boot over it would help nobody.
+      if (!hasCode(error, INDEX_OPTIONS_CONFLICT) && !hasCode(error, INDEX_KEY_SPECS_CONFLICT)) {
+        throw error;
+      }
+      logger.warn('Migration v2: an audit index on these keys already exists as built', { keys });
+    }
+  }
+  for (const name of ['userId_1_timestamp_-1', 'userId_1_action_1_timestamp_-1']) {
+    try {
+      await auditLogs.dropIndex(name);
+      logger.info(`Migration v2: dropped superseded audit index ${name}`);
+    } catch (error: unknown) {
+      if (!hasCode(error, INDEX_NOT_FOUND) && !hasCode(error, NAMESPACE_NOT_FOUND)) throw error;
+    }
+  }
+}
+
+/**
+ * v2, second step — the erasure records written before this version name the
+ * erased account's address in clear (`metadata.deletedEmail`), for a year. Each
+ * is rewritten to the masked form the cascade now writes (`metadata.maskedEmail`,
+ * `maskEmail` from shared), and the plaintext field removed.
+ *
+ * Idempotent because the field is RENAMED: a row already rewritten no longer
+ * carries `deletedEmail`, so it is never masked twice (and `maskEmail` is not
+ * idempotent on a one-character local part). Each update is conditioned on the
+ * value it read.
+ */
+async function maskLegacyErasureRecords(): Promise<void> {
+  const auditLogs = mongoose.connection.collection('audit_logs');
+  const legacy = auditLogs.find(
+    {
+      userId: null,
+      action: { $in: ['account_delete', 'deletion_cleanup'] },
+      'metadata.deletedEmail': { $type: 'string' },
+    },
+    { projection: { 'metadata.deletedEmail': 1 } },
+  );
+  let pending: mongoose.mongo.AnyBulkWriteOperation[] = [];
+  let masked = 0;
+  const flush = async (): Promise<void> => {
+    if (pending.length === 0) return;
+    const result = await auditLogs.bulkWrite(pending, { ordered: false });
+    masked += result.modifiedCount;
+    pending = [];
+  };
+  for await (const row of legacy) {
+    const plain = (row as { metadata?: { deletedEmail?: unknown } }).metadata?.deletedEmail;
+    if (typeof plain !== 'string') continue;
+    pending.push({
+      updateOne: {
+        filter: { _id: row._id, 'metadata.deletedEmail': plain },
+        update: {
+          $set: { 'metadata.maskedEmail': maskEmail(plain) },
+          $unset: { 'metadata.deletedEmail': '' },
+        },
+      },
+    });
+    if (pending.length >= 500) await flush();
+  }
+  await flush();
+  if (masked > 0) {
+    logger.info(`Migration v2: masked the address in ${String(masked)} erasure record(s)`);
+  }
+}
 
 /**
  * Build the `JobLock.jobName` and `Migration.version` unique indexes before the

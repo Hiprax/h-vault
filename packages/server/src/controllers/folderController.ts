@@ -52,6 +52,14 @@ const ALLOWED_UPDATE_FOLDER_FIELDS = new Set([
 ]);
 
 /**
+ * The folder update fields that carry ciphertext (or are derived from it): a
+ * rename. An update without them changed only where the folder sits or how it
+ * looks, and its audit row says so (`contentChanged: false`) — see
+ * `vaultController`'s `ITEM_CONTENT_FIELDS` for why.
+ */
+const FOLDER_CONTENT_FIELDS = ['encryptedName', 'nameIv', 'nameTag', 'searchHash'] as const;
+
+/**
  * Validates that adding a folder under `parentId` would not exceed
  * `MAX_FOLDER_NESTING_DEPTH`.  Uses `$graphLookup` (single DB query) instead
  * of N+1 individual queries.
@@ -258,6 +266,7 @@ export const updateFolder = catchAsync(async (req: Request, res: Response): Prom
   }
 
   const filteredBody = pickAllowedFields(body, ALLOWED_UPDATE_FOLDER_FIELDS);
+  const contentChanged = FOLDER_CONTENT_FIELDS.some((field) => Object.hasOwn(filteredBody, field));
 
   // When parentId is explicitly null, use $unset so the field is removed from the
   // document entirely — matching the behaviour of deleteFolder's child-folder
@@ -325,7 +334,7 @@ export const updateFolder = catchAsync(async (req: Request, res: Response): Prom
   await createAuditLog(
     userId,
     'folder_update',
-    { folderId: id },
+    { folderId: id, contentChanged },
     updateCtx.ip,
     updateCtx.userAgent,
   );
@@ -496,7 +505,9 @@ export const reorderFolder = catchAsync(async (req: Request, res: Response): Pro
   await createAuditLog(
     userId,
     'folder_reorder',
-    { folderId: id, sortOrder },
+    // The stored id, not the route's spelling: `validateObjectId` accepts either
+    // case, and the audit service coalesces a run of reorders by this value.
+    { folderId: String(folder._id), sortOrder },
     reorderCtx.ip,
     reorderCtx.userAgent,
   );

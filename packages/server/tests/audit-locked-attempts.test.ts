@@ -18,7 +18,7 @@ import {
   recordLockedAttempt,
   recordNothing,
   resetStrangerAuditTracking,
-  STRANGER_AUDIT_TRIM_EVERY,
+  AUDIT_TRIM_EVERY,
   trimStrangerAuditRows,
 } from '../src/services/auditService.js';
 
@@ -27,6 +27,14 @@ afterEach(() => {
   resetStrangerAuditTracking();
 });
 
+/**
+ * An hour-aligned instant a day ago. Every seeded row is placed relative to it,
+ * never at a fixed calendar date, so no row ever falls outside the audit log's
+ * 365-day TTL (the TTL monitor could reap a stale fixed-date row mid-test).
+ */
+const RECENT_HOUR = Math.floor(Date.now() / 3_600_000) * 3_600_000 - 24 * 3_600_000;
+const HOUR = 3_600_000;
+
 function newUserId(): string {
   return new mongoose.Types.ObjectId().toString();
 }
@@ -34,7 +42,7 @@ function newUserId(): string {
 describe('recordLockedAttempt', () => {
   it('coalesces a minute of attempts into one row with a count, and starts a new row next minute', async () => {
     const userId = newUserId();
-    const minute = new Date(Date.UTC(2026, 8, 28, 12, 0, 5));
+    const minute = new Date(RECENT_HOUR + 12 * HOUR + 5_000);
 
     await recordLockedAttempt(userId, '198.51.100.1', 'ua-one', minute);
     await recordLockedAttempt(
@@ -61,7 +69,7 @@ describe('recordLockedAttempt', () => {
     expect(rows[0]).not.toHaveProperty('coalesceKey');
     const hydrated = await AuditLog.findById(rows[0]!._id).select('+coalesceKey');
     expect(hydrated!.coalesceKey).toBe(
-      `${userId}|login_failed|locked|${String(Date.UTC(2026, 8, 28, 12, 0, 0))}`,
+      `${userId}|login_failed|locked|${String(RECENT_HOUR + 12 * HOUR)}`,
     );
     expect(JSON.stringify(hydrated!.toJSON())).not.toContain('coalesceKey');
   });
@@ -75,7 +83,7 @@ describe('recordLockedAttempt', () => {
 
   it('retries a lost insert race as an update of the winning row', async () => {
     const userId = newUserId();
-    const at = new Date(Date.UTC(2026, 8, 28, 13, 0, 0));
+    const at = new Date(RECENT_HOUR + 13 * HOUR);
     await recordLockedAttempt(userId, 'a', 'a', at);
 
     // The next upsert behaves as if a concurrent request inserted first.
@@ -122,10 +130,10 @@ describe('recordNothing', () => {
 });
 
 describe('the stranger-writable cap', () => {
-  it(`trims on every ${String(STRANGER_AUDIT_TRIM_EVERY)}th insert, and not before`, async () => {
+  it(`trims on every ${String(AUDIT_TRIM_EVERY)}th insert, and not before`, async () => {
     const userId = newUserId();
     const spy = vi.spyOn(AuditLog, 'find');
-    for (let i = 0; i < STRANGER_AUDIT_TRIM_EVERY - 1; i++) {
+    for (let i = 0; i < AUDIT_TRIM_EVERY - 1; i++) {
       await noteStrangerWritableInsert(userId);
     }
     expect(spy).not.toHaveBeenCalled();
@@ -135,7 +143,7 @@ describe('the stranger-writable cap', () => {
 
   it('keeps exactly the newest rows at a shared timestamp, using _id as the tie-break', async () => {
     const userId = new mongoose.Types.ObjectId();
-    const at = new Date(Date.UTC(2026, 8, 1));
+    const at = new Date(RECENT_HOUR - 27 * 24 * HOUR);
     const docs = Array.from({ length: MAX_STRANGER_AUDIT_ROWS_PER_USER + 2 }, () => ({
       _id: new mongoose.Types.ObjectId(),
       userId,
@@ -173,14 +181,14 @@ describe('the stranger-writable cap', () => {
         action: 'login_failed',
         ipAddress: 's',
         userAgent: 's',
-        timestamp: new Date(Date.UTC(2026, 8, 1) + i),
+        timestamp: new Date(RECENT_HOUR - 27 * 24 * HOUR + i),
       })),
     );
     const find = vi.spyOn(AuditLog, 'find').mockImplementationOnce((() => {
       throw new Error('datastore unavailable');
     }) as never);
 
-    for (let i = 0; i < STRANGER_AUDIT_TRIM_EVERY; i++) {
+    for (let i = 0; i < AUDIT_TRIM_EVERY; i++) {
       await expect(noteStrangerWritableInsert(userId.toString())).resolves.toBeUndefined();
     }
     // The trim was attempted once and failed: nothing was removed.
@@ -188,12 +196,14 @@ describe('the stranger-writable cap', () => {
     expect(await AuditLog.countDocuments({ userId })).toBe(MAX_STRANGER_AUDIT_ROWS_PER_USER + 1);
 
     // The counter started again, so the next interval trims for real.
-    for (let i = 0; i < STRANGER_AUDIT_TRIM_EVERY - 1; i++) {
+    for (let i = 0; i < AUDIT_TRIM_EVERY - 1; i++) {
       await noteStrangerWritableInsert(userId.toString());
     }
     expect(find).toHaveBeenCalledTimes(1);
     await noteStrangerWritableInsert(userId.toString());
-    expect(find).toHaveBeenCalledTimes(2);
+    // Two reads for the real trim: the boundary, then the batch of ids to delete
+    // (F-02: a backlog is removed in bounded batches of named ids).
+    expect(find).toHaveBeenCalledTimes(3);
     expect(await AuditLog.countDocuments({ userId })).toBe(MAX_STRANGER_AUDIT_ROWS_PER_USER);
   });
 });
@@ -201,36 +211,31 @@ describe('the stranger-writable cap', () => {
 describe('what counts toward the stranger-writable cap', () => {
   it('a coalesced attempt is an update, not an insert: a minute of them never trims', async () => {
     const userId = newUserId();
-    const at = new Date(Date.UTC(2026, 8, 28, 15, 0, 0));
+    const at = new Date(RECENT_HOUR + 15 * HOUR);
     const find = vi.spyOn(AuditLog, 'find');
 
-    for (let i = 0; i < STRANGER_AUDIT_TRIM_EVERY + 5; i++) {
+    for (let i = 0; i < AUDIT_TRIM_EVERY + 5; i++) {
       await recordLockedAttempt(userId, 'a', 'a', new Date(at.getTime() + i * 100));
     }
 
     expect(find).not.toHaveBeenCalled();
     const rows = await AuditLog.find({ userId }).lean();
     expect(rows).toHaveLength(1);
-    expect(rows[0]!.count).toBe(STRANGER_AUDIT_TRIM_EVERY + 5);
+    expect(rows[0]!.count).toBe(AUDIT_TRIM_EVERY + 5);
   });
 
   it("each minute's first attempt is an insert, and the hundredth such insert trims once", async () => {
     const userId = newUserId();
-    const start = Date.UTC(2026, 8, 28, 16, 0, 0);
+    const start = RECENT_HOUR + 16 * HOUR;
     const find = vi.spyOn(AuditLog, 'find');
 
-    for (let i = 0; i < STRANGER_AUDIT_TRIM_EVERY - 1; i++) {
+    for (let i = 0; i < AUDIT_TRIM_EVERY - 1; i++) {
       await recordLockedAttempt(userId, 'a', 'a', new Date(start + i * 60_000));
     }
     expect(find).not.toHaveBeenCalled();
-    await recordLockedAttempt(
-      userId,
-      'a',
-      'a',
-      new Date(start + (STRANGER_AUDIT_TRIM_EVERY - 1) * 60_000),
-    );
+    await recordLockedAttempt(userId, 'a', 'a', new Date(start + (AUDIT_TRIM_EVERY - 1) * 60_000));
     expect(find).toHaveBeenCalledTimes(1);
-    expect(await AuditLog.countDocuments({ userId })).toBe(STRANGER_AUDIT_TRIM_EVERY);
+    expect(await AuditLog.countDocuments({ userId })).toBe(AUDIT_TRIM_EVERY);
   });
 });
 
@@ -253,7 +258,7 @@ describe('the coalescing key index', () => {
 
   it('lets a concurrent burst of first attempts in one minute land on ONE row', async () => {
     const userId = newUserId();
-    const at = new Date(Date.UTC(2026, 8, 28, 17, 0, 0));
+    const at = new Date(RECENT_HOUR + 17 * HOUR);
 
     await Promise.all(
       Array.from({ length: 8 }, (_, i) => recordLockedAttempt(userId, `ip-${String(i)}`, 'ua', at)),

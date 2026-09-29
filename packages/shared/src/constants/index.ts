@@ -1213,6 +1213,24 @@ export const STRANGER_WRITABLE_AUDIT_ACTIONS = [
 ] as const satisfies readonly AuditAction[];
 export const MAX_STRANGER_AUDIT_ROWS_PER_USER = 5_000;
 
+/**
+ * How many ACTIVITY-class audit rows (what an account did to its own items,
+ * folders, documents and backups) one account keeps. Past it the oldest are
+ * trimmed, hourly by the maintenance job and on every hundredth insert of the
+ * account in between. SECURITY-class rows are never counted against it and never
+ * removed by it: a session that floods edits can push its own old edits out of
+ * the log, never a sign-in, a password change or a 2FA event.
+ */
+export const MAX_ACTIVITY_AUDIT_ROWS_PER_USER = 100_000;
+
+/**
+ * How recent an account's newest audit row must be for an identical
+ * metadata-only edit (same action, same item or folder, same address, same user
+ * agent) to be counted into it instead of written as a row of its own. The row's
+ * timestamp moves to the latest edit, so the window slides.
+ */
+export const AUDIT_COALESCE_WINDOW_MS = 60_000;
+
 export const BACKUP_STATUSES = ['success', 'failed'] as const;
 export type BackupStatus = (typeof BACKUP_STATUSES)[number];
 

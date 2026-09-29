@@ -1725,7 +1725,13 @@ describe('Vault API', () => {
 
       // One row naming the item and its type, with no echo of what changed.
       expect(updates).toHaveLength(1);
-      expect(updates[0]?.metadata).toEqual({ itemId: id, itemType: 'login' });
+      // `contentChanged: false`: a favourite toggle carries no ciphertext, which is
+      // what lets the audit service count a run of them into one row (F-02).
+      expect(updates[0]?.metadata).toEqual({
+        itemId: id,
+        itemType: 'login',
+        contentChanged: false,
+      });
 
       // ...and the update the row claims actually landed.
       const updated = await VaultItem.findById(id).lean();

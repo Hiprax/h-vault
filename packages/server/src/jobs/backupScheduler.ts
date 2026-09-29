@@ -175,6 +175,13 @@ async function processUserBackup(user: {
       contentType: 'application/octet-stream',
     };
 
+    // Re-checked at the last moment: an erasure that began while this backup
+    // was being assembled wins, and nothing is mailed or logged for it.
+    if ((await User.exists({ _id: userId, deletionPending: { $ne: true } })) === null) {
+      logger.info(`Backup for user ${userId} skipped: the account is being erased`);
+      return;
+    }
+
     let emailsSentCount = 0;
     const failedEmails: string[] = [];
 
@@ -282,6 +289,10 @@ export function startBackupScheduler(): ScheduledTask {
           const currentHour = new Date().getUTCHours();
 
           const userCursor = User.find({
+            // An account being erased is never backed up: mailing its vault would
+            // send data the owner asked to have destroyed, and the backup log row
+            // (which names the recipients) would outlive the erasure.
+            deletionPending: { $ne: true },
             'settings.backup.enabled': true,
             'settings.backup.scheduleHour': currentHour,
             'settings.backup.encryptedBWK': { $exists: true, $ne: '' },

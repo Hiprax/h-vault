@@ -384,7 +384,7 @@ describe('F-03 (d2) — the stranger-writable audit actions have their own cap',
 
     // Spray enough other accounts to fill the process-local tracker.
     auditService.resetStrangerAuditTracking();
-    for (let i = 0; i < auditService.STRANGER_AUDIT_TRACKED_ACCOUNTS; i++) {
+    for (let i = 0; i < auditService.AUDIT_TRIM_TRACKED_ACCOUNTS; i++) {
       await auditService.noteStrangerWritableInsert(new mongoose.Types.ObjectId().toString());
     }
     await auditService.noteStrangerWritableInsert(victim.id);

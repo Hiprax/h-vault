@@ -191,32 +191,23 @@ describe('Database indexes', () => {
       expect(ttlIndex!.expireAfterSeconds).toBe(365 * 24 * 60 * 60);
     });
 
-    it('should have a compound index on userId and timestamp', async () => {
+    // F-02: both page indexes end in `_id`, so `GET /user/audit-log`'s total
+    // order `{timestamp: -1, _id: -1}` is an index walk, and the two superseded
+    // shapes (without `_id`) are gone (migration v2 drops them on old databases).
+    it('should have the page index {userId, timestamp, _id}', async () => {
       await AuditLog.ensureIndexes();
-      const indexes = (await AuditLog.collection.indexes()) as {
-        key: Record<string, number>;
-        [k: string]: unknown;
-      }[];
-
-      const compoundIndex = indexes.find(
-        (idx) => idx.key['userId'] === 1 && idx.key['timestamp'] === -1,
-      );
-
-      expect(compoundIndex).toBeDefined();
+      const indexes = await AuditLog.collection.indexes();
+      const keys = indexes.map((idx) => JSON.stringify(idx.key));
+      expect(keys).toContain(JSON.stringify({ userId: 1, timestamp: -1, _id: -1 }));
+      expect(keys).not.toContain(JSON.stringify({ userId: 1, timestamp: -1 }));
     });
 
-    it('should have a compound index on userId, action, and timestamp', async () => {
+    it('should have the filtered page index {userId, action, timestamp, _id}', async () => {
       await AuditLog.ensureIndexes();
-      const indexes = (await AuditLog.collection.indexes()) as {
-        key: Record<string, number>;
-        [k: string]: unknown;
-      }[];
-
-      const compoundIndex = indexes.find(
-        (idx) => idx.key['userId'] === 1 && idx.key['action'] === 1 && idx.key['timestamp'] === -1,
-      );
-
-      expect(compoundIndex).toBeDefined();
+      const indexes = await AuditLog.collection.indexes();
+      const keys = indexes.map((idx) => JSON.stringify(idx.key));
+      expect(keys).toContain(JSON.stringify({ userId: 1, action: 1, timestamp: -1, _id: -1 }));
+      expect(keys).not.toContain(JSON.stringify({ userId: 1, action: 1, timestamp: -1 }));
     });
   });
 

@@ -83,8 +83,8 @@ stack that publishes exactly one loopback port, and a test suite that gates ever
 | **Account lockout**               | Per factor: 10 wrong passwords lock new sign-ins for 30 minutes, renewed while the guessing goes on, and 10 wrong codes lock the 2FA step. A locked sign-in answers a right and a wrong password identically, so it never confirms a guess; existing sessions are never locked out, and a browser holding a live device proof (left by a completed sign-in on this version, kept for 30 days of use) signs in normally. Progressive delays and an unlock email that also proves the browser that follows it.                                                                                                                                                                                                                                                                                                                                |
 | **CSRF + rate limiting**          | HMAC-SHA256 double-submit tokens with constant-time verification, and [nineteen rate-limit tiers](#rate-limiting), all but two backed by MongoDB, keyed per IP or per account, with IPv6 `/64` aggregation.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | **Breach detection**              | HaveIBeenPwned via k-anonymity — only a 5-character SHA-1 prefix ever leaves the server.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| **Audit log**                     | A searchable security log covering **48 distinct operations**, with TTL-based retention.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| **Account deletion**              | GDPR-complete, password-confirmed, and cascaded atomically across every collection.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| **Audit log**                     | A searchable security log covering **48 distinct operations**, with TTL-based retention and a size bound per account: routine vault activity is capped at 100,000 entries (oldest removed first, and a run of identical edits counted into one entry), while security events are never trimmed (failed sign-ins and other entries a stranger can cause are capped separately at 5,000).                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| **Account deletion**              | GDPR-complete and password-confirmed: every collection is erased, the bulk in batches and the rest in one small final transaction, an interrupted erasure is finished by the next run, and the record kept of it masks the address.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 
 ### Data
 
@@ -702,7 +702,8 @@ That is the whole deployment. Indexes are created automatically by the one-shot 
 container before the API is allowed to start, so there is no manual index step. (Production runs
 Mongoose with `autoIndex` off, and the indexes are not merely a performance matter: the
 `(userId, searchHash)` unique partial index on folders is what makes duplicate detection return
-409, and the audit-log and refresh-token TTLs are what bound those collections.)
+409, and the audit-log and refresh-token TTLs are what bound those collections, together with the
+audit log's per-account caps.)
 
 ### 3. Put your system Nginx in front
 
@@ -765,7 +766,9 @@ bundle's one-year lifetime, from `hvault-pm2.locations.conf`) at
   bearer token) with attacker-influenced content is the precondition for a BREACH-style
   compression oracle. The payloads are base64 ciphertext, which barely compresses anyway.
 - **Transactions work.** MongoDB runs as a single-node replica set (`rs0`), so vault-key rotation,
-  account deletion and refresh-token rotation take their atomic paths.
+  refresh-token rotation and the final step of an account deletion take their atomic paths. (The
+  deletion erases an account's bulk in batches first, so its transaction stays small however large
+  the account grew.)
 - **Hardened by default.** `no-new-privileges` everywhere; all Linux capabilities dropped (MongoDB
   keeps only the five its entrypoint needs to drop to an unprivileged user); read-only root
   filesystems on the app, Nginx, the bootstrap **and** the storage engine; memory, CPU and
@@ -951,7 +954,11 @@ pm2 start ecosystem.config.cjs --env production
 ```
 
 512 MB memory restart limit, structured logs in `logs/`, cluster mode. Background jobs take
-distributed MongoDB locks, so they never double-run across instances. Express serves the SPA
+distributed MongoDB locks, so they never double-run across instances. Startup migrations run before
+the server listens: upgrading to a version with a new one (the one that bounds the audit log builds
+its two new page indexes, then drops the two they replace) can make that first start take as long
+as building an index over your `audit_logs` collection, so a large deployment should allow for it
+or run `create-indexes` first. Express serves the SPA
 itself in this mode (there is no internal Nginx), so front it with
 `docker/nginx/system.pm2.example.conf` (rendered from the ecosystem's golden nginx policy; install
 `docker/nginx/includes/hvault-pm2.conf` at `/etc/nginx/sites-local/hvault-pm2.conf` first) and set
@@ -1440,7 +1447,8 @@ h-vault/
 │   │   │   │                    #   JobLock, Migration, PwnedRangeCache, UpdateCheckState
 │   │   │   ├── routes/          #   Express routers
 │   │   │   ├── services/        #   auditService
-│   │   │   ├── jobs/            #   backup scheduler, token cleanup, trash purge, document GC, release check
+│   │   │   ├── jobs/            #   backup scheduler, token cleanup, trash purge, document GC, release check,
+│   │   │   │                    #   hourly maintenance (audit-log caps)
 │   │   │   └── utils/           #   tokens, email, job locks, folder graph, graceful shutdown
 │   │   ├── sandbox-document/    #   (build output) the viewer document, copied from client/dist-sandbox
 │   │   └── tests/               #   Vitest + Supertest + mongodb-memory-server
@@ -1505,10 +1513,10 @@ npm run test:e2e                # Playwright
 
 | Suite      | Files | What it covers                                                                                                                                                                                                                                                                                                                                                                             |
 | ---------- | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Server** | 195   | Supertest against an in-memory MongoDB: auth, refresh reuse detection, vault and folder CRUD, cycle and depth guards, 2FA, backup/restore atomicity and cross-account restore, import/export, cross-user isolation, concurrent operations, rate limiters, background jobs, CSRF, config validation, and the Docker/pipeline invariants                                                     |
-| **Client** | 183   | jsdom: crypto round-trips (IV uniqueness, tamper detection), stores, hooks, Axios interceptors, offline cache, accessibility, entropy metering, the import parsers + identity/conflict resolution + client-side import encryption, and the file-encryption tool against the **real** crypto library                                                                                        |
-| **Shared** | 14    | Schemas, constants, utilities, barrel exports                                                                                                                                                                                                                                                                                                                                              |
-| **E2E**    | 22    | Playwright, Chromium over all of it plus a Firefox leg over the clipboard and auto-lock specs: full auth, vault, folder, 2FA, import/export, backup/restore, lock/unlock, address-field and file-encryption journeys, plus the encrypted document store — upload, byte-exact download, the format-and-repair review, trash/restore/purge, a quota refusal — and the isolated preview frame |
+| **Server** | 213   | Supertest against an in-memory MongoDB: auth, refresh reuse detection, vault and folder CRUD, cycle and depth guards, 2FA, backup/restore atomicity and cross-account restore, import/export, cross-user isolation, concurrent operations, rate limiters, background jobs, CSRF, config validation, and the Docker/pipeline invariants                                                     |
+| **Client** | 199   | jsdom: crypto round-trips (IV uniqueness, tamper detection), stores, hooks, Axios interceptors, offline cache, accessibility, entropy metering, the import parsers + identity/conflict resolution + client-side import encryption, and the file-encryption tool against the **real** crypto library                                                                                        |
+| **Shared** | 18    | Schemas, constants, utilities, barrel exports                                                                                                                                                                                                                                                                                                                                              |
+| **E2E**    | 24    | Playwright, Chromium over all of it plus a Firefox leg over the clipboard and auto-lock specs: full auth, vault, folder, 2FA, import/export, backup/restore, lock/unlock, address-field and file-encryption journeys, plus the encrypted document store — upload, byte-exact download, the format-and-repair review, trash/restore/purge, a quota refusal — and the isolated preview frame |
 
 **Files** counts every test file each suite owns on disk, which is not the same as the number the
 command above runs: the server's default Vitest config excludes `tests/resource/**` and

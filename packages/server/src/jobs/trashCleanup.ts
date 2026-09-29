@@ -3,11 +3,11 @@ import type mongoose from 'mongoose';
 import { createModuleLogger } from '../utils/logger.js';
 import { storageConfigured } from '../config/index.js';
 import { VaultItem } from '../models/VaultItem.js';
-import { AuditLog } from '../models/AuditLog.js';
 import { Document } from '../models/Document.js';
 import { TRASH_AUTO_PURGE_DAYS } from '@hvault/shared';
 import { acquireJobLock, releaseJobLock } from '../utils/jobLock.js';
 import { trackJob } from '../utils/jobTracker.js';
+import { recordJobAuditEntries } from '../services/auditService.js';
 import { getStorage } from '../services/storage/index.js';
 import { createStorageBreaker } from '../utils/storageBreaker.js';
 
@@ -160,14 +160,13 @@ async function purgeTrashedDocuments(
     }
 
     if (purgedByUser.size > 0) {
-      await AuditLog.insertMany(
+      await recordJobAuditEntries(
         Array.from(purgedByUser.entries()).map(([userId, documentCount]) => ({
           userId,
           action: 'trash_auto_purge' as const,
           metadata: { documentCount, cutoffDays: TRASH_AUTO_PURGE_DAYS },
           ipAddress: 'system',
           userAgent: 'system/trash-cleanup-job',
-          timestamp: new Date(),
         })),
       );
     }
@@ -196,11 +195,13 @@ export function startTrashCleanupJob(): ScheduledTask {
           const BATCH_SIZE = 500;
           let totalDeleted = 0;
           let deletedCount: number;
+          let readCount: number;
           do {
             const items = await VaultItem.find({ deletedAt: { $lte: cutoffDate } })
               .select('_id userId')
               .limit(BATCH_SIZE)
               .lean();
+            readCount = items.length;
             if (items.length === 0) break;
 
             // Group items by userId for defense-in-depth delete filtering
@@ -215,38 +216,53 @@ export function startTrashCleanupJob(): ScheduledTask {
               }
             }
 
-            // Delete per-user with userId in filter for defense-in-depth
+            // Delete per-user with userId in filter for defense-in-depth, and with
+            // the trash predicate RE-STATED. The batch was read a moment ago, and
+            // in between the owner may have restored one of these items
+            // (`restoreItem` unsets `deletedAt`); a delete by `_id` alone would then
+            // destroy a live item for good. With the predicate in the filter, a row
+            // restored (or re-trashed later than the cutoff) since the read is
+            // simply not deleted.
             deletedCount = 0;
+            const purgedByUser = new Map<string, number>();
             for (const [userId, userItems] of itemsByUser) {
               const result = await VaultItem.deleteMany({
                 _id: { $in: userItems.map((i) => i._id) },
                 userId,
+                deletedAt: { $lte: cutoffDate },
               });
               deletedCount += result.deletedCount;
+              if (result.deletedCount > 0) {
+                purgedByUser.set(userId, result.deletedCount);
+              }
             }
             totalDeleted += deletedCount;
 
-            // Create audit log entries immediately after each batch
-            // so deleted items are always audited even if a later batch fails
-            const auditEntries = Array.from(itemsByUser.entries()).map(([userId, userItems]) => ({
+            // Create audit log entries immediately after each batch so deleted
+            // items are always audited even if a later batch fails. Each counts
+            // what was actually deleted for that account (a restored row is not a
+            // purge), and nothing else: no account's entry carries a number about
+            // other accounts.
+            const auditEntries = Array.from(purgedByUser.entries()).map(([userId, itemCount]) => ({
               userId,
               action: 'trash_auto_purge' as const,
-              metadata: {
-                itemCount: userItems.length,
-                cutoffDays: TRASH_AUTO_PURGE_DAYS,
-                batchSize: deletedCount,
-              },
+              metadata: { itemCount, cutoffDays: TRASH_AUTO_PURGE_DAYS },
               ipAddress: 'system',
               userAgent: 'system/trash-cleanup-job',
-              timestamp: new Date(),
             }));
 
-            await AuditLog.insertMany(auditEntries);
+            // Through the audit service, so these rows count toward the
+            // account's activity cap like any other.
+            await recordJobAuditEntries(auditEntries);
 
             logger.info(
               `Trash cleanup batch: deleted ${String(deletedCount)} items for ${String(itemsByUser.size)} user(s)`,
             );
-          } while (deletedCount === BATCH_SIZE);
+            // Another batch while this one was full AND made progress. A restored
+            // row makes a full batch delete fewer than it read, which must not end
+            // the walk early; a full batch that deleted NOTHING would be read again
+            // for ever, so it does end it (and the rest waits for the next night).
+          } while (readCount === BATCH_SIZE && deletedCount > 0);
 
           if (totalDeleted > 0) {
             logger.info(

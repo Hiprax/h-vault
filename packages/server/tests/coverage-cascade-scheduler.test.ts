@@ -107,7 +107,7 @@ async function seedTrustedDevice(userId: string): Promise<void> {
 import { config } from '../src/config/index.js';
 import { Document } from '../src/models/Document.js';
 import { buildObjectKey } from '../src/utils/documentObjects.js';
-import { DOCUMENT_PLAINTEXT_CHUNK_BYTES } from '@hvault/shared';
+import { DOCUMENT_PLAINTEXT_CHUNK_BYTES, maskEmail } from '@hvault/shared';
 import { cascadeDeleteUser } from '../src/utils/cascadeDelete.js';
 // The predicate `cascadeDeleteUser` branches on, imported from its ONE definition.
 // `cascadeDelete.ts` used to re-export a copy of it under this same name; the
@@ -178,11 +178,12 @@ describe('cascadeDeleteUser — sequential failure path (standalone)', () => {
     const bystander = await createTestUser();
     await VaultItem.create({ ...sampleVaultItem(), userId: bystander.id });
 
-    // The flag is normally already set by the caller; clear it so the re-set in
-    // the catch block is load-bearing rather than a no-op.
+    // The flag is normally already set by the caller; clear it, so the account
+    // ending up pending proves the cascade itself marks it (its first write, F-02),
+    // whoever called. (The catch-block re-set is pinned in cascade-delete.test.ts.)
     await User.updateOne({ _id: target.id }, { $set: { deletionPending: false } });
 
-    // Fail midway through the sequence: items are already gone, folders are not.
+    // Fail in the final step: the batches already erased the bulk (forward-only).
     const folderSpy = vi
       .spyOn(Folder, 'deleteMany')
       .mockRejectedValueOnce(new Error('connection reset during cascade'));
@@ -221,9 +222,15 @@ describe('cascadeDeleteUser — sequential failure path (standalone)', () => {
     const folderSpy = vi
       .spyOn(Folder, 'deleteMany')
       .mockRejectedValueOnce(new Error('cascade blew up'));
-    const updateSpy = vi
-      .spyOn(User, 'updateOne')
-      .mockRejectedValueOnce(new Error('re-set also failed'));
+    // The cascade's first write is its own `deletionPending` mark (F-02), so the
+    // failure is aimed at the second `updateOne`: the re-set in the catch.
+    const originalUpdateOne = User.updateOne.bind(User) as (...args: unknown[]) => unknown;
+    let updates = 0;
+    const updateSpy = vi.spyOn(User, 'updateOne').mockImplementation(((...args: unknown[]) => {
+      updates += 1;
+      if (updates === 2) return Promise.reject(new Error('re-set also failed'));
+      return originalUpdateOne(...args);
+    }) as never);
 
     const result = await cascadeDeleteUser({
       userId: target.id,
@@ -239,6 +246,7 @@ describe('cascadeDeleteUser — sequential failure path (standalone)', () => {
     // The inner failure must be swallowed: the caller only learns the cascade
     // did not complete.
     expect(result).toBe(false);
+    expect(updates).toBe(2);
     expect(await User.findById(target.id)).not.toBeNull();
   });
 });
@@ -676,7 +684,11 @@ describe('cascadeDeleteUser — transactional branch (replica set)', () => {
     const systemLogs = await AuditLog.find({ userId: null, action: 'account_delete' }).lean();
     expect(systemLogs).toHaveLength(1);
     expect((systemLogs[0]!.metadata as Record<string, unknown>)['deletedUserId']).toBe(target.id);
-    expect((systemLogs[0]!.metadata as Record<string, unknown>)['deletedEmail']).toBe(target.email);
+    // Masked (F-02): the erasure record never keeps the address in clear.
+    expect((systemLogs[0]!.metadata as Record<string, unknown>)['maskedEmail']).toBe(
+      maskEmail(target.email),
+    );
+    expect(JSON.stringify(systemLogs[0]!.metadata)).not.toContain(target.email);
 
     // Cross-user isolation.
     expect(await User.findById(bystander.id)).not.toBeNull();
@@ -687,18 +699,24 @@ describe('cascadeDeleteUser — transactional branch (replica set)', () => {
     expect(await AuditLog.countDocuments({ userId: bystander.id })).toBe(1);
   });
 
-  it('rolls back EVERY write and writes no orphan audit row when the transaction aborts', async () => {
+  // Restated for F-02 (PLAN.md 3.2): the cascade is no longer one all-or-nothing
+  // transaction — a transaction sized by an account's whole history is one MongoDB
+  // aborts at its lifetime limit — but an idempotent forward-only erasure. The bulky
+  // rows go in batches BEFORE the final transaction, so an abort of that transaction
+  // no longer puts them back. An abort at the user-row delete keeps the account
+  // (pending) and writes no erasure record, and a re-run finishes it. (That the
+  // record is written INSIDE the transaction is pinned in cascade-delete-bounded.)
+  it('an abort of the final transaction keeps the account pending with no erasure record, and a re-run finishes it', async () => {
     const target = await createTestUser();
     await VaultItem.create({ ...sampleVaultItem(), userId: target.id });
     await Folder.create({ ...sampleFolder(), userId: target.id });
     await BackupLog.create({ userId: target.id, status: 'success', sentTo: [target.email] });
 
-    // Enter with the flag cleared so the abort-time re-set is load-bearing.
+    // Enter with the flag cleared: the cascade must set it itself.
     await User.updateOne({ _id: target.id }, { $set: { deletionPending: false } });
 
-    // Blow up on the LAST write in the transaction — every preceding delete
-    // (and the audit insert) is already applied inside the session, so only a
-    // genuine rollback can restore them.
+    // Blow up at the user-row delete inside the transaction, BEFORE the erasure
+    // record would be written: the account must survive, still pending.
     const deleteSpy = vi
       .spyOn(User, 'findByIdAndDelete')
       .mockImplementationOnce(
@@ -720,18 +738,30 @@ describe('cascadeDeleteUser — transactional branch (replica set)', () => {
 
     expect(result).toBe(false);
 
-    // Nothing was erased — the user's data is fully intact for the retry.
+    // The account survives, pending, so it can be neither used nor re-registered...
     const userAfter = await User.findById(target.id).lean();
     expect(userAfter).not.toBeNull();
     expect(userAfter!.deletionPending).toBe(true);
-    expect(await VaultItem.countDocuments({ userId: target.id })).toBe(1);
-    expect(await Folder.countDocuments({ userId: target.id })).toBe(1);
-    expect(await RefreshToken.countDocuments({ userId: target.id })).toBe(1);
-    expect(await BackupLog.countDocuments({ userId: target.id })).toBe(1);
-
-    // The invariant the standalone suite could not assert: the audit row was
-    // written INSIDE the session, so an abort must take it with it. A surviving
-    // row would claim an erasure that never happened.
+    // ...its bulky rows are already gone (forward-only)...
+    expect(await VaultItem.countDocuments({ userId: target.id })).toBe(0);
+    expect(await Folder.countDocuments({ userId: target.id })).toBe(0);
+    expect(await RefreshToken.countDocuments({ userId: target.id })).toBe(0);
+    expect(await BackupLog.countDocuments({ userId: target.id })).toBe(0);
+    // ...and no erasure record exists: one would claim an erasure that had not
+    // happened.
     expect(await AuditLog.countDocuments({ action: 'deletion_cleanup' })).toBe(0);
+
+    // The zombie loop's re-run finishes it, recording it exactly once.
+    expect(
+      await cascadeDeleteUser({
+        userId: target.id,
+        userEmail: target.email,
+        ip: '127.0.0.1',
+        userAgent: 'test-agent',
+        auditAction: 'deletion_cleanup',
+      }),
+    ).toBe(true);
+    expect(await User.findById(target.id)).toBeNull();
+    expect(await AuditLog.countDocuments({ action: 'deletion_cleanup' })).toBe(1);
   });
 });

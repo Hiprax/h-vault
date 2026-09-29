@@ -1448,7 +1448,7 @@ export const swaggerSpec: JsonObject = {
             type: 'integer',
             minimum: 1,
             description:
-              'How many events the row stands for: 1, except for `login_failed` with `metadata.reason` `locked`, which counts every sign-in attempt made during a password lockout within one minute. Rows written before the field existed omit it (read as 1).',
+              'How many events the row stands for: 1, except for a coalesced row. `login_failed` with `metadata.reason` `locked` counts every sign-in attempt made during a password lockout within one minute (its timestamp is the first attempt). `item_update` and `folder_update` with `metadata.contentChanged` `false`, and `folder_reorder`, count an uninterrupted run of identical edits of one item or folder from one address and user agent, each within a minute of the last (its timestamp is the latest edit). Rows written before the field existed omit it (read as 1).',
           },
         },
       },

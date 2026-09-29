@@ -98,6 +98,24 @@ const ALLOWED_UPDATE_FIELDS = new Set([
 ]);
 
 /**
+ * The update fields that carry ciphertext (or are derived from it). An update
+ * that sends none of them changed only an item's metadata — favourite, tags,
+ * folder — and its audit row says so (`contentChanged: false`), which is what
+ * lets `auditService` count a run of such edits into one row. An update that
+ * sends any of them keeps a row of its own.
+ */
+const ITEM_CONTENT_FIELDS = [
+  'encryptedData',
+  'dataIv',
+  'dataTag',
+  'encryptedName',
+  'nameIv',
+  'nameTag',
+  'searchHash',
+  'passwordHistory',
+] as const;
+
+/**
  * What a re-seal is told when the vault key it sealed under is no longer the
  * account's: read before it starts, or found moved when it commits. Under 200
  * characters with the remedy first, because the client slices a 4xx there.
@@ -354,7 +372,13 @@ export const updateItem = catchAsync(async (req: Request, res: Response): Promis
   await createAuditLog(
     userId,
     'item_update',
-    { itemId: id, itemType: item.itemType },
+    {
+      // The stored id, not the route's spelling: `validateObjectId` accepts either
+      // case, and the audit service coalesces a run of edits by this value.
+      itemId: String(item._id),
+      itemType: item.itemType,
+      contentChanged: ITEM_CONTENT_FIELDS.some((field) => Object.hasOwn(sanitizedUpdate, field)),
+    },
     updateCtx.ip,
     updateCtx.userAgent,
   );

@@ -86,7 +86,7 @@ import { sendEmail } from '../src/utils/email.js';
 import { Document } from '../src/models/Document.js';
 import { buildObjectKey } from '../src/utils/documentObjects.js';
 import { createInMemoryStorage } from './helpers/inMemoryStorage.js';
-import { DOCUMENT_PLAINTEXT_CHUNK_BYTES } from '@hvault/shared';
+import { DOCUMENT_PLAINTEXT_CHUNK_BYTES, maskEmail } from '@hvault/shared';
 
 const mockedSchedule = vi.mocked(cron.schedule);
 const mockedSendEmail = vi.mocked(sendEmail);
@@ -239,6 +239,54 @@ describe('backupScheduler', () => {
     expect(mockedSchedule).toHaveBeenCalledWith('0 * * * *', expect.any(Function), {
       timezone: 'UTC',
     });
+  });
+
+  it('never backs up an account that is being erased, and writes nothing for it', async () => {
+    startBackupScheduler();
+    const callback = getScheduledCallback();
+
+    const pending = await createBackupUser();
+    await User.updateOne({ _id: pending._id }, { $set: { deletionPending: true } });
+    await createVaultItem(pending._id);
+    const live = await createBackupUser();
+    const itemReads = vi.spyOn(VaultItem, 'find');
+
+    await callback();
+
+    // The account is not even selected: none of its data is read to assemble a
+    // backup (the re-check before mailing is the second layer, pinned below).
+    expect(
+      itemReads.mock.calls.some(
+        (call) =>
+          String((call[0] as { userId?: unknown } | undefined)?.userId) === String(pending._id),
+      ),
+    ).toBe(false);
+    // Negative: nothing mailed to, or logged for, the account being erased...
+    expect(mockedSendEmail.mock.calls.map((call) => call[0])).toEqual([live.email]);
+    expect(await BackupLog.countDocuments({ userId: pending._id })).toBe(0);
+    // ...while the live account is backed up as before.
+    expect(await BackupLog.countDocuments({ userId: live._id, status: 'success' })).toBe(1);
+  });
+
+  it('drops a backup whose account began erasure while the backup was being assembled', async () => {
+    startBackupScheduler();
+    const callback = getScheduledCallback();
+
+    const user = await createBackupUser();
+    await createVaultItem(user._id);
+    // The erasure begins after the scheduler selected the account: the flag lands
+    // while the backup is being assembled (its document summary is the last read).
+    const originalAggregate = Document.aggregate.bind(Document) as (...args: unknown[]) => unknown;
+    vi.spyOn(Document, 'aggregate').mockImplementation((async (...args: unknown[]) => {
+      await User.updateOne({ _id: user._id }, { $set: { deletionPending: true } });
+      return originalAggregate(...args);
+    }) as never);
+
+    await callback();
+    vi.restoreAllMocks();
+
+    expect(mockedSendEmail).not.toHaveBeenCalled();
+    expect(await BackupLog.countDocuments({ userId: user._id })).toBe(0);
   });
 
   it('should send backup email for eligible users', async () => {
@@ -1432,7 +1480,12 @@ describe('deletionPending cleanup (in tokenCleanup)', () => {
     expect((auditLogs[0]!.metadata as Record<string, unknown>)['deletedUserId']).toBe(
       zombie._id.toString(),
     );
-    expect((auditLogs[0]!.metadata as Record<string, unknown>)['deletedEmail']).toBe(zombie.email);
+    // Masked, under its own name (F-02): the erasure record must not keep the
+    // address it erased in clear for a year.
+    expect((auditLogs[0]!.metadata as Record<string, unknown>)['maskedEmail']).toBe(
+      maskEmail(zombie.email),
+    );
+    expect(JSON.stringify(auditLogs[0]!.metadata)).not.toContain(zombie.email);
   });
 
   it('should delete user-scoped audit logs during cleanup', async () => {

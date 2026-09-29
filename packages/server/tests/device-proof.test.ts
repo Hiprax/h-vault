@@ -603,6 +603,37 @@ describe('F-03 — revocation', () => {
     expect(await proofsOf(user.id)).toHaveLength(0);
   });
 
+  it("log-out-everywhere replaces a caller's single-use proof like for like: single-use, 10 minutes", async () => {
+    const user = await createTestUser({ emailVerified: true });
+    const single = await seedProof(user.id, {
+      singleUse: true,
+      expiresAt: new Date(Date.now() + 5 * 60 * 1000),
+    });
+    const agent = request(app);
+    const csrf = await getCsrf(agent, `refreshToken=${user.refreshToken}`);
+    const res = await agent
+      .post(`${API}/auth/logout-all`)
+      .set('Authorization', authHeader(user.accessToken))
+      .set('x-csrf-token', csrf.token)
+      .set(
+        'Cookie',
+        [csrf.cookie, `refreshToken=${user.refreshToken}`, `${COOKIE}=${single.raw}`].join('; '),
+      );
+    expect(res.status).toBe(200);
+
+    const fresh = proofValue(res);
+    expect(fresh).toMatch(/^[0-9a-f]{64}$/);
+    expect(fresh).not.toBe(single.raw);
+    expect(proofCookie(res)).toMatch(/Max-Age=600/);
+    const rows = await proofsOf(user.id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.tokenHash).toBe(hashToken(fresh!));
+    // Negative: never upgraded to a 30-day reusable proof by a session alone.
+    expect(rows[0]!.singleUse).toBe(true);
+    expect(rows[0]!.expiresAt.getTime()).toBeLessThan(Date.now() + 11 * 60 * 1000);
+    expect(await proofs().findOne({ _id: single.id })).toBeNull();
+  });
+
   it('refresh-token reuse revokes every proof (the device is presumed stolen)', async () => {
     const user = await createTestUser({ emailVerified: true });
     await seedProof(user.id);
@@ -775,6 +806,22 @@ describe('F-03 — a proof in use stays alive; a single-use proof is spent exact
     expect(singleRow!.expiresAt.getTime()).toBeLessThan(Date.now() + 11 * 60 * 1000);
   });
 
+  it('a failure to extend the held proof never fails the refresh, and re-sends nothing', async () => {
+    const user = await createTestUser({ emailVerified: true });
+    const held = await seedProof(user.id, { expiresAt: new Date(Date.now() + DAY_MS) });
+    const extend = vi
+      .spyOn(DeviceProof, 'updateOne')
+      .mockImplementationOnce((() => Promise.reject(new Error('datastore unavailable'))) as never);
+
+    const res = await refreshWithProof(user, held.raw);
+    expect(res.status).toBe(200);
+    expect(res.body.data.accessToken).toEqual(expect.any(String));
+    expect(extend).toHaveBeenCalledTimes(1);
+    expect(proofCookie(res)).toBeUndefined();
+    const row = await proofs().findOne({ _id: held.id });
+    expect(row!.expiresAt.getTime()).toBeLessThan(Date.now() + 2 * DAY_MS);
+  });
+
   it('two concurrent sign-ins racing with one single-use proof: exactly one is proven', async () => {
     const user = await createTestUser({ emailVerified: true });
     const single = await seedProof(user.id, {
@@ -896,7 +943,7 @@ describe('F-03 — account deletion erases the proofs (transactional branch)', (
     expect(await proofsOf(user.id)).toHaveLength(0);
   });
 
-  it('cascadeDeleteUser removes the target account proofs inside the transaction', async () => {
+  it('cascadeDeleteUser removes the target account proofs on the transactional branch', async () => {
     expect(supportsTransactions()).toBe(true);
     const target: TestUser = await createTestUser({ emailVerified: true });
     const bystander = await createTestUser({ emailVerified: true });
@@ -915,5 +962,23 @@ describe('F-03 — account deletion erases the proofs (transactional branch)', (
     expect(startSession).toHaveBeenCalled();
     expect(await proofsOf(target.id)).toHaveLength(0);
     expect(await proofsOf(bystander.id)).toHaveLength(1);
+  });
+});
+
+describe('DeviceProof serialisation', () => {
+  it('never serialises the token hash (what a stolen cookie must hash to), nor __v', async () => {
+    const proof = await DeviceProof.create({
+      userId: new mongoose.Types.ObjectId(),
+      tokenHash: hashToken('a-proof-cookie-value'),
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+
+    const json = proof.toJSON();
+    expect(Object.hasOwn(json, 'tokenHash')).toBe(false);
+    expect(Object.hasOwn(json, '__v')).toBe(false);
+    expect(JSON.stringify(json)).not.toContain(hashToken('a-proof-cookie-value'));
+    // And the strip is not achieved by emitting nothing: the fields a reader may see survive.
+    expect(String(json.userId)).toBe(proof.userId.toString());
+    expect(json.expiresAt).toEqual(proof.expiresAt);
   });
 });

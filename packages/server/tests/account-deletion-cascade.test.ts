@@ -36,7 +36,7 @@ vi.mock('../src/services/storage/index.js', async (importOriginal) => {
 
 import { TOTP, Secret } from 'otpauth';
 import { CryptoManager } from '@hiprax/crypto';
-import { DOCUMENT_PLAINTEXT_CHUNK_BYTES, DOCUMENT_TAG_BYTES } from '@hvault/shared';
+import { DOCUMENT_PLAINTEXT_CHUNK_BYTES, DOCUMENT_TAG_BYTES, maskEmail } from '@hvault/shared';
 import app from '../src/app.js';
 import { User } from '../src/models/User.js';
 import { VaultItem } from '../src/models/VaultItem.js';
@@ -337,7 +337,8 @@ describe('Account Deletion Cascade (API-level)', () => {
       expect(systemLog!.metadata).toEqual(
         expect.objectContaining({
           deletedUserId: user.id,
-          deletedEmail: user.email,
+          // Masked (F-02): the erasure record never keeps the address in clear.
+          maskedEmail: maskEmail(user.email),
         }),
       );
     });

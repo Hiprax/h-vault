@@ -170,7 +170,7 @@
         "line": 99.31,
         "branch": 93.85,
         "function": 98.99,
-        "linesTotal": 10942,
+        "linesTotal": 10940,
         "branchesTotal": 7820,
         "filesMeasured": [
           "src/App.tsx",
