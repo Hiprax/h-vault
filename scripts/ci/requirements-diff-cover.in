@@ -1,0 +1,5 @@
+# The one top-level requirement of the coverage gate's diff-cover install in
+# .github/workflows/release.yml. Compile it into the hash-locked
+# requirements-diff-cover.txt beside it (see CONTRIBUTING.md, "Refreshing the
+# release workflow's pins"); never install from this file directly.
+diff-cover==10.4.1

@@ -200,7 +200,7 @@ const PREREQUISITES = {
   'diff-cover': {
     label: 'the diff-cover binary',
     ok: () => hasExe('diff-cover'),
-    fix: 'install diff-cover — uv tool install diff-cover (or pipx install diff-cover)',
+    fix: 'install diff-cover 10.4.1, the version release.yml pins — uv tool install diff-cover==10.4.1 (or a venv from scripts/ci/requirements-diff-cover.txt, see CONTRIBUTING.md)',
   },
   'build:shared': {
     label: 'a built @hvault/shared (packages/shared/dist)',

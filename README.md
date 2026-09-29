@@ -2108,12 +2108,12 @@ npx playwright install --with-deps chromium firefox
 Pin them rather than taking the newest: several gates ratchet counts that a different
 scanner version reports differently, which reads as a regression no code caused.
 
-| Tool         | Version | Gate it feeds | Install                                                         |
-| ------------ | ------- | ------------- | --------------------------------------------------------------- |
-| `actionlint` | 1.7.12  | `config`      | [release archive](https://github.com/rhysd/actionlint/releases) |
-| `hadolint`   | 2.14.0  | `config`      | [release binary](https://github.com/hadolint/hadolint/releases) |
-| `oasdiff`    | 1.28.0  | `openapi`     | [release archive](https://github.com/oasdiff/oasdiff/releases)  |
-| `diff-cover` | current | `coverage`    | `uv tool install diff-cover`, or `pipx install diff-cover`      |
+| Tool         | Version | Gate it feeds | Install                                                                                                             |
+| ------------ | ------- | ------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `actionlint` | 1.7.12  | `config`      | [release archive](https://github.com/rhysd/actionlint/releases)                                                     |
+| `hadolint`   | 2.14.0  | `config`      | [release binary](https://github.com/hadolint/hadolint/releases)                                                     |
+| `oasdiff`    | 1.28.0  | `openapi`     | [release archive](https://github.com/oasdiff/oasdiff/releases)                                                      |
+| `diff-cover` | 10.4.1  | `coverage`    | hash-locked `scripts/ci/requirements-diff-cover.txt` (see CONTRIBUTING.md), or `uv tool install diff-cover==10.4.1` |
 
 `~/.local/bin` is enough for all four; none of them needs root. If you append that
 directory to `PATH` in a shell profile, **start the run from a fresh login shell**:
@@ -2130,7 +2130,7 @@ caused, so ask:
 actionlint -version                # 1.7.12
 hadolint --version                 # Haskell Dockerfile Linter 2.14.0
 oasdiff --version                  # oasdiff version 1.28.0
-diff-cover --version               # any current release
+diff-cover --version               # diff-cover 10.4.1
 ```
 
 For the record, the durations published in this section were measured on a machine
@@ -3020,6 +3020,13 @@ tags ahead of package.json          → refused, rather than releasing a version
 To cut a release: bump the version everywhere it appears, rename `## [Unreleased]` in
 [CHANGELOG.md](CHANGELOG.md) to `## [X.Y.Z] - <date>`, and push. The Release body is that section,
 verbatim; a release whose section is missing or empty fails rather than publishing empty notes.
+
+**Least privilege, and nothing unpinned.** Only the second job can write to the repository: the
+gauntlet job, which installs every dependency and runs third-party code, gets a read-only token and
+does not keep it in its checkout. Every action is pinned to a full commit SHA, every downloaded
+tool is checked against a SHA-256 committed in the workflow, and `diff-cover` comes from a
+hash-locked requirements file. Moving any of those pins is a deliberate edit; CONTRIBUTING.md,
+"Refreshing the release workflow's pins", is the procedure.
 
 Tags are ordered numerically, not lexically (`v1.10.0` is above `v1.9.0`). If HEAD is already
 tagged, no second tag is minted but the Release is still reconciled, so a run interrupted between

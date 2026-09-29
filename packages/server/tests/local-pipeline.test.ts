@@ -72,12 +72,13 @@ interface ReleaseWorkflow {
     pull_request?: unknown;
     schedule?: unknown;
   };
-  permissions: Record<string, string>;
+  permissions?: Record<string, string>;
   concurrency: { group: string; 'cancel-in-progress': boolean };
   jobs: Record<
     string,
     {
       needs?: string[];
+      permissions?: Record<string, string>;
       'timeout-minutes'?: number;
       steps: {
         name?: string;
@@ -85,6 +86,7 @@ interface ReleaseWorkflow {
         if?: string;
         uses?: string;
         with?: Record<string, unknown>;
+        env?: Record<string, unknown>;
         run?: string;
       }[];
     }
@@ -147,11 +149,21 @@ describe('release workflow', () => {
     expect(release.on.push?.tags).toBeUndefined();
   });
 
-  it('grants only contents: write', () => {
-    // Enough to push a tag and publish a release ("write" implies read, so
-    // checkout still works); nothing else — notably not the `security-events:
-    // write` the deleted CodeQL job required.
-    expect(release.permissions).toEqual({ contents: 'write' });
+  it('grants write access only to the job that publishes, and none at workflow level', () => {
+    // A workflow-level block is inherited by EVERY job, so the one that runs
+    // `npm ci` (every dependency's install script) and the whole gauntlet held a
+    // token able to push to `main` and move tags. Each job now names its own
+    // scopes: `verify` reads, `release` writes `contents` (enough to push a tag
+    // and publish a Release) and nothing else — notably not the `security-events:
+    // write` the deleted CodeQL job required. A job added without a block of its
+    // own would inherit the repository default, which can be read-write, so every
+    // job must declare one.
+    expect(release.permissions).toBeUndefined();
+    for (const [name, job] of Object.entries(release.jobs)) {
+      expect(job.permissions, `job ${name} must declare its own permissions`).toBeDefined();
+    }
+    expect(release.jobs['verify']?.permissions).toEqual({ contents: 'read' });
+    expect(release.jobs['release']?.permissions).toEqual({ contents: 'write' });
   });
 
   it('serialises runs without cancelling one mid-release', () => {
@@ -295,6 +307,238 @@ describe('release workflow', () => {
         /steps\.version\.outputs\.should_release == 'true'/,
       );
     }
+  });
+});
+
+/**
+ * A `run:` script as the shell will execute it: backslash-continued lines joined
+ * into one command, comments and blank lines dropped. Asserting over raw lines
+ * lets a command split across a continuation hide the half that matters (the old
+ * `curl … \` / `| tar xz` pair did exactly that).
+ */
+const shellCommands = (script: string): string[] =>
+  script
+    .replace(/\\\n\s*/g, ' ')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line !== '' && !line.startsWith('#'));
+
+const allRunScripts = (): string[] =>
+  Object.values(release.jobs)
+    .flatMap((job) => job.steps)
+    .map((step) => step.run ?? '');
+
+const unquote = (word: string): string => word.replace(/^(["'])(.*)\1$/, '$2');
+
+const DIFF_COVER_REQUIREMENTS = 'scripts/ci/requirements-diff-cover.txt';
+const SHA256_HEX = /^[0-9a-f]{64}$/;
+
+/**
+ * The hash-locked requirements file, one entry per requirement with its
+ * continuation lines folded in. pip-compile writes each as `name==version \`
+ * followed by `--hash=sha256:…` lines and a `# via` comment, which is dropped.
+ */
+const parseLockedRequirements = (
+  text: string,
+): { name: string; version: string; hashes: string[] }[] =>
+  shellCommands(text).map((entry) => {
+    const [spec = '', ...options] = entry.split(/\s+/);
+    const match = /^([A-Za-z0-9._-]+)==(\S+)$/.exec(spec);
+    if (!match) throw new Error(`not an exact pin: ${entry}`);
+    const hashes = options
+      .filter((option) => !option.startsWith('#'))
+      .map((option) => {
+        const hash = /^--hash=sha256:(.+)$/.exec(option);
+        if (!hash) throw new Error(`unexpected option ${option} in ${spec}`);
+        return hash[1] ?? '';
+      });
+    return { name: (match[1] ?? '').toLowerCase(), version: match[2] ?? '', hashes };
+  });
+
+describe('release workflow supply chain (F-01): nothing it runs can change under it', () => {
+  it('keeps the checkout token out of .git/config in the job that runs third-party code', () => {
+    // actions/checkout otherwise writes the job token into the clone's git config
+    // for every later step to read, `npm ci`'s install scripts included. `verify`
+    // pushes nothing, so it keeps nothing.
+    const verifyCheckout = release.jobs['verify']?.steps.find((step) =>
+      step.uses?.startsWith('actions/checkout@'),
+    );
+    expect(verifyCheckout?.with?.['persist-credentials']).toBe(false);
+
+    // The release job is the opposite case, and is NOT to be "fixed" the same
+    // way: `git push origin refs/tags/$TAG` authenticates with that persisted
+    // token, so turning it off there breaks every release at the tag step.
+    const releaseCheckout = release.jobs['release']?.steps.find((step) =>
+      step.uses?.startsWith('actions/checkout@'),
+    );
+    expect(releaseCheckout).toBeDefined();
+    expect(releaseCheckout?.with?.['persist-credentials']).not.toBe(false);
+  });
+
+  it('pins every action to a full commit SHA, naming the release in a comment', () => {
+    // A tag is a pointer its owner (or whoever compromises them) can move; a
+    // 40-hex commit id cannot be moved. The trailing `# vX.Y.Z` is what makes
+    // the pin reviewable and refreshable (CONTRIBUTING.md), and is read from the
+    // RAW text because the YAML parser discards comments.
+    const usesLines = releaseYaml
+      .split('\n')
+      .map((line) => /^\s*(?:-\s+)?uses:\s*(.*)$/.exec(line)?.[1]?.trim())
+      .filter((value): value is string => value !== undefined);
+    const parsedUses = Object.values(release.jobs)
+      .flatMap((job) => job.steps)
+      .flatMap((step) => (step.uses === undefined ? [] : [step.uses]));
+
+    // Every `uses` the parser sees was on a line checked here, so a flow-style
+    // `{ uses: … }` cannot slip past the raw-text check.
+    expect(parsedUses.length).toBeGreaterThan(0);
+    expect(usesLines).toHaveLength(parsedUses.length);
+
+    const pinned = /^([\w.-]+\/[\w.-]+(?:\/[\w./-]+)?)@([0-9a-f]{40})\s+#\s*v\d+\.\d+\.\d+$/;
+    const refsByAction = new Map<string, Set<string>>();
+    for (const line of usesLines) {
+      const match = pinned.exec(line);
+      expect(match, `uses: ${line}`).not.toBeNull();
+      const [, action = '', sha = ''] = match ?? [];
+      refsByAction.set(action, (refsByAction.get(action) ?? new Set<string>()).add(line));
+      expect(parsedUses).toContain(`${action}@${sha}`);
+    }
+    // One action, one pin: two checkouts at different commits would mean one of
+    // them was refreshed and the other forgotten.
+    for (const [action, refs] of refsByAction) {
+      expect([...refs], `${action} is pinned more than one way`).toHaveLength(1);
+    }
+  });
+
+  it('verifies every downloaded binary against a committed checksum before using it', () => {
+    // A release asset can be replaced after the fact, and `curl … | tar xz`
+    // unpacked whatever arrived. Each download now goes to a file, and the very
+    // next command checks that file against a SHA-256 written in this workflow;
+    // `set -e` stops the step on a mismatch, before the binary is ever run.
+    const downloads: string[] = [];
+    for (const script of allRunScripts()) {
+      const commands = shellCommands(script);
+      commands.forEach((command, index) => {
+        expect(command, 'no download tool but curl').not.toMatch(/\bwget\b/);
+        if (!/\bcurl\b/.test(command)) return;
+        expect(script, 'a step that downloads stops on the first failure').toMatch(
+          /set -euo pipefail/,
+        );
+        // Never streamed into an extractor or an interpreter.
+        expect(command, `curl piped: ${command}`).not.toMatch(/\|/);
+        const target = /\s(?:-o|--output)\s+(\S+)/.exec(command)?.[1];
+        expect(target, `curl without -o: ${command}`).toBeDefined();
+        const next = commands[index + 1] ?? '';
+        const check =
+          /^echo\s+"([0-9a-f]+)\s{2}(\S+)"\s*\|\s*sha256sum\s+--check\s+--strict\s+-$/.exec(next);
+        expect(check, `no checksum right after: ${command}`).not.toBeNull();
+        expect(check?.[1], `checksum for ${String(target)}`).toMatch(SHA256_HEX);
+        expect(check?.[2]).toBe(unquote(target ?? ''));
+        downloads.push(unquote(target ?? ''));
+      });
+    }
+    // Non-vacuous: the three binaries this job has always fetched are among them.
+    for (const tool of ['actionlint', 'hadolint', 'oasdiff']) {
+      expect(
+        downloads.some((file) => file.startsWith(tool)),
+        `${tool} is downloaded and checked`,
+      ).toBe(true);
+    }
+  });
+
+  it('installs diff-cover only from its hash-locked requirements, inside a venv', () => {
+    // `pipx install diff-cover` took whatever version PyPI served that minute,
+    // with whatever dependencies. `--require-hashes` refuses any archive whose
+    // hash is not in the committed file; `--no-deps` refuses to resolve anything
+    // the file does not already list; `pip check` then proves the list complete.
+    const commands = allRunScripts().flatMap(shellCommands);
+    expect(commands.join('\n')).not.toMatch(/\bpipx\b/);
+    const installs = commands.filter((command) => /\bpip3?["']?\s+install\b/.test(command));
+    expect(installs.length).toBeGreaterThan(0);
+    for (const install of installs) {
+      expect(install).toMatch(/\s--require-hashes(\s|$)/);
+      expect(install).toMatch(/\s--no-deps(\s|$)/);
+      // Wheels only: an sdist would run its own build backend, installed
+      // without any hash check, before a single file is verified.
+      expect(install).toMatch(/\s--only-binary=:all:(\s|$)/);
+      expect(install).toMatch(new RegExp(`\\s-r\\s+${DIFF_COVER_REQUIREMENTS}$`));
+      // Into the venv, never the runner's own interpreter.
+      expect(install).toMatch(/^"\$HOME\/\.diff-cover\/bin\/pip"\s/);
+    }
+    expect(commands).toContain('python3 -m venv "$HOME/.diff-cover"');
+    expect(commands).toContain('"$HOME/.diff-cover/bin/pip" check');
+
+    const locked = parseLockedRequirements(read(...DIFF_COVER_REQUIREMENTS.split('/')));
+    expect(locked.map((entry) => entry.name)).toContain('diff-cover');
+    // diff-cover has runtime dependencies; a file listing it alone would make
+    // `--no-deps` install a diff-cover that cannot import them.
+    expect(locked.length).toBeGreaterThan(1);
+    for (const entry of locked) {
+      expect(entry.hashes.length, `${entry.name} carries a hash`).toBeGreaterThan(0);
+      for (const hash of entry.hashes) expect(hash, entry.name).toMatch(SHA256_HEX);
+    }
+    // The compiled file is the input's resolution, not a hand edit of it.
+    const inputs = shellCommands(read('scripts', 'ci', 'requirements-diff-cover.in'));
+    expect(inputs.length).toBeGreaterThan(0);
+    for (const input of inputs) {
+      const [name = '', version = ''] = input.split('==');
+      expect(
+        locked.find((entry) => entry.name === name.toLowerCase())?.version,
+        `input ${input}`,
+      ).toBe(version);
+    }
+  });
+
+  it('names the pinned versions wherever a contributor is told what to install', () => {
+    // A pin refreshed in the workflow but not in the prose sends every local run
+    // back to the old version, and several gates ratchet counts that another
+    // scanner version reports differently. The README table, its version-check
+    // block and every `diff-cover==` spelling are held to the workflow and the lock.
+    const install = release.jobs['verify']?.steps.find(
+      (step) => step.env?.['ACTIONLINT_VERSION'] !== undefined,
+    );
+    const lockedDiffCover = parseLockedRequirements(
+      read(...DIFF_COVER_REQUIREMENTS.split('/')),
+    ).find((entry) => entry.name === 'diff-cover')?.version;
+    expect(lockedDiffCover).toBeDefined();
+    const diffCoverVersion = String(lockedDiffCover);
+    const pinned: Record<string, string> = {
+      actionlint: String(install?.env?.['ACTIONLINT_VERSION']),
+      hadolint: String(install?.env?.['HADOLINT_VERSION']),
+      oasdiff: String(install?.env?.['OASDIFF_VERSION']),
+      'diff-cover': diffCoverVersion,
+    };
+
+    const readme = read('README.md');
+    for (const [tool, version] of Object.entries(pinned)) {
+      const row = new RegExp(`^\\| \`${tool}\`\\s*\\|\\s*([^|\\s]+)\\s*\\|`, 'm').exec(readme);
+      expect(row?.[1], `README prerequisites row for ${tool}`).toBe(version);
+    }
+    expect(readme).toMatch(
+      new RegExp(
+        `diff-cover --version\\s+# diff-cover ${diffCoverVersion.replaceAll('.', '\\.')}\\n`,
+      ),
+    );
+
+    const spellings = [
+      readme,
+      read('CONTRIBUTING.md'),
+      read('scripts', 'ci', 'local-ci.mjs'),
+    ].flatMap((text) => [...text.matchAll(/diff-cover==([^\s`'")]+)/g)].map((m) => m[1]));
+    expect(spellings.length).toBeGreaterThan(0);
+    for (const spelling of spellings) expect(spelling).toBe(diffCoverVersion);
+  });
+
+  it('reads the requirements file strictly, so a weakened lock fails the check above', () => {
+    // The parser is what the assertions above stand on; a lenient one would
+    // pass a file that pip itself would install without verifying.
+    expect(parseLockedRequirements('a==1 \\\n    --hash=sha256:' + 'a'.repeat(64))).toEqual([
+      { name: 'a', version: '1', hashes: ['a'.repeat(64)] },
+    ]);
+    expect(parseLockedRequirements('a==1\n')).toEqual([{ name: 'a', version: '1', hashes: [] }]);
+    expect(() => parseLockedRequirements('a>=1 \\\n    --hash=sha256:00')).toThrow(
+      /not an exact pin/,
+    );
+    expect(() => parseLockedRequirements('a==1 --index-url=http://x')).toThrow(/unexpected option/);
   });
 });
 

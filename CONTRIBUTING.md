@@ -218,9 +218,11 @@ because the obvious way past each of them is the wrong one.
   owned, expiring `COV-DIFF-EXEMPT` entry in `.testfortress/suppressions.json` naming that
   file and bounding how many lines it excuses — there is no pragma, no ignore file and no
   `--fail-under` to lower, and the entry stops excusing anything the day it expires. It
-  needs `diff-cover` on your `PATH` (`uv tool install diff-cover`, or
-  `pipx install diff-cover`); without it the gate reports **could not run** rather than
-  passing quietly.
+  needs `diff-cover` on your `PATH` (`uv tool install diff-cover==10.4.1`, or
+  `pipx install diff-cover==10.4.1`); without it the gate reports **could not run** rather than
+  passing quietly. The release workflow installs the exact, hash-locked set in
+  `scripts/ci/requirements-diff-cover.txt`; installing from that file (see "Refreshing the
+  release workflow's pins" below) gives you the same version it runs.
 
 - **`deadcode`** runs `knip` (unused files, exports, exported types and dependencies, plus
   dependencies used without being declared) and `jscpd` (duplication). The answer to a
@@ -351,6 +353,65 @@ a claim someone else now has to check.
 
 None of them is a way to land work that does not pass. If a gate is wrong, fix the gate;
 if the code is wrong, fix the code. See the next section.
+
+### Refreshing the release workflow's pins
+
+`.github/workflows/release.yml` runs nothing it has not pinned. Each action it uses is
+named by a full 40-character commit SHA, with the release it corresponds to in a trailing
+`# vX.Y.Z` comment. Each binary it downloads is checked against a SHA-256 committed on the
+line after the download. `diff-cover` and every package it imports come from the
+hash-locked `scripts/ci/requirements-diff-cover.txt`. None of these moves on its own. A
+new upstream release changes nothing here until someone edits the pin, which is the point:
+a moved tag or a replaced release asset can no longer reach the job. The cost is that
+refreshing a pin is a deliberate edit, done like this.
+
+- **An action.** Resolve the tag to the commit it points at, with read-only calls:
+
+  ```bash
+  gh api repos/actions/checkout/git/ref/tags/v4.4.0 --jq '.object.type + " " + .object.sha'
+  git ls-remote https://github.com/actions/checkout 'refs/tags/v4.4.0' 'refs/tags/v4.4.0^{}'
+  ```
+
+  If the type is `commit`, that SHA is the pin. If it is `tag`, the tag is annotated:
+  `.object.sha` names the tag OBJECT, not a commit. Follow it with
+  `gh api repos/actions/checkout/git/tags/<that sha> --jq .object.sha`; that result, which
+  is also the `^{}` line of `git ls-remote`, is the pin. Both calls must agree. Replace
+  every occurrence of the action (one action is pinned one way everywhere) and update the
+  comment. Moving to a new MAJOR is a dependency upgrade: read its release notes first.
+
+- **A downloaded binary.** Change its `*_VERSION` and its checksum line together; a
+  version bumped alone fails the checksum on purpose. Take the hash from the checksum file
+  the project publishes beside the asset (its URL is the comment above the check). Then
+  confirm it two more ways: against GitHub's own digest,
+  `gh api repos/<owner>/<repo>/releases/tags/v<version> --jq '.assets[] | "\(.name) \(.digest)"'`,
+  and against `sha256sum` of a copy you downloaded yourself. All three must agree, or the
+  pin does not move. Never compute a hash from a download alone. Never copy one from
+  anywhere but the release itself.
+- **`diff-cover`.** Edit the version in `scripts/ci/requirements-diff-cover.in`. Then
+  regenerate the locked file, which pins every dependency and every hash:
+
+  ```bash
+  uvx --from pip-tools pip-compile --generate-hashes --strip-extras --no-emit-index-url \
+    --output-file=scripts/ci/requirements-diff-cover.txt scripts/ci/requirements-diff-cover.in
+  ```
+
+  Dry-run the workflow's own install in a throwaway virtual environment before committing,
+  ideally on the Python the runner uses:
+
+  ```bash
+  python3 -m venv /tmp/dc && /tmp/dc/bin/pip install --require-hashes --no-deps \
+    --only-binary=:all: -r scripts/ci/requirements-diff-cover.txt && /tmp/dc/bin/pip check
+  ```
+
+  Do not install it through `pipx install --pip-args=...`. pipx passes the package as a
+  positional requirement, which carries no hash, and in hash-checking mode pip refuses the
+  whole install.
+
+`packages/server/tests/local-pipeline.test.ts` holds the workflow to this shape. It fails
+on any of the following: a `uses:` that is not a commit SHA with its comment, one action
+pinned two ways, a download not followed by its checksum, a `pip install` without
+`--require-hashes`, a requirement without a hash, or a lock that no longer matches its
+`.in`. `npm run audit:config` runs `actionlint` over the result.
 
 ## You may not make a gate pass by weakening it
 

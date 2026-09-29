@@ -19,11 +19,18 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# The minimum that lets GITHUB_TOKEN push a tag and publish a Release. Every
-# other scope is dropped, including the `security-events: write` the deleted
-# CodeQL job needed.
-permissions:
-  contents: write
+# No workflow-level `permissions` block, deliberately: one would be inherited by
+# BOTH jobs, and `verify` runs third-party code (`npm ci` executes every
+# dependency's install script, then the whole gauntlet runs). Each job declares
+# its own scopes below — `verify` reads, and only `release`, which runs nothing
+# but this repository's own scripts, may push a tag and publish a Release.
+#
+# Supply chain: every `uses:` is pinned to a full commit SHA (a tag can be moved
+# by whoever controls the action's repository; a commit id cannot), with the
+# release it names in a trailing comment, and every binary this workflow
+# downloads is checked against a SHA-256 committed here before it is installed.
+# CONTRIBUTING.md, "Refreshing the release workflow's pins", is the procedure
+# for moving any of them.
 
 # Serialised, and deliberately NOT cancel-in-progress. Two pushes landing
 # seconds apart would otherwise both read the same tag state and race, and the
@@ -50,21 +57,35 @@ jobs:
     name: Verify (the full local gauntlet)
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    # Read-only: this job publishes nothing, and it is the one that runs code
+    # this repository did not write.
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           # The secret scan's history leg reads every blob ever committed, and
           # the coverage gate diffs against `main`. Both need the whole history.
           fetch-depth: 0
+          # Otherwise the job token is written into .git/config, where every
+          # later step (every install script under `npm ci` included) can read
+          # it. This job pushes nothing, so it keeps nothing.
+          persist-credentials: false
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version-file: .nvmrc
           cache: npm
 
+      # Each binary is downloaded to a file and checked against the SHA-256
+      # committed on the line after it; `set -e` stops the step on a mismatch,
+      # before anything is unpacked or run. Each hash is the one its project
+      # publishes beside the asset (that file's URL is the comment above each
+      # check), confirmed against GitHub's own asset digest and a download of the
+      # same file. Bumping a *_VERSION without its hash fails here, loudly.
       - name: Install the gate prerequisites
         env:
           ACTIONLINT_VERSION: 1.7.12
@@ -74,18 +95,45 @@ jobs:
           set -euo pipefail
           mkdir -p "$HOME/.local/bin"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          cd "$(mktemp -d)"
 
-          curl -fsSL "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \
-            | tar xz -C "$HOME/.local/bin" actionlint
+          curl -fsSL -o "actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          # https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_checksums.txt
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" | sha256sum --check --strict -
+          tar xzf "actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" -C "$HOME/.local/bin" actionlint
 
-          curl -fsSL -o "$HOME/.local/bin/hadolint" \
-            "https://github.com/hadolint/hadolint/releases/download/v${HADOLINT_VERSION}/hadolint-Linux-x86_64"
-          chmod +x "$HOME/.local/bin/hadolint"
+          curl -fsSL -o hadolint-linux-x86_64 \
+            "https://github.com/hadolint/hadolint/releases/download/v${HADOLINT_VERSION}/hadolint-linux-x86_64"
+          # https://github.com/hadolint/hadolint/releases/download/v2.14.0/hadolint-linux-x86_64.sha256
+          echo "6bf226944684f56c84dd014e8b979d27425c0148f61b3bd99bcc6f39e9dc5a47  hadolint-linux-x86_64" | sha256sum --check --strict -
+          install -m 0755 hadolint-linux-x86_64 "$HOME/.local/bin/hadolint"
 
-          curl -fsSL "https://github.com/oasdiff/oasdiff/releases/download/v${OASDIFF_VERSION}/oasdiff_${OASDIFF_VERSION}_linux_amd64.tar.gz" \
-            | tar xz -C "$HOME/.local/bin" oasdiff
+          curl -fsSL -o "oasdiff_${OASDIFF_VERSION}_linux_amd64.tar.gz" \
+            "https://github.com/oasdiff/oasdiff/releases/download/v${OASDIFF_VERSION}/oasdiff_${OASDIFF_VERSION}_linux_amd64.tar.gz"
+          # https://github.com/oasdiff/oasdiff/releases/download/v1.28.0/checksums.txt
+          echo "e0ef076f2cf953d922addc04be9c3851cf3ec18f7678d2b94d44cea23dca51b5  oasdiff_${OASDIFF_VERSION}_linux_amd64.tar.gz" | sha256sum --check --strict -
+          tar xzf "oasdiff_${OASDIFF_VERSION}_linux_amd64.tar.gz" -C "$HOME/.local/bin" oasdiff
 
-          pipx install diff-cover
+      # From a committed, hash-locked requirements file that pins diff-cover AND
+      # every package it imports (scripts/ci/requirements-diff-cover.txt,
+      # compiled from the .in beside it). `--require-hashes` refuses any archive
+      # whose hash is not in that file, `--no-deps` refuses to resolve anything
+      # it does not list, `--only-binary=:all:` refuses an sdist (whose build
+      # backend would be fetched and run unverified), and `pip check` proves the
+      # list complete. Not `pipx install --pip-args=…`: pipx passes its package
+      # as a positional requirement, which carries no hash, so pip refuses the
+      # whole install in hash-checking mode. Only the entry point is linked onto
+      # PATH; the venv's own `python3`/`pip` must not shadow the runner's.
+      - name: Install diff-cover from its hash-locked requirements
+        run: |
+          set -euo pipefail
+          python3 -m venv "$HOME/.diff-cover"
+          "$HOME/.diff-cover/bin/pip" install --disable-pip-version-check --require-hashes --no-deps --only-binary=:all: \
+            -r scripts/ci/requirements-diff-cover.txt
+          "$HOME/.diff-cover/bin/pip" check
+          ln -sf "$HOME/.diff-cover/bin/diff-cover" "$HOME/.local/bin/diff-cover"
+          diff-cover --version
 
       - name: Install dependencies
         run: npm ci
@@ -109,13 +157,21 @@ jobs:
     needs: verify
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # The minimum that lets GITHUB_TOKEN push a tag and publish a Release, and
+    # only here: this job installs nothing and runs only this repository's own
+    # scripts. Every other scope is dropped, including the
+    # `security-events: write` the deleted CodeQL job needed.
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           # The release decision reads every existing tag, so a shallow clone
           # (the default) would see none and re-mint a version already released.
+          # Credentials stay persisted HERE, unlike in `verify`: the tag push
+          # below authenticates with them.
           fetch-depth: 0
 
       # Answers two questions at once, and refuses rather than guessing when

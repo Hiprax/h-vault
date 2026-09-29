@@ -1345,6 +1345,18 @@ devices via clipboard sync. H-Vault reduces the exposure window but cannot elimi
   reporting the ones it does not cover; a later npm release enforces it. That is why the
   telemetry opt-out is set separately. The production images install with scripts disabled
   either way.
+- The release workflow gives write access only to the job that publishes. The job that
+  installs dependencies and runs the gauntlet holds a read-only token and does not keep it in
+  its checkout, so a compromised dependency or tool running there cannot push to the
+  repository or move a release tag; the publishing job checks the commit out afresh and runs
+  only this repository's own scripts. Every GitHub Action is pinned to a full commit SHA, the
+  three downloaded tools are checked against SHA-256 values committed in the workflow, and
+  `diff-cover` is installed from a hash-locked requirements file. Be precise about the limit:
+  code that runs in the gauntlet job can still read what that job can read and make it fail
+  or pass, and three things it fetches are not pinned by a hash committed here: the Node
+  toolchain `actions/setup-node` downloads, the Playwright browsers, and the runner image
+  itself (`ubuntu-latest`). The npm dependency tree is pinned by the lockfile's integrity
+  hashes.
 
 ## Hardening your own deployment
 
