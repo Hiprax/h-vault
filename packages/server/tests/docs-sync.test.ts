@@ -3,7 +3,15 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { AUDIT_ACTIONS, MAX_PREVIEW_BYTES, PREVIEW_MODES, formatBytes } from '@hvault/shared';
+import {
+  AUDIT_ACTIONS,
+  HIBP_MAX_MISSES_PER_USER_PER_DAY,
+  HIBP_MAX_MISSES_PER_USER_PER_WINDOW,
+  HIBP_MISS_BUDGET_WINDOW_MINUTES,
+  MAX_PREVIEW_BYTES,
+  PREVIEW_MODES,
+  formatBytes,
+} from '@hvault/shared';
 import { TIER_BUDGET_SECONDS } from '../../../scripts/ci/lib/tiers.mjs';
 // The accessibility gate's membership, read from the ONE list that defines it —
 // the same import `gate-surface.test.ts` takes, for the same reason: a count
@@ -169,6 +177,16 @@ describe('README documentation sync', () => {
         expect(text).toContain(`Rate limited: ${formatted(FOLDER_WRITE_RATE_LIMIT_MAX)} req/user`);
       }
     });
+  });
+
+  it('quotes the breach fetch budgets from their constants', () => {
+    // Both are derived from MAX_ITEMS_PER_USER, so a hand-copied number would not
+    // move with a change to the per-account item cap.
+    const count = (value: number): string => value.toLocaleString('en-US');
+    expect(readme).toContain(
+      `**${count(HIBP_MAX_MISSES_PER_USER_PER_WINDOW)} per ${String(HIBP_MISS_BUDGET_WINDOW_MINUTES)} minutes**`,
+    );
+    expect(readme).toContain(`**${count(HIBP_MAX_MISSES_PER_USER_PER_DAY)} per day**`);
   });
 
   it('the Heavy Ops rate-limit row reflects the real targets, not "password generation"', () => {

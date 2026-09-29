@@ -13,7 +13,7 @@
  *    password can never masquerade as "safe".
  */
 import type { AxiosError } from 'axios';
-import { HIBP_BATCH_MAX_PREFIXES } from '@hvault/shared';
+import { HIBP_BATCH_MAX_PREFIXES, HIBP_MISS_BUDGET_WINDOW_MINUTES } from '@hvault/shared';
 import { checkBreachBatchApi } from '../api/userApi';
 import type { DecryptedVaultItem } from '../../stores/vaultStore';
 
@@ -45,6 +45,13 @@ const BATCH_CONCURRENCY = 3;
 const MAX_RETRIES = 3;
 /** Fallback backoff when a 429 carries no usable Retry-After. */
 const DEFAULT_RETRY_MS = 2000;
+/**
+ * The longest Retry-After worth waiting out: one budget window. The server's
+ * per-window limits (requests and fetches alike) never ask for more; a longer
+ * one is its DAILY fetch budget, and holding a scan open for hours would only
+ * look like a hang, so that batch is reported as not checked at once instead.
+ */
+const MAX_RETRY_WAIT_MS = HIBP_MISS_BUDGET_WINDOW_MINUTES * 60 * 1000;
 
 async function sha1HexUpper(password: string): Promise<string> {
   const data = new TextEncoder().encode(password);
@@ -217,9 +224,12 @@ export async function runBreachCheck(
         if (signal?.aborted) return;
         const axiosError = error as AxiosError;
         if (axiosError.response?.status === 429 && attempt < MAX_RETRIES) {
-          attempt += 1;
-          await delay(retryAfterMs(axiosError), signal);
-          continue;
+          const waitMs = retryAfterMs(axiosError);
+          if (waitMs <= MAX_RETRY_WAIT_MS) {
+            attempt += 1;
+            await delay(waitMs, signal);
+            continue;
+          }
         }
         markBatchFailed(batch);
         return;

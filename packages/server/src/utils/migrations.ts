@@ -75,9 +75,10 @@ function hasCode(error: unknown, code: number): boolean {
  * `skip`/`limit` pages need; the old `{userId, timestamp}` and `{userId, action,
  * timestamp}` cannot serve the `_id` half, so every page was a blocking sort over
  * every row the account had. `models/AuditLog.ts` now declares the extended pair,
- * but `create-indexes` only ever BUILDS, so without this the two superseded
- * indexes would linger on every existing deployment and cost every audit insert
- * for nothing.
+ * but `create-indexes` never removes an index the schema stopped declaring (the
+ * only index it drops is a declared expiry index it rebuilds), so without this
+ * the two superseded indexes would linger on every existing deployment and cost
+ * every audit insert for nothing.
  *
  * The new pair is built FIRST, here, and only then are the old ones dropped: a
  * deployment that boots before its operator has run `create-indexes` (PM2, where
@@ -87,7 +88,7 @@ function hasCode(error: unknown, code: number): boolean {
  * version of the schema needed and must not change meaning when the model does.
  * Only these two indexes are named: building the model's whole index set here
  * could fail the boot on an operator's own TTL (a changed retention is an options
- * conflict until `create-indexes` resolves it).
+ * conflict until `create-indexes` rebuilds that index; see `ttlIndexReconcile.ts`).
  *
  * Idempotent: every step tolerates having already happened, and a collection
  * that does not exist yet is simply created with the right indexes.

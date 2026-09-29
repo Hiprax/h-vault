@@ -16,6 +16,7 @@ import { config } from '../src/config/index.js';
 // The model list lives in indexedModels.ts so it can be asserted by a drift
 // test — guaranteeing every model with declared indexes is created here.
 import { indexedModels } from './indexedModels.js';
+import { createIndexesWithCurrentRetention } from '../src/utils/ttlIndexReconcile.js';
 
 async function createIndexes(): Promise<void> {
   console.log(`Connecting to MongoDB: ${config.MONGODB_URI.replace(/\/\/[^@]+@/, '//***@')}`);
@@ -30,7 +31,14 @@ async function createIndexes(): Promise<void> {
 
   for (const { name, model } of indexedModels) {
     try {
-      await model.createIndexes();
+      // A TTL index whose retention setting changed since it was built is rebuilt
+      // rather than refused (see ttlIndexReconcile.ts).
+      const rebuilt = await createIndexesWithCurrentRetention(model);
+      for (const index of rebuilt) {
+        console.log(
+          `  [REBUILT] ${name}.${index.name}: retention ${String(index.fromSeconds)}s -> ${String(index.toSeconds)}s`,
+        );
+      }
       console.log(`  [OK] ${name}`);
     } catch (error) {
       console.error(`  [FAIL] ${name}:`, error instanceof Error ? error.message : error);

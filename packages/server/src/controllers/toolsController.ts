@@ -26,6 +26,13 @@ import { acquireJobLock, releaseJobLock } from '../utils/jobLock.js';
 import { supportsTransactions } from '../utils/transactionSupport.js';
 import { estimateItemJsonSize, estimateFolderJsonSize } from '../utils/sizeEstimator.js';
 import { fetchRangeFromHibp } from '../utils/hibp.js';
+import { noteOnDemandRangeInsert } from '../utils/breachRangeCap.js';
+import {
+  BreachMissBudgetError,
+  breachMissBudgetFor,
+  refuseBreachLookup,
+  type BreachMissBudget,
+} from '../utils/breachMissBudget.js';
 import {
   APP_VERSION,
   MAX_ENCRYPTED_DATA_LENGTH,
@@ -272,8 +279,20 @@ export function setHibpCacheEntry(key: string, entry: HibpCacheEntry): void {
 // status is whatever the error middleware maps the rejection to: a real
 // `AxiosError` with no `.response` becomes 502, a non-axios rejection 500.
 
-/** Per-process coalescing of concurrent duplicate L3 fetches (thundering-herd guard). */
-export const rangeInFlight = new Map<string, Promise<string>>();
+/**
+ * What a shared lookup settles with when its CREATOR's fetch budget refused it:
+ * nothing was fetched, and that says nothing about the budget of anyone who
+ * joined, so each of them looks again with its own (see {@link getRange}).
+ */
+const NOT_FETCHED = Symbol('not fetched');
+
+/**
+ * Per-process coalescing of concurrent duplicate lookups (thundering-herd guard).
+ * A lookup settles with the range, rejects only for an UPSTREAM failure with no
+ * cached fallback, and settles with {@link NOT_FETCHED} when its creator's budget
+ * refused it — never with that refusal, which belongs to the creator alone.
+ */
+export const rangeInFlight = new Map<string, Promise<string | typeof NOT_FETCHED>>();
 
 const MS_PER_DAY = 86_400_000;
 
@@ -290,10 +309,45 @@ function isRangeFresh(doc: { source: string; fetchedAt: Date }, now: number): bo
 }
 
 /**
- * Resolve the (padding-stripped) HIBP range for a prefix through the cache
- * layers. Throws ONLY when L3 fails and there is no L2 fallback at all.
+ * Stores a range fetched on demand; returns whether that INSERTED a row.
+ *
+ * A row the seed command wrote is never overwritten, not even one it wrote while
+ * this fetch was in flight: turning it into an on-demand row would put it under
+ * the TTL and the row cap, which seeded rows are exempt from. Such a row fails the
+ * filter, the upsert's insert then meets the unique `prefix` index, and that
+ * duplicate-key refusal means "already stored": the lookup still answers with
+ * what it fetched. The same holds when another worker inserted it first.
+ *
+ * `runValidators` is deliberately OMITTED here (unlike most update sites in this
+ * codebase). Mongoose's `required` check on a String rejects '', and an EMPTY
+ * range is a legitimate value: a prefix whose every row was count-0 padding has no
+ * real breached suffixes. Adding the flag would make those prefixes fail to cache
+ * and re-hit HIBP forever.
  */
-export async function getRange(rawPrefix: string): Promise<string> {
+async function storeFetchedRange(prefix: string, range: string): Promise<boolean> {
+  try {
+    const written = await PwnedRangeCache.updateOne(
+      { prefix, source: { $ne: 'seed' } },
+      { $set: { range, source: 'hibp', fetchedAt: new Date() } },
+      { upsert: true },
+    );
+    return written.upsertedCount > 0;
+  } catch (err: unknown) {
+    if ((err as { code?: unknown } | null)?.code !== 11000) throw err;
+    return false;
+  }
+}
+
+/**
+ * Resolve the (padding-stripped) HIBP range for a prefix through the cache
+ * layers, charging `budget` (the requesting account's, REQUIRED: this is the one
+ * path an account can make the server fetch through) for a fetch it causes.
+ *
+ * Throws when neither the cache nor HIBP can answer: an upstream failure, or a
+ * {@link BreachMissBudgetError} when the account's budget is spent. In both cases
+ * a stale cached range is served instead when there is one.
+ */
+export async function getRange(rawPrefix: string, budget: BreachMissBudget): Promise<string> {
   const prefix = rawPrefix.toUpperCase(); // canonical key (matches HIBP + the DB)
   const now = Date.now();
 
@@ -301,27 +355,41 @@ export async function getRange(rawPrefix: string): Promise<string> {
   if (l1 && l1.expires > now) return l1.data;
 
   const pending = rangeInFlight.get(prefix);
-  if (pending) return pending;
+  if (pending) {
+    const outcome = await pending;
+    if (outcome !== NOT_FETCHED) return outcome;
+    // The lookup joined was refused its creator's budget: look again with ours.
+    // Its creator has already freed the prefix (see the `finally` below), so this
+    // cannot rejoin the refused lookup.
+    return getRange(prefix, budget);
+  }
 
-  const task = (async (): Promise<string> => {
+  let refusal: unknown;
+  const lookup = async (): Promise<string | typeof NOT_FETCHED> => {
     const doc = await PwnedRangeCache.findOne({ prefix }).lean();
     if (doc && isRangeFresh(doc, now)) {
       setHibpCacheEntry(prefix, { data: doc.range, expires: now + HIBP_CACHE_TTL_MS });
       return doc.range;
     }
     try {
+      await budget.charge();
+    } catch (err: unknown) {
+      if (doc) {
+        // Same fallback as an unreachable HIBP (below): real cached data, never a
+        // false "safe", and not written to L1, so a later lookup fetches again.
+        logger.warn('Breach fetch budget spent; serving stale range-cache entry', { prefix });
+        return doc.range;
+      }
+      refusal = err;
+      return NOT_FETCHED;
+    }
+    try {
       const range = await fetchRangeFromHibp(prefix);
-      // `runValidators` is deliberately OMITTED here (unlike most update sites in
-      // this codebase). Mongoose's `required` check on a String rejects '', and an
-      // EMPTY range is a legitimate value: a prefix whose every row was count-0
-      // padding has no real breached suffixes. Adding the flag would make those
-      // prefixes fail to cache and re-hit HIBP forever.
-      await PwnedRangeCache.updateOne(
-        { prefix },
-        { $set: { range, source: 'hibp', fetchedAt: new Date() } },
-        { upsert: true },
-      );
+      const inserted = await storeFetchedRange(prefix, range);
       setHibpCacheEntry(prefix, { data: range, expires: Date.now() + HIBP_CACHE_TTL_MS });
+      // A NEW row is what grows the shared cache (a refresh rewrites one in
+      // place), so only an insert counts toward the sampled cap eviction.
+      if (inserted) await noteOnDemandRangeInsert();
       return range;
     } catch (err) {
       if (doc) {
@@ -336,12 +404,18 @@ export async function getRange(rawPrefix: string): Promise<string> {
       }
       throw err;
     }
-  })();
-
+  };
+  const task = lookup();
   rangeInFlight.set(prefix, task);
   try {
-    return await task;
+    const outcome = await task;
+    if (outcome === NOT_FETCHED) throw refusal;
+    return outcome;
   } finally {
+    // The entry is still this lookup's own. Nothing registers under a prefix
+    // while an entry is there (a newcomer joins it instead), and this `await` was
+    // registered on `task` before any joiner's, so it resumes first: a joiner
+    // that looks again after a refusal finds the prefix already free.
     rangeInFlight.delete(prefix);
   }
 }
@@ -479,8 +553,15 @@ export const checkPasswordBreach = catchAsync(
       throw httpErrors.badRequest('Invalid hash prefix: must be exactly 5 hex characters');
     }
 
-    // Layered lookup: L1 in-memory → L2 pwned_range_cache → L3 HIBP.
-    const data = await getRange(hashPrefix);
+    // Layered lookup: L1 in-memory → L2 pwned_range_cache → L3 HIBP, a fetch
+    // charged to this account's budget.
+    let data: string;
+    try {
+      data = await getRange(hashPrefix, breachMissBudgetFor(getUserId(req)));
+    } catch (err: unknown) {
+      if (err instanceof BreachMissBudgetError) refuseBreachLookup(res, err);
+      throw err;
+    }
 
     res.status(200).json({
       success: true,
@@ -550,15 +631,24 @@ export const checkPasswordBreachBatch = catchAsync(
 
     const data: Record<string, string> = {};
     const errors: string[] = [];
+    // ONE budget for the whole request: once it refuses, it refuses at once.
+    const budget = breachMissBudgetFor(getUserId(req));
+    let refusal: BreachMissBudgetError | undefined;
 
     // Every unique prefix routes through the layered cache (L1 in-memory →
     // L2 pwned_range_cache → L3 HIBP). L1/L2-warm prefixes resolve without any
     // outbound call, so fanning out over ALL prefixes (not just misses) is cheap
     // and preserves the exact response contract.
     await runWithConcurrency(uniquePrefixes, HIBP_FANOUT_CONCURRENCY, async (prefix) => {
+      // The request is refused as a whole, so a prefix not started yet is left.
+      if (refusal) return;
       try {
-        data[prefix] = await getRange(prefix);
+        data[prefix] = await getRange(prefix, budget);
       } catch (err) {
+        if (err instanceof BreachMissBudgetError) {
+          refusal = err;
+          return;
+        }
         // Report the prefix as unchecked — never omit it silently (the client
         // would read a missing prefix as "no breach").
         errors.push(prefix);
@@ -567,6 +657,12 @@ export const checkPasswordBreachBatch = catchAsync(
         });
       }
     });
+
+    // A spent budget refuses the whole batch rather than answer part of it: the
+    // client retries a 429 after `Retry-After`, never a prefix listed in
+    // `errors`. Nothing fetched before the refusal is lost; it is in the shared
+    // cache, so the retry gets it as a free hit.
+    if (refusal) refuseBreachLookup(res, refusal);
 
     res.status(200).json({ success: true, data, errors });
   },

@@ -284,6 +284,54 @@ export const MAX_IMPORT_FILE_SIZE_BYTES = 8_388_608;
 // so a full-vault breach scan never exhausts the limiter mid-scan.
 export const HIBP_BATCH_MAX_PREFIXES = 100;
 
+/**
+ * How many breach ranges fetched ON DEMAND (`source: 'hibp'`) the shared range
+ * cache keeps. Past it the oldest-fetched are evicted, hourly by the maintenance
+ * job and after every 500th range a server process inserts in between. Ranges imported
+ * by the seed command (`source: 'seed'`) are never counted against it and never
+ * evicted by it: seeding the whole corpus is the operator's deliberate choice.
+ *
+ * Arithmetic: a padding-stripped range is ~800-900 `SUFFIX:COUNT` rows of ~40
+ * bytes, about 36 KB (measured), so 20,000 ranges are about 720 MB of range text
+ * before storage compression. That is ~2% of the 1,048,576 possible prefixes,
+ * which is ample for the prefixes one instance's accounts actually hold, while
+ * no account can grow the collection toward the full ~37 GB corpus.
+ */
+export const HIBP_ONDEMAND_MAX_ROWS = 20_000;
+
+/** Full cold-cache breach scans of the largest vault one day's budget fits. */
+const HIBP_FULL_SCANS_PER_DAY = 3;
+
+/**
+ * How many breach ranges one account may make the server fetch from HIBP per
+ * window (`HIBP_MISS_BUDGET_WINDOW_MINUTES`): lookups the shared cache could not
+ * answer. Ranges the cache already holds are free. Past it both breach endpoints
+ * answer 429 with `Retry-After` until the window resets.
+ *
+ * Derived, not chosen: one full breach scan of the largest vault an account may
+ * hold, every item with a distinct password, on a cache that holds none of its
+ * prefixes, needs `MAX_ITEMS_PER_USER` fetches, and it must fit one window or a
+ * legitimate scan is refused part-way (the same invariant `breachBatchLimiter`
+ * is sized by). Written as a number, not as an alias of `MAX_ITEMS_PER_USER`;
+ * the shared and server tests fail the moment the two differ. It is a third of
+ * the prefixes that limiter lets through per window, so it is what bounds one
+ * account's outbound lookups.
+ */
+export const HIBP_MAX_MISSES_PER_USER_PER_WINDOW = 10_000;
+
+/** The window `HIBP_MAX_MISSES_PER_USER_PER_WINDOW` is counted over. */
+export const HIBP_MISS_BUDGET_WINDOW_MINUTES = 15;
+
+/**
+ * How many breach ranges one account may make the server fetch from HIBP per
+ * day: three full cold-cache scans of the largest vault. The window budget above
+ * bounds a burst; without this one an account could keep it spent round the
+ * clock (96 windows, ~960,000 fetches a day). Past it both breach endpoints
+ * answer 429 with a `Retry-After` of up to a day; the client waits out at most one
+ * window of it and otherwise reports those passwords as not checked.
+ */
+export const HIBP_MAX_MISSES_PER_USER_PER_DAY = MAX_ITEMS_PER_USER * HIBP_FULL_SCANS_PER_DAY;
+
 // File Encryption tool (client-side, account-agnostic). The size cap is a
 // client-enforced guardrail (the file is encrypted in the browser and never
 // uploaded, so the server cannot enforce it); this value is the fallback used

@@ -7,10 +7,14 @@ import { VaultItem } from '../src/models/VaultItem.js';
 import { Folder } from '../src/models/Folder.js';
 import { BackupLog } from '../src/models/BackupLog.js';
 import { JobLock } from '../src/models/JobLock.js';
-import { PwnedRangeCache } from '../src/models/PwnedRangeCache.js';
+import {
+  ON_DEMAND_RANGE_RETENTION_WINDOWS,
+  PwnedRangeCache,
+} from '../src/models/PwnedRangeCache.js';
 import { Document } from '../src/models/Document.js';
 import { DocumentUpload } from '../src/models/DocumentUpload.js';
 import { buildObjectKey } from '../src/utils/documentObjects.js';
+import { config } from '../src/config/index.js';
 
 // ---- Helpers for explain()-based index-usage assertions ----
 // A query may be served by an index (IXSCAN) or a full collection scan
@@ -691,12 +695,13 @@ describe('Database indexes', () => {
   });
 
   describe('PwnedRangeCache model indexes', () => {
-    it('should have a unique index on prefix and NO TTL index', async () => {
+    it('should have a unique prefix index, a partial TTL on fetchedAt and the cap index', async () => {
       await PwnedRangeCache.ensureIndexes();
       const indexes = (await PwnedRangeCache.collection.indexes()) as {
         key: Record<string, number>;
         unique?: boolean;
         expireAfterSeconds?: number;
+        partialFilterExpression?: Record<string, unknown>;
         [k: string]: unknown;
       }[];
 
@@ -704,10 +709,25 @@ describe('Database indexes', () => {
       expect(prefixIndex).toBeDefined();
       expect(prefixIndex!.unique).toBe(true);
 
-      // Deliberately no TTL: staleness is application-level so seed entries can
-      // be exempt from the on-demand refresh window. A hard TTL would evict the
-      // stale-fallback entry and force needless re-fetches.
-      expect(indexes.some((idx) => typeof idx.expireAfterSeconds === 'number')).toBe(false);
+      // Exactly one TTL index, and it can only ever reach ON-DEMAND rows: seeded
+      // rows are outside its partial filter. Its retention is a MULTIPLE of the
+      // freshness window, because getRange serves a stale row as the fallback
+      // when HIBP is unreachable.
+      const ttl = indexes.filter((idx) => typeof idx.expireAfterSeconds === 'number');
+      expect(ttl).toHaveLength(1);
+      expect(ttl[0]!.key).toEqual({ fetchedAt: 1 });
+      expect(ttl[0]!.partialFilterExpression).toEqual({ source: 'hibp' });
+      expect(ttl[0]!.expireAfterSeconds).toBe(
+        config.BREACH_CACHE_TTL_DAYS * ON_DEMAND_RANGE_RETENTION_WINDOWS * 86_400,
+      );
+      expect(ON_DEMAND_RANGE_RETENTION_WINDOWS).toBeGreaterThan(1);
+
+      // The row cap counts and walks the on-demand rows through this index.
+      const capIndex = indexes.find(
+        (idx) => JSON.stringify(idx.key) === JSON.stringify({ source: 1, fetchedAt: 1, _id: 1 }),
+      );
+      expect(capIndex).toBeDefined();
+      expect(capIndex!.expireAfterSeconds).toBeUndefined();
     });
   });
 

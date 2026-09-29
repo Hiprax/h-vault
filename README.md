@@ -958,7 +958,10 @@ distributed MongoDB locks, so they never double-run across instances. Startup mi
 the server listens: upgrading to a version with a new one (the one that bounds the audit log builds
 its two new page indexes, then drops the two they replace) can make that first start take as long
 as building an index over your `audit_logs` collection, so a large deployment should allow for it
-or run `create-indexes` first. Express serves the SPA
+or run `create-indexes` first. Run `create-indexes` again after every upgrade and after changing a
+retention setting (`AUDIT_LOG_RETENTION_DAYS`, `BACKUP_RETENTION_DAYS`, `BREACH_CACHE_TTL_DAYS`):
+it builds new indexes (the breach-cache cap reads through one, and its hourly step fails and logs
+until it exists) and rebuilds an expiry index whose retention changed. Express serves the SPA
 itself in this mode (there is no internal Nginx), so front it with
 `docker/nginx/system.pm2.example.conf` (rendered from the ecosystem's golden nginx policy; install
 `docker/nginx/includes/hvault-pm2.conf` at `/etc/nginx/sites-local/hvault-pm2.conf` first) and set
@@ -1073,7 +1076,7 @@ start** rather than run misconfigured.
 | `DOCUMENT_ALLOWED_EXTENSIONS`        | No       | — (all allowed)                    | Comma-separated extension allowlist, e.g. `pdf,md,png`. Advisory and enforced in the browser only: the server receives ciphertext and cannot see a filename                                                                                                                                                                       |
 | `AUDIT_LOG_RETENTION_DAYS`           | No       | `365`                              | 1–3650                                                                                                                                                                                                                                                                                                                            |
 | `LOG_DIRECTORY`                      | No       | `<cwd>/logs`                       | Where the rotating log files go. Relative values resolve against the process's working directory; a blank value is treated as unset. No file transports under `NODE_ENV=test`                                                                                                                                                     |
-| `BREACH_CACHE_TTL_DAYS`              | No       | `30`                               | 1–365. Freshness window for on-demand HIBP breach-range cache entries; seed-imported entries are TTL-exempt                                                                                                                                                                                                                       |
+| `BREACH_CACHE_TTL_DAYS`              | No       | `30`                               | 1–365. Freshness window for on-demand HIBP breach-range cache entries. An on-demand entry is deleted after four windows (until then it is the fallback when HIBP is unreachable), and at most 20,000 are kept, oldest removed first; seed-imported entries are exempt from both. Run `create-indexes` after changing it           |
 | `BREACH_SEED_AUTO`                   | No       | `false`                            | When `true`, the refresh cron may fetch missing/stale ranges from HIBP (tens of GB over a full corpus). Off by default                                                                                                                                                                                                            |
 | `BREACH_SEED_REFRESH_CRON`           | No       | —                                  | Cron expression (UTC) for the breach-range refresh job. Unset disables it. Requires `BREACH_SEED_AUTO=true` to fetch                                                                                                                                                                                                              |
 | `HIBP_CACHE_MAX_BYTES`               | No       | `67108864`                         | ≥ 1048576 (1 MiB). Byte ceiling for the in-memory HIBP range cache, per worker process (a real range is ~36 KB); the binding memory bound, alongside the 10,000-entry cap                                                                                                                                                         |
@@ -1395,6 +1398,18 @@ Every tier on an authenticated route keys on the account, not the address: the a
 from a verified token, so people sharing an office or household connection never spend each
 other's budget, and moving to another address buys nobody a fresh one.
 
+**Breach lookups also spend a fetch budget.** Beyond the two breach tiers above, each breach lookup
+that the server's shared range cache cannot answer, and that it therefore fetches from
+HaveIBeenPwned, is charged to the account: **10,000 per 15 minutes** (a full check of the largest
+vault an account may hold, on an empty cache) and **30,000 per day**. Lookups the cache answers are
+free. Past either budget a lookup is answered from a stale cached range when there is one, and
+otherwise both breach endpoints answer 429 with a `Retry-After` for that budget
+(the `RateLimit-*` headers such a response may also carry describe the request tier, not the
+budget); a refused batch is refused whole, and the ranges it fetched first are kept, so the retry
+gets them free. It is not one of the tiers: it counts
+fetches, not requests, and it applies in development too, because it bounds a shared store and an
+outside service rather than throttling requests.
+
 Exceeding a limit returns **429** with a JSON body. Responses carry the IETF standard headers —
 `RateLimit-Policy`, `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset`, and `Retry-After`
 on a 429.
@@ -1448,7 +1463,7 @@ h-vault/
 │   │   │   ├── routes/          #   Express routers
 │   │   │   ├── services/        #   auditService
 │   │   │   ├── jobs/            #   backup scheduler, token cleanup, trash purge, document GC, release check,
-│   │   │   │                    #   hourly maintenance (audit-log caps)
+│   │   │   │                    #   hourly maintenance (audit-log caps, breach-cache cap)
 │   │   │   └── utils/           #   tokens, email, job locks, folder graph, graceful shutdown
 │   │   ├── sandbox-document/    #   (build output) the viewer document, copied from client/dist-sandbox
 │   │   └── tests/               #   Vitest + Supertest + mongodb-memory-server

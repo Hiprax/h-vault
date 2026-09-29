@@ -78,7 +78,8 @@ const auditLogSchema = new Schema<IAuditLog>(
  * has, which on an unbounded log is exactly the cost F-02 is about. With it the
  * page is an index walk. The indexes these replace (`{userId, timestamp}` and
  * `{userId, action, timestamp}`) are dropped by migration v2, since
- * `create-indexes` only ever builds. The same two serve the per-account trims in
+ * `create-indexes` never removes an index the schema stopped declaring. The same
+ * two serve the per-account trims in
  * `auditService` and the cascade's batched delete.
  */
 auditLogSchema.index({ userId: 1, timestamp: -1, _id: -1 });

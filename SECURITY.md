@@ -537,6 +537,30 @@ packages/server`, or inside the production image (which has no `npm`) with
   `UPDATE_CHECK_ENABLED=false` too, for a server that contacts no third party at all). The cache is **fail-safe**: a miss
   falls through to HIBP, and an upstream failure with no cached fallback surfaces as an
   error, never as a "not breached" result.
+- **The cache is bounded, and each account's lookups behind it are budgeted.** A range fetched on demand
+  is deleted four freshness windows (`BREACH_CACHE_TTL_DAYS`) after it was fetched; until
+  then a stale range remains the fallback when HIBP is unreachable. At most 20,000 on-demand
+  ranges are kept (about 720 MB at the typical ~36 KB per range), the oldest removed first,
+  hourly and after every 500th range a server process inserts, so between evictions the
+  collection can run a few hundred rows per process over the cap. Seeded ranges are never
+  expired or evicted (a lookup never overwrites a seeded range): seeding the whole corpus
+  (about 37 GB) is the operator's decision. Both bounds use indexes that `create-indexes` builds;
+  until it has run on an upgraded deployment, the hourly eviction fails and logs instead.
+  Each fetch the cache could not avoid is charged to the account that caused it: 10,000
+  per 15 minutes (one full check of the largest vault an account may hold) and 30,000 per
+  day. Past either, a request that needs a fetch is refused (429) as a whole unless a stale
+  cached range can answer it, while a request the cache answers entirely still succeeds. What this does not bound, stated plainly:
+  - The worst case of the cap is set by the size of a range, not by the typical one: the
+    per-range fetch bound (1 MiB) allows about 20 GB if the upstream ever sent maximal
+    ranges.
+  - The budget is per account, so the total the server fetches grows with the number of
+    accounts, and registration is open by default.
+  - One account's daily budget exceeds the cap, so an account can push other accounts'
+    ranges out of the cache. That costs them extra fetches, never a wrong answer.
+  - An account past its budget sees a cached prefix answered and an uncached one refused,
+    so it can tell which prefixes are in the cache, that is, which prefixes someone on this
+    instance looked up recently. The cache records no account, and response timing already
+    told cached from fetched.
 - **On-device saved results.** The breach findings and weak-password scores shown on the
   Vault Health page are cached in the browser (IndexedDB) **encrypted with your vault key**,
   so they survive a page refresh or browser close without forcing a re-scan. They stay

@@ -393,7 +393,10 @@ services:
   # which is why the app gates on it completing successfully.
   #
   # It is idempotent (createIndexes on an existing index is a no-op), so it runs on
-  # every `up` and picks up any index a new release added.
+  # every `up` and picks up any index a new release added. An expiry index whose
+  # retention setting (AUDIT_LOG_RETENTION_DAYS, BACKUP_RETENTION_DAYS,
+  # BREACH_CACHE_TTL_DAYS) changed is dropped and rebuilt with the new value.
+  # Nothing else is ever dropped.
   hvault-bootstrap:
     build:
       <<: *hvault-build

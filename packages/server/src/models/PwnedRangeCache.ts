@@ -1,11 +1,13 @@
 import mongoose, { Schema, type Model, type Types } from 'mongoose';
 import { HIBP_MAX_RANGE_RESPONSE_BYTES } from '../constants/index.js';
+import { config } from '../config/index.js';
 
 /**
  * Provenance of a cached range.
  * - `hibp`: fetched on demand from the HIBP range API; subject to the runtime
- *   staleness TTL (`BREACH_CACHE_TTL_DAYS`).
- * - `seed`: imported in bulk by the opt-in seed command; TTL-exempt at runtime
+ *   staleness window (`BREACH_CACHE_TTL_DAYS`), to the TTL index below and to the
+ *   `HIBP_ONDEMAND_MAX_ROWS` cap (`utils/breachRangeCap.ts`).
+ * - `seed`: imported in bulk by the opt-in seed command; exempt from all three
  *   (freshness is owned by the operator re-running the seed, not by per-request
  *   refresh, which would defeat the point of seeding the full corpus).
  */
@@ -34,10 +36,22 @@ export interface IPwnedRangeCache {
  * cache is a shared, global keyed store. It is therefore stored in plaintext:
  * encrypting public data adds no confidentiality and only hurts lookups.
  *
- * Growth is hard-bounded to 16^5 = 1,048,576 documents by the unique `prefix`
- * index (one row per possible prefix). There is deliberately NO TTL index —
- * staleness is decided in application code (`toolsController.getRange`) so that
- * `source: 'seed'` entries can be exempt from the on-demand refresh window.
+ * The unique `prefix` index bounds the collection only at the whole corpus
+ * (16^5 = 1,048,576 rows, ~37 GB), and every account's breach check writes to it,
+ * so the rows fetched ON DEMAND are bounded twice more:
+ *
+ * - by AGE: the partial TTL index below deletes an on-demand row
+ *   {@link ON_DEMAND_RANGE_RETENTION_WINDOWS} freshness windows after it was
+ *   fetched. Freshness itself is still decided in application code
+ *   (`toolsController.getRange`), and a row past its window is not dead: when
+ *   HIBP is unreachable, `getRange` serves it as the fallback. A TTL equal to the
+ *   window would delete every row the moment it became that fallback, which is
+ *   why the retention is a multiple of the window and never the window itself;
+ * - by COUNT: `HIBP_ONDEMAND_MAX_ROWS`, enforced off the lookup path by the hourly
+ *   maintenance job and after every 500th inserted range (`utils/breachRangeCap.ts`),
+ *   which finds the oldest rows through the `{source, fetchedAt, _id}` index.
+ *
+ * Both are partial to `source: 'hibp'`: seeded rows are never expired or evicted.
  */
 const pwnedRangeCacheSchema = new Schema<IPwnedRangeCache>(
   {
@@ -70,6 +84,30 @@ const pwnedRangeCacheSchema = new Schema<IPwnedRangeCache>(
   },
   { collection: 'pwned_range_cache' },
 );
+
+/**
+ * How many freshness windows (`BREACH_CACHE_TTL_DAYS`) an on-demand row outlives
+ * its fetch before the TTL monitor deletes it: three windows of stale fallback
+ * after the first of freshness. Never 1 (see the model docblock).
+ *
+ * The retention is read from the configuration when this module loads, so it is
+ * fixed in the index at `create-indexes` time; `create-indexes` re-creates the
+ * index when the configured value changes.
+ */
+export const ON_DEMAND_RANGE_RETENTION_WINDOWS = 4;
+
+pwnedRangeCacheSchema.index(
+  { fetchedAt: 1 },
+  {
+    expireAfterSeconds: config.BREACH_CACHE_TTL_DAYS * ON_DEMAND_RANGE_RETENTION_WINDOWS * 86_400,
+    partialFilterExpression: { source: 'hibp' },
+  },
+);
+
+// Serves the cap: the count of on-demand rows and the walk from the oldest one.
+// `_id` is the last key so the walk, which reads only `_id` and `fetchedAt`, is
+// answered from the index without loading a single ~36 KB range.
+pwnedRangeCacheSchema.index({ source: 1, fetchedAt: 1, _id: 1 });
 
 export const PwnedRangeCache: Model<IPwnedRangeCache> = mongoose.model<IPwnedRangeCache>(
   'PwnedRangeCache',

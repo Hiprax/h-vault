@@ -26,6 +26,7 @@ import app from '../src/app.js';
 import { HIBP_MAX_RANGE_RESPONSE_BYTES } from '../src/constants/index.js';
 import { fetchRangeFromHibp } from '../src/utils/hibp.js';
 import { PwnedRangeCache } from '../src/models/PwnedRangeCache.js';
+import { config } from '../src/config/index.js';
 import {
   getRange,
   hibpCache,
@@ -35,6 +36,13 @@ import {
 } from '../src/controllers/toolsController.js';
 import { createTestUser, authHeader, getCsrf as getCsrfBase } from './helpers.js';
 import type { TestUser } from './helpers.js';
+import mongoose from 'mongoose';
+import { breachMissBudgetFor, type BreachMissBudget } from '../src/utils/breachMissBudget.js';
+
+/** A fresh account's fetch budget: these tests are about the cache, not the budget. */
+function anyBudget(): BreachMissBudget {
+  return breachMissBudgetFor(new mongoose.Types.ObjectId().toString());
+}
 
 const API = '/api/v1';
 
@@ -272,7 +280,7 @@ describe('PwnedRangeCache.range length bound', () => {
       data: `${'A'.repeat(35)}:0\r\n${'B'.repeat(35)}:0`,
     });
 
-    await expect(getRange('FEDC9')).resolves.toBe('');
+    await expect(getRange('FEDC9', anyBudget())).resolves.toBe('');
     await expect(PwnedRangeCache.findOne({ prefix: 'FEDC9' }).lean()).resolves.toMatchObject({
       range: '',
       source: 'hibp',
@@ -312,7 +320,9 @@ describe('an oversized HIBP response is refused safely', () => {
     interceptToUpstream();
     const bytesBefore = getHibpCacheBytes();
 
-    await expect(getRange('DDDDD')).rejects.toMatchObject({ code: 'ERR_BAD_RESPONSE' });
+    await expect(getRange('DDDDD', anyBudget())).rejects.toMatchObject({
+      code: 'ERR_BAD_RESPONSE',
+    });
 
     // L1: no entry, and the running byte total is not left desynchronised —
     // an entry accounted for but never stored (or the reverse) would silently
@@ -337,12 +347,14 @@ describe('an oversized HIBP response is refused safely', () => {
       prefix: 'CAFE1',
       range: stale,
       source: 'hibp',
-      fetchedAt: new Date(Date.now() - 400 * 86_400_000),
+      // Stale (two freshness windows old) yet well inside the TTL of four, so the
+      // TTL monitor cannot reap the row between this insert and the lookup.
+      fetchedAt: new Date(Date.now() - 2 * config.BREACH_CACHE_TTL_DAYS * 86_400_000),
     });
     upstreamBody = rangeBodyOfExactly(HIBP_MAX_RANGE_RESPONSE_BYTES + 1);
     interceptToUpstream();
 
-    await expect(getRange('CAFE1')).resolves.toBe(stale);
+    await expect(getRange('CAFE1', anyBudget())).resolves.toBe(stale);
     expect(upstreamHits).toBe(1);
     await expect(PwnedRangeCache.findOne({ prefix: 'CAFE1' }).lean()).resolves.toMatchObject({
       range: stale,
@@ -355,10 +367,14 @@ describe('an oversized HIBP response is refused safely', () => {
   it('does not poison a subsequent good fetch for the same prefix', async () => {
     upstreamBody = rangeBodyOfExactly(HIBP_MAX_RANGE_RESPONSE_BYTES + 1);
     interceptToUpstream();
-    await expect(getRange('EDCBA')).rejects.toMatchObject({ code: 'ERR_BAD_RESPONSE' });
+    await expect(getRange('EDCBA', anyBudget())).rejects.toMatchObject({
+      code: 'ERR_BAD_RESPONSE',
+    });
 
     upstreamBody = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA:9\r\nBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB:0';
-    await expect(getRange('EDCBA')).resolves.toBe('AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA:9');
+    await expect(getRange('EDCBA', anyBudget())).resolves.toBe(
+      'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA:9',
+    );
     expect(upstreamHits).toBe(2);
     await expect(PwnedRangeCache.findOne({ prefix: 'EDCBA' }).lean()).resolves.toMatchObject({
       range: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA:9',

@@ -214,8 +214,8 @@ export const listItems = catchAsync(async (req: Request, res: Response): Promise
   //
   // It is accepted rather than bought off with indexes because the cheaper fix is
   // not cheap here: `_id` would have to be appended to every sort-serving compound
-  // index, and `scripts/create-indexes.ts` only ever calls `createIndexes()` — it
-  // never drops — so each superseded prefix would linger until a drop migration
+  // index, and `scripts/create-indexes.ts` never removes an index the schema
+  // stopped declaring, so each superseded prefix would linger until a drop migration
   // retired it. It is also the same cost the document list already pays
   // (`documentController`'s `sendDocumentPage`).
   const [items, total] = await Promise.all([

@@ -137,6 +137,13 @@ import {
   VAULT_SEARCH_KEY_INFO,
 } from '../src/constants/index.js';
 import {
+  HIBP_MAX_MISSES_PER_USER_PER_DAY,
+  HIBP_MAX_MISSES_PER_USER_PER_WINDOW,
+  HIBP_MISS_BUDGET_WINDOW_MINUTES,
+  HIBP_ONDEMAND_MAX_ROWS,
+  MAX_ITEMS_PER_USER as ITEM_CAP,
+} from '../src/constants/index.js';
+import {
   cardDataSchema,
   identityDataSchema,
   isValidIdentityEmail,
@@ -1595,5 +1602,22 @@ describe('Vault item bounds', () => {
     for (const byte of bytes) binary += String.fromCharCode(byte);
     expect(btoa(binary).length).toBe(MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH);
     expect(MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH).toBe(40_000);
+  });
+});
+
+describe('Breach-cache bounds (F-06)', () => {
+  it('keeps at most 20,000 on-demand ranges', () => {
+    expect(HIBP_ONDEMAND_MAX_ROWS).toBe(20_000);
+  });
+
+  it('budgets one full cold scan of the largest vault per 15-minute window', () => {
+    expect(HIBP_MISS_BUDGET_WINDOW_MINUTES).toBe(15);
+    expect(HIBP_MAX_MISSES_PER_USER_PER_WINDOW).toBe(ITEM_CAP);
+    expect(HIBP_MAX_MISSES_PER_USER_PER_WINDOW).toBeLessThan(HIBP_ONDEMAND_MAX_ROWS);
+  });
+
+  it('budgets three full cold scans per day', () => {
+    expect(HIBP_MAX_MISSES_PER_USER_PER_DAY).toBe(3 * ITEM_CAP);
+    expect(HIBP_MAX_MISSES_PER_USER_PER_DAY).toBe(30_000);
   });
 });

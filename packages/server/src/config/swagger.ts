@@ -4,6 +4,9 @@ import {
   DOCUMENT_CIPHERTEXT_CHUNK_BYTES,
   DOCUMENT_PLAINTEXT_CHUNK_BYTES,
   HIBP_BATCH_MAX_PREFIXES,
+  HIBP_MAX_MISSES_PER_USER_PER_DAY,
+  HIBP_MAX_MISSES_PER_USER_PER_WINDOW,
+  HIBP_MISS_BUDGET_WINDOW_MINUTES,
   MAX_DOCUMENTS_PER_ROTATION,
   MAX_ENCRYPTED_DOCUMENT_META_LENGTH,
   MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH,
@@ -353,6 +356,24 @@ const errorResponse = (description: string): Record<string, unknown> =>
 const SECOND_FACTOR_LOCKED = errorResponse(
   '`ACCOUNT_LOCKED`: the second factor is locked after too many wrong codes. The code is not checked and nothing is counted; the lock ends at its deadline or through the unlock link emailed to the owner.',
 );
+
+/**
+ * The 429 of the two breach endpoints: the request tier, or the account's fetch
+ * budget. Both send `Retry-After`; in production the tier's `RateLimit-*`
+ * headers ride on either, describing the tier, never the budget.
+ */
+const BREACH_LOOKUP_REFUSED = {
+  ...errorResponse(
+    `Either the endpoint's request tier is spent, or this account's breach fetch budget is: ${HIBP_MAX_MISSES_PER_USER_PER_WINDOW.toLocaleString('en-US')} lookups per ${String(HIBP_MISS_BUDGET_WINDOW_MINUTES)} minutes and ${HIBP_MAX_MISSES_PER_USER_PER_DAY.toLocaleString('en-US')} per day that the shared range cache could not answer and the server had to fetch from Have I Been Pwned (cache hits are free). A request the budget refuses is refused whole; ranges it fetched first are kept, so the retry gets them free.`,
+  ),
+  headers: {
+    'Retry-After': {
+      description:
+        "Seconds until whatever refused the request has room again: the request tier's window, or the fetch budget's (at most one day).",
+      schema: { type: 'integer', example: 600 },
+    },
+  },
+};
 
 /**
  * The answers of a request that re-checks the caller's own credentials and then
@@ -3510,7 +3531,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Tools'],
         summary: 'Check password breach (HIBP)',
         description:
-          'Checks if a password hash prefix has been found in data breaches using the Have I Been Pwned k-anonymity API.',
+          "Checks if a password hash prefix has been found in data breaches using the Have I Been Pwned k-anonymity API. A prefix the shared range cache cannot answer is fetched from Have I Been Pwned and charged to the account's breach fetch budget; when that budget is spent, a stale cached range is served if there is one, and otherwise the request is refused with 429.",
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: jsonRequestBody('CheckBreachRequest'),
         responses: {
@@ -3536,7 +3557,7 @@ export const swaggerSpec: JsonObject = {
           },
           401: { $ref: '#/components/responses/Unauthorized' },
           400: { $ref: '#/components/responses/ValidationError' },
-          429: { $ref: '#/components/responses/RateLimited' },
+          429: BREACH_LOOKUP_REFUSED,
         },
       },
     },
@@ -3546,7 +3567,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Tools'],
         summary: 'Check password breaches in bulk (HIBP)',
         description:
-          'Checks several password hash prefixes against Have I Been Pwned in one request, preserving k-anonymity (only the first 5 hex chars of each SHA-1 hash are sent; the client deduplicates its passwords first). The server serves warm results from its per-process cache and fans the rest out to HIBP with bounded concurrency. The response maps each resolved prefix to its HIBP range text and reports any prefixes whose lookup failed under `errors`, so the client can mark those passwords as not-checked rather than not-breached.',
+          "Checks several password hash prefixes against Have I Been Pwned in one request, preserving k-anonymity (only the first 5 hex chars of each SHA-1 hash are sent; the client deduplicates its passwords first). The server serves warm results from its per-process cache and fans the rest out to HIBP with bounded concurrency. The response maps each resolved prefix to its HIBP range text and reports any prefixes whose lookup failed under `errors`, so the client can mark those passwords as not-checked rather than not-breached. Every prefix the server has to fetch is charged to the account's breach fetch budget; a request that runs out of it is refused whole with 429 and `Retry-After`.",
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: jsonRequestBody('CheckBreachBatchRequest'),
         responses: {
@@ -3575,7 +3596,7 @@ export const swaggerSpec: JsonObject = {
           },
           401: { $ref: '#/components/responses/Unauthorized' },
           400: { $ref: '#/components/responses/ValidationError' },
-          429: { $ref: '#/components/responses/RateLimited' },
+          429: BREACH_LOOKUP_REFUSED,
         },
       },
     },

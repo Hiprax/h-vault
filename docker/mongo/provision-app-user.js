@@ -18,7 +18,9 @@
 //   * The rate-limit store creates its own TTL index lazily on the `rateLimits`
 //     collection, which the model-driven bootstrap never touches.
 //   * Migrations drop indexes a schema change superseded (v2 drops the two audit
-//     log page indexes that lacked `_id`), because the bootstrap only ever builds;
+//     log page indexes that lacked `_id`), because the bootstrap builds rather than
+//     prunes; and the bootstrap itself drops and rebuilds an expiry index whose
+//     retention setting changed, since `collMod` is not part of `readWrite`.
 //     `dropIndex` is part of `readWrite`, and a refusal would fail the boot.
 //
 // The one command the app sends outside `hvault` is `hello` against `admin`,

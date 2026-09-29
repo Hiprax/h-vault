@@ -5,6 +5,7 @@ import { User } from '../models/User.js';
 import { trimActivityAuditRows, trimStrangerAuditRows } from '../services/auditService.js';
 import { acquireJobLock, releaseJobLock } from '../utils/jobLock.js';
 import { trackJob } from '../utils/jobTracker.js';
+import { capOnDemandRanges } from '../utils/breachRangeCap.js';
 
 const logger = createModuleLogger('jobs/maintenance');
 
@@ -152,6 +153,7 @@ export async function trimEveryAccountsAuditLog(
  */
 const MAINTENANCE_STEPS: readonly MaintenanceStep[] = [
   { name: 'audit-trim', run: () => trimEveryAccountsAuditLog() },
+  { name: 'hibp-range-cap', run: () => capOnDemandRanges() },
 ];
 
 /**
