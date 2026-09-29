@@ -329,7 +329,7 @@ describe('standalone screens are one main landmark with the card title as the h1
   });
 
   it('the reset-password form, reached with a token', async () => {
-    const { container } = renderAt('/reset-password?token=abc', <ResetPasswordPage />);
+    const { container } = renderAt('/reset-password#token=abc', <ResetPasswordPage />);
     await settleMountEffects();
     expectStandaloneScreen(container, 'Reset Password');
   });
@@ -347,7 +347,7 @@ describe('standalone screens are one main landmark with the card title as the h1
         refuse = reject;
       }),
     );
-    const { container } = renderAt('/verify-email?token=abc', <VerifyEmailPage />);
+    const { container } = renderAt('/verify-email#token=abc', <VerifyEmailPage />);
     expectStandaloneScreen(container, 'Verifying Email');
 
     refuse(httpError(400, 'Invalid or expired verification token'));
@@ -357,7 +357,7 @@ describe('standalone screens are one main landmark with the card title as the h1
 
   it('the account-unlock page after the server refuses', async () => {
     mockUnlockAccount.mockRejectedValue(httpError(400, 'Invalid or expired unlock token'));
-    const { container } = renderAt('/unlock-account?token=abc', <UnlockAccountPage />);
+    const { container } = renderAt('/unlock-account#token=abc', <UnlockAccountPage />);
     await screen.findByRole('heading', { level: 1, name: 'Unlock Failed' });
     expectStandaloneScreen(container, 'Unlock Failed');
   });

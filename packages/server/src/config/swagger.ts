@@ -475,7 +475,7 @@ export const swaggerSpec: JsonObject = {
     title: 'H-Vault API',
     version: APP_VERSION,
     description:
-      'Zero-knowledge password manager, secret store, and encrypted note-taking API. All vault data is encrypted client-side with AES-256-GCM before reaching the server — the server never sees plaintext user data.',
+      'Zero-knowledge password manager, secret store, and encrypted note-taking API. All vault data is encrypted client-side with AES-256-GCM before reaching the server — the server never sees plaintext user data. Every response the application sends under /api/v1, errors included, carries Cache-Control: no-store and Pragma: no-cache.',
     license: {
       name: 'MIT',
       url: 'https://opensource.org/licenses/MIT',
@@ -2175,8 +2175,16 @@ export const swaggerSpec: JsonObject = {
         type: 'object',
         properties: {
           status: { type: 'string', enum: ['ok', 'error'] },
-          uptime: { type: 'number', description: 'Seconds' },
-          version: { type: 'string' },
+          uptime: {
+            type: 'number',
+            description:
+              'Never sent. /health answers with the same fields in every mode; uptime is on /metrics.',
+          },
+          version: {
+            type: 'string',
+            description:
+              'Never sent. No unauthenticated response names the running version; signed-in accounts read it from /releases/status.',
+          },
           timestamp: { type: 'string', format: 'date-time' },
           database: { type: 'string', enum: ['connected', 'disconnected'] },
         },
@@ -2631,7 +2639,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Health'],
         summary: 'Health check',
         description:
-          'Returns server health status including database connectivity, uptime, and version.',
+          'Returns server health status and database connectivity, with the same fields in every mode: no version, no uptime and nothing that tells a non-production instance apart (those are on the token-gated /metrics).',
         responses: {
           200: jsonEnvelope('Server is healthy', { $ref: '#/components/schemas/HealthResponse' }),
           429: { $ref: '#/components/responses/RateLimited' },
@@ -2657,7 +2665,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Health'],
         summary: 'Operator metrics',
         description:
-          'Process uptime, memory, database connection state and the object-storage gauge from the boot preflight. Mounted only when METRICS_TOKEN is configured: without it the path does not exist and answers 404. Rate limited: 60 req/IP per minute, counted in memory per process.',
+          'Process uptime, memory, database connection state, the object-storage gauge from the boot preflight, the mode the process runs in (a non-production mode has every rate limiter off; never reported on /health) and whether proxied requests have arrived that the server does not trust (TRUST_PROXY unset or 0 behind a proxy). Mounted only when METRICS_TOKEN is configured: without it the path does not exist and answers 404. Rate limited: 60 req/IP per minute, counted in memory per process.',
         security: [{ metricsToken: [] }],
         responses: {
           200: jsonEnvelope('Metrics', {
@@ -2681,6 +2689,17 @@ export const swaggerSpec: JsonObject = {
                 },
               },
               storage: { type: 'object' },
+              mode: { type: 'string', enum: ['development', 'production', 'test'] },
+              proxy: {
+                type: 'object',
+                properties: {
+                  misconfigSuspected: {
+                    type: 'boolean',
+                    description:
+                      'True once a production server with TRUST_PROXY unset or 0 has received X-Forwarded-For from a loopback or private address (logged once as well).',
+                  },
+                },
+              },
             },
           }),
           403: { $ref: '#/components/responses/Forbidden' },

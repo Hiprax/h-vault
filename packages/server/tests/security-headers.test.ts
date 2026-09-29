@@ -616,4 +616,93 @@ describe('Security Headers & Middleware', () => {
       expect(res.headers['access-control-allow-headers']).toBeDefined();
     });
   });
+
+  // ── API cache semantics ──────────────────────────────────────────
+
+  describe('API responses are never stored by a cache', () => {
+    /**
+     * Every `/api/v1` answer is personal (a profile, a vault page, a wrapped key) or
+     * describes this deployment, and none of it may be kept by the browser's disk
+     * cache or by any cache between it and the server. The application says so
+     * itself, rather than relying on the inner Nginx's floor, because the PM2 path
+     * has no inner Nginx. `Pragma` covers HTTP/1.0 caches, which ignore
+     * `Cache-Control`.
+     */
+    function expectNoStore(res: request.Response): void {
+      expect(res.headers['cache-control']).toBe('no-store');
+      expect(res.headers['pragma']).toBe('no-cache');
+    }
+
+    it('marks an authenticated JSON response no-store, and still sends an ETag validator', async () => {
+      const user = await createTestUser();
+
+      const res = await request(app)
+        .get('/api/v1/user/profile')
+        .set('Authorization', authHeader(user.accessToken));
+
+      expect(res.status).toBe(200);
+      expectNoStore(res);
+      // ETags are deliberately left on: an ETag on a no-store answer is simply never
+      // used, while turning them off app-wide would strip the SPA shell and the
+      // sandbox document (both revalidated) of their validators.
+      expect(res.headers['etag']).toMatch(/^W\/"/);
+    });
+
+    it('marks an anonymous JSON response no-store', async () => {
+      const res = await request(app).get('/api/v1/config');
+
+      expect(res.status).toBe(200);
+      expectNoStore(res);
+    });
+
+    it('marks a refusal no-store too, including one answered before any route runs', async () => {
+      // CSRF refuses this before the auth router is reached (through the error
+      // handler), and an unknown path under the API falls through every router to
+      // Express's final handler: neither may be cached.
+      const csrfRefused = await request(app).post('/api/v1/auth/login').send({});
+      const unknown = await request(app).get('/api/v1/no-such-route');
+
+      expect(csrfRefused.status).toBe(403);
+      expectNoStore(csrfRefused);
+      expect(unknown.status).toBe(404);
+      expectNoStore(unknown);
+    });
+
+    it('marks answers produced AHEAD of the routers: a CORS preflight and a malformed-JSON 400', async () => {
+      // These two pin the mount's POSITION, not just its prefix: the preflight is
+      // answered by `cors` and the 400 by the global JSON parser, both of which run
+      // before CSRF and every router. A mount moved below either would lose them.
+      const preflight = await request(app)
+        .options('/api/v1/auth/login')
+        .set('Origin', 'http://localhost:5173')
+        .set('Access-Control-Request-Method', 'POST');
+      const malformed = await request(app)
+        .post('/api/v1/auth/login')
+        .set('Content-Type', 'application/json')
+        .send('{"email":');
+
+      expect(preflight.status).toBe(204);
+      expectNoStore(preflight);
+      expect(malformed.status).toBe(400);
+      expectNoStore(malformed);
+    });
+
+    it('matches the API prefix the way the router does, whatever its case', async () => {
+      const res = await request(app).get('/API/V1/config');
+
+      expect(res.status).toBe(200);
+      expectNoStore(res);
+    });
+
+    it('leaves responses outside /api/v1 alone', async () => {
+      // The API documentation page is served outside the prefix in this tier; the
+      // production-only SPA shell (sent with no lifetime) and sandbox document
+      // (`no-cache`) are checked against the built artifact by the smoke gate.
+      const res = await request(app).get('/api/docs/');
+
+      expect(res.status).toBe(200);
+      expect(res.headers['cache-control']).not.toBe('no-store');
+      expect(res.headers['pragma']).toBeUndefined();
+    });
+  });
 });

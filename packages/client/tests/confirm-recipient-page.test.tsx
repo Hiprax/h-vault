@@ -9,9 +9,10 @@
  * nothing; a refusal shows the server's sentence.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { StrictMode } from 'react';
-import { MemoryRouter, Route, Routes, useLocation } from 'react-router';
+import { renderToString } from 'react-dom/server';
+import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router';
 import { AxiosError, AxiosHeaders } from 'axios';
 
 const { mockConfirm } = vi.hoisted(() => ({ mockConfirm: vi.fn() }));
@@ -25,8 +26,21 @@ import ConfirmRecipientPage from '../src/pages/ConfirmRecipientPage';
 /** Shows where the router is, so a test can see the fragment leave. */
 function LocationProbe() {
   const location = useLocation();
+  const navigate = useNavigate();
   return (
-    <output data-testid="location">{`${location.pathname}${location.search}${location.hash}`}</output>
+    <>
+      <output data-testid="location">{`${location.pathname}${location.search}${location.hash}`}</output>
+      {/* A second confirmation link pasted into the same tab: a hash-only navigation. */}
+      <button
+        type="button"
+        onClick={() => void navigate('/backup/confirm-recipient#token=second.link.token')}
+      >
+        open a second link
+      </button>
+      <button type="button" onClick={() => void navigate('/backup/confirm-recipient#token=')}>
+        open a broken link
+      </button>
+    </>
   );
 }
 
@@ -84,6 +98,7 @@ describe('ConfirmRecipientPage', () => {
     expect(mockConfirm).toHaveBeenCalledWith({ token: 'aaa.bbb.ccc' });
     // The fragment is gone; the page itself stayed.
     expect(screen.getByTestId('location')).toHaveTextContent(/^\/backup\/confirm-recipient$/);
+    expect(screen.getByRole('link', { name: 'Go to H-Vault' })).toHaveAttribute('href', '/login');
   });
 
   it('shows the confirming state while the request is in flight', async () => {
@@ -95,6 +110,8 @@ describe('ConfirmRecipientPage', () => {
       await screen.findByRole('heading', { level: 1, name: 'Confirming Address' }),
     ).toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: 'Confirmation Failed' })).not.toBeInTheDocument();
+    // The way out is offered once there is an outcome, not while it is pending.
+    expect(screen.queryByRole('link', { name: 'Go to H-Vault' })).not.toBeInTheDocument();
   });
 
   it('survives a network failure with no response, and says so', async () => {
@@ -209,4 +226,101 @@ describe('ConfirmRecipientPage', () => {
       screen.getByText('Too many verification attempts, please try again later'),
     ).toBeInTheDocument();
   });
+
+  it('confirms a second link opened in the same tab, and ignores the late answer for the first', async () => {
+    let failFirst: (reason: unknown) => void = () => undefined;
+    mockConfirm
+      .mockImplementationOnce(
+        () =>
+          new Promise((_resolve, reject) => {
+            failFirst = reject;
+          }),
+      )
+      .mockResolvedValueOnce({ data: { success: true, message: 'Second link confirmed.' } });
+
+    renderAt('/backup/confirm-recipient#token=aaa.bbb.ccc');
+    await waitFor(() => expect(mockConfirm).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole('button', { name: 'open a second link' }));
+
+    expect(
+      await screen.findByRole('heading', { level: 1, name: 'Address Confirmed' }),
+    ).toBeInTheDocument();
+    expect(mockConfirm).toHaveBeenLastCalledWith({ token: 'second.link.token' });
+    await act(async () => {
+      failFirst(refusal(400, 'TOKEN_INVALID'));
+      await Promise.resolve();
+    });
+
+    expect(
+      screen.getByRole('heading', { level: 1, name: 'Address Confirmed' }),
+    ).toBeInTheDocument();
+    expect(screen.getByText('Second link confirmed.')).toBeInTheDocument();
+  });
+
+  it("shows the incomplete-link state for a broken second link, and drops the first link's late answer", async () => {
+    let passFirst: (value: unknown) => void = () => undefined;
+    mockConfirm.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          passFirst = resolve;
+        }),
+    );
+
+    renderAt('/backup/confirm-recipient#token=aaa.bbb.ccc');
+    await waitFor(() => expect(mockConfirm).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole('button', { name: 'open a broken link' }));
+
+    expect(await screen.findByText(/This confirmation link is incomplete/)).toBeInTheDocument();
+    await act(async () => {
+      passFirst({ data: { success: true, message: 'Stale confirmation.' } });
+      await Promise.resolve();
+    });
+    expect(screen.queryByText('Stale confirmation.')).not.toBeInTheDocument();
+    expect(mockConfirm).toHaveBeenCalledTimes(1);
+  });
+
+  it('replaces a finished outcome with the incomplete-link sentence when a broken link follows it', async () => {
+    mockConfirm.mockResolvedValueOnce({
+      data: { success: true, message: 'First link confirmed.' },
+    });
+
+    renderAt('/backup/confirm-recipient#token=aaa.bbb.ccc');
+    expect(await screen.findByText('First link confirmed.')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'open a broken link' }));
+
+    expect(
+      await screen.findByRole('heading', { level: 1, name: 'Confirmation Failed' }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/This confirmation link is incomplete/)).toBeInTheDocument();
+    expect(screen.queryByText('First link confirmed.')).not.toBeInTheDocument();
+    expect(mockConfirm).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    [
+      'a link with a token',
+      '/backup/confirm-recipient#token=aaa.bbb.ccc',
+      'Confirming Address',
+      false,
+    ],
+    ['a link without one', '/backup/confirm-recipient', 'Confirmation Failed', true],
+  ] as const)(
+    'paints the right state for %s BEFORE any effect runs, with its heading and no premature way out',
+    (_label, entry, heading, footer) => {
+      // `renderToString` runs no effects, so this is the first commit a browser
+      // paints before the page's effect has done anything.
+      const html = renderToString(
+        <MemoryRouter initialEntries={[entry]}>
+          <Routes>
+            <Route path="/backup/confirm-recipient" element={<ConfirmRecipientPage />} />
+          </Routes>
+        </MemoryRouter>,
+      );
+
+      expect(html).toMatch(new RegExp(`<h1[^>]*>${heading}</h1>`));
+      expect(html.includes('Go to H-Vault')).toBe(footer);
+      expect(html.includes('This confirmation link is incomplete')).toBe(footer);
+      expect(mockConfirm).not.toHaveBeenCalled();
+    },
+  );
 });

@@ -43,9 +43,11 @@
  * the login budget) is invisible to any test that only exercises the endpoint.
  *
  * Middleware mounted at a PATH rather than at the root is reported too, against
- * {@link MIDDLEWARE_MOUNTS}. `app.use('/api/docs', swaggerUi.serve, …)` is the
- * one such mount today and is allowlisted there (it serves the Swagger UI and
- * is covered by `swagger.test.ts`). Without that check, `app.use('/api/v1/x',
+ * {@link MIDDLEWARE_MOUNTS} (by prefix) and {@link IDENTITY_MIDDLEWARE_MOUNTS} (by
+ * function identity AND exact mount). `app.use('/api/docs', swaggerUi.serve, …)`
+ * is allowlisted by prefix (it serves the Swagger UI and is covered by
+ * `swagger.test.ts`); `app.use('/api/v1', apiNoStore)` by identity, since its
+ * prefix is every route's. Without that check, `app.use('/api/v1/x',
  * someHandler)` would be neither a route nor a router and would answer requests
  * while being invisible to every assertion here.
  */
@@ -59,6 +61,7 @@ import {
 import { holdLargeBodySlot, parseLargeJsonBody } from '../../src/middleware/largeBodyAdmission.js';
 import { holdHeavyResponseSlot } from '../../src/middleware/heavyResponseAdmission.js';
 import { sanitizeRequestBody } from '../../src/middleware/sanitizeBody.js';
+import { apiNoStore } from '../../src/middleware/apiCacheControl.js';
 
 export type HttpMethod = 'get' | 'post' | 'put' | 'delete';
 
@@ -142,6 +145,17 @@ export const ROUTER_MOUNTS = [
  * `/api/v1/...` answers requests without ever appearing as a route.
  */
 const MIDDLEWARE_MOUNTS = ['/api/docs'] as const;
+
+/**
+ * Path-scoped middleware admitted by IDENTITY rather than by prefix: the exact
+ * mount AND the very function object. `/api/v1` is every route's prefix, so
+ * admitting the prefix alone would wave through any handler mounted there,
+ * including one that answers requests no row covers. `apiNoStore` only sets two
+ * headers and calls `next()` (`middleware/apiCacheControl.ts`).
+ */
+const IDENTITY_MIDDLEWARE_MOUNTS: readonly { path: string; handle: unknown }[] = [
+  { path: '/api/v1', handle: apiNoStore },
+];
 
 /**
  * The surface. Grouped by router, in mount order, and within a router in the
@@ -1317,7 +1331,14 @@ export function collectAppRoutes(app: Express): CollectedRoutes {
       // business; PATH-SCOPED middleware answers requests under a prefix and
       // must therefore be one this file knows about, or it is invisible to
       // every assertion here.
-      if (layer.slash !== true && mountOf(layer, MIDDLEWARE_MOUNTS) === null) {
+      const admittedByIdentity = IDENTITY_MIDDLEWARE_MOUNTS.some(
+        ({ path, handle }) => layer.handle === handle && mountOf(layer, [path]) === path,
+      );
+      if (
+        layer.slash !== true &&
+        !admittedByIdentity &&
+        mountOf(layer, MIDDLEWARE_MOUNTS) === null
+      ) {
         unknownMounts.push(`middleware "${layer.name}" at an unrecognised path`);
       }
       continue;

@@ -25,6 +25,8 @@ import { APPLICATION_PERMISSIONS_POLICY } from './config/permissionsPolicy.js';
 import { doubleCsrfProtection, csrfTokenHandler } from './middleware/csrf.js';
 import { csrfLimiter, metricsLimiter } from './middleware/rateLimiter.js';
 import { sanitizeRequestBody } from './middleware/sanitizeBody.js';
+import { apiNoStore } from './middleware/apiCacheControl.js';
+import { createProxyTrustDetector } from './utils/deploymentChecks.js';
 import swaggerUi from 'swagger-ui-express';
 import { swaggerSpec } from './config/swagger.js';
 import { warnIfSwaggerEnabledInProduction } from './utils/swaggerWarning.js';
@@ -51,6 +53,17 @@ const app = express();
 if (config.TRUST_PROXY) {
   app.set('trust proxy', config.TRUST_PROXY);
 }
+
+// Says so, once, when a production server receives proxied requests while trusting
+// no proxy (every client would share the proxy's rate-limit bucket and audit
+// address). Changes nothing about the request. `utils/deploymentChecks.ts`.
+app.use(
+  createProxyTrustDetector({
+    nodeEnv: config.NODE_ENV,
+    trustProxy: config.TRUST_PROXY,
+    logger: createModuleLogger('app'),
+  }),
+);
 
 // Generate per-request CSP nonce
 app.use((_req: Request, res: Response, next: NextFunction) => {
@@ -144,6 +157,16 @@ app.use((_req: Request, res: Response, next: NextFunction) => {
   res.setHeader('Permissions-Policy', APPLICATION_PERMISSIONS_POLICY);
   next();
 });
+
+// Nothing the API answers may be kept by a cache (`middleware/apiCacheControl.ts`).
+// Mounted HERE, ahead of CORS, the body parsers, CSRF and every router, so an answer
+// produced by any of them (a preflight, a malformed-JSON 400, a CSRF 403, the error
+// handler) carries it. ETags are deliberately LEFT ON (no `app.set('etag', false)`):
+// that switch is app-wide, so it would also strip the SPA shell (sent with no
+// lifetime, so revalidated) and the sandbox document (`no-cache`) of the validator
+// that makes their revalidation cheap, while an ETag on a `no-store` answer is simply
+// never used.
+app.use('/api/v1', apiNoStore);
 
 app.use(
   cors({

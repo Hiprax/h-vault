@@ -58,7 +58,7 @@ export const A11Y_VIEWS = [
     description: 'the forgot-password form, signed out, before an address has been submitted',
   },
   {
-    // WITH a token in the query string, because that is the branch that has a
+    // WITH a token in the link's fragment, because that is the branch that has a
     // form in it. `ResetPasswordPage` returns an "Invalid Link" card when the
     // parameter is absent — the same shape the two views below already cover — so
     // scanning the tokenless page would trade a three-field form, its data-loss
@@ -67,7 +67,7 @@ export const A11Y_VIEWS = [
     // one and have it refused.
     id: 'reset-password',
     description:
-      'the reset-password form, reached with a token in the query string so the form renders rather than the invalid-link card, every field empty',
+      'the reset-password form, reached with a token in the link fragment so the form renders rather than the invalid-link card, every field empty',
   },
   {
     id: 'verify-email',

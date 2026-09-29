@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect } from 'react';
-import { Link, useSearchParams } from 'react-router';
+import { Link } from 'react-router';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from '@hvault/shared/zod';
@@ -9,6 +9,7 @@ import { ArrowLeft, CheckCircle, AlertCircle, AlertTriangle, Eye, EyeOff } from 
 import { BrandLogo } from '../components/ui/BrandLogo';
 import { resetPasswordApi } from '../services/api/authApi';
 import { cn, getApiErrorMessage } from '../lib/utils';
+import { useLinkToken } from '../lib/linkToken';
 import { accountEmailSchema } from '../lib/accountEmail';
 import { cryptoService } from '../services/crypto/cryptoService';
 import { Button } from '../components/ui/Button';
@@ -67,8 +68,9 @@ const strengthColors: Record<number, string> = {
 /* -------------------------------------------------------------------------- */
 
 export default function ResetPasswordPage() {
-  const [searchParams] = useSearchParams();
-  const token = searchParams.get('token');
+  // From the link's fragment (or, for one release, a query from an older email),
+  // and removed from the address bar once read. `lib/linkToken.ts`.
+  const token = useLinkToken({ acceptQuery: true });
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isSuccess, setIsSuccess] = useState(false);

@@ -624,7 +624,7 @@ describe('VerifyEmailPage', () => {
 
   it('shows loading state initially when token is present', () => {
     mockVerifyEmailApi.mockReturnValue(new Promise(() => {})); // never resolves
-    renderWithRouter(<VerifyEmailPage />, { route: '/verify-email?token=test-token' });
+    renderWithRouter(<VerifyEmailPage />, { route: '/verify-email#token=test-token' });
 
     expect(screen.getByText('Verifying Email')).toBeInTheDocument();
   });
@@ -633,7 +633,7 @@ describe('VerifyEmailPage', () => {
     mockVerifyEmailApi.mockResolvedValue({
       data: { success: true, message: 'Email verified successfully' },
     });
-    renderWithRouter(<VerifyEmailPage />, { route: '/verify-email?token=test-token' });
+    renderWithRouter(<VerifyEmailPage />, { route: '/verify-email#token=test-token' });
 
     await waitFor(() => {
       expect(screen.getByText('Email Verified')).toBeInTheDocument();
@@ -643,7 +643,7 @@ describe('VerifyEmailPage', () => {
 
   it('shows error when verification fails', async () => {
     mockVerifyEmailApi.mockRejectedValue(new Error('Token expired'));
-    renderWithRouter(<VerifyEmailPage />, { route: '/verify-email?token=bad-token' });
+    renderWithRouter(<VerifyEmailPage />, { route: '/verify-email#token=bad-token' });
 
     await waitFor(() => {
       expect(screen.getByText('Verification Failed')).toBeInTheDocument();
@@ -660,7 +660,7 @@ describe('VerifyEmailPage', () => {
 
   it('has link to sign in after verification', async () => {
     mockVerifyEmailApi.mockResolvedValue({ data: { success: true, message: 'OK' } });
-    renderWithRouter(<VerifyEmailPage />, { route: '/verify-email?token=test-token' });
+    renderWithRouter(<VerifyEmailPage />, { route: '/verify-email#token=test-token' });
 
     await waitFor(() => {
       expect(screen.getByText('Email Verified')).toBeInTheDocument();
@@ -680,7 +680,7 @@ describe('UnlockAccountPage', () => {
 
   it('shows loading state initially when token is present', () => {
     mockUnlockAccountApi.mockReturnValue(new Promise(() => {}));
-    renderWithRouter(<UnlockAccountPage />, { route: '/unlock-account?token=test-token' });
+    renderWithRouter(<UnlockAccountPage />, { route: '/unlock-account#token=test-token' });
 
     expect(screen.getByText('Unlocking Account')).toBeInTheDocument();
   });
@@ -689,7 +689,7 @@ describe('UnlockAccountPage', () => {
     mockUnlockAccountApi.mockResolvedValue({
       data: { success: true, message: 'Account unlocked' },
     });
-    renderWithRouter(<UnlockAccountPage />, { route: '/unlock-account?token=test-token' });
+    renderWithRouter(<UnlockAccountPage />, { route: '/unlock-account#token=test-token' });
 
     await waitFor(() => {
       expect(screen.getByText('Account Unlocked')).toBeInTheDocument();
@@ -699,7 +699,7 @@ describe('UnlockAccountPage', () => {
 
   it('shows error when unlock fails', async () => {
     mockUnlockAccountApi.mockRejectedValue(new Error('Token expired'));
-    renderWithRouter(<UnlockAccountPage />, { route: '/unlock-account?token=bad-token' });
+    renderWithRouter(<UnlockAccountPage />, { route: '/unlock-account#token=bad-token' });
 
     await waitFor(() => {
       expect(screen.getByText('Unlock Failed')).toBeInTheDocument();
@@ -756,7 +756,7 @@ describe('ResetPasswordPage', () => {
   });
 
   it('renders the password reset form when token is present', async () => {
-    await renderResetPassword('/reset-password?token=test-token');
+    await renderResetPassword('/reset-password#token=test-token');
 
     expect(screen.getByRole('heading', { name: /reset password/i })).toBeInTheDocument();
     expect(screen.getByLabelText('Email')).toBeInTheDocument();
@@ -766,13 +766,13 @@ describe('ResetPasswordPage', () => {
   });
 
   it('shows data loss warning', async () => {
-    await renderResetPassword('/reset-password?token=test-token');
+    await renderResetPassword('/reset-password#token=test-token');
 
     expect(screen.getByText(/vault items will become unrecoverable/i)).toBeInTheDocument();
   });
 
   it('shows validation error for mismatched passwords', async () => {
-    renderWithRouter(<ResetPasswordPage />, { route: '/reset-password?token=test-token' });
+    renderWithRouter(<ResetPasswordPage />, { route: '/reset-password#token=test-token' });
 
     await act(async () => {
       fireEvent.change(screen.getByLabelText('Email'), { target: { value: 'test@example.com' } });
@@ -791,7 +791,7 @@ describe('ResetPasswordPage', () => {
   });
 
   it('has back to sign in link', async () => {
-    await renderResetPassword('/reset-password?token=test-token');
+    await renderResetPassword('/reset-password#token=test-token');
 
     expect(screen.getByText('Back to sign in').closest('a')).toHaveAttribute('href', '/login');
   });

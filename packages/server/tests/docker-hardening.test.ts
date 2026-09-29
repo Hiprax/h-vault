@@ -591,6 +591,23 @@ describe('Docker deployment', () => {
       expect(env['MONGODB_URI']).toBeDefined();
     });
 
+    it('listens on every interface INSIDE the container, which the server never does by default', () => {
+      // The server's own default is 127.0.0.1 (right for a bare-metal host, where
+      // only local processes may connect). In a container that would refuse the
+      // stack's Nginx, which arrives over the `edge` bridge, so both compose files
+      // pin HOST; nothing is published by it. Deleting either line leaves the stack
+      // (or the dev container) unreachable, which only a full deploy run would show.
+      expect(app?.environment?.['HOST']).toBe('0.0.0.0');
+      const devCompose = readFileSync(path.join(repoRoot, 'docker-compose.dev.yml'), 'utf-8');
+      expect(devCompose).toMatch(/^ {6}HOST: 0\.0\.0\.0$/m);
+      // And the app image says so itself, so a container run outside Compose is
+      // reachable too: the line sits in the `app` stage, right after NODE_ENV.
+      const dockerfile = readFileSync(path.join(repoRoot, 'docker', 'Dockerfile'), 'utf-8');
+      expect(dockerfile).toMatch(
+        /^FROM base AS app\nENV NODE_ENV=production\n(?:#.*\n)*ENV HOST=0\.0\.0\.0$/m,
+      );
+    });
+
     it('pins the proxy hop count to exactly 2 — the number of proxies there are', () => {
       // Not `toBeDefined()`: this is the one number in the stack an attacker benefits
       // from directly. Express trusts the last N entries of X-Forwarded-For, so a

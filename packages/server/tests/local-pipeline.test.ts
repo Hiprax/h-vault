@@ -761,7 +761,7 @@ describe('computeNextTag', () => {
 
 describe('planRelease: the tag may never disagree with the version of truth', () => {
   // `package.json` is what `scripts/inject-version.js` compiles into
-  // APP_VERSION, which `/health` and the OpenAPI document both serve. A release
+  // APP_VERSION, which the OpenAPI document and the signed-in release status both serve. A release
   // tagged v0.9.1 whose artifact reports 0.8.0 is the defect this guards.
 
   it('releases when the version has never been tagged and the series agrees', () => {

@@ -274,6 +274,11 @@ CMD ["/app/node_modules/.bin/tsx", "scripts/create-indexes.ts"]
 # -----------------------------------------------------------------------------
 FROM base AS app
 ENV NODE_ENV=production
+# Listen on every interface INSIDE the container: the server's own default is
+# 127.0.0.1 (right for a bare-metal host), which would refuse every connection
+# from outside the container, the stack's Nginx included. Compose pins the same
+# value; this keeps an image run on its own reachable too.
+ENV HOST=0.0.0.0
 
 # The production runtime executes `node` directly (see CMD and HEALTHCHECK) and
 # never invokes npm. Remove the global npm CLI: the Alpine base ships it with a

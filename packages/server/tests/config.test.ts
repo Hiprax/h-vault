@@ -1,9 +1,10 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { MAX_DOCUMENT_EXT_LENGTH, publicConfigResponseSchema } from '@hvault/shared';
 import { HIBP_MAX_RANGE_RESPONSE_BYTES } from '../src/constants/index.js';
+import { createTestPki, type TestPki } from './smtpTestPki.js';
 
 // The monorepo root, resolved from this file rather than from cwd: the server
 // suite is run both from the repository root and workspace-scoped, and the
@@ -2028,6 +2029,134 @@ describe('Server Config Validation', () => {
     it('a too-short non-empty key is still rejected', async () => {
       await expect(loadConfigWithEnv({ TWO_FACTOR_ENCRYPTION_KEY: 'too-short' })).rejects.toThrow(
         /Invalid environment configuration/,
+      );
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Listener address (F-23)
+  // ---------------------------------------------------------------------------
+
+  describe('HOST', () => {
+    it.each([
+      ['unset', undefined, '127.0.0.1'],
+      ['empty', '', '127.0.0.1'],
+      ['every IPv4 interface', '0.0.0.0', '0.0.0.0'],
+      ['every interface, dual stack', '::', '::'],
+      ['IPv6 loopback', '::1', '::1'],
+      ['a private address', '10.0.0.5', '10.0.0.5'],
+    ] as const)('%s reads as %s', async (_label, raw, expected) => {
+      const { config } = await loadConfigWithEnv({ HOST: raw });
+      expect(config.HOST).toBe(expected);
+    });
+
+    it.each([
+      ['a host name (a shell may export HOST as the machine name)', 'my-laptop'],
+      ['localhost, which resolves to whichever address the resolver lists first', 'localhost'],
+      ['an address with a port', '127.0.0.1:5000'],
+      ['a bracketed IPv6 address', '[::1]'],
+    ] as const)('refuses to boot on %s', async (_label, raw) => {
+      await expect(loadConfigWithEnv({ HOST: raw })).rejects.toThrow(
+        /Invalid environment configuration:[\s\S]*HOST: HOST must be an IP address/,
+      );
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // SMTP transport security (F-08)
+  // ---------------------------------------------------------------------------
+
+  describe('SMTP_REQUIRE_TLS', () => {
+    // One case per load: the config module is evaluated once per test.
+    it.each([
+      ['unset', undefined, undefined],
+      ['empty', '', undefined],
+      ['true', 'true', true],
+      ['false', 'false', false],
+    ] as const)(
+      'is tri-state: %s reads as %s (unset and empty mean "decide from the host")',
+      async (_label, raw, expected) => {
+        const { config } = await loadConfigWithEnv({ SMTP_REQUIRE_TLS: raw });
+        expect(config.SMTP_REQUIRE_TLS).toBe(expected);
+      },
+    );
+
+    it.each(['yes', '1', 'TRUE', 'off'])(
+      'refuses to boot on %s rather than guessing which way the operator meant it',
+      async (value) => {
+        await expect(loadConfigWithEnv({ SMTP_REQUIRE_TLS: value })).rejects.toThrow(
+          /Invalid environment configuration:[\s\S]*SMTP_REQUIRE_TLS/,
+        );
+      },
+    );
+  });
+
+  describe('SMTP_TLS_CA', () => {
+    let pki: TestPki;
+    let other: TestPki;
+
+    beforeAll(async () => {
+      pki = await createTestPki('H-Vault config test CA');
+      other = await createTestPki('H-Vault config test second CA');
+    });
+
+    it('accepts a PEM certificate and hands it on unchanged', async () => {
+      const { config } = await loadConfigWithEnv({ SMTP_TLS_CA: pki.caPem });
+      expect(config.SMTP_TLS_CA).toBe(pki.caPem);
+    });
+
+    it('accepts a bundle of several certificates', async () => {
+      const bundle = `${pki.caPem}\n${other.caPem}`;
+      const { config } = await loadConfigWithEnv({ SMTP_TLS_CA: bundle });
+      expect(config.SMTP_TLS_CA).toBe(bundle);
+    });
+
+    it('reads a literal \\n as a line break, for a PEM kept on one line of the .env file', async () => {
+      const oneLine = pki.caPem.replaceAll('\n', '\\n');
+      expect(oneLine).not.toContain('\n');
+      const { config } = await loadConfigWithEnv({ SMTP_TLS_CA: oneLine });
+      expect(config.SMTP_TLS_CA).toBe(pki.caPem);
+    });
+
+    it('accepts a PEM saved with Windows line endings', async () => {
+      const crlf = pki.caPem.replaceAll('\n', '\r\n');
+      const { config } = await loadConfigWithEnv({ SMTP_TLS_CA: crlf });
+      expect(config.SMTP_TLS_CA).toBe(crlf);
+    });
+
+    it('never repeats a refused value in the boot error (it may be a pasted private key)', async () => {
+      const marker = 'SECRETMARKER7f3cQ';
+      const pasted = `${pki.caPem}-----BEGIN ${'PRIVATE'} KEY-----\n${marker}\n-----END ${'PRIVATE'} KEY-----\n`;
+      const failure = await loadConfigWithEnv({ SMTP_TLS_CA: pasted }).then(
+        () => null,
+        (err: unknown) => err,
+      );
+      expect(failure).toBeInstanceOf(Error);
+      expect((failure as Error).message).toMatch(/SMTP_TLS_CA: SMTP_TLS_CA must be one or more/);
+      expect((failure as Error).message).not.toContain(marker);
+      // Nor any of the certificate's own body.
+      const certificateBody = pki.caPem.split('\n')[1] ?? '';
+      expect(certificateBody.length).toBeGreaterThan(16);
+      expect((failure as Error).message).not.toContain(certificateBody);
+    });
+
+    it.each([
+      ['unset', undefined],
+      ['empty', ''],
+    ] as const)('is absent when %s', async (_label, raw) => {
+      const { config } = await loadConfigWithEnv({ SMTP_TLS_CA: raw });
+      expect(config.SMTP_TLS_CA).toBeUndefined();
+    });
+
+    it.each([
+      ['a file path', '/etc/ssl/private-ca.pem'],
+      ['a truncated certificate', () => pki.caPem.replace(/\n[A-Za-z0-9+/=]{8,}\n/, '\n')],
+      ['a certificate followed by other text', () => `${pki.caPem}\nnot a certificate\n`],
+      ['a certificate followed by its private key', () => `${pki.caPem}${pki.serverKeyPem}`],
+    ] as const)('refuses to boot on %s', async (_label, value) => {
+      const raw = typeof value === 'function' ? value() : value;
+      await expect(loadConfigWithEnv({ SMTP_TLS_CA: raw })).rejects.toThrow(
+        /Invalid environment configuration:[\s\S]*SMTP_TLS_CA: SMTP_TLS_CA must be one or more PEM certificates/,
       );
     });
   });

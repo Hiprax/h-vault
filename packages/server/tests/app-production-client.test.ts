@@ -172,6 +172,7 @@ import {
 // `test:smoke` and `test:deploy`. `clean-room.test.ts` already reaches into the
 // same module from this tier, so the import path is an established one.
 import { SANDBOX_BYPASS_SPELLINGS } from '../../../scripts/ci/lib/sandbox-headers.mjs';
+import { proxyMisconfigSuspected } from '../src/utils/deploymentChecks.js';
 
 // Readable aliases for the fixtures. They live in the hoisted box because the
 // mock factory needs them and runs during `import app` — i.e. before any
@@ -467,5 +468,21 @@ describe('a production build missing an artifact fails loudly at boot', () => {
     // The pass-through, so the helper cannot become an unconditional throw and
     // still satisfy the two cases above.
     expect(requireBuildArtifact(() => '<!doctype html>', 'unused')).toBe('<!doctype html>');
+  });
+});
+
+describe('the production app reports a proxy it does not trust', () => {
+  it('raises the /metrics gauge once a request arrives through a local proxy with TRUST_PROXY unset', async () => {
+    // Pins the MOUNT in `app.ts` (right after `trust proxy`), which the detector's
+    // own suite cannot see: it builds its own app. The harness runs the real app
+    // in production mode with TRUST_PROXY unset, and supertest connects from
+    // 127.0.0.1, exactly where a host Nginx connects from. No other case in this
+    // file sends X-Forwarded-For, so the gauge starts low whatever the order.
+    expect(proxyMisconfigSuspected()).toBe(false);
+
+    const response = await request(app).get('/vault').set('X-Forwarded-For', '203.0.113.7');
+
+    expect(response.status).toBe(200);
+    expect(proxyMisconfigSuspected()).toBe(true);
   });
 });

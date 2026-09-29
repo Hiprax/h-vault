@@ -18,8 +18,8 @@
  * Exit codes: 0 = decided (whether or not a release is due) · 1 = the tag that
  * would be created disagrees with the version of truth, so nothing may be
  * published. That second case is the guard: `package.json` is what
- * `scripts/inject-version.js` compiles into `APP_VERSION`, which `/health` and
- * the OpenAPI document both serve, so a tag that disagrees with it publishes a
+ * `scripts/inject-version.js` compiles into `APP_VERSION`, which the OpenAPI
+ * document and the signed-in release status both serve, so a tag that disagrees with it publishes a
  * release whose own artifact contradicts its name.
  *
  * Human-readable commentary goes to stderr, so `node next-version.mjs` can be

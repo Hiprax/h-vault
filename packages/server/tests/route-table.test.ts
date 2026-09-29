@@ -29,6 +29,9 @@
  */
 import { describe, it, expect } from 'vitest';
 import app from '../src/app.js';
+import express from 'express';
+import type { NextFunction, Request, Response } from 'express';
+import { apiNoStore } from '../src/middleware/apiCacheControl.js';
 import * as rateLimiters from '../src/middleware/rateLimiter.js';
 import {
   BODY_SANITIZER,
@@ -67,6 +70,29 @@ describe('the route table matches the real Express router stack', () => {
       [],
     );
     expect(observed.unsupported, 'router layer(s) this reader cannot classify').toEqual([]);
+  });
+
+  it('admits the /api/v1 no-store middleware by identity only, so any other handler there is still reported', () => {
+    // The real app mounts `apiNoStore` at `/api/v1`, and the reader admits exactly
+    // that function at exactly that mount. The two near misses below must still be
+    // reported: an anonymous handler at the same prefix (which could answer
+    // requests no row covers), and the same function at a different path.
+    const admitted = express();
+    admitted.use('/api/v1', apiNoStore);
+    const anonymous = express();
+    anonymous.use('/api/v1', (_req: Request, _res: Response, next: NextFunction) => {
+      next();
+    });
+    const elsewhere = express();
+    elsewhere.use('/api/v1/x', apiNoStore);
+
+    expect(collectAppRoutes(admitted).unknownMounts).toEqual([]);
+    expect(collectAppRoutes(anonymous).unknownMounts).toEqual([
+      'middleware "<anonymous>" at an unrecognised path',
+    ]);
+    expect(collectAppRoutes(elsewhere).unknownMounts).toEqual([
+      'middleware "apiNoStore" at an unrecognised path',
+    ]);
   });
 
   it('can name every rate limiter the middleware module exports', () => {

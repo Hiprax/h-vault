@@ -1038,7 +1038,7 @@ describe('VerifyEmailPage', () => {
   it('falls back to a default success message when the API returns none', async () => {
     mockVerifyEmailApi.mockResolvedValue({ data: { success: true } });
 
-    renderPage(<VerifyEmailPage />, '/verify-email?token=t1');
+    renderPage(<VerifyEmailPage />, '/verify-email#token=t1');
 
     expect(await screen.findByText('Email Verified')).toBeInTheDocument();
     expect(screen.getByText('Email verified successfully.')).toBeInTheDocument();
@@ -1051,7 +1051,7 @@ describe('VerifyEmailPage', () => {
       response: { data: { message: 'Verification token has expired' } },
     });
 
-    renderPage(<VerifyEmailPage />, '/verify-email?token=expired');
+    renderPage(<VerifyEmailPage />, '/verify-email#token=expired');
 
     expect(await screen.findByText('Verification Failed')).toBeInTheDocument();
     expect(screen.getByText('Verification token has expired')).toBeInTheDocument();
@@ -1063,7 +1063,7 @@ describe('VerifyEmailPage', () => {
     await act(async () => {
       render(
         <StrictMode>
-          <MemoryRouter initialEntries={['/verify-email?token=t1']}>
+          <MemoryRouter initialEntries={['/verify-email#token=t1']}>
             <VerifyEmailPage />
           </MemoryRouter>
         </StrictMode>,
@@ -1079,7 +1079,7 @@ describe('UnlockAccountPage', () => {
   it('falls back to a default success message when the API returns none', async () => {
     mockUnlockAccountApi.mockResolvedValue({ data: { success: true } });
 
-    renderPage(<UnlockAccountPage />, '/unlock-account?token=t1');
+    renderPage(<UnlockAccountPage />, '/unlock-account#token=t1');
 
     expect(await screen.findByText('Account Unlocked')).toBeInTheDocument();
     expect(
@@ -1094,7 +1094,7 @@ describe('UnlockAccountPage', () => {
       response: { data: { message: 'Unlock token is invalid' } },
     });
 
-    renderPage(<UnlockAccountPage />, '/unlock-account?token=bad');
+    renderPage(<UnlockAccountPage />, '/unlock-account#token=bad');
 
     expect(await screen.findByText('Unlock Failed')).toBeInTheDocument();
     expect(screen.getByText('Unlock token is invalid')).toBeInTheDocument();
@@ -1106,7 +1106,7 @@ describe('UnlockAccountPage', () => {
     await act(async () => {
       render(
         <StrictMode>
-          <MemoryRouter initialEntries={['/unlock-account?token=t1']}>
+          <MemoryRouter initialEntries={['/unlock-account#token=t1']}>
             <UnlockAccountPage />
           </MemoryRouter>
         </StrictMode>,

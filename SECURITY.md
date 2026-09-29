@@ -75,6 +75,53 @@ security posture, not a disclaimer.
   exported once per vault key to derive that subkey rather than on every save.
 - **A passive network attacker.** All traffic is expected to run over TLS terminated by
   your reverse proxy, and the vault payloads are already ciphertext underneath it.
+- **Copies of API answers kept by a cache.** Every response the application sends under
+  `/api/v1`, refusals included, carries `Cache-Control: no-store` (with `Pragma: no-cache` for
+  HTTP/1.0 caches), so neither the browser's disk cache nor a compliant proxy between it and
+  the server keeps a profile, a page of ciphertext or a wrapped key after the tab is closed.
+  This holds on the PM2 path too, which has no inner Nginx to add it. (Answers Node or a proxy
+  produce before the request reaches the application, such as a malformed-request 400 or a
+  gateway error, carry no account data.)
+- **Mail intercepted between this server and its SMTP relay.** The connection to the relay
+  must be encrypted (STARTTLS, TLS 1.2 or later, certificate verified against the public roots
+  or the CA in `SMTP_TLS_CA`) before the server authenticates or sends a message, so a relay
+  that offers no TLS, or a network attacker who strips its STARTTLS advertisement, gets
+  neither the SMTP password nor a verification, password-reset or unlock link: the send fails
+  and the server reports the relay at startup (a relay that starts failing later shows up as
+  failed sends in the log). **What this does not cover:** a relay whose `SMTP_HOST` is a
+  loopback IP address (`127.0.0.1`, `::1`) is exempt by default, because that connection cannot
+  leave the machine (`SMTP_REQUIRE_TLS=true` removes the exemption); a NAME is never exempt,
+  `localhost` included, because the mail library resolves a name through DNS first, so whoever
+  answers that query would decide where the connection goes. `SMTP_REQUIRE_TLS=false` switches
+  the requirement off entirely, `NODE_TLS_REJECT_UNAUTHORIZED=0` in the environment turns
+  certificate checks off for the whole process (the server warns at startup when it sees it),
+  and what the relay does with the message after it (onward delivery to the recipient's
+  provider) is outside this server's control.
+- **One-time tokens in logs and history.** The verification, password-reset, unlock and
+  backup-recipient confirmation links carry their token in the URL fragment (`#token=…`), which
+  a browser never sends to a server: it appears in no request line, so neither Nginx tier's
+  access log nor this server's request log receives it, and it is never forwarded in a
+  `Referer`. The page reads it, removes it from the address bar (so the session-history entry
+  and a later bookmark no longer hold it; a browser's own record of visited URLs may still hold
+  the link as first opened, on that device only) and sends it in the body of one POST, where the
+  request logger masks it. **For this release only**, a link mailed before it, with the token in the query
+  string, is still accepted and stripped the same way; a request for such a link has already
+  put that token in the logs, and it stays usable there until it expires (at most an hour for a
+  reset or unlock link) or is used.
+- **Going round the proxy, and deployments that silently run with their brakes off.** Outside
+  Docker the server listens on `127.0.0.1` unless `HOST` says otherwise, so on the PM2 path only
+  processes on the same machine (the local Nginx among them) can reach it, and the documented
+  `TRUST_PROXY=loopback` trusts that proxy by its address rather than by a hop count a direct
+  client could exploit to choose its own address. Two misconfigurations are detected rather than
+  guessed at: a start in development mode (`NODE_ENV` unset or `development`: every rate limit
+  off, weaker cookies) and a production server receiving proxied requests from a local or private
+  address with `TRUST_PROXY` unset or `0` (every client sharing one rate-limit bucket and audit
+  address). Each is logged once and reported on the token-gated `/api/v1/metrics`; the public
+  `/api/v1/health` answers with the same fields in every mode, so it names neither the mode nor
+  the version. **They are reported, not refused:** the server still starts and serves in both
+  cases, and an operator who sets `HOST=0.0.0.0` or a numeric `TRUST_PROXY` outside Docker is
+  trusted to mean it. The detector sees only a proxy on a loopback or private address, and under
+  PM2's cluster mode each worker keeps its own gauge.
 - **Credential stuffing and online guessing.** Rate limiting, account lockout with progressive
   delays, and 2FA — with the lockout and 2FA paths deliberately built so they do not leak
   whether an account exists. **Each factor has its own lockout.** Ten wrong passwords lock the

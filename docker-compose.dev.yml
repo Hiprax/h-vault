@@ -115,6 +115,10 @@ services:
     environment:
       NODE_ENV: development
       PORT: '5000'
+      # The server listens on loopback unless told otherwise; the published port
+      # above arrives on eth0 (Docker DNATs to it), so the container listens on
+      # every interface. The publish itself stays bound to the host's 127.0.0.1.
+      HOST: 0.0.0.0
       # Bind Vite to every container interface so the published port reaches it —
       # Docker DNATs to eth0, not loopback. Outside Docker, vite.config.ts defaults
       # to 127.0.0.1.

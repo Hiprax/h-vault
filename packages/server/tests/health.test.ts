@@ -39,10 +39,24 @@ describe('Health routes', () => {
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
       expect(res.body.data.status).toBe('ok');
-      expect(res.body.data.version).toBeDefined();
-      expect(typeof res.body.data.uptime).toBe('number');
       expect(res.body.data.database).toBe('connected');
       expect(res.body.data.timestamp).toBeDefined();
+    });
+
+    it('answers with the same fields in every mode, so it neither names a version nor betrays a non-production instance', async () => {
+      // This suite runs with NODE_ENV=test. Outside production /health used to add
+      // `uptime` and `version`: an unauthenticated answer that both named the
+      // running version and told a scanner the instance runs with its rate limiters
+      // off. It now has exactly the production shape everywhere; both facts are on
+      // the token-gated /metrics (uptime, mode) and the authenticated release status.
+      const res = await request(app).get('/api/v1/health');
+
+      expect(res.status).toBe(200);
+      expect(Object.keys(res.body.data as Record<string, unknown>).sort()).toEqual([
+        'database',
+        'status',
+        'timestamp',
+      ]);
     });
 
     it('does not probe object storage, and reports nothing about it', async () => {
@@ -99,6 +113,27 @@ describe('Metrics controller', () => {
     expect(res.body.data.database).toBeDefined();
     expect(res.body.data.database.state).toBe('connected');
     expect(res.body.data.database.readyState).toBe(1);
+  });
+
+  it('reports the running mode and the untrusted-proxy gauge, which /health never does', async () => {
+    const { errorMiddleware } = await import('@hiprax/errors');
+    const metricsApp = express();
+    metricsApp.get('/metrics', getMetrics);
+    metricsApp.use(errorMiddleware);
+
+    const metrics = await request(metricsApp).get('/metrics');
+    const health = await request(app).get('/api/v1/health');
+
+    expect(metrics.status).toBe(200);
+    // The suite runs in test mode, and nothing here sent a proxied request.
+    expect(metrics.body.data.mode).toBe('test');
+    expect(metrics.body.data.proxy).toEqual({ misconfigSuspected: false });
+    // The public health answer must not advertise either: an instance whose
+    // limiters are off (a non-production mode) is exactly what a scanner wants.
+    expect(health.status).toBe(200);
+    expect(health.body.data.mode).toBeUndefined();
+    expect(health.body.data.proxy).toBeUndefined();
+    expect(JSON.stringify(health.body)).not.toMatch(/"(test|development|production)"/);
   });
 
   it('reports the object-storage gauge as unmeasured until a preflight has run', async () => {

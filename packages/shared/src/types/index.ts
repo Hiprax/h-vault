@@ -697,8 +697,6 @@ export interface CreatedInvitation {
 // Health check
 export interface HealthCheckResponse {
   status: 'ok' | 'error';
-  uptime: number;
-  version: string;
   timestamp: string;
   database: 'connected' | 'disconnected';
 }

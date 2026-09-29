@@ -78,6 +78,11 @@ x-hvault-app-environment: &hvault-app-environment
   # is the only thing that connects to it. Pinned here so a PORT meant for local
   # development in .env cannot desynchronise the Nginx upstream from the app.
   PORT: '5000'
+  # The address Express listens on inside the container. The server's own default
+  # is loopback (right for a bare-metal/PM2 host, where only local processes, the
+  # local Nginx among them, may connect); in a container that would refuse the stack's Nginx, which arrives
+  # over the `edge` bridge. Nothing is published, so this reaches no host port.
+  HOST: 0.0.0.0
   # Single-node replica set (rs0), initiated by the db healthcheck below. The app
   # needs a replica set for its transactional paths (vault key rotation, account
   # cascade-delete, refresh-token rotation), all of which check the driver's

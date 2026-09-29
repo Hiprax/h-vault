@@ -137,8 +137,8 @@ export function computeNextTag({ tags, headTags, pkgVersion }) {
  * a different question from "should anything be published from this commit?",
  * and conflating the two is the defect this exists to close: the series walks
  * v0.8.0 → v0.8.1 on its own, while `package.json` — which `scripts/inject-
- * version.js` compiles into `APP_VERSION`, which `/health` and the OpenAPI
- * document both serve — stays at 0.8.0. The published release then carries a
+ * version.js` compiles into `APP_VERSION`, which the OpenAPI document and the
+ * signed-in release status both serve — stays at 0.8.0. The published release then carries a
  * tag no artifact inside it agrees with.
  *
  * So the version of truth leads and the tag follows. Three outcomes:
@@ -224,7 +224,7 @@ export function planRelease({ tags, headTags, pkgVersion }) {
       mismatch: true,
       reason:
         `the tag series would mint ${tag}, but package.json says ${version} — ` +
-        `publishing ${tag} would ship an artifact whose /health and OpenAPI document both report ${version}`,
+        `publishing ${tag} would ship an artifact whose OpenAPI document and release status both report ${version}`,
     };
   }
 

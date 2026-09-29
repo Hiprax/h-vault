@@ -1,6 +1,8 @@
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import fs from 'node:fs';
+import { X509Certificate } from 'node:crypto';
+import net from 'node:net';
 import dotenv from 'dotenv';
 import { z } from 'zod';
 import {
@@ -155,6 +157,30 @@ function isProductionStorageEndpoint(endpoint: string): boolean {
   return isLocalOrPrivateStorageHost(hostname);
 }
 
+/** One PEM certificate block. */
+const PEM_CERTIFICATE_BLOCK = /-----BEGIN CERTIFICATE-----[^-]+-----END CERTIFICATE-----/g;
+
+/**
+ * Whether `value` is a bundle of PEM certificates and nothing else: at least one
+ * block, every block a certificate Node can parse, and no other text but
+ * whitespace between them. A private key pasted in by mistake is refused rather
+ * than kept in the process's configuration, and a truncated certificate refuses
+ * boot instead of failing every send later.
+ */
+function isCertificateBundle(value: string): boolean {
+  const blocks = value.match(PEM_CERTIFICATE_BLOCK);
+  if (blocks === null) return false;
+  if (value.replace(PEM_CERTIFICATE_BLOCK, '').trim() !== '') return false;
+  return blocks.every((block) => {
+    try {
+      new X509Certificate(block);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+}
+
 /**
  * The document part route's body deadline when `DOCUMENT_PART_BODY_TIMEOUT_MS` is
  * not set: one sealed segment at the slowest sustained uplink this deployment
@@ -167,6 +193,25 @@ export const DEFAULT_DOCUMENT_PART_BODY_TIMEOUT_MS =
 const envSchema = z
   .object({
     PORT: z.coerce.number().int().min(1).max(65535).default(5000),
+    // The address the HTTP server listens on (`utils/listenAddress.ts`). Loopback by
+    // default, because on the PM2 path the only intended client is the host Nginx on
+    // the same machine: listening on every interface would let anyone who can reach
+    // the machine's address go round the proxy (and, with a numeric TRUST_PROXY,
+    // choose the client address every rate limit and audit row is keyed on). The
+    // containers are reached over a bridge network and set 0.0.0.0 in Compose. An IP
+    // literal only: a NAME binds whichever address the resolver lists first
+    // (`localhost` can be ::1 alone), and some shells export HOST as the machine's
+    // name, which must refuse boot rather than bind somewhere nobody chose.
+    HOST: z.preprocess(
+      (v) => (v === '' ? undefined : v),
+      z
+        .string()
+        .refine((host) => net.isIP(host) !== 0, {
+          message:
+            'HOST must be an IP address to listen on (127.0.0.1, the default; 0.0.0.0 or :: for every interface). If your shell exports HOST as the machine name, unset it or set HOST in the environment the server is started from',
+        })
+        .default('127.0.0.1'),
+    ),
     NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
 
     // How long the server will spend RECEIVING one request, and how long it will
@@ -271,6 +316,35 @@ const envSchema = z
       .string()
       .optional()
       .transform((v) => (v === '' ? undefined : v)),
+    // Whether SMTP must be encrypted (STARTTLS, when SMTP_SECURE's implicit TLS is
+    // not in use). TRI-STATE, read by `utils/email.ts`: `true` requires it for every
+    // relay, a loopback one included; `false` turns the requirement off, for a
+    // plaintext relay the operator controls; unset (or empty) requires it for every
+    // relay except one whose SMTP_HOST is a loopback IP LITERAL (127.0.0.1, ::1); a
+    // name, `localhost` included, is resolved through DNS and so is never exempt. Anything else
+    // refuses boot rather than guessing which of the three was meant.
+    SMTP_REQUIRE_TLS: z
+      .enum(['true', 'false', ''])
+      .optional()
+      .transform((val) => (val === 'true' ? true : val === 'false' ? false : undefined)),
+    // The certificate authority (PEM, one or more certificates) to trust for the
+    // SMTP relay, for an operator whose relay has a certificate from a private CA.
+    // The PEM itself rather than a path, so the value travels in the one root
+    // `.env` like every other setting (a literal `\n` is accepted for a newline).
+    // Set, it REPLACES the public roots for the SMTP connection (Node's `ca`): only
+    // what is named is trusted. Unset: the platform's public roots, as for every
+    // other outbound connection. Verification is never turned off. Not used with
+    // EMAIL_PROVIDER=gmail. Read ONLY by `utils/email.ts`.
+    SMTP_TLS_CA: z.preprocess(
+      (v) => (v === '' ? undefined : typeof v === 'string' ? v.replaceAll('\\n', '\n') : v),
+      z
+        .string()
+        .refine(isCertificateBundle, {
+          message:
+            'SMTP_TLS_CA must be one or more PEM certificates (-----BEGIN CERTIFICATE----- blocks) and nothing else',
+        })
+        .optional(),
+    ),
     SMTP_PASS: z
       .string()
       .optional()

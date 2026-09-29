@@ -197,6 +197,14 @@ export default defineConfig({
       SMTP_USER: '',
       SMTP_PASS: '',
       SMTP_FROM: '',
+      SMTP_REQUIRE_TLS: '',
+      SMTP_TLS_CA: '',
+      // Pinned for the same reason: an exported HOST (some shells export the machine
+      // NAME, which refuses boot) or TRUST_PROXY in a developer's environment would
+      // change what the suites observe. `config.test.ts` and `listen-address.test.ts`
+      // set their own values over these.
+      HOST: '127.0.0.1',
+      TRUST_PROXY: '',
       // Pinned EMPTY for exactly the reason METRICS_TOKEN above is: these four
       // decide the SHAPE of the application, not just a value. They are validated
       // all-or-none, so a developer whose root .env points at a real bucket (which

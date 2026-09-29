@@ -210,6 +210,33 @@ try {
     );
 
     // -----------------------------------------------------------------------
+    // 3b. API answers are never stored by a cache; the shell still revalidates
+    // -----------------------------------------------------------------------
+    // The application marks every `/api/v1` answer `no-store` (with `Pragma` for
+    // HTTP/1.0 caches) itself, because the PM2 path has no inner Nginx to add the
+    // floor. The shell is the negative: that marking must not leak out of the API
+    // prefix onto the documents the browser is meant to revalidate.
+    const apiConfig = await fetch(new URL('/api/v1/config', baseUrl));
+    await apiConfig.arrayBuffer();
+    const apiCache = apiConfig.headers.get('cache-control');
+    const apiPragma = apiConfig.headers.get('pragma');
+    const shellCache = shell.headers.get('cache-control');
+    const shellPragma = shell.headers.get('pragma');
+    const apiCacheOk =
+      apiConfig.status === 200 &&
+      apiCache === 'no-store' &&
+      apiPragma === 'no-cache' &&
+      !/no-store/i.test(shellCache ?? '') &&
+      shellPragma === null;
+    record(
+      'api-no-store',
+      apiCacheOk,
+      apiCacheOk
+        ? '/api/v1/config is Cache-Control: no-store with Pragma: no-cache; the shell is not'
+        : `GET /api/v1/config returned ${String(apiConfig.status)}; Cache-Control=${String(apiCache)}, Pragma=${String(apiPragma)}; shell Cache-Control=${String(shellCache)}, Pragma=${String(shellPragma)}`,
+    );
+
+    // -----------------------------------------------------------------------
     // 4. The document sandbox, which is production-only in every part
     // -----------------------------------------------------------------------
     // The route, its policy and the two headers `sandbox-assets/` needs all

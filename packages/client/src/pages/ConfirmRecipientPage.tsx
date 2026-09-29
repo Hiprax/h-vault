@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
-import { Link, useLocation, useNavigate } from 'react-router';
+import { Link } from 'react-router';
 import { isAxiosError } from 'axios';
 import { CheckCircle, XCircle, Loader2 } from 'lucide-react';
 import { confirmBackupRecipientApi } from '../services/api/backupApi';
 import { getApiErrorMessage } from '../lib/utils';
+import { useLinkToken } from '../lib/linkToken';
 import {
   Card,
   CardContent,
@@ -14,29 +15,12 @@ import {
 } from '../components/ui/Card';
 import { StandalonePage } from '../components/layout/StandalonePage';
 
-/** Where the confirmation link carries its token: the URL fragment, never the query. */
-const TOKEN_FRAGMENT_PREFIX = '#token=';
+/** What a link without a usable token means. */
+const INCOMPLETE_LINK_MESSAGE =
+  'This confirmation link is incomplete. Open the link from the email again.';
 /** What a refused link means, in the recipient's terms. */
 const INVALID_LINK_MESSAGE =
   'This confirmation link is not valid. It may have expired, been used already, or been replaced by a newer one.';
-
-/** The same bound the server's schema applies to the token. */
-const MAX_TOKEN_LENGTH = 2000;
-
-/**
- * The token from a `#token=` fragment, or null. A fragment is never sent to a
- * server, so the token reaches no access log and no `Referer` on its way here.
- */
-function readFragmentToken(hash: string): string | null {
-  if (!hash.startsWith(TOKEN_FRAGMENT_PREFIX)) return null;
-  let token: string;
-  try {
-    token = decodeURIComponent(hash.slice(TOKEN_FRAGMENT_PREFIX.length));
-  } catch {
-    return null;
-  }
-  return token.length > 0 && token.length <= MAX_TOKEN_LENGTH ? token : null;
-}
 
 /**
  * `/backup/confirm-recipient#token=…`: the page a backup recipient lands on from
@@ -46,34 +30,43 @@ function readFragmentToken(hash: string): string | null {
  * in a bookmark), and sends it to the server once.
  */
 export default function ConfirmRecipientPage() {
-  const location = useLocation();
-  const navigate = useNavigate();
-  // Read ONCE, at mount: removing the fragment below changes `location.hash`.
-  const [token] = useState(() => readFragmentToken(location.hash));
+  // From the fragment ONLY (this link never had a query form), read once and then
+  // removed from the address bar. `lib/linkToken.ts`.
+  const token = useLinkToken();
+  // The first paint shows the right state before the effect below has run (a
+  // browser paints before running it); the effect then keeps both current for a
+  // later link too.
   const [status, setStatus] = useState<'loading' | 'success' | 'error'>(
     token === null ? 'error' : 'loading',
   );
-  const [message, setMessage] = useState(
-    token === null
-      ? 'This confirmation link is incomplete. Open the link from the email again.'
-      : '',
-  );
-  const calledRef = useRef(false);
+  // Shown only once there is an outcome; until then it is the no-token sentence.
+  const [message, setMessage] = useState(INCOMPLETE_LINK_MESSAGE);
+  // Every token already handled: each is sent once (StrictMode runs this effect
+  // twice), and a SECOND link opened in the same tab, which changes the token
+  // without a reload, is sent too.
+  const handledRef = useRef(new Set<string | null>());
+  // Which request is current: an answer for a token a later link superseded is
+  // dropped, so it cannot overwrite the newer link's result.
+  const requestRef = useRef<object | null>(null);
 
   useEffect(() => {
-    if (calledRef.current) return;
-    calledRef.current = true;
+    if (handledRef.current.has(token)) return;
+    handledRef.current.add(token);
+    // A fresh object per request: identity, not arithmetic, tells them apart.
+    const request = {};
+    requestRef.current = request;
 
-    if (location.hash !== '') {
-      void navigate(
-        { pathname: location.pathname, search: location.search, hash: '' },
-        { replace: true },
-      );
+    if (!token) {
+      // A link that carries no usable token, the first one or a later one.
+      setStatus('error');
+      setMessage(INCOMPLETE_LINK_MESSAGE);
+      return;
     }
-    if (!token) return;
 
+    setStatus('loading');
     void confirmBackupRecipientApi({ token })
       .then((res) => {
+        if (request !== requestRef.current) return;
         setStatus('success');
         setMessage(
           (res.data.success ? res.data.message : undefined) ??
@@ -81,6 +74,7 @@ export default function ConfirmRecipientPage() {
         );
       })
       .catch((err: unknown) => {
+        if (request !== requestRef.current) return;
         setStatus('error');
         // A refused token is a 400 carrying only a code; the page says what that
         // means for the person holding the link. Anything else (the rate limit, the
@@ -91,7 +85,7 @@ export default function ConfirmRecipientPage() {
             : getApiErrorMessage(err, INVALID_LINK_MESSAGE),
         );
       });
-  }, [location.hash, location.pathname, location.search, navigate, token]);
+  }, [token]);
 
   return (
     <StandalonePage>
@@ -128,7 +122,7 @@ export default function ConfirmRecipientPage() {
           )}
         </CardHeader>
 
-        {status !== 'loading' && (
+        {(status === 'success' || status === 'error') && (
           <CardContent className="pt-0">
             <CardFooter className="justify-center px-0">
               <Link

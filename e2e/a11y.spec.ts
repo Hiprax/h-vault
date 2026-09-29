@@ -35,7 +35,7 @@ const DOCUMENT_UGLY_JSON = 'ugly.json';
  * The token the three link-landing pages are scanned with.
  *
  * Deliberately NOT a valid JWT, and deliberately not empty either. Empty means
- * `?token` is absent, which is a different branch on all three pages (the
+ * the `#token=` fragment is absent, which is a different branch on all three pages (the
  * missing-token copy, and on `/reset-password` a card instead of the form); a
  * malformed one reaches the server, fails `jwt.verify`, and comes back 400, so
  * `/verify-email` and `/unlock-account` settle on the failure card they show a
@@ -216,7 +216,7 @@ test.describe('accessibility: every primary view and modal', () => {
         // The token is what selects the FORM branch; `ResetPasswordPage` renders
         // an invalid-link card without one. Nothing submits it, so it is never
         // presented to the server and its contents are irrelevant.
-        await page.goto(`/reset-password?token=${REJECTED_TOKEN}`);
+        await page.goto(`/reset-password#token=${REJECTED_TOKEN}`);
         await expect(page.getByRole('heading', { name: 'Reset Password' })).toBeVisible({
           timeout: 60_000,
         });
@@ -234,7 +234,7 @@ test.describe('accessibility: every primary view and modal', () => {
         // server answers 400 — so the failure card is the SETTLED state, and the
         // wait below is on it rather than on the spinner that precedes it. A scan
         // taken mid-request would cover a `Loader2` and report it clean.
-        await page.goto(`/verify-email?token=${REJECTED_TOKEN}`);
+        await page.goto(`/verify-email#token=${REJECTED_TOKEN}`);
         await expect(page.getByRole('heading', { name: 'Verification Failed' })).toBeVisible({
           timeout: 60_000,
         });
@@ -242,7 +242,7 @@ test.describe('accessibility: every primary view and modal', () => {
       });
 
       await test.step('unlock account', async () => {
-        await page.goto(`/unlock-account?token=${REJECTED_TOKEN}`);
+        await page.goto(`/unlock-account#token=${REJECTED_TOKEN}`);
         await expect(page.getByRole('heading', { name: 'Unlock Failed' })).toBeVisible({
           timeout: 60_000,
         });

@@ -90,7 +90,7 @@ function emptyOkResponse(): AxiosResponse<ApiResponse<null>> {
 
 function renderWithToken(token = 'valid-token') {
   return render(
-    <MemoryRouter initialEntries={[`/reset-password?token=${token}`]}>
+    <MemoryRouter initialEntries={[`/reset-password#token=${token}`]}>
       <ResetPasswordPage />
     </MemoryRouter>,
   );

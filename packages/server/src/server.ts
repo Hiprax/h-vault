@@ -17,7 +17,10 @@ import { runMigrations } from './utils/migrations.js';
 import { getRunningJobs } from './utils/jobTracker.js';
 import { createGracefulShutdown } from './utils/gracefulShutdown.js';
 import { createTimedServer } from './utils/httpTimeouts.js';
+import { listenOn } from './utils/listenAddress.js';
+import { reportDeploymentMode, reportTlsVerificationOverride } from './utils/deploymentChecks.js';
 import { runStoragePreflight } from './utils/storageHealth.js';
+import { verifyEmailTransportAtBoot } from './utils/email.js';
 
 const logger = createModuleLogger('server');
 
@@ -32,6 +35,13 @@ async function startServer(): Promise<void> {
   try {
     // Connect to database
     await connectDatabase();
+
+    // A start outside production runs with every rate limiter off and weaker
+    // cookies; say so once, loudly (also reported as `mode` on /metrics).
+    reportDeploymentMode(config.NODE_ENV, logger);
+    // And, whatever the mode, a process-wide switch that turns certificate
+    // verification off for every outbound connection, SMTP included.
+    reportTlsVerificationOverride(process.env, logger);
 
     // Run pending migrations before starting anything else
     await runMigrations();
@@ -73,9 +83,9 @@ async function startServer(): Promise<void> {
     // followed by `listen`, with no seam between them to put these in.
     const server = createTimedServer(app);
 
-    server.listen(config.PORT, () => {
+    listenOn(server, { port: config.PORT, host: config.HOST }, () => {
       logger.info(
-        `${config.APP_NAME} server running on port ${String(config.PORT)} in ${config.NODE_ENV} mode`,
+        `${config.APP_NAME} server listening on ${config.HOST}:${String(config.PORT)} in ${config.NODE_ENV} mode`,
       );
 
       // Signal PM2 that the process is ready to accept connections (requires wait_ready: true)
@@ -100,6 +110,12 @@ async function startServer(): Promise<void> {
       //   * NOT handed to `trackJob`. It is not a scheduled job, and putting it in
       //     the running set would make graceful shutdown wait on it.
       void runStoragePreflight();
+
+      // One-shot email check, for the same three reasons: `sendEmail` never throws,
+      // so a relay that cannot satisfy the TLS requirement (or refuses the login)
+      // would otherwise fail every verification, reset and unlock mail one quiet log
+      // line at a time. This says so once, loudly, at startup, and never rejects.
+      void verifyEmailTransportAtBoot();
     });
 
     // Track active connections for graceful shutdown

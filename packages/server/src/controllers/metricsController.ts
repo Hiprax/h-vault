@@ -4,6 +4,7 @@ import { catchAsync, httpErrors } from '@hiprax/errors';
 import mongoose from 'mongoose';
 import { config } from '../config/index.js';
 import { getStorageHealth } from '../utils/storageHealth.js';
+import { proxyMisconfigSuspected } from '../utils/deploymentChecks.js';
 
 // ── Handlers ─────────────────────────────────────────────────────────
 
@@ -53,6 +54,12 @@ export const getMetrics = catchAsync((req: Request, res: Response): void => {
       // endpoint an operator reaches for while it is down. `/api/v1/health`
       // carries no equivalent block on purpose — see `utils/storageHealth.ts`.
       storage: getStorageHealth(),
+      // The mode the process runs in, and whether a proxied request has arrived
+      // that this server does not trust (`utils/deploymentChecks.ts`). Here and
+      // NOT on `/api/v1/health`: an unauthenticated answer naming a non-production
+      // mode would advertise an instance whose rate limiters are off.
+      mode: config.NODE_ENV,
+      proxy: { misconfigSuspected: proxyMisconfigSuspected() },
     },
   });
 });
