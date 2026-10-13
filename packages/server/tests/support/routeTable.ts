@@ -46,8 +46,9 @@
  * {@link MIDDLEWARE_MOUNTS} (by prefix) and {@link IDENTITY_MIDDLEWARE_MOUNTS} (by
  * function identity AND exact mount). `app.use('/api/docs', swaggerUi.serve, …)`
  * is allowlisted by prefix (it serves the Swagger UI and is covered by
- * `swagger.test.ts`); `app.use('/api/v1', apiNoStore)` by identity, since its
- * prefix is every route's. Without that check, `app.use('/api/v1/x',
+ * `swagger.test.ts`); `app.use('/api/v1', apiNoStore)` and
+ * `app.use('/api/v1', refuseCrossSiteRequests)` by identity, since their prefix is
+ * every route's. Without that check, `app.use('/api/v1/x',
  * someHandler)` would be neither a route nor a router and would answer requests
  * while being invisible to every assertion here.
  */
@@ -62,6 +63,7 @@ import { holdLargeBodySlot, parseLargeJsonBody } from '../../src/middleware/larg
 import { holdHeavyResponseSlot } from '../../src/middleware/heavyResponseAdmission.js';
 import { sanitizeRequestBody } from '../../src/middleware/sanitizeBody.js';
 import { apiNoStore } from '../../src/middleware/apiCacheControl.js';
+import { refuseCrossSiteRequests } from '../../src/middleware/fetchMetadata.js';
 
 export type HttpMethod = 'get' | 'post' | 'put' | 'delete';
 
@@ -151,10 +153,14 @@ const MIDDLEWARE_MOUNTS = ['/api/docs'] as const;
  * mount AND the very function object. `/api/v1` is every route's prefix, so
  * admitting the prefix alone would wave through any handler mounted there,
  * including one that answers requests no row covers. `apiNoStore` only sets two
- * headers and calls `next()` (`middleware/apiCacheControl.ts`).
+ * headers and calls `next()` (`middleware/apiCacheControl.ts`);
+ * `refuseCrossSiteRequests` only ever REFUSES (403 to the error handler) or calls
+ * `next()`, so it answers nothing a row would have to cover
+ * (`middleware/fetchMetadata.ts`).
  */
 const IDENTITY_MIDDLEWARE_MOUNTS: readonly { path: string; handle: unknown }[] = [
   { path: '/api/v1', handle: apiNoStore },
+  { path: '/api/v1', handle: refuseCrossSiteRequests },
 ];
 
 /**

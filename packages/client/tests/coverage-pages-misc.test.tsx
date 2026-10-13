@@ -690,6 +690,17 @@ describe('AuditLogPage - row rendering', () => {
           timestamp: '2025-06-01T12:02:00.000Z',
           metadata: { reason: 'failure_budget' },
         },
+        {
+          // A count that is not a number is no count: the response is not
+          // schema-validated here, and a string compares as a number.
+          _id: 'c4',
+          action: 'login_failed',
+          ipAddress: '198.51.100.7',
+          userAgent: 'curl/8',
+          timestamp: '2025-06-01T12:03:00.000Z',
+          metadata: { reason: 'locked' },
+          count: '5' as unknown as number,
+        },
       ]),
     );
 
@@ -697,11 +708,12 @@ describe('AuditLogPage - row rendering', () => {
 
     const table = await screen.findByRole('table');
     const rows = within(table).getAllByRole('row').slice(1);
-    expect(rows).toHaveLength(3);
+    expect(rows).toHaveLength(4);
     expect(within(rows[0]!).getByText('× 37')).toBeInTheDocument();
     expect(within(rows[1]!).queryByText(/^×/)).toBeNull();
     expect(within(rows[2]!).getByText('Sign-in Proof Revoked')).toBeInTheDocument();
     expect(within(rows[2]!).queryByText(/^×/)).toBeNull();
+    expect(within(rows[3]!).queryByText(/^×/)).toBeNull();
   });
 
   it('renders the mapped label for a known action and the raw action for an unknown one', async () => {

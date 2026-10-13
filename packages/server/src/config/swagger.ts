@@ -475,7 +475,7 @@ export const swaggerSpec: JsonObject = {
     title: 'H-Vault API',
     version: APP_VERSION,
     description:
-      'Zero-knowledge password manager, secret store, and encrypted note-taking API. All vault data is encrypted client-side with AES-256-GCM before reaching the server — the server never sees plaintext user data. Every response the application sends under /api/v1, errors included, carries Cache-Control: no-store and Pragma: no-cache.',
+      'Zero-knowledge password manager, secret store, and encrypted note-taking API. All vault data is encrypted client-side with AES-256-GCM before reaching the server — the server never sees plaintext user data. Every response the application sends under /api/v1, errors included, carries Cache-Control: no-store and Pragma: no-cache. A request a browser marks Sec-Fetch-Site: cross-site is refused with 403 before any operation runs, whatever its destination; requests without that header (non-browser clients) are unaffected.',
     license: {
       name: 'MIT',
       url: 'https://opensource.org/licenses/MIT',

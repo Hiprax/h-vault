@@ -160,6 +160,121 @@ describe('InviteCard', () => {
     expect(cryptoService.clearKey).toHaveBeenCalledWith(AUTH_KEY);
   });
 
+  it('asks for both fields before deriving anything, whichever one is missing', async () => {
+    render(<InviteCard email="inviter@example.org" clipboardClearSeconds={30} />);
+    const message = 'Enter the address to invite and your master password.';
+
+    // An address that is only spaces is no address.
+    fillAndSubmit('   ', 'my master password');
+    expect(await screen.findByText(message)).toBeInTheDocument();
+    fillAndSubmit('friend@example.org', '');
+    expect(await screen.findByText(message)).toBeInTheDocument();
+
+    expect(cryptoService.deriveKeys).not.toHaveBeenCalled();
+    expect(createInvitationApi).not.toHaveBeenCalled();
+  });
+
+  it('sends a space-padded address without its spaces, clears an earlier error, and empties the address once minted', async () => {
+    vi.mocked(createInvitationApi).mockResolvedValue({
+      data: { success: true, data: { link: LINK, expiresAt: '2026-10-06T08:00:00.000Z' } },
+    } as never);
+    render(<InviteCard email="inviter@example.org" clipboardClearSeconds={30} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Create invitation' }));
+    expect(
+      await screen.findByText('Enter the address to invite and your master password.'),
+    ).toBeInTheDocument();
+
+    fillAndSubmit('  friend@example.org  ');
+    await screen.findByDisplayValue(LINK);
+    expect(createInvitationApi).toHaveBeenCalledWith({
+      authHash: 'proof-hash',
+      email: 'friend@example.org',
+    });
+    expect(screen.queryByText('Enter the address to invite and your master password.')).toBeNull();
+    expect(screen.getByLabelText('Invitee email')).toHaveValue('');
+  });
+
+  it('trims an address pasted with no-break spaces, which the email field itself keeps', async () => {
+    // `<input type="email">` strips only ASCII whitespace; a no-break space is
+    // what a copy from a web page or a document usually brings along.
+    vi.mocked(createInvitationApi).mockResolvedValue({
+      data: { success: true, data: { link: LINK, expiresAt: '2026-10-06T08:00:00.000Z' } },
+    } as never);
+    render(<InviteCard email="inviter@example.org" clipboardClearSeconds={30} />);
+    fillAndSubmit('\u00a0friend@example.org\u00a0');
+
+    await screen.findByDisplayValue(LINK);
+    expect(createInvitationApi).toHaveBeenCalledWith({
+      authHash: 'proof-hash',
+      email: 'friend@example.org',
+    });
+  });
+
+  it('holds the button while the invitation is being created, and releases it after', async () => {
+    let answer: (value: unknown) => void = () => undefined;
+    vi.mocked(createInvitationApi).mockReturnValue(
+      new Promise((resolve) => {
+        answer = resolve;
+      }) as never,
+    );
+    render(<InviteCard email="inviter@example.org" clipboardClearSeconds={30} />);
+    fillAndSubmit();
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Create invitation/ })).toBeDisabled();
+    });
+    await act(async () => {
+      answer({
+        data: { success: true, data: { link: LINK, expiresAt: '2026-10-06T08:00:00.000Z' } },
+      });
+      await Promise.resolve();
+    });
+    await screen.findByDisplayValue(LINK);
+    expect(screen.getByRole('button', { name: /Create invitation/ })).toBeEnabled();
+  });
+
+  it('withdraws the previous link when a second invitation is refused', async () => {
+    vi.mocked(createInvitationApi)
+      .mockResolvedValueOnce({
+        data: { success: true, data: { link: LINK, expiresAt: '2026-10-06T08:00:00.000Z' } },
+      } as never)
+      .mockRejectedValueOnce(refusal(400, 'That address cannot register here.'));
+    render(<InviteCard email="inviter@example.org" clipboardClearSeconds={30} />);
+
+    fillAndSubmit();
+    await screen.findByDisplayValue(LINK);
+    fillAndSubmit('other@example.org');
+
+    expect(await screen.findByText('That address cannot register here.')).toBeInTheDocument();
+    expect(screen.queryByDisplayValue(LINK)).toBeNull();
+  });
+
+  it('shows no link for an answer that does not report success, and keeps the address', async () => {
+    vi.mocked(createInvitationApi).mockResolvedValue({
+      data: { success: false, message: 'no' },
+    } as never);
+    render(<InviteCard email="inviter@example.org" clipboardClearSeconds={30} />);
+    fillAndSubmit();
+
+    await waitFor(() => {
+      expect(createInvitationApi).toHaveBeenCalledTimes(1);
+    });
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Create invitation/ })).toBeEnabled();
+    });
+    expect(screen.queryByRole('button', { name: 'Copy invitation link' })).toBeNull();
+    expect(screen.getByLabelText('Invitee email')).toHaveValue('friend@example.org');
+  });
+
+  it('falls back to its own sentence when the failure carries none', async () => {
+    vi.mocked(createInvitationApi).mockRejectedValue('connection lost');
+    render(<InviteCard email="inviter@example.org" clipboardClearSeconds={30} />);
+    fillAndSubmit();
+
+    expect(await screen.findByText('The invitation could not be created.')).toBeInTheDocument();
+  });
+
   it('asks for both fields before deriving anything', async () => {
     render(<InviteCard email="inviter@example.org" clipboardClearSeconds={30} />);
     fireEvent.click(screen.getByRole('button', { name: 'Create invitation' }));

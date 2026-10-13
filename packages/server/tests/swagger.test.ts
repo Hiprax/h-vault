@@ -48,6 +48,17 @@ describe('API Documentation', () => {
       expect(res.body.info.version).toBe(APP_VERSION);
     });
 
+    it('states the two rules every /api/v1 answer follows, which no operation repeats', () => {
+      // A client author reads these once, here: every answer (errors included) is
+      // never cached, and a browser request marked cross-site is refused before
+      // any operation runs. Both are pinned against the code elsewhere
+      // (security-headers.test.ts, fetch-metadata-floor.test.ts); this pins that
+      // the contract says so.
+      const description = (swaggerSpec['info'] as { description?: string }).description ?? '';
+      expect(description).toContain('Cache-Control: no-store');
+      expect(description).toContain('Sec-Fetch-Site: cross-site is refused with 403');
+    });
+
     it('should include all API tags', async () => {
       const res = await request(app).get('/api/v1/docs.json');
 

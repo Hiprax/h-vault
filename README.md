@@ -221,8 +221,9 @@ the sidebar and nothing to switch off.
   to 5 MB, and both run inside the isolated frame described below rather than in the page.
 - **A viewer that cannot reach your vault.** Documents are displayed inside an isolated frame
   with an **opaque origin**: it holds no key, no token, no cookie and no storage, it cannot read
-  the page that embeds it, and its own content-security policy leaves it unable to reach any host
-  but this one or to read a single response. Your browser decrypts
+  the page that embeds it, and its own content-security policy leaves it unable to read a single response or to fetch
+  from any host but this one (short of navigating itself away, see `SECURITY.md`), and the API
+  refuses every request it makes. Your browser decrypts
   and verifies the file, and only then hands the frame the bytes — never the document key, the
   vault key, an access token, the document's id or even its name. The title, the toolbar and the
   download button are drawn outside the frame, so nothing a document renders can forge them, and
@@ -1178,7 +1179,10 @@ tools, backup and releases routes all require a Bearer JWT, as do five `/auth` r
 `logout-all`, `invitations` and `verify-unlock`. The rest of `/auth`, plus health, config and the CSRF token, are
 public; metrics is gated by a header token rather than a JWT. The **Auth** column below is
 authoritative. Every `/api/v1` response the application sends, errors included, carries
-`Cache-Control: no-store` and `Pragma: no-cache`, so a compliant cache keeps no copy of it.
+`Cache-Control: no-store` and `Pragma: no-cache`, so a compliant cache keeps no copy of it. A
+request a browser marks `Sec-Fetch-Site: cross-site` is refused with `403` before any route runs,
+whatever it asks for; the application's own requests are same-origin, and a client that sends no
+such header (a probe, a scraper, `curl`) is unaffected.
 
 <details open>
 <summary><b>Authentication</b> — <code>/api/v1/auth</code></summary>
@@ -1667,7 +1671,7 @@ measurement you can check rather than a claim from the day it was written. They 
 | `openapi`          | T1   | `oasdiff` against the committed contract snapshot: a breaking API change fails unless the version's MAJOR component was raised in the same commit                                                                                                                            | _new_                      |
 | `e2e`              | T1   | Playwright against an auto-started stack (dev server, in-memory MongoDB, the pinned storage engine in a container): Chromium over every spec, and a second Firefox project over the two whose answers depend on the engine — clipboard hygiene and auto-lock                 | `e2e` job                  |
 | `a11y`             | T1   | axe-core over thirty-eight primary views and modals in the real authenticated DOM, plus the focus behaviours a scanner cannot infer                                                                                                                                          | _new_                      |
-| `sandbox`          | T1   | A real browser renders every preview mode and the committed hostile corpus under the **built artifact's** own headers, and the engine refuses nothing but remote images                                                                                                      | _new_                      |
+| `sandbox`          | T1   | A real browser renders every preview mode and the committed hostile corpus under the **built artifact's** own headers, and the engine refuses nothing but images named by address                                                                                            | _new_                      |
 | `docker`           | T1   | Builds all 4 images, `nginx -t`, `docker compose config`, 3 × Trivy scans (fails on new fixable CRITICAL/HIGH; see the baseline below)                                                                                                                                       | `docker-build` job         |
 | `bundle`           | T1   | The built client's initial payload and every chunk against a committed size budget, so a deliberately lazy library cannot become a static import                                                                                                                             | _new_                      |
 | `fuzz`             | T2   | Arbitrary bytes, the committed hostile corpus and generated documents through all seven import parsers and the restore path, under a wall-clock deadline                                                                                                                     | _new_                      |

@@ -329,6 +329,47 @@ describe('Security Headers & Middleware', () => {
       expect(xfo).toMatch(/DENY|SAMEORIGIN/i);
     });
 
+    it('pins Cross-Origin-Opener-Policy: same-origin on every API response, refusals included (F-22)', async () => {
+      // helmet's default, and NOT overridden anywhere (`app.ts`, `config/sandboxCsp.ts`).
+      // A document opened by a page on another origin, under `same-origin`, lands in
+      // a browsing context group of its own: the opener gets no handle to post it a
+      // port with. The same header on `/sandbox.html`, the response an opener would
+      // actually load, is pinned by the smoke gate against the built artifact,
+      // because that route exists only in production.
+      const user = await createTestUser();
+      const responses = {
+        anonymous: await request(app).get('/api/v1/config'),
+        authenticated: await request(app)
+          .get('/api/v1/user/profile')
+          .set('Authorization', authHeader(user.accessToken)),
+        unauthenticated: await request(app).get('/api/v1/user/profile'),
+        csrfRefused: await request(app).post('/api/v1/auth/login').send({}),
+        crossSiteRefused: await request(app)
+          .get('/api/v1/config')
+          .set('Sec-Fetch-Site', 'cross-site'),
+        unknown: await request(app).get('/api/v1/no-such-route'),
+        malformed: await request(app)
+          .post('/api/v1/auth/login')
+          .set('Content-Type', 'application/json')
+          .send('{"email":'),
+      };
+
+      expect(
+        Object.fromEntries(Object.entries(responses).map(([name, res]) => [name, res.status])),
+      ).toEqual({
+        anonymous: 200,
+        authenticated: 200,
+        unauthenticated: 401,
+        csrfRefused: 403,
+        crossSiteRefused: 403,
+        unknown: 404,
+        malformed: 400,
+      });
+      for (const [name, res] of Object.entries(responses)) {
+        expect(res.headers['cross-origin-opener-policy'], name).toBe('same-origin');
+      }
+    });
+
     it('should not expose X-Powered-By header', async () => {
       const res = await request(app).get('/api/v1/health');
 

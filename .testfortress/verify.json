@@ -249,14 +249,14 @@
     "test:smoke": {
       "cmd": "npm run test:smoke",
       "tier": 1,
-      "gate": "the BUILT artifact boots in production mode against a real mongod, serves a deep-linked SPA route with a matching CSP nonce, answers /api/v1 with Cache-Control: no-store and Pragma: no-cache while the shell carries neither, serves the isolated render document under its own tailored policy directive by directive while no route-missing URL spelling hands that document out at all, and completes a register \u2192 sign-in \u2192 store \u2192 read-back journey whose ciphertext round-trips byte for byte",
+      "gate": "the BUILT artifact boots in production mode against a real mongod, serves a deep-linked SPA route with a matching CSP nonce, answers /api/v1 with Cache-Control: no-store and Pragma: no-cache while the shell carries neither, refuses an /api/v1 request marked Sec-Fetch-Site: cross-site with 403 while answering same-origin and metadata-less ones, serves the isolated render document under its own tailored policy directive by directive and with Cross-Origin-Opener-Policy: same-origin while no route-missing URL spelling hands that document out at all, and completes a register \u2192 sign-in \u2192 store \u2192 read-back journey whose ciphertext round-trips byte for byte",
       "report": ["smoke.json", "smoke.log"],
       "requires": ["build:server", "build:client"]
     },
     "test:sandbox": {
       "cmd": "npm run test:sandbox",
       "tier": 1,
-      "gate": "a real browser renders the isolated document under the headers the BUILT artifact sends in production mode \u2014 booted beside a real mongod and the pinned object-storage engine, after the deployment's own index bootstrap, with the service worker controlling the page \u2014 across every preview mode (text, code, markdown, a stored web page, a raster image and an SVG from blob: URLs, a data: image inside a document, audio from a blob: URL, and the PDF refusal) plus the committed hostile corpus, each frame served under exactly one Content-Security-Policy equal to the server's own constant, and the engine refusing nothing but the corpus's remote images, on img-src",
+      "gate": "a real browser renders the isolated document under the headers the BUILT artifact sends in production mode \u2014 booted beside a real mongod and the pinned object-storage engine, after the deployment's own index bootstrap, with the service worker controlling the page \u2014 across every preview mode (text, code, markdown, a stored web page, a raster image and an SVG from blob: URLs, a data: image inside a document, audio from a blob: URL, and the PDF refusal) plus the committed hostile corpus, each frame served under exactly one Content-Security-Policy equal to the server's own constant, and the engine refusing nothing but images a document names by address (the corpus's third party, and this server's own address, which the policy gives no image source), on img-src",
       "report": ["sandbox.json", "junit-sandbox.xml"],
       "countsTests": false,
       "requires": ["build:shared", "build:server", "build:client", "docker"]

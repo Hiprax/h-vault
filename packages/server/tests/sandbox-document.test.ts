@@ -86,8 +86,8 @@ describe('the document sandbox policy', () => {
       'default-src': ["'none'"],
       'script-src': ["'self'"],
       'style-src': ["'self'"],
-      'img-src': ["'self'", 'blob:', 'data:'],
-      'font-src': ["'self'", 'data:'],
+      'img-src': ['blob:', 'data:'],
+      'font-src': ['data:'],
       'media-src': ['blob:'],
       'connect-src': ["'none'"],
       'worker-src': ["'none'"],
@@ -109,12 +109,10 @@ describe('the document sandbox policy', () => {
     // thread widens `worker-src`. The bound is stated exactly rather than as a
     // slogan, because the slogan is false and `config/sandboxCsp.ts` says so: the
     // sandbox can READ no response at all, and the loop below proves no directive
-    // names an external host, so nothing it emits leaves this server. What it is
-    // NOT is "no request of any kind" — `script-src`, `style-src`, `img-src` and
-    // `font-src` allow `'self'`, which a sandboxed document resolves from the
-    // response URL. So a vulnerability in any parser it runs still cannot
-    // exfiltrate the document to a third party, read this application's own API,
-    // or burn a user's rate-limit budget into a login lockout.
+    // names an external host. What it is NOT is "no request of any kind" —
+    // `script-src` and `style-src` keep `'self'` (the frame's own bundle needs
+    // it), which a sandboxed document resolves from the response URL, so the API
+    // refuses a cross-site request itself (`middleware/fetchMetadata.ts`).
     expect(SANDBOX_CSP_DIRECTIVES['connect-src']).toEqual(["'none'"]);
     expect(SANDBOX_CSP_DIRECTIVES['worker-src']).toEqual(["'none'"]);
     // `connect-src 'none'` also blocks fetch() and XMLHttpRequest against a
@@ -134,6 +132,25 @@ describe('the document sandbox policy', () => {
     // 'unsafe-inline' and 'unsafe-eval' would each undo the script isolation.
     expect(SANDBOX_CSP_HEADER).not.toContain('unsafe-inline');
     expect(SANDBOX_CSP_HEADER).not.toContain('unsafe-eval');
+  });
+
+  it('names no same-origin source for anything a document can embed by URL', () => {
+    // F-10. `'self'` inside a sandboxed document still names THIS server (CSP
+    // takes it from the response URL, not from the opaque origin), so an
+    // `img-src 'self'` let any rendered document — or a compromised renderer —
+    // put `<img src="/api/v1/…">` on the wire, a request the API would answer.
+    // Nothing the frame shows needs one: images and media come from `blob:` URLs
+    // the frame mints from bytes it was handed, inline pictures from `data:`, and
+    // `sandbox.css` names no `url()` and uses the system fonts. `script-src` and
+    // `style-src` are the two that must keep `'self'` (the frame's own bundle),
+    // which is why the API also refuses `Sec-Fetch-Site: cross-site` on its own.
+    for (const directive of ['img-src', 'font-src', 'media-src'] as const) {
+      expect(SANDBOX_CSP_DIRECTIVES[directive], directive).not.toContain("'self'");
+    }
+    expect(SANDBOX_CSP_DIRECTIVES['img-src']).toEqual(['blob:', 'data:']);
+    expect(SANDBOX_CSP_DIRECTIVES['font-src']).toEqual(['data:']);
+    expect(parseCsp(SANDBOX_CSP_HEADER)['img-src']).toEqual(['blob:', 'data:']);
+    expect(parseCsp(SANDBOX_CSP_HEADER)['font-src']).toEqual(['data:']);
   });
 
   it('sandboxes itself through the policy, not only through the iframe attribute', () => {

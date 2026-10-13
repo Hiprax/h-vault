@@ -110,14 +110,10 @@ export function RegisterPage() {
     },
   });
 
+  // Read once. No unmount guard: a state update on an unmounted component is a
+  // no-op in React 19, and the mode read is the same answer however often it lands.
   useEffect(() => {
-    let active = true;
-    void readRegistrationMode().then((value) => {
-      if (active) setMode(value);
-    });
-    return () => {
-      active = false;
-    };
+    void readRegistrationMode().then(setMode);
   }, []);
 
   // An invitation link carries its token in the FRAGMENT, which the browser never

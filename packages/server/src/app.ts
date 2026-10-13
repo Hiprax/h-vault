@@ -26,6 +26,7 @@ import { doubleCsrfProtection, csrfTokenHandler } from './middleware/csrf.js';
 import { csrfLimiter, metricsLimiter } from './middleware/rateLimiter.js';
 import { sanitizeRequestBody } from './middleware/sanitizeBody.js';
 import { apiNoStore } from './middleware/apiCacheControl.js';
+import { refuseCrossSiteRequests } from './middleware/fetchMetadata.js';
 import { createProxyTrustDetector } from './utils/deploymentChecks.js';
 import swaggerUi from 'swagger-ui-express';
 import { swaggerSpec } from './config/swagger.js';
@@ -167,6 +168,13 @@ app.use((_req: Request, res: Response, next: NextFunction) => {
 // that makes their revalidation cheap, while an ETag on a `no-store` answer is simply
 // never used.
 app.use('/api/v1', apiNoStore);
+
+// No API handler runs for a request a browser marks `Sec-Fetch-Site: cross-site`,
+// which is what every request from the isolated document's opaque origin is
+// (`middleware/fetchMetadata.ts`). After `apiNoStore`, so the refusal is never
+// cached; ahead of CORS, the parsers, CSRF and every router, so a cross-site
+// preflight is refused rather than answered and nothing is parsed for it.
+app.use('/api/v1', refuseCrossSiteRequests);
 
 app.use(
   cors({

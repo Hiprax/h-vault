@@ -22,6 +22,14 @@ test('the dark variant follows the dark class, whatever the system asks for', as
   await expect(indicator).toBeVisible();
   const colourWith = async (scheme: 'light' | 'dark', darkClass: boolean) => {
     await page.emulateMedia({ colorScheme: scheme });
+    // The account's theme is `system`, so the app answers the emulated change
+    // itself, asynchronously, by re-applying the class (`uiStore`'s media-query
+    // listener). Its `data-theme` attribute says when it has: overriding the
+    // class before that lets the app's late answer overwrite the override.
+    await page.waitForFunction(
+      (expected) => document.documentElement.getAttribute('data-theme') === expected,
+      scheme,
+    );
     await page.evaluate((on) => {
       document.documentElement.classList.toggle('dark', on);
     }, darkClass);

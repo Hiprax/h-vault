@@ -32,6 +32,7 @@ import app from '../src/app.js';
 import express from 'express';
 import type { NextFunction, Request, Response } from 'express';
 import { apiNoStore } from '../src/middleware/apiCacheControl.js';
+import { refuseCrossSiteRequests } from '../src/middleware/fetchMetadata.js';
 import * as rateLimiters from '../src/middleware/rateLimiter.js';
 import {
   BODY_SANITIZER,
@@ -92,6 +93,21 @@ describe('the route table matches the real Express router stack', () => {
     ]);
     expect(collectAppRoutes(elsewhere).unknownMounts).toEqual([
       'middleware "apiNoStore" at an unrecognised path',
+    ]);
+  });
+
+  it('admits the /api/v1 cross-site floor by identity only, at exactly that mount', () => {
+    // The floor sits at the same prefix as every route (`middleware/fetchMetadata.ts`),
+    // so it is admitted the same way: that function, that mount, nothing else.
+    const admitted = express();
+    admitted.use('/api/v1', apiNoStore);
+    admitted.use('/api/v1', refuseCrossSiteRequests);
+    const elsewhere = express();
+    elsewhere.use('/api/v1/auth', refuseCrossSiteRequests);
+
+    expect(collectAppRoutes(admitted).unknownMounts).toEqual([]);
+    expect(collectAppRoutes(elsewhere).unknownMounts).toEqual([
+      'middleware "refuseCrossSiteRequests" at an unrecognised path',
     ]);
   });
 

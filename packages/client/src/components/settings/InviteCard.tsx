@@ -39,6 +39,8 @@ export function InviteCard({ email, clipboardClearSeconds }: InviteCardProps) {
 
   const handleMint = async () => {
     setError(null);
+    // `<input type="email">` strips only ASCII whitespace; `trim()` also takes
+    // the no-break spaces a pasted address often carries.
     const address = invitee.trim();
     if (address === '' || password === '') {
       setError('Enter the address to invite and your master password.');

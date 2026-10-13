@@ -237,6 +237,45 @@ try {
     );
 
     // -----------------------------------------------------------------------
+    // 3c. A request a browser marks cross-site is refused before any route runs
+    // -----------------------------------------------------------------------
+    // F-10: every request the isolated document causes leaves an opaque origin,
+    // so the browser marks it `Sec-Fetch-Site: cross-site`, and the API refuses
+    // every such request whatever it asks for (`middleware/fetchMetadata.ts`).
+    // The negatives are the application's own request (`same-origin`) and a
+    // client that sends no Fetch Metadata at all, which is what this gate's own
+    // vault journey below is.
+    const crossSite = await fetch(new URL('/api/v1/config', baseUrl), {
+      headers: {
+        'Sec-Fetch-Site': 'cross-site',
+        'Sec-Fetch-Mode': 'no-cors',
+        'Sec-Fetch-Dest': 'image',
+      },
+    });
+    const crossSiteBody = await crossSite.text();
+    const sameOrigin = await fetch(new URL('/api/v1/config', baseUrl), {
+      headers: {
+        'Sec-Fetch-Site': 'same-origin',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Dest': 'empty',
+      },
+    });
+    await sameOrigin.arrayBuffer();
+    const crossSiteOk =
+      crossSite.status === 403 &&
+      crossSite.headers.get('cache-control') === 'no-store' &&
+      !crossSiteBody.includes('"data"') &&
+      sameOrigin.status === 200 &&
+      apiConfig.status === 200;
+    record(
+      'api-cross-site',
+      crossSiteOk,
+      crossSiteOk
+        ? '/api/v1/config refuses Sec-Fetch-Site: cross-site with 403 (no-store); same-origin and a client sending no Fetch Metadata are answered'
+        : `cross-site GET /api/v1/config returned ${String(crossSite.status)} (Cache-Control=${String(crossSite.headers.get('cache-control'))}); same-origin returned ${String(sameOrigin.status)}; no metadata returned ${String(apiConfig.status)}`,
+    );
+
+    // -----------------------------------------------------------------------
     // 4. The document sandbox, which is production-only in every part
     // -----------------------------------------------------------------------
     // The route, its policy and the two headers `sandbox-assets/` needs all
@@ -263,6 +302,24 @@ try {
       sandboxOk
         ? `/sandbox.html is served by Express with exactly one Content-Security-Policy, matching all ${String(Object.keys(SANDBOX_CSP_EXPECTED).length)} directives`
         : `GET /sandbox.html returned ${String(sandbox.status)}; Cache-Control=${String(sandboxCache)}${cspDiff.length > 0 ? `; ${cspDiff.join('; ')}` : ''}`,
+    );
+
+    // F-22: a page that OPENS `/sandbox.html` (rather than framing it) would hold a
+    // handle to post it a port with. The frame accepts a port from its parent
+    // alone, and this is the layer in front of that: under
+    // `Cross-Origin-Opener-Policy: same-origin` (helmet's default, overridden
+    // nowhere) a cross-origin opener's popup lands in a browsing context group of
+    // its own and the opener is left with no handle at all. Pinned on THIS
+    // response because it is the one an opener would load, and it exists only in
+    // a production build served in production mode.
+    const sandboxOpener = sandbox.headers.get('cross-origin-opener-policy');
+    const sandboxOpenerOk = sandbox.status === 200 && sandboxOpener === 'same-origin';
+    record(
+      'sandbox-opener-policy',
+      sandboxOpenerOk,
+      sandboxOpenerOk
+        ? '/sandbox.html carries Cross-Origin-Opener-Policy: same-origin, so a cross-origin opener keeps no handle to it'
+        : `GET /sandbox.html returned ${String(sandbox.status)} with Cross-Origin-Opener-Policy=${String(sandboxOpener)}, expected same-origin`,
     );
 
     // The spellings that miss the route. Express 5 matches the RAW pathname and

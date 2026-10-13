@@ -36,11 +36,12 @@
  * they buy is worth stating exactly rather than as a slogan: nothing the isolated
  * document runs can READ a response (no `fetch`, `XMLHttpRequest`, WebSocket,
  * `EventSource` or `sendBeacon`), and no directive here names an external host, so
- * nothing it emits reaches a third party. It is NOT "opens no socket of any kind"
- * — `script-src`, `style-src`, `img-src` and `font-src` all allow `'self'`, which
- * a sandboxed document resolves from the response URL, so an `<img src="/api/v1/…">`
- * is a GET this server would see. `packages/server/src/config/sandboxCsp.ts` names
- * that wording as the one not to write. Each of the two is one appended word away
+ * nothing it emits reaches a third party. `img-src` and `font-src` name no
+ * same-origin source either. It is NOT "opens no socket of any kind" — `script-src`
+ * and `style-src` keep `'self'` for the frame's own bundle, which a sandboxed
+ * document resolves from the response URL, so the API refuses every
+ * `Sec-Fetch-Site: cross-site` request itself. `packages/server/src/config/sandboxCsp.ts`
+ * names that wording as the one not to write. Each of the two is one appended word away
  * from being widened, which a `.includes("connect-src 'none'")` check stays green
  * through.
  * An ADDED directive matters as much as a widened one, which is why
@@ -50,8 +51,8 @@ export const SANDBOX_CSP_EXPECTED = Object.freeze({
   'default-src': "'none'",
   'script-src': "'self'",
   'style-src': "'self'",
-  'img-src': "'self' blob: data:",
-  'font-src': "'self' data:",
+  'img-src': 'blob: data:',
+  'font-src': 'data:',
   'media-src': 'blob:',
   'connect-src': "'none'",
   'worker-src': "'none'",

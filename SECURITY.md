@@ -82,6 +82,16 @@ security posture, not a disclaimer.
   This holds on the PM2 path too, which has no inner Nginx to add it. (Answers Node or a proxy
   produce before the request reaches the application, such as a malformed-request 400 or a
   gateway error, carry no account data.)
+- **API requests caused by another site's pages, or by the isolated document viewer.** The API
+  refuses, with 403 and before any handler runs, every request a browser marks
+  `Sec-Fetch-Site: cross-site`, whatever it asks for: an image, a script, a stylesheet, a form,
+  a navigation. Every request the document viewer's sandboxed frame causes is marked that way,
+  since its origin is opaque. The application's own requests are `same-origin`; a client that
+  is not a browser (a health probe, a metrics scraper) sends no such header and is not affected,
+  and a browser too old to send it falls back on the session cookies being `SameSite=Strict`
+  and on the CSRF token, as before. Browsers send this header only over HTTPS (or to the
+  local machine), so this protection, like the opener isolation described under the document
+  viewer, depends on the TLS this guide already requires.
 - **Mail intercepted between this server and its SMTP relay.** The connection to the relay
   must be encrypted (STARTTLS, TLS 1.2 or later, certificate verified against the public roots
   or the CA in `SMTP_TLS_CA`) before the server authenticates or sends a message, so a relay
@@ -853,13 +863,20 @@ isolated document, embedded as
 'none'` is the containment, and it is worth being exact about what that buys**: it blocks
   `fetch`, `XMLHttpRequest`, WebSockets, `EventSource` and `sendBeacon`, so a compromised renderer
   can never READ a response; and no directive in the policy names an external host, so nothing it
-  emits can reach a third party. What it does not do is stop every packet — `script-src`,
-  `style-src`, `img-src` and `font-src` allow `'self'`, and inside a sandboxed document CSP
-  resolves `'self'` from the response's URL rather than from the document's opaque origin, so an
-  `<img src="/api/v1/…">` is a request this server would see. The honest bound is therefore **no
-  host but this one, and no readable answer**, not "no network at all" — the same bound residual
-  risk 1 below describes for self-navigation. All of it is affordable only because there is no PDF
-  renderer; see below.
+  emits can reach a third party. Images and fonts have no same-origin source either: `img-src` is
+  `blob:` and `data:` only (pictures the frame decodes from the bytes it was handed, or that a
+  document carries inline) and `font-src` is `data:`, because inside a sandboxed document CSP
+  resolves `'self'` from the response's URL rather than from the document's opaque origin, so
+  `'self'` would name this server. A document that points an image at any address, this server's
+  included, has that image refused in the browser and is shown a notice saying so. What the
+  policy cannot do is stop every packet: `script-src` and `style-src` keep `'self'` for the frame's
+  own code, and nothing stops a document navigating itself. Every such request leaves an opaque
+  origin, so the browser marks it `Sec-Fetch-Site: cross-site`, and **the API refuses every request
+  marked that way, with 403, before any handler runs** (whatever it asks for: a script, a
+  stylesheet, a navigation). The honest bound is therefore **no host but this one, no readable
+  answer, and no API handler**, not "no network at all": a request still reaches the reverse
+  proxy's access log, and navigating away to another site is residual risk 1 below. All of it is
+  affordable only because there is no PDF renderer; see below.
 - **It is handed bytes and nothing else.** The application decrypts the file, verifies every
   segment's authentication tag and the whole-file digest, and only then posts the plaintext, a
   render mode, an extension hint and the current theme. Never the document key, the vault key, an
@@ -867,7 +884,11 @@ isolated document, embedded as
   embedder's URL — which contains the document id — is not handed over in `document.referrer`.
 - **The channel is one-shot.** The frame announces itself once on the window; the application
   accepts that handshake **at most once per frame** and removes the listener at that moment,
-  then transfers a `MessagePort` and says everything else over it. One frame per document, created
+  then transfers a `MessagePort` and says everything else over it. The frame, in turn, takes a port
+  only from the window that embeds it: a port posted by any other window (a page that opened the
+  viewer's address, a sibling frame) is ignored, and a page on another origin that opens that
+  address keeps no handle to it at all, because it is served with
+  `Cross-Origin-Opener-Policy: same-origin`. One frame per document, created
   fresh and destroyed when you navigate away, so one document can never observe the next. A link
   clicked inside the frame is delivered as a message, checked against the same URL allowlist the
   rest of the app uses (http, https and mailto only), and opened only after you confirm a dialog
@@ -1197,12 +1218,14 @@ sandboxed frame the document viewer uses: an opaque origin, no vault key beside 
 storage, and a policy of `connect-src 'none'`. Running it in the application's own origin would
 put it next to the unlocked vault with a full network available to it.
 
-**The residual risk that frame does leave.** Its policy allows `img-src 'self'`, and any iframe can
-navigate itself, so a compromised release of that decoder could make credential-less same-origin
-GET requests. It could not read the responses, and no cookie would be attached, but a request URL
-would land in this server's own access log. That channel cannot be closed for any iframe, and it
-is much smaller than the alternative, where the same compromise would have the vault key in reach.
-The decoder is a small, zero-dependency package and is pinned like everything else.
+**The residual risk that frame does leave.** Its policy allows scripts and stylesheets from this
+server (its own code), and any iframe can navigate itself, so a compromised release of that
+decoder could still make credential-less GET requests to this server. It could not read the
+responses, no cookie would be attached, and the API refuses each one aimed at `/api/v1` before any
+handler runs, because a request from the frame is marked as coming from another site; but a request
+URL would land in the reverse proxy's access log. That channel cannot be closed for any iframe, and it is much
+smaller than the alternative, where the same compromise would have the vault key in reach. The
+decoder is a small, zero-dependency package and is pinned like everything else.
 
 **What the decoded keys are while they are on screen.** They are unwrapped TOTP secrets, which is
 the plainest secret this application ever holds. They live in one module-level map, never in a

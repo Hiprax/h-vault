@@ -278,7 +278,8 @@ because the obvious way past each of them is the wrong one.
   run names the preview that broke, and three things are asserted about each frame: it
   was served under exactly ONE policy equal to `packages/server/src/config/sandboxCsp.ts`,
   its renderer finished (audio reached its metadata, an image decoded), and the engine
-  raised no policy violation except the hostile corpus's remote images. **Never answer a
+  raised no policy violation except images a document names by address (the hostile corpus's
+  third-party images, and this server's own address, which F-10 gave no image source). **Never answer a
   refused `blob:`, `data:` or module source by widening the policy**, and never by
   weakening the violation check: read the violation the report names, then decide whether
   the renderer or the policy changed. The same specs run again behind the Compose stack's

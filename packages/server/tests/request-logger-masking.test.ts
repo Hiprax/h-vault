@@ -100,7 +100,7 @@ vi.mock('@hiprax/errors', async (importOriginal) => {
   };
 });
 
-import { createRequestLogger } from '@hiprax/logger';
+import { createRequestLogger, type LoggableRequest, type LoggableResponse } from '@hiprax/logger';
 import { createErrorMiddleware, httpErrors } from '@hiprax/errors';
 
 /** In-memory winston transport that records every log info object it receives. */
@@ -134,21 +134,23 @@ function runRequestLogger(body: unknown, maskBodyKeys: string[]): Record<string,
     maskBodyKeys,
   });
 
-  const req = {
+  // Typed as the logger's own framework-agnostic shapes, which is exactly what
+  // the middleware reads: no Express object is pretended.
+  const req: LoggableRequest = {
     method: 'POST',
     url: '/api/v1/test',
     originalUrl: '/api/v1/test',
     headers: {},
     body,
   };
-  const res = new EventEmitter() as EventEmitter & Record<string, unknown>;
-  res.statusCode = 200;
-  res.getHeader = () => undefined;
-  res.getHeaders = () => ({});
-  res.writableEnded = true;
+  const res: LoggableResponse & EventEmitter = Object.assign(new EventEmitter(), {
+    statusCode: 200,
+    getHeader: () => undefined,
+    getHeaders: () => ({}),
+    writableEnded: true,
+  });
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  middleware(req as any, res as any, () => {});
+  middleware(req, res, () => {});
   res.emit('finish');
   return capture.records;
 }

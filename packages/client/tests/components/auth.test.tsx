@@ -2,6 +2,7 @@ import { act, render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { AxiosError, AxiosHeaders } from 'axios';
+import { MAX_INVITATION_TOKEN_LENGTH } from '@hvault/shared';
 import { LoginPage } from '../../src/components/auth/LoginPage';
 import { RegisterPage } from '../../src/components/auth/RegisterPage';
 import { UnlockScreen } from '../../src/components/auth/UnlockScreen';
@@ -1025,17 +1026,67 @@ describe('RegisterPage', () => {
       expect(mockRegister).not.toHaveBeenCalled();
     });
 
-    it('trims a pasted invitation and refuses one that cannot be an invitation', async () => {
+    it('refuses a pasted invitation that cannot be one, marking the field', async () => {
       serveMode('invite');
       renderAt('/register');
 
-      fireEvent.change(await screen.findByLabelText('Invitation code'), {
+      const field = await screen.findByLabelText('Invitation code');
+      // A token is not prose: no spell-checking marks on it, and no error state
+      // before anything was submitted.
+      expect(field).toHaveAttribute('spellcheck', 'false');
+      expect(field).toHaveAttribute('aria-invalid', 'false');
+      expect(screen.getByText('Invitation code').className).not.toMatch(/destructive/);
+      fireEvent.change(field, {
         target: { value: 'not a token!' },
       });
       await fillAndSubmit();
 
       expect(await screen.findByText('That is not an invitation code.')).toBeInTheDocument();
       expect(mockRegister).not.toHaveBeenCalled();
+      // The field and its label both show the error.
+      expect(screen.getByLabelText('Invitation code')).toHaveAttribute('aria-invalid', 'true');
+      expect(screen.getByText('Invitation code').className).toMatch(/destructive/);
+    });
+
+    it('sends a pasted invitation without its surrounding spaces', async () => {
+      serveMode('invite');
+      mockRegister.mockResolvedValue({ emailSent: true });
+      renderAt('/register');
+
+      fireEvent.change(await screen.findByLabelText('Invitation code'), {
+        target: { value: '  tok_ABC-123  ' },
+      });
+      await fillAndSubmit();
+
+      await waitFor(() => {
+        expect(mockRegister).toHaveBeenCalledWith(
+          'invitee@example.com',
+          'superStrongPass1',
+          'tok_ABC-123',
+        );
+      });
+    });
+
+    it('holds an invitation to the server bound: at the bound it is sent, one past it is refused', async () => {
+      serveMode('invite');
+      mockRegister.mockResolvedValue({ emailSent: true });
+      renderAt('/register');
+
+      const field = await screen.findByLabelText('Invitation code');
+      fireEvent.change(field, { target: { value: 'x'.repeat(MAX_INVITATION_TOKEN_LENGTH + 1) } });
+      await fillAndSubmit();
+      expect(await screen.findByText('That is not an invitation code.')).toBeInTheDocument();
+      expect(mockRegister).not.toHaveBeenCalled();
+
+      fireEvent.change(field, { target: { value: 'x'.repeat(MAX_INVITATION_TOKEN_LENGTH) } });
+      fireEvent.click(screen.getByRole('button', { name: /create account/i }));
+      await waitFor(() => {
+        expect(mockRegister).toHaveBeenCalledWith(
+          'invitee@example.com',
+          'superStrongPass1',
+          'x'.repeat(MAX_INVITATION_TOKEN_LENGTH),
+        );
+      });
     });
 
     it('says a closed server is closed and offers no form to fill', async () => {

@@ -1257,11 +1257,12 @@ export async function openNext(page: Page, fixture: string): Promise<void> {
  *
  * `startSandbox` posts `{ kind: 'ready' }` to `win.parent`, and at top level that
  * IS the window itself; its window listener accepts only a message CARRYING A
- * TRANSFERRED PORT and does not remove itself for one without. So an init script
- * registered before the module — which is what `addInitScript` guarantees — can
- * answer the frame's own announcement with a port and complete the real
- * handshake. There is no race and no sleep: the listener exists before the
- * message can be posted.
+ * TRANSFERRED PORT, posted BY `win.parent` (F-22: an opener or a sibling frame is
+ * ignored), and does not remove itself for one without. At top level the parent
+ * is the window itself, so an init script registered before the module — which
+ * is what `addInitScript` guarantees — can answer the frame's own announcement
+ * with a port posted to its own window and complete the real handshake. There is
+ * no race and no sleep: the listener exists before the message can be posted.
  *
  * WHY THIS IS AVAILABLE AT ALL, stated because it is a dev-server property and
  * not a claim about production. `test:e2e` and `test:a11y` drive `npm run dev`,
