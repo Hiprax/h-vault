@@ -104,7 +104,7 @@ router.put(
 // (see `middleware/largeBodyAdmission.ts`): the limiter and the admission slot run
 // BEFORE the body is read, or they bound nothing. The sanitizer runs straight AFTER
 // the parser: the global parser in `app.ts` skips this path, so the app-level
-// sanitizer ran before this body existed and filtered nothing.
+// sanitizer ran before this body existed and filtered only the query.
 router.post(
   '/restore',
   passwordVerifyLimiter,

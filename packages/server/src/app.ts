@@ -25,6 +25,7 @@ import { APPLICATION_PERMISSIONS_POLICY } from './config/permissionsPolicy.js';
 import { doubleCsrfProtection, csrfTokenHandler } from './middleware/csrf.js';
 import { csrfLimiter, metricsLimiter } from './middleware/rateLimiter.js';
 import { sanitizeRequestBody } from './middleware/sanitizeBody.js';
+import { refuseParameterLimitErrors } from './middleware/parameterLimits.js';
 import { apiNoStore } from './middleware/apiCacheControl.js';
 import { refuseCrossSiteRequests } from './middleware/fetchMetadata.js';
 import { createProxyTrustDetector } from './utils/deploymentChecks.js';
@@ -221,22 +222,30 @@ app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 // Cookie parsing
 app.use(cookieParser());
 
-// MongoDB operator injection and prototype-pollution prevention, over every body the
-// global parser above produced. This mount does NOT cover the routes in
-// `CUSTOM_BODY_LIMIT_PATHS`: their body is still unparsed here, so each of them
-// mounts the same middleware again straight after its own parser, and
-// `tests/route-table.test.ts` fails any route-level JSON parser that is not followed
-// by it. See `middleware/sanitizeBody.ts` for why only the body is filtered.
-app.use(sanitizeRequestBody);
-
-// HTTP Parameter Pollution protection
+// HTTP Parameter Pollution protection. Besides collapsing a repeated parameter to its
+// last value, `hppx` EXPANDS dotted and bracketed keys (`a[b]=`, `a.b=`) into nested
+// objects, in the query and in a urlencoded body. Past its bounds (20 levels, 5,000
+// keys) it throws; `refuseParameterLimitErrors` answers exactly those as the 400 they
+// are and passes every other error on (`middleware/parameterLimits.ts`).
 app.use(
-  hppx({
-    whitelist: ['tags', 'ids'],
-    mergeStrategy: 'keepLast',
-    sources: ['query', 'body'],
-  }),
+  refuseParameterLimitErrors(
+    hppx({
+      whitelist: ['tags', 'ids'],
+      mergeStrategy: 'keepLast',
+      sources: ['query', 'body'],
+    }),
+  ),
 );
+
+// MongoDB operator injection and prototype-pollution prevention, over the query and
+// every body the global parsers produced. It runs AFTER `hppx`, never before: the
+// expansion above is what turns `folderId[$ne]=x` into an operator, and a filter
+// that ran first judged the flat key and let it through. This mount does NOT cover
+// the routes in `CUSTOM_BODY_LIMIT_PATHS`: their body is still unparsed here, so
+// each of them mounts the same middleware again straight after its own parser, and
+// `tests/route-table.test.ts` fails any route-level JSON parser that is not followed
+// by it. `tests/input-filter-order.test.ts` pins this order over the wire.
+app.use(sanitizeRequestBody);
 
 // Passport
 app.use(passport.initialize());

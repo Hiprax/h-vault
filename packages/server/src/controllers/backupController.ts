@@ -1,4 +1,5 @@
 import type { Request, Response } from 'express';
+import type { z } from 'zod';
 import { catchAsync, httpErrors } from '@hiprax/errors';
 import { createModuleLogger, errorMessage } from '../utils/logger.js';
 import mongoose from 'mongoose';
@@ -55,6 +56,7 @@ import {
   MAX_BACKUP_MAILS_PER_USER_PER_DAY,
   ERROR_CODES,
   maskEmail,
+  backupPayloadSchema,
 } from '@hvault/shared';
 import type {
   BackupSetupInput,
@@ -1057,6 +1059,71 @@ export const changeBackupPassword = catchAsync(
   },
 );
 
+/**
+ * A restore's backup file, parsed and with its skeleton checked: an object whose
+ * `items` and `folders`, when present, are bounded arrays of objects. Each row's
+ * fields are still unvalidated here; the restore's allowlists decide them row by row.
+ */
+interface BackupPayload {
+  items?: Record<string, unknown>[];
+  folders?: Record<string, unknown>[];
+}
+
+/** The length of `payload[key]` when the payload is an object and that is an array, else 0. */
+function arrayLength(payload: unknown, key: 'items' | 'folders'): number {
+  const value: unknown = (payload as Partial<Record<string, unknown>> | null)?.[key];
+  return Array.isArray(value) ? value.length : 0;
+}
+
+/**
+ * Parses the restore's `data` string and checks its skeleton against
+ * `backupPayloadSchema`, returning the payload AS PARSED (the schema's loose output
+ * is a copy and is discarded). Refusals are 400s.
+ *
+ * Three refusals, in this order: malformed JSON, more entries in total than
+ * `MAX_IMPORT_ITEMS` (counted before any row is read), and a skeleton that does
+ * not match.
+ *
+ * Called BEFORE the rotation fence and the vault-key lock, never inside them. A
+ * malformed or oversized file is the client's error whatever the account's state, so it is
+ * answered without reading the account or taking the lock; and the multi-megabyte
+ * parse it costs is no longer spent while every other key-changing operation of the
+ * account waits. It used to run in the locked span with no shape check, where a
+ * payload whose `items` held `null` failed as a 500 and a payload that was not an
+ * object at all "restored" nothing successfully.
+ *
+ * Only the FIRST problem is named, with its path: a file of ten thousand bad rows
+ * is not answered with ten thousand sentences.
+ */
+function parseBackupPayload(data: string): BackupPayload {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    throw httpErrors.badRequest('Invalid backup data: malformed JSON');
+  }
+  // The entry count comes FIRST, before any row is looked at: it is two array
+  // lengths, while the skeleton check below walks every row, so a file of
+  // millions of junk entries is refused here for the price of reading them.
+  const totalEntries = arrayLength(parsed, 'items') + arrayLength(parsed, 'folders');
+  if (totalEntries > MAX_IMPORT_ITEMS) {
+    throw httpErrors.badRequest(
+      `Restore exceeds the maximum allowed item count (${String(MAX_IMPORT_ITEMS)}). Received ${String(totalEntries)} entries.`,
+    );
+  }
+  const result = backupPayloadSchema.safeParse(parsed);
+  if (!result.success) {
+    // A failed parse always carries at least one issue; only the first is named.
+    const [{ path, message }] = result.error.issues as [z.core.$ZodIssue, ...z.core.$ZodIssue[]];
+    throw httpErrors.badRequest(
+      path.length > 0
+        ? `Invalid backup data at ${path.map(String).join('.')}: ${message}`
+        : `Invalid backup data: ${message}`,
+    );
+  }
+  return parsed as BackupPayload;
+}
+
 /** What a completed restore reports, so the lock can be released before it is sent. */
 interface RestoreOutcome {
   itemsRestored: number;
@@ -1081,9 +1148,13 @@ interface RestoreOutcome {
  * is ANSWERED rather than thrown, the recoverable stale-generation 409, returns
  * `null` to say so.
  */
-async function restoreUnderRotationLock(req: Request, userId: string): Promise<RestoreOutcome> {
+async function restoreUnderRotationLock(
+  req: Request,
+  userId: string,
+  backupPayload: BackupPayload,
+): Promise<RestoreOutcome> {
   const body = req.body as RestoreBackupInput;
-  const { conflictStrategy, data } = body;
+  const { conflictStrategy } = body;
 
   // A restore NEVER replaces the caller's vault key. The client re-encrypts every
   // backup row to this account's current vault key before sending, so restore only
@@ -1091,18 +1162,6 @@ async function restoreUnderRotationLock(req: Request, userId: string): Promise<R
   // That is exactly why it must be fenced during a rotation: the key the client
   // re-encrypted against is the one the rotation is replacing.
   await assertVaultNotRotating(userId);
-
-  // Parse the backup data (client sends already-decrypted JSON)
-  let backupPayload: {
-    items?: Record<string, unknown>[];
-    folders?: Record<string, unknown>[];
-  };
-
-  try {
-    backupPayload = JSON.parse(data) as typeof backupPayload;
-  } catch {
-    throw httpErrors.badRequest('Invalid backup data: malformed JSON');
-  }
 
   const backupItems = backupPayload.items ?? [];
   const backupFolders = backupPayload.folders ?? [];
@@ -1117,13 +1176,6 @@ async function restoreUnderRotationLock(req: Request, userId: string): Promise<R
     throw httpErrors.conflict(
       'Reload the app, then restore again: this backup holds entries in a newer format than ' +
         'this page understands, and restoring them from it would lose them.',
-    );
-  }
-
-  const totalEntries = backupItems.length + backupFolders.length;
-  if (totalEntries > MAX_IMPORT_ITEMS) {
-    throw httpErrors.badRequest(
-      `Restore exceeds the maximum allowed item count (${String(MAX_IMPORT_ITEMS)}). Received ${String(totalEntries)} entries.`,
     );
   }
 
@@ -1188,8 +1240,8 @@ async function restoreUnderRotationLock(req: Request, userId: string): Promise<R
 
   // The vault-key generation, checked HERE rather than beside the fence at the
   // top of the handler, and this is the last statement before the first write.
-  // Between the two lie a multi-megabyte `JSON.parse`, the entry-count cap and
-  // four collection scans for the net-new counts — hundreds of milliseconds in
+  // Between the two lie the format gate and four collection scans for the
+  // net-new counts — hundreds of milliseconds in
   // which a rotation can commit and leave every row below sealed under a key
   // the account has already replaced. The exclusion lock the caller holds is what
   // makes that span atomic rather than merely short.
@@ -1761,12 +1813,15 @@ async function restoreUnderRotationLock(req: Request, userId: string): Promise<R
  * `POST /backup/restore` — add the backup's rows to this account, under the
  * vault key the client re-encrypted them with.
  *
- * ## Why this handler is a lock and nothing else
+ * ## Why this handler is a lock and (almost) nothing else
  *
  * The work is in {@link restoreUnderRotationLock}; what is here is the span that
- * work has to be atomic over. A restore's vault-key checks are reads, and the
- * distance from them to the first row written is a multi-megabyte `JSON.parse`,
- * the entry-count cap and four counted collection scans — long enough for a
+ * work has to be atomic over, preceded by the one thing that needs no account
+ * state at all: parsing the file, counting its entries and checking its skeleton
+ * ({@link parseBackupPayload}), which refuses a malformed or oversized file with a
+ * 400 before the lock is taken. A restore's vault-key checks are reads, and the
+ * distance from them to the first row written is the format gate and four counted
+ * collection scans — long enough for a
  * rotation to raise its fence, enumerate an account these rows are not yet part
  * of, and commit. Every row the restore then writes is sealed under the key that
  * rotation has just replaced: stranded on arrival, unreadable afterwards, and
@@ -1785,13 +1840,17 @@ async function restoreUnderRotationLock(req: Request, userId: string): Promise<R
  */
 export const restoreBackup = catchAsync(async (req: Request, res: Response): Promise<void> => {
   const userId = getUserId(req);
-  const { conflictStrategy } = req.body as RestoreBackupInput;
+  const { conflictStrategy, data } = req.body as RestoreBackupInput;
+
+  // The file's shape is the client's business and is settled first, before the
+  // lock below and the fence inside it. See `parseBackupPayload`.
+  const backupPayload = parseBackupPayload(data);
 
   const rotationLockId = await acquireVaultRotationLock(userId);
   let outcome: RestoreOutcome | undefined;
   let staleVaultKey: StaleVaultKeyError | null = null;
   try {
-    outcome = await restoreUnderRotationLock(req, userId);
+    outcome = await restoreUnderRotationLock(req, userId, backupPayload);
   } catch (error) {
     // Caught NARROWLY, by type, and OUTSIDE the span: rendering it inside would
     // put the response on the wire while the lock is still held. A blanket catch

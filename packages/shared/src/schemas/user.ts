@@ -9,6 +9,8 @@ import {
   MAX_BACKUP_EMAILS,
   MAX_RESTORE_DATA_LENGTH,
   MAX_IMPORT_ITEMS,
+  MAX_ITEMS_PER_USER,
+  MAX_FOLDERS_PER_USER,
   MAX_TAGS_PER_ITEM,
   MAX_ENCRYPTED_NAME_LENGTH,
   MAX_ENCRYPTED_DATA_LENGTH,
@@ -249,9 +251,10 @@ export const backupSettingsSchema = z
     // older tab's combined save (`{enabled, scheduleHour, backupEmails}`) would
     // answer 200, and the user would believe recipients were saved that never
     // were. So the key stays declared and any value at all is a 400 whose message
-    // names the route to use instead. No inner bound: Zod skips later checks once
-    // one has failed, so an over-long list or entry would be refused with a
-    // message that did not say where recipients went (the body limit bounds size).
+    // names the route to use instead. No inner bound: Zod skips a later refinement
+    // once a check has failed (length checks are the exception, they still run),
+    // so an over-long list or entry would be refused with a message that did not
+    // say where recipients went (the body limit bounds size).
     backupEmails: z
       .array(z.string({ error: BACKUP_RECIPIENTS_MOVED_MESSAGE }), {
         error: BACKUP_RECIPIENTS_MOVED_MESSAGE,
@@ -353,6 +356,42 @@ export const restoreBackupSchema = z.object({
   // with, and a rotation that commits between that re-encryption and this request
   // strands every one of them. See `optionalVaultKeyVersionSchema`.
   vaultKeyVersion: optionalVaultKeyVersionSchema,
+});
+
+/**
+ * An array of at most `max` objects, its LENGTH checked before any element is.
+ *
+ * `z.array(row).max(max)` would not bound anything: Zod 4 parses every element
+ * first and runs the length check only afterwards, keeping an issue for every
+ * element that failed, so a 25 MiB array of `null` would be answered only after
+ * collecting an issue object for each of its millions of entries. Here the
+ * elements are first taken as `unknown` (references only), the length is checked,
+ * and only an array within it is piped on to have each element checked as an
+ * object: a pipe whose first stage failed never runs its second.
+ */
+const boundedRows = (max: number) =>
+  z
+    .array(z.unknown())
+    .max(max)
+    .pipe(z.array(z.looseObject({})));
+
+/**
+ * The SKELETON of the backup file a restore carries as its `data` string, checked
+ * after `JSON.parse` and before anything else (the rotation fence, the vault-key
+ * lock, the counts): the payload is an object, and `items`/`folders`, when present,
+ * are arrays of objects of a bounded length.
+ *
+ * Every object is LOOSE on purpose, and the server keeps the payload it PARSED, not
+ * this schema's output. Zod 4's plain `z.object({})` strips every key it does not
+ * name, so a strict skeleton would hand the restore empty rows and drop the
+ * `backupEncryption` block; the fields of each row are the restore's own allowlists'
+ * business, row by row, exactly as before.
+ */
+export const backupPayloadSchema = z.looseObject({
+  version: z.union([z.number(), z.string()]).optional(),
+  exportDate: z.string().optional(),
+  items: boundedRows(MAX_ITEMS_PER_USER).optional(),
+  folders: boundedRows(MAX_FOLDERS_PER_USER).optional(),
 });
 
 export const exportSchema = z.object({

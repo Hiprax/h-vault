@@ -1007,7 +1007,8 @@ leaves the write fence raised, and only signing in lowers that, which cannot hap
 
 The generation check is a read, and a read is only worth the distance to the write that trusts it.
 Four operations have real work between the two: an import parses and validates a whole file, a
-restore does the same and then counts four collections, a document upload waits for the storage
+restore counts four collections (its file is parsed and its structure checked before any of this,
+so a malformed one is refused without waiting on the lock), a document upload waits for the storage
 service to assemble the file, and a master-password change revokes every session. A rotation
 starting inside one of those gaps had already listed the vault without the arriving entries, so
 they were sealed under a key the account was in the middle of replacing — unreadable from the

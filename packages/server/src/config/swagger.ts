@@ -33,6 +33,9 @@ import {
   RELEASE_CHANGE_KINDS,
   RELEASE_ICONS,
   UPDATE_STATES,
+  MAX_IMPORT_ITEMS,
+  MAX_ITEMS_PER_USER,
+  MAX_FOLDERS_PER_USER,
 } from '@hvault/shared';
 
 // ---------------------------------------------------------------------------
@@ -1869,7 +1872,7 @@ export const swaggerSpec: JsonObject = {
             type: 'string',
             minLength: 1,
             maxLength: 26214400,
-            description: 'Backup file contents (max 25 MB)',
+            description: `Backup file contents (max 25 MB): a JSON object whose \`items\` and \`folders\`, when present, are arrays of objects, at most ${String(MAX_IMPORT_ITEMS)} entries in total, ${String(MAX_ITEMS_PER_USER)} items and ${String(MAX_FOLDERS_PER_USER)} folders. Anything else is refused with 400 before the restore takes any lock.`,
           },
           vaultKeyVersion: VAULT_KEY_VERSION_PROPERTY,
         },

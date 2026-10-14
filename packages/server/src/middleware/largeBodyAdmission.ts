@@ -21,7 +21,7 @@ const logger = createModuleLogger('large-body-admission');
  *   2. {@link holdLargeBodySlot}, this account's share and one process-wide slot;
  *   3. {@link parseLargeJsonBody}, which buffers and parses the body, followed
  *      IMMEDIATELY by `sanitizeRequestBody` (`middleware/sanitizeBody.ts`): the
- *      app-level sanitizer ran before this body existed and filtered nothing;
+ *      app-level sanitizer ran before this body existed and filtered only the query;
  *   4. validation, then the handler, wrapped by {@link holdingLargeBodySlot} so the
  *      slot outlives the response when the handler does.
  *
@@ -60,9 +60,9 @@ export const LARGE_JSON_BODY_LIMIT_BYTES = 30 * 1024 * 1024;
 /**
  * Buffers and parses a large JSON body. ONE instance, mounted on both routes, so
  * the route table can find it by identity. Both paths are exempted from the global
- * 2 MB parser in `app.ts` (`CUSTOM_BODY_LIMIT_PATHS`), and with it from the app-level
- * sanitizer's reach, which is why each route mounts `sanitizeRequestBody` straight
- * after this parser.
+ * 2 MB parser in `app.ts` (`CUSTOM_BODY_LIMIT_PATHS`), so the app-level sanitizer
+ * filters only their query, which is why each route mounts `sanitizeRequestBody`
+ * straight after this parser.
  */
 export const parseLargeJsonBody: RequestHandler = express.json({
   limit: LARGE_JSON_BODY_LIMIT_BYTES,

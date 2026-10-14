@@ -77,14 +77,14 @@ describe('Phase 6 — Backup Integrity and Edge Cases', () => {
         conflictStrategy: 'skip',
         data,
       });
-      // The controller coerces a non-array `items` via `?? []`-style handling
-      // and iterates it defensively, so a malformed structure yields a clean 200
-      // with nothing restored (never a 5xx crash, and — pinning the real
-      // contract — not an auth/CSRF rejection that would make the DB assertion
-      // vacuously true).
-      expect(res.status).toBe(200);
-      expect(res.body.success).toBe(true);
-      expect(res.body.data.itemsRestored).toBe(0);
+      // F-14: the payload's skeleton is checked before anything else, so a
+      // malformed structure is refused as the client's error, naming where it
+      // went wrong (never a 5xx, and no longer a 200 that "restored" nothing).
+      // The message pins the real contract: an auth/CSRF rejection would also be
+      // a 4xx and would make the DB assertion vacuously true.
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(String(res.body.message)).toMatch(/^Invalid backup data at items: /);
       const count = await VaultItem.countDocuments({ userId: user.id });
       expect(count).toBe(0);
     });

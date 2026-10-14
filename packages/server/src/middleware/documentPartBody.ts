@@ -294,7 +294,7 @@ export const PART_BODY_LIMIT_BYTES = DOCUMENT_CIPHERTEXT_CHUNK_BYTES + PART_BODY
  * object that is not an Array, so it would be rewritten into a plain object of numeric keys:
  * `{0: 137, 1: 80, …}`. The part would then fail its own digest check, or worse be
  * forwarded as something that is not the bytes the client sealed. Mounted here, the
- * parser runs after the sanitizer, after `hppx` and after the request logger, none
+ * parser runs after `hppx`, after the sanitizer and after the request logger, none
  * of which ever see a Buffer.
  *
  * There is deliberately NO entry added to `CUSTOM_BODY_LIMIT_PATHS` for this route.

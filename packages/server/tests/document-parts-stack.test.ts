@@ -10,12 +10,12 @@
  *   1. `express.json({ limit: '2mb' })`, whose limit would refuse this body if it
  *      ever claimed the request;
  *   2. `express.urlencoded`;
- *   3. the **MongoDB injection sanitizer**, which rebuilds any object body key by
+ *   3. `hppx` with `mergeStrategy: 'keepLast'`;
+ *   4. the **MongoDB injection sanitizer**, which rebuilds any object body key by
  *      key to strip `$`-prefixed operators — and a `Buffer` is an object that is not
  *      an Array, so a raw parser mounted app-level would hand it a Buffer and get
- *      back `{0: 137, 1: 80, …}`;
- *   4. `hppx` with `mergeStrategy: 'keepLast'`, and the request logger, which
- *      reads and masks body keys.
+ *      back `{0: 137, 1: 80, …}` — and the request logger, which reads and masks
+ *      body keys.
  *
  * Exercising the router in isolation would prove nothing about any of them. Every
  * assertion here therefore goes through `app`, which is what makes this file a

@@ -49,6 +49,7 @@
  */
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import request from 'supertest';
+import { MAX_FOLDERS_PER_USER } from '@hvault/shared';
 import app from '../src/app.js';
 import { User } from '../src/models/User.js';
 import { VaultItem } from '../src/models/VaultItem.js';
@@ -603,23 +604,31 @@ describe('POST /backup/restore refuses rows sealed under a superseded vault key'
   });
 
   it('lets the pre-guard body checks answer first, with 400 and not 409', async () => {
-    // The placement, not the contract. `restoreBackup` has no job lock, so what
-    // makes the guard's span short is where the line sits: after the multi-
-    // megabyte `JSON.parse`, the entry-count cap and the four net-new collection
-    // scans, and immediately before the first write. Hoisted up beside
-    // `assertVaultNotRotating` at the top of the handler it would answer 409
-    // here, and the contract cases above would not notice.
+    // The placement, not the contract. What makes the guard's span short is
+    // where the line sits: after the entry-count cap and the four net-new
+    // collection scans, and immediately before the first write. Hoisted up beside
+    // `assertVaultNotRotating` at the top of the locked span it would answer 409
+    // here, and the contract cases above would not notice. (The refusal used is
+    // the per-user folder cap, which needs the account's state and so is decided
+    // INSIDE the span; a malformed or oversized file is refused before the span
+    // altogether, F-14.)
+    await Folder.insertMany(
+      Array.from({ length: MAX_FOLDERS_PER_USER }, (_, i) => ({
+        userId: user.id,
+        ...sampleFolder({ encryptedName: `seed-${String(i)}` }),
+      })),
+    );
     const current = await rotateVaultKey();
     const before = await snapshot();
 
     const res = await send('post', '/api/v1/backup/restore', {
-      conflictStrategy: 'skip',
-      data: 'this is not JSON',
+      conflictStrategy: 'keep_both',
+      data: JSON.stringify({ items: [], folders: [sampleFolder({ encryptedName: 'one-more' })] }),
       vaultKeyVersion: current - 1,
     });
 
     expect(res.status).toBe(400);
-    expect(res.body.message).toMatch(/malformed JSON/i);
+    expect(res.body.message).toMatch(/per-user folder limit/i);
     expect(res.body.data).toBeUndefined();
     await expectNothingWritten(before);
   });

@@ -128,6 +128,26 @@ describe('hppx wiring in the REAL app (app.ts)', () => {
     expect(res.body.data.tags).toEqual(['alpha', 'beta', 'gamma']);
   });
 
+  it('keeps a whitelisted URLENCODED array (`tags[]=a&tags[]=b`) an array through hppx AND the operator filter after it', async () => {
+    // The operator filter runs after hppx (F-13), so it is handed hppx's output:
+    // the whitelisted array hppx restored. A filter that rebuilt arrays as objects,
+    // or an order that let keepLast's collapsed value stand, would store 'beta' or
+    // fail validation here.
+    const item = await seedItem(user.id, { itemType: 'login' });
+    const { token: csrfToken, cookie: csrfCookie } = await getCsrf(agent);
+
+    const res = await agent
+      .put(`${API}/vault/items/${String(item._id)}`)
+      .set('Authorization', authHeader(user.accessToken))
+      .set('Cookie', csrfCookie)
+      .set('x-csrf-token', csrfToken)
+      .type('form')
+      .send('tags[]=alpha&tags[]=beta');
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body.data.tags).toEqual(['alpha', 'beta']);
+  });
+
   it('hands validation ONE value for a query parameter spelled two ways: the last', async () => {
     // The last spelling asks for the NON-default order, so a result in that
     // order tells "Zod received the scalar last value" apart from "the parameter
