@@ -566,7 +566,19 @@ describe('Docker deployment', () => {
       // container wholesale, and only container-topology values are overridden.
       // There is no per-package env file anywhere in this repo, by design.
       expect(envFilePaths(app)).toContain('.env');
-      expect(envFilePaths(bootstrap)).toContain('.env');
+      // ...except the index bootstrap, which is handed NO env_file at all (F-20):
+      // it reads only the secret-free index configuration, and the root .env
+      // would put every application secret inside the stack's widest image.
+      expect(bootstrap?.env_file).toBeUndefined();
+      expect(Object.keys(bootstrap?.environment ?? {}).sort()).toEqual([
+        'AUDIT_LOG_RETENTION_DAYS',
+        'BACKUP_RETENTION_DAYS',
+        'BREACH_CACHE_TTL_DAYS',
+        'MONGODB_URI',
+        'MONGO_MAX_POOL_SIZE',
+        'MONGO_MIN_POOL_SIZE',
+        'NODE_ENV',
+      ]);
     });
 
     it('cannot boot on a default database password even with no .env present', () => {
@@ -683,22 +695,25 @@ describe('Docker deployment', () => {
       // so the app-environment anchor blanks all four discrete MONGO_* creds. The
       // app reads only MONGODB_URI, so this is invisible to it. Verified on the live
       // container: `printenv MONGO_ROOT_PASSWORD` is empty.
-      for (const [label, service] of [
-        ['hvault-app', app],
-        ['hvault-bootstrap', bootstrap],
-      ] as const) {
-        for (const key of [
-          'MONGO_ROOT_USERNAME',
-          'MONGO_ROOT_PASSWORD',
-          'MONGO_APP_USERNAME',
-          'MONGO_APP_PASSWORD',
-        ]) {
-          // Present-and-empty, not merely absent: absent would let `env_file`'s
-          // value through, which is exactly the bug. The empty string is what
-          // overrides it.
-          expect(service?.environment, `${label}.${key}`).toHaveProperty(key, '');
-        }
+      const discreteCredentials = [
+        'MONGO_ROOT_USERNAME',
+        'MONGO_ROOT_PASSWORD',
+        'MONGO_APP_USERNAME',
+        'MONGO_APP_PASSWORD',
+      ];
+      for (const key of discreteCredentials) {
+        // Present-and-empty, not merely absent: absent would let `env_file`'s
+        // value through, which is exactly the bug. The empty string is what
+        // overrides it.
+        expect(app?.environment, `hvault-app.${key}`).toHaveProperty(key, '');
       }
+      // The bootstrap has no `env_file` (F-20), so there is nothing to override:
+      // the keys must be ABSENT, and no root credential may be interpolated in.
+      expect(bootstrap?.env_file).toBeUndefined();
+      for (const key of discreteCredentials) {
+        expect(bootstrap?.environment, `hvault-bootstrap.${key}`).not.toHaveProperty(key);
+      }
+      expect(JSON.stringify(bootstrap?.environment ?? {})).not.toContain('MONGO_ROOT_PASSWORD');
       // Nginx never joins the data network and needs no database credential at all.
       expect(JSON.stringify(nginx?.environment ?? {})).not.toContain('MONGO_ROOT_PASSWORD');
     });
@@ -714,12 +729,10 @@ describe('Docker deployment', () => {
       //
       // Present-and-empty, not merely absent: absent lets `env_file`'s value
       // through, which is the bug.
-      for (const [label, service] of [
-        ['hvault-app', app],
-        ['hvault-bootstrap', bootstrap],
-      ] as const) {
-        expect(service?.environment, `${label}.S3_RPC_SECRET`).toHaveProperty('S3_RPC_SECRET', '');
-      }
+      expect(app?.environment, 'hvault-app.S3_RPC_SECRET').toHaveProperty('S3_RPC_SECRET', '');
+      // The bootstrap gets no `env_file` (F-20), so the key is simply absent there.
+      expect(bootstrap?.env_file).toBeUndefined();
+      expect(bootstrap?.environment).not.toHaveProperty('S3_RPC_SECRET');
       // ...and the one service that DOES read it interpolates the same key.
       expect(s3?.environment?.['GARAGE_RPC_SECRET']).toMatch(/\$\{S3_RPC_SECRET:\?/);
     });
@@ -825,8 +838,7 @@ describe('Docker deployment', () => {
     it('is hardened like the app, despite living for only two seconds', () => {
       // This image carries the whole devDependency tree (it runs the TypeScript
       // create-indexes script through tsx), which makes it the widest attack surface
-      // in the stack — and it holds root MongoDB credentials while it runs. A
-      // short life is not a reason to exempt it.
+      // in the stack. A short life is not a reason to exempt it.
       expect(bootstrap?.security_opt).toContain('no-new-privileges:true');
       expect(bootstrap?.cap_drop).toContain('ALL');
       expect(bootstrap?.cap_add).toBeUndefined();
@@ -851,9 +863,11 @@ describe('Docker deployment', () => {
 
     it('owns a writable log directory before dropping to the non-root user', () => {
       // The bootstrap runs with cwd = /app/packages/server (an explicit WORKDIR
-      // now; it used to be npm's `-w` doing it implicitly), and the script
-      // imports src/config, which calls createLogger() at MODULE
-      // SCOPE. @hiprax/logger eagerly mkdirs `<cwd>/logs` and THROWS if it cannot —
+      // now; it used to be npm's `-w` doing it implicitly). The script used to
+      // import src/config, which calls createLogger() at MODULE SCOPE; it now reads
+      // only the secret-free index configuration and loads no logger (F-20,
+      // tests/index-config.test.ts), but the directory is kept for any later import
+      // that reaches the logger. @hiprax/logger eagerly mkdirs `<cwd>/logs` and THROWS if it cannot —
       // and /app/packages/server is root-owned (COPY runs as root), so uid 1000
       // gets EACCES, the bootstrap exits non-zero, and the app's
       // `service_completed_successfully` gate never opens: the whole stack is dead.
@@ -1179,11 +1193,34 @@ describe('Docker deployment', () => {
       expect(db?.cpus).toBeDefined();
     });
 
-    it('probes health silently, with credentials read from its own environment', () => {
+    it('probes health silently, authenticating inside the script from its own environment', () => {
       const probe = probeOf(db);
-      // `$$` is Compose's escape for a literal `$`: the shell inside the container
-      // expands it, so the password never appears in what `docker inspect` shows.
-      expect(probe).toContain('$$MONGO_INITDB_ROOT_PASSWORD');
+      // F-18. The probe used to pass the root credential as `-u "$$…" -p "$$…"`.
+      // `$$` kept the value out of the command line `docker inspect` stores, but
+      // the shell inside the container EXPANDED it into mongosh's argv, every ten
+      // seconds, and a process's argv is readable by every account on the host
+      // (`/proc/<pid>/cmdline`, the default `hidepid=0`) while its environment is
+      // readable only by its owner. So the script reads both values from
+      // `process.env` and authenticates itself, and nothing on the command line
+      // names, carries or expands the credential.
+      expect(probe).toContain('process.env.MONGO_INITDB_ROOT_USERNAME');
+      expect(probe).toContain('process.env.MONGO_INITDB_ROOT_PASSWORD');
+      // Signing in is the script's FIRST statement and a refusal ends it
+      // unhealthy: `db.hello()` needs no authentication, so a probe that carried
+      // on after a refused sign-in would report an initiated primary healthy on
+      // any password at all.
+      expect(probe).toMatch(
+        /--eval '\s*try \{ db\.getSiblingDB\("admin"\)\.auth\(process\.env\.MONGO_INITDB_ROOT_USERNAME, process\.env\.MONGO_INITDB_ROOT_PASSWORD\) \}\s*catch \(e0\) \{ print\("auth: " \+ \(e0\.codeName \|\| "failed"\)\); quit\(1\) \}/,
+      );
+      // The first initialisation's temporary standalone mongod reports itself
+      // writable too; only the replica set may make the probe healthy.
+      expect(probe).toContain('hello.isWritablePrimary && hello.setName === "rs0" ? 0 : 1');
+      expect(probe).not.toMatch(/(^|\s)-p(\s|$)/);
+      expect(probe).not.toMatch(/(^|\s)-u(\s|$)/);
+      expect(probe).not.toContain('--password');
+      expect(probe).not.toContain('--username');
+      expect(probe).not.toContain('--authenticationDatabase');
+      expect(probe).not.toMatch(/\$\$?\{?MONGO_INITDB_ROOT_PASSWORD/);
       // The set must advertise the SERVICE NAME. Initiating it as `localhost:27017`
       // leaves the primary unreachable from every other container in the stack.
       expect(probe).toContain('hvault-db:27017');
@@ -1191,6 +1228,100 @@ describe('Docker deployment', () => {
       // transactions are available.
       expect(probe).toContain('isWritablePrimary');
       expect(probe).toContain('/dev/null');
+    });
+  });
+
+  describe('no credential on a command line (F-18, the class)', () => {
+    // A process's argv is readable by every account on the host, its environment
+    // only by its owner. The healthcheck was one instance; these hold the class:
+    // nothing the stack runs, and nothing the README tells an operator to run,
+    // puts a password or secret on a command line, whether Compose interpolates
+    // it (`${X}`, stored in `docker inspect` too) or a shell expands it (`$$X`).
+    const CREDENTIAL_EXPANSION =
+      /\$\$?\{?[A-Z0-9_]*(?:PASSWORD|PASS|SECRET|TOKEN|_KEY)[A-Z0-9_]*\}?/;
+    const PASSWORD_FLAG = /(?:^|\s)(?:-p|--password)(?:[\s=]|$)/;
+
+    function argvOf(service: ServiceConfig | undefined): string[] {
+      return [
+        probeOf(service),
+        [service?.entrypoint ?? []].flat().join(' '),
+        [service?.command ?? []].flat().join(' '),
+      ];
+    }
+
+    it('expands no credential into the argv of any service, in either compose file', () => {
+      const devCompose = parse(
+        readFileSync(path.join(repoRoot, 'docker-compose.dev.yml'), 'utf-8'),
+        { merge: true },
+      ) as ComposeConfig;
+      const checked: string[] = [];
+      for (const [file, parsed] of [
+        ['docker-compose.yml', compose],
+        ['docker-compose.dev.yml', devCompose],
+      ] as const) {
+        for (const [name, service] of Object.entries(parsed.services)) {
+          for (const argv of argvOf(service)) {
+            if (argv.length === 0) continue;
+            checked.push(`${file} ${name}`);
+            expect(argv, `${file} → ${name}`).not.toMatch(CREDENTIAL_EXPANSION);
+            expect(argv, `${file} → ${name}`).not.toMatch(PASSWORD_FLAG);
+          }
+        }
+      }
+      // Not vacuous: the database probe and the storage engine's command are read.
+      expect(checked).toEqual(expect.arrayContaining(['docker-compose.yml hvault-db']));
+      expect(checked.length).toBeGreaterThan(6);
+    });
+
+    it('never tells an operator to pass a database password on the command line', () => {
+      // The runbooks (backup, restore, rotation, troubleshooting) used to expand
+      // `$MONGO_ROOT_PASSWORD` into `docker compose exec … mongosh -p` /
+      // `mongodump --password`: the value then sat in the argv of the host's
+      // docker CLI AND of the tool inside the container. They now authenticate
+      // inside the container from its own environment, or prompt.
+      // A password flag carrying a credential-named variable or a password
+      // placeholder; `mkdir -p "$RUN"` and `ps -p "$(…)"` are not credentials.
+      const PASSWORD_ON_ARGV =
+        /(?:^|\s)(?:-p|--password)[\s=]+["']?(?:\$\{?[A-Z0-9_]*(?:PASS|SECRET|TOKEN)|<[^>]*pass)/i;
+      // `docker compose exec -e NAME=value` puts the value on the host CLI's argv;
+      // a bare `-e NAME` (filled from the CLI's own environment) does not.
+      const VALUE_ON_EXEC_ENV =
+        /(?:^|\s)(?:-e|--env)(?:\s+|=)["']?[A-Z0-9_]*(?:PASS|SECRET|TOKEN)[A-Z0-9_]*=/;
+      // A credential inside a connection string handed to a tool.
+      const CREDENTIAL_IN_URI = /mongodb(?:\+srv)?:\/\/[^\s:@/]+:(?:\$|<)/;
+      const scanned: string[] = [];
+      for (const doc of ['README.md', 'SECURITY.md', 'CONTRIBUTING.md']) {
+        const text = readFileSync(path.join(repoRoot, doc), 'utf-8');
+        const lines = text.split('\n');
+        scanned.push(...lines.filter((line) => /mongo(?:sh|dump|restore)/.test(line)));
+        for (const pattern of [PASSWORD_ON_ARGV, VALUE_ON_EXEC_ENV, CREDENTIAL_IN_URI]) {
+          expect(
+            lines.filter((line) => pattern.test(line)),
+            `${doc} ${String(pattern)}`,
+          ).toEqual([]);
+        }
+        // A password written into the script itself is on mongosh's argv too
+        // (`--eval '…changeUserPassword("u","<new>")'`, the old runbook's
+        // shape): every password a documented script sets is read from the
+        // environment inside it.
+        for (const call of text.matchAll(/changeUserPassword\(([^)]*)\)/g)) {
+          expect(call[1]!.split(',')[1] ?? '', `${doc}: ${call[0]}`).toMatch(
+            /^\s*process\.env\.[A-Z0-9_]+\s*$/,
+          );
+        }
+        // The same for a password a script signs in with, or sets on a user.
+        for (const call of text.matchAll(/\.auth\(([^)]*)\)/g)) {
+          expect(call[1]!.split(',')[1] ?? '', `${doc}: ${call[0]}`).toMatch(
+            /^\s*process\.env\.[A-Z0-9_]+\s*$/,
+          );
+        }
+        for (const call of text.matchAll(/\bpwd:\s*([^,}]*)/g)) {
+          expect(call[1]!.trim(), `${doc}: ${call[0]}`).toMatch(/^process\.env\.[A-Z0-9_]+$/);
+        }
+      }
+      // Not vacuous: the runbooks that run these tools are among the lines read.
+      expect(scanned.some((line) => line.includes('mongodump --config'))).toBe(true);
+      expect(scanned.some((line) => line.includes('changeUserPassword'))).toBe(true);
     });
   });
 
@@ -1358,6 +1489,150 @@ describe('Docker deployment', () => {
       const tmpOpts = tmpfsOptions(s3, '/tmp');
       expect(tmpOpts).toMatch(/size=\d+m/);
       expect(tmpOpts).not.toContain('uid=');
+    });
+
+    it('records running as root as an accepted residual in SECURITY.md, with its bound (F-19)', () => {
+      // The engine image declares no USER, so the default stack runs it as root
+      // inside its container, and the tmpfs above is deliberately NOT uid-pinned
+      // for that reason. That is a stated residual, not an oversight: the
+      // sentence and the bound it names must stay in the threat model, and the
+      // bound must be the one this file actually enforces.
+      const securityMd = readFileSync(path.join(repoRoot, 'SECURITY.md'), 'utf-8');
+      // Markdown wraps lines, so the prose is compared with its whitespace collapsed.
+      const section = (
+        /### The object storage service\n([\s\S]*?)(?=\n### |\n## |$)/.exec(securityMd)?.[1] ?? ''
+      ).replace(/\s+/g, ' ');
+      expect(section).toContain('runs as root inside its container');
+      expect(section).toMatch(/accepted residual/i);
+      for (const bound of [
+        'internal network',
+        'every capability',
+        'no-new-privileges',
+        'read-only root',
+        'ciphertext',
+      ]) {
+        expect(section, bound).toContain(bound);
+      }
+      // ...and it is TRUE of the default stack, which is what the sentence claims.
+      expect(s3?.cap_drop).toContain('ALL');
+      expect(s3?.security_opt).toContain('no-new-privileges:true');
+      expect(s3?.read_only).toBe(true);
+      expect(networksOf(s3)).toEqual(['data']);
+      expect(compose.networks['data']?.internal).toBe(true);
+      expect((s3 as { user?: unknown } | undefined)?.user).toBeUndefined();
+      // The optional path is named where the residual is.
+      expect(section).toContain('docker/garage.Dockerfile');
+    });
+
+    describe('the OPTIONAL non-root alternative (F-19), shipped commented out', () => {
+      const BEGIN = '  # >>> optional-nonroot-storage (docker-compose.override.yml)';
+      const END = '  # <<< optional-nonroot-storage';
+
+      /** The commented override, uncommented and parsed exactly as an operator would save it. */
+      function optionalOverride(): ComposeConfig & {
+        services: Record<
+          string,
+          (ServiceConfig & { user?: string; network_mode?: string }) | undefined
+        >;
+      } {
+        const lines = composeYaml.split('\n');
+        const start = lines.indexOf(BEGIN);
+        const end = lines.indexOf(END);
+        expect(start, 'begin marker').toBeGreaterThan(-1);
+        expect(end, 'end marker').toBeGreaterThan(start);
+        const body = lines.slice(start + 1, end).map((line) => {
+          expect(line, 'every line of the block is commented').toMatch(/^ {2}#( |$)/);
+          return line.replace(/^ {2}# ?/, '');
+        });
+        return parse(body.join('\n'), {
+          merge: true,
+          customTags: [{ tag: '!override', collection: 'seq', resolve: (value: unknown) => value }],
+        }) as never;
+      }
+
+      it('is commented out, so the default stack is unchanged', () => {
+        // The parsed default has neither the one-shot nor a build for hvault-s3.
+        expect(compose.services['hvault-s3-volumes']).toBeUndefined();
+        expect(s3?.build).toBeUndefined();
+        expect(composeYaml.split('\n').filter((line) => line === BEGIN)).toHaveLength(1);
+      });
+
+      it('builds the wrapper image, which is the pinned engine image plus a numeric non-root USER', () => {
+        const override = optionalOverride();
+        const s3Override = override.services['hvault-s3'];
+        expect(s3Override?.build).toEqual({ context: '.', dockerfile: 'docker/garage.Dockerfile' });
+        const wrapper = readFileSync(path.join(repoRoot, 'docker', 'garage.Dockerfile'), 'utf-8');
+        const instructions = wrapper
+          .split('\n')
+          .filter((line) => /^[A-Z]+\s/.test(line))
+          .map((line) => line.trim());
+        // The SAME image, by the same digest, as the default service; switching
+        // changes the user and nothing else. Nothing else runs in the build.
+        expect(instructions).toEqual([`FROM ${String(s3?.image)}`, 'USER 1000:1000']);
+        // Its own tag, so it never shadows the pulled engine image, defaulting to
+        // the release like the stack's other images (a bump must not leave it stale).
+        expect(s3Override?.image).toMatch(/^hvault-s3:\$\{HVAULT_VERSION:-\d+\.\d+\.\d+\}$/);
+        expect(interpolationDefault(s3Override?.image?.replace(/^hvault-s3:/, ''))).toBe(
+          rootPackageJson.version,
+        );
+      });
+
+      it('pins the tmpfs to that user, replacing the root-owned one', () => {
+        const s3Override = optionalOverride().services['hvault-s3'];
+        expect(s3Override?.tmpfs).toEqual(['/tmp:size=64m,uid=1000,gid=1000,mode=1777']);
+        // `!override`: Compose appends lists when merging files, and two /tmp
+        // mounts are refused. The parse above resolved the tag; it must be there.
+        const block = composeYaml.slice(composeYaml.indexOf(BEGIN), composeYaml.indexOf(END));
+        expect(block).toMatch(/tmpfs: !override\n/);
+      });
+
+      it('starts the engine only after a one-shot handed both volumes to that user', () => {
+        const override = optionalOverride();
+        expect(override.services['hvault-s3']?.depends_on?.['hvault-s3-volumes']?.condition).toBe(
+          'service_completed_successfully',
+        );
+        const oneShot = override.services['hvault-s3-volumes'];
+        expect(oneShot?.restart).toBe('no');
+        expect(oneShot?.user).toBe('0:0');
+        expect(oneShot?.entrypoint).toEqual([
+          'chown',
+          '-R',
+          '1000:1000',
+          '/var/lib/garage/meta',
+          '/var/lib/garage/data',
+        ]);
+        // The very volumes the engine mounts, at the very paths it mounts them.
+        const engineVolumes = (s3?.volumes ?? []).filter((volume) =>
+          volume.startsWith('hvault-s3-'),
+        );
+        expect([...(oneShot?.volumes ?? [])].sort()).toEqual([...engineVolumes].sort());
+      });
+
+      it('gives the one-shot CHOWN and nothing else, no network, and a digest-pinned image', () => {
+        const oneShot = optionalOverride().services['hvault-s3-volumes'];
+        expect(oneShot?.image).toMatch(/^alpine:\d+\.\d+\.\d+@sha256:[0-9a-f]{64}$/);
+        expect(oneShot?.cap_drop).toEqual(['ALL']);
+        expect(oneShot?.cap_add).toEqual(['CHOWN']);
+        expect(oneShot?.security_opt).toContain('no-new-privileges:true');
+        expect(oneShot?.read_only).toBe(true);
+        expect(oneShot?.network_mode).toBe('none');
+        expect(oneShot?.networks).toBeUndefined();
+        expect(oneShot?.ports).toBeUndefined();
+        expect(oneShot?.logging?.options?.['max-size']).toBe('10m');
+        expect(oneShot?.pids_limit).toBeGreaterThan(0);
+        expect(oneShot?.mem_limit).toBeDefined();
+        expect(oneShot?.container_name).toBe('${HVAULT_STACK_NAME:-hvault}-s3-volumes');
+      });
+
+      it('lints the wrapper Dockerfile with the others', () => {
+        const gate = readFileSync(path.join(repoRoot, 'scripts', 'ci', 'config-gate.mjs'), 'utf-8');
+        const listed = /const dockerfiles = \[([^\]]*)\]/.exec(gate)?.[1] ?? '';
+        const onDisk = readdirSync(path.join(repoRoot, 'docker'))
+          .filter((name) => /(^|\.)Dockerfile$/.test(name))
+          .map((name) => `'docker/${name}'`);
+        for (const file of onDisk) expect(listed, file).toContain(file);
+        expect(onDisk).toContain("'docker/garage.Dockerfile'");
+      });
     });
 
     it('bounds processes, memory and CPU', () => {

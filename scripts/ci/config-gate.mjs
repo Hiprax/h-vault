@@ -4,7 +4,7 @@
  * no compiler, linter or test ever reads:
  *
  *   actionlint  .github/workflows/*.yml   the release workflow, expressions included
- *   hadolint    docker/Dockerfile, docker/mongo.Dockerfile
+ *   hadolint    docker/Dockerfile, docker/mongo.Dockerfile, docker/garage.Dockerfile
  *   spectral    the OpenAPI 3.0.3 document packages/server/src/config/swagger.ts builds
  *
  *   node scripts/ci/config-gate.mjs           check, write config.sarif
@@ -148,7 +148,7 @@ function toolFailed(tool, file, run, detail) {
 }
 
 // ---------------------------------------------------------------------------
-// hadolint — both Dockerfiles
+// hadolint — every Dockerfile under docker/ (a test holds the list to the directory)
 // ---------------------------------------------------------------------------
 {
   const version = captureExe('hadolint', ['--version']);
@@ -157,7 +157,7 @@ function toolFailed(tool, file, run, detail) {
   }
   toolVersions.hadolint = version.stdout.trim();
 
-  const dockerfiles = ['docker/Dockerfile', 'docker/mongo.Dockerfile'];
+  const dockerfiles = ['docker/Dockerfile', 'docker/mongo.Dockerfile', 'docker/garage.Dockerfile'];
   for (const file of dockerfiles) {
     if (!existsSync(path.join(repoRoot, file))) fatal(`${file} is missing`);
   }

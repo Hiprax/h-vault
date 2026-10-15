@@ -305,7 +305,7 @@ export function renderEnvFile(values) {
 }
 
 /**
- * The Compose override that hands the throwaway configuration to the containers.
+ * The Compose override that hands the throwaway configuration to the app.
  *
  * The stack's own `env_file: .env` is `required: false`, so a checkout with no
  * `.env` — which is every clean room, and this repository's own working tree —
@@ -336,7 +336,11 @@ export function renderOverride(envFileAbsolutePath) {
   // tag. The path is still JSON-encoded: a YAML double-quoted scalar uses JSON's
   // own escaping rules, so a Windows path's backslashes survive it intact — the
   // property the JSON form was chosen for in the first place.
-  const services = ['hvault-app', 'hvault-bootstrap']
+  // The app only. The index bootstrap is given no env file at all (F-20): its
+  // seven keys reach it by interpolation from the drill's `--env-file`, exactly
+  // as an operator's `.env` reaches it, and handing it the throwaway secrets here
+  // would hide the very regression `bootstrapEnvironmentProblems` exists to catch.
+  const services = ['hvault-app']
     .map(
       (service) =>
         `  ${service}:\n` +
@@ -363,4 +367,136 @@ export function parseProvisionLog(text) {
     created: /created '.*' with readWrite on hvault/.test(output),
     reconciled: /already exists; roles reconciled, password untouched/.test(output),
   };
+}
+
+/**
+ * F-18: how long the drill watches the database container's process table.
+ *
+ * The healthcheck runs every 10 s and lives for about a second, so 22 s sees at
+ * least two runs of it. The verdict below refuses a sample that saw none, so a
+ * slower probe makes the step red rather than vacuously green.
+ */
+export const ARGV_SAMPLE_SECONDS = 22;
+
+/**
+ * The bash loop that samples every process's argv inside a container and prints
+ * each one that names mongosh.
+ *
+ * The pattern is spelled `mongo[s]h` so the sampler's own command line, which
+ * carries the pattern, never matches it. Only argv is read
+ * (`/proc/<pid>/cmdline`, what any account on the host can read); the
+ * environment, which the healthcheck now reads its credential from, is readable
+ * only by the process's owner and is deliberately not sampled.
+ */
+export function argvSamplerScript(seconds = ARGV_SAMPLE_SECONDS) {
+  if (!Number.isInteger(seconds) || seconds < 1 || seconds > 120) {
+    throw new Error(
+      `the argv sample length must be an integer of seconds in 1..120, got ${String(seconds)}`,
+    );
+  }
+  return (
+    `end=$((SECONDS+${String(seconds)})); while [ $SECONDS -lt $end ]; do ` +
+    'for f in /proc/[0-9]*/cmdline; do c=$(tr "\\0" " " < "$f" 2>/dev/null); ' +
+    'case "$c" in *mongo[s]h*) echo "$c";; esac; done; done'
+  );
+}
+
+/**
+ * Judges an argv sample: no secret's VALUE may appear in any sampled command
+ * line, and the sample must have seen the healthcheck at all.
+ *
+ * Problems name the secret, never its value. A value shorter than 16
+ * characters is refused outright: it could match unrelated text and turn the
+ * check into noise, and the drill generates 64-character ones.
+ *
+ * @param {string} sampleOutput  the sampler's stdout, one argv per line
+ * @param {{name: string, value: string}[]} secrets
+ * @returns {{ problems: string[], observed: number }}
+ */
+export function argvCredentialProblems(sampleOutput, secrets) {
+  for (const { name, value } of secrets) {
+    if (typeof value !== 'string' || value.length < 16) {
+      throw new Error(`the secret ${name} is too short to search an argv sample for`);
+    }
+  }
+  // Distinct lines: the loop prints a long-lived process on every pass.
+  const lines = [
+    ...new Set(
+      String(sampleOutput ?? '')
+        .split('\n')
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0),
+    ),
+  ];
+  // Only the command line as the probe was STARTED counts: once mongosh is up
+  // it retitles itself with any credential redacted, so a sample that saw only
+  // that later title never looked at the window the leak was in.
+  const observed = lines.filter((line) => /^mongosh\s(?:.*\s)?--eval(?:\s|$)/.test(line)).length;
+  const problems = [];
+  if (observed === 0) {
+    problems.push(
+      'no mongosh command line as started (with --eval) was seen in the sample, so it proves nothing about the healthcheck',
+    );
+  }
+  for (const { name, value } of secrets) {
+    if (lines.some((line) => line.includes(value))) {
+      problems.push(
+        `${name} appeared in a process's command line, readable by every account on the host`,
+      );
+    }
+  }
+  return { problems, observed };
+}
+
+/**
+ * F-20: the keys the index bootstrap is given, restated for the drill.
+ *
+ * Plain JavaScript cannot import the server's TypeScript, so this is a copy of
+ * `INDEX_CONFIG_KEYS` (`packages/server/src/config/indexConfigSchema.ts`), and
+ * `clean-room.test.ts` holds the two equal.
+ */
+export const BOOTSTRAP_ENVIRONMENT_KEYS = Object.freeze([
+  'NODE_ENV',
+  'MONGODB_URI',
+  'MONGO_MAX_POOL_SIZE',
+  'MONGO_MIN_POOL_SIZE',
+  'BACKUP_RETENTION_DAYS',
+  'AUDIT_LOG_RETENTION_DAYS',
+  'BREACH_CACHE_TTL_DAYS',
+]);
+
+/**
+ * Judges the environment the index bootstrap actually ran with
+ * (`docker inspect`'s `Config.Env` of the exited container): exactly the index
+ * keys plus whatever its image bakes in (`PATH`, `NODE_VERSION`, ...), and no
+ * secret's value anywhere in it. Problems name keys and secrets, never values.
+ *
+ * @param {string[]} containerEnv  `KEY=VALUE` entries of the container
+ * @param {string[]} imageEnv      `KEY=VALUE` entries the image itself declares
+ * @param {{name: string, value: string}[]} secrets  values that must not appear
+ * @returns {string[]}
+ */
+export function bootstrapEnvironmentProblems(containerEnv, imageEnv, secrets) {
+  const keyOf = (entry) => String(entry).split('=', 1)[0];
+  const imageKeys = new Set(imageEnv.map(keyOf));
+  const keys = containerEnv.map(keyOf);
+  const problems = [];
+  if (keys.length === 0) problems.push('the bootstrap container reported no environment at all');
+  for (const key of BOOTSTRAP_ENVIRONMENT_KEYS) {
+    if (!keys.includes(key)) problems.push(`the bootstrap was not given ${key}`);
+  }
+  for (const key of keys) {
+    if (!BOOTSTRAP_ENVIRONMENT_KEYS.includes(key) && !imageKeys.has(key)) {
+      problems.push(`the bootstrap was given ${key}, which it does not read`);
+    }
+  }
+  for (const { name, value } of secrets) {
+    if (typeof value !== 'string' || value.length < 16) {
+      throw new Error(`the secret ${name} is too short to search an environment for`);
+    }
+    if (containerEnv.some((entry) => String(entry).includes(value))) {
+      problems.push(`${name} reached the bootstrap's environment`);
+    }
+  }
+  return problems;
 }

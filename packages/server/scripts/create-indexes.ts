@@ -8,22 +8,28 @@
  * Usage:
  *   npx tsx packages/server/scripts/create-indexes.ts
  *
- * Requires MONGODB_URI environment variable (or .env file).
+ * Reads only the secret-free index configuration (`src/config/indexConfig.ts`):
+ * MONGODB_URI, the pool sizes, the three retention settings and NODE_ENV, from
+ * the environment or the root .env. It must never import the application
+ * configuration (`src/config/index.ts`), which refuses to load without every
+ * application secret: the Docker stack's `hvault-bootstrap` one-shot runs this
+ * script with exactly those keys and nothing else (F-20; held by
+ * tests/index-config.test.ts and tests/create-indexes-boot.test.ts).
  */
 
 import mongoose from 'mongoose';
-import { config } from '../src/config/index.js';
+import { indexConfig } from '../src/config/indexConfig.js';
 // The model list lives in indexedModels.ts so it can be asserted by a drift
 // test — guaranteeing every model with declared indexes is created here.
 import { indexedModels } from './indexedModels.js';
 import { createIndexesWithCurrentRetention } from '../src/utils/ttlIndexReconcile.js';
 
 async function createIndexes(): Promise<void> {
-  console.log(`Connecting to MongoDB: ${config.MONGODB_URI.replace(/\/\/[^@]+@/, '//***@')}`);
+  console.log(`Connecting to MongoDB: ${indexConfig.MONGODB_URI.replace(/\/\/[^@]+@/, '//***@')}`);
 
-  await mongoose.connect(config.MONGODB_URI, {
-    maxPoolSize: config.MONGO_MAX_POOL_SIZE,
-    minPoolSize: config.MONGO_MIN_POOL_SIZE,
+  await mongoose.connect(indexConfig.MONGODB_URI, {
+    maxPoolSize: indexConfig.MONGO_MAX_POOL_SIZE,
+    minPoolSize: indexConfig.MONGO_MIN_POOL_SIZE,
     serverSelectionTimeoutMS: 10000,
   });
 

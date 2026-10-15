@@ -233,7 +233,7 @@ because the obvious way past each of them is the wrong one.
 - **The duplication ceiling in `.jscpd.json` is the measured value and only ever falls.**
   `.testfortress/baseline.json` records the same number with a lower-is-better direction,
   so raising the ceiling to make room for a new clone fails the `ratchet-full` gate.
-- **`config`** lints the release workflow (`actionlint`), both Dockerfiles (`hadolint`) and
+- **`config`** lints the release workflow (`actionlint`), the three Dockerfiles (`hadolint`) and
   the OpenAPI document that `packages/server/src/config/swagger.ts` builds (`spectral`). It
   fails on error-level findings; everything below that is counted into
   `warnings.audit:config` in the baseline, where it can be paid down and cannot grow. It

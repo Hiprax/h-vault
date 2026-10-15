@@ -1,6 +1,6 @@
 import mongoose, { Schema, type Model, type Types } from 'mongoose';
 import { HIBP_MAX_RANGE_RESPONSE_BYTES } from '../constants/index.js';
-import { config } from '../config/index.js';
+import { indexConfig } from '../config/indexConfig.js';
 
 /**
  * Provenance of a cached range.
@@ -99,7 +99,8 @@ export const ON_DEMAND_RANGE_RETENTION_WINDOWS = 4;
 pwnedRangeCacheSchema.index(
   { fetchedAt: 1 },
   {
-    expireAfterSeconds: config.BREACH_CACHE_TTL_DAYS * ON_DEMAND_RANGE_RETENTION_WINDOWS * 86_400,
+    expireAfterSeconds:
+      indexConfig.BREACH_CACHE_TTL_DAYS * ON_DEMAND_RANGE_RETENTION_WINDOWS * 86_400,
     partialFilterExpression: { source: 'hibp' },
   },
 );

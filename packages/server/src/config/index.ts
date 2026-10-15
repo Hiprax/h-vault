@@ -1,9 +1,5 @@
-import { fileURLToPath } from 'node:url';
-import path from 'node:path';
-import fs from 'node:fs';
 import { X509Certificate } from 'node:crypto';
 import net from 'node:net';
-import dotenv from 'dotenv';
 import { z } from 'zod';
 import {
   DOCUMENT_CIPHERTEXT_CHUNK_BYTES,
@@ -19,32 +15,16 @@ import {
   MAX_UPDATE_NOTIFY_EMAILS,
 } from '../constants/index.js';
 import { createModuleLogger } from '../utils/logger.js';
-
-// Resolve .env from the monorepo root (4 levels up from packages/server/src/config/).
-// When using npm workspaces, process.cwd() points to the package directory, not the
-// monorepo root. This caused dotenv to load packages/server/.env (test config with
-// empty SMTP values) instead of the root .env (actual user config).
-const configDir = path.dirname(fileURLToPath(import.meta.url));
-const rootDir = path.resolve(configDir, '..', '..', '..', '..');
-const rootEnvPath = path.join(rootDir, '.env');
-
-// Every option that decides WHAT is loaded, pinned. dotenv also reads its options
-// from `DOTENV_*` (and `DOTENV_CONFIG_*`) environment variables on every
-// `config()` call, with the options passed here taking precedence, so anything
-// left unpinned is something an ambient variable can change. `override: false` is
-// the load-bearing one: a variable the environment already holds must win over
-// the file (the server suite's pinned `test.env` beats a developer's root .env
-// only because of it, the E2E harness points storage at its own engine that way,
-// and a process-manager or shell export is expected to beat the file). The encoding and
-// the parser are pinned so the file is read the one way it has always been read.
-const DOTENV_LOAD_OPTIONS = { override: false, encoding: 'utf8', fast: false } as const;
-
-// The root .env when there is one, else the one in CWD (a standalone deployment
-// without .env at the monorepo root, e.g. inside a Docker container). The
-// fallback is named explicitly rather than left to dotenv's default, which
-// `DOTENV_PATH` would otherwise redirect.
-const envPath = fs.existsSync(rootEnvPath) ? rootEnvPath : path.resolve(process.cwd(), '.env');
-dotenv.config({ ...DOTENV_LOAD_OPTIONS, path: envPath });
+// The `.env` load (once per process, shared with the index bootstrap's
+// configuration) and the secret-free keys that configuration declares, composed
+// into the schema below so both read them identically.
+import './envFile.js';
+import {
+  INDEX_CONFIG_SHAPE,
+  POOL_SIZE_ORDER_ISSUE,
+  invalidEnvironmentConfiguration,
+  poolSizesAreOrdered,
+} from './indexConfigSchema.js';
 
 // NOTE: previously this used `dotenv-safe` to enforce the presence of
 // `.env.example` keys at boot. That guard is now redundant: the Zod schema
@@ -212,7 +192,10 @@ const envSchema = z
         })
         .default('127.0.0.1'),
     ),
-    NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
+    // NODE_ENV, the database connection and pool, and the three retention
+    // settings: declared once in `indexConfigSchema.ts`, the secret-free subset the
+    // index bootstrap reads (F-20).
+    ...INDEX_CONFIG_SHAPE,
 
     // How long the server will spend RECEIVING one request, and how long it will
     // spend on that request's headers alone. Both are applied to the HTTP server
@@ -258,11 +241,6 @@ const envSchema = z
       .min(5_000)
       .max(600_000)
       .default(DEFAULT_DOCUMENT_PART_BODY_TIMEOUT_MS),
-
-    // Database
-    MONGODB_URI: z.string().min(1).default('mongodb://localhost:27017/hvault'),
-    MONGO_MAX_POOL_SIZE: z.coerce.number().int().min(1).max(100).default(10),
-    MONGO_MIN_POOL_SIZE: z.coerce.number().int().min(0).max(50).default(2),
 
     // JWT
     JWT_ACCESS_SECRET: z
@@ -402,7 +380,6 @@ const envSchema = z
 
     // Backup
     BACKUP_MAX_SIZE_MB: z.coerce.number().int().min(1).max(100).default(25),
-    BACKUP_RETENTION_DAYS: z.coerce.number().int().min(1).max(365).default(30),
 
     // Export
     EXPORT_MAX_SIZE_MB: z.coerce.number().int().min(1).max(100).default(25),
@@ -531,16 +508,8 @@ const envSchema = z
         return kept;
       }),
 
-    // Audit
-    AUDIT_LOG_RETENTION_DAYS: z.coerce.number().int().min(1).max(3650).default(365),
-
-    // Breach range cache (persistent, cross-account HIBP range cache)
-    // On-demand (`source: 'hibp'`) entries are re-fetched once older than this
-    // many days; seed-imported entries are exempt (refreshed by re-running the
-    // seed). The HIBP corpus is additive, so a stale entry can only miss a very
-    // recently added breach, never wrongly clear a known one — set 7 for a
-    // stricter freshness posture.
-    BREACH_CACHE_TTL_DAYS: z.coerce.number().int().min(1).max(365).default(30),
+    // Breach range cache (persistent, cross-account HIBP range cache):
+    // BREACH_CACHE_TTL_DAYS is in `indexConfigSchema.ts`.
     // When true, the refresh cron below fetches missing/stale ranges from HIBP
     // (tens of GB over a full corpus). Off by default.
     BREACH_SEED_AUTO: z
@@ -702,12 +671,7 @@ const envSchema = z
         },
       ),
   })
-  .refine((data) => data.MONGO_MIN_POOL_SIZE <= data.MONGO_MAX_POOL_SIZE, {
-    // An inverted pool config (min > max) otherwise passes per-field validation
-    // and only fails at MongoDB connect time, masked behind the retry loop.
-    message: 'MONGO_MIN_POOL_SIZE cannot be greater than MONGO_MAX_POOL_SIZE',
-    path: ['MONGO_MIN_POOL_SIZE'],
-  })
+  .refine(poolSizesAreOrdered, POOL_SIZE_ORDER_ISSUE)
   .refine((data) => data.HTTP_HEADERS_TIMEOUT_MS <= data.HTTP_REQUEST_TIMEOUT_MS, {
     // NOT a tidiness rule. Node SWAPS the two when the headers timeout is the
     // larger (`ConnectionsList::Expired` does it in C++, silently), so a
@@ -780,12 +744,7 @@ type EnvConfig = z.infer<typeof envSchema>;
 function loadConfig(): EnvConfig {
   const result = envSchema.safeParse(process.env);
 
-  if (!result.success) {
-    const formatted = result.error.issues
-      .map((issue) => `  ${issue.path.join('.')}: ${issue.message}`)
-      .join('\n');
-    throw new Error(`Invalid environment configuration:\n${formatted}`);
-  }
+  if (!result.success) throw invalidEnvironmentConfiguration(result.error.issues);
 
   const data = result.data;
 

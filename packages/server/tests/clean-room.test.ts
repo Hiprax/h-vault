@@ -26,7 +26,12 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  ARGV_SAMPLE_SECONDS,
+  BOOTSTRAP_ENVIRONMENT_KEYS,
   SERVICE_EXPECTATIONS,
+  argvCredentialProblems,
+  argvSamplerScript,
+  bootstrapEnvironmentProblems,
   hostBindingOf,
   isLoopbackBinding,
   parseComposePs,
@@ -317,7 +322,7 @@ describe('the throwaway deployment configuration', () => {
     }
   });
 
-  it('gives both configured services the absolute path to the env file', () => {
+  it('gives the app, and only the app, the absolute path to the env file', () => {
     // The EXACT document, not three substrings. The override used to be JSON,
     // which validated itself — a malformed emission threw in `JSON.parse`. YAML
     // does not: with `- path:` indented to the wrong column every `toContain`
@@ -328,12 +333,12 @@ describe('the throwaway deployment configuration', () => {
         '  hvault-app:\n' +
         '    env_file: !override\n' +
         '      - path: "/tmp/drill/drill.env"\n' +
-        '        required: true\n' +
-        '  hvault-bootstrap:\n' +
-        '    env_file: !override\n' +
-        '      - path: "/tmp/drill/drill.env"\n' +
         '        required: true\n',
     );
+    // NOT the index bootstrap (F-20): it is given no env file in production, and
+    // handing it the throwaway secrets here would hide that regression from the
+    // drill's own check of the environment it ran with.
+    expect(renderOverride('/tmp/drill/drill.env')).not.toContain('hvault-bootstrap');
   });
 
   it('REPLACES the base env_file list rather than extending it', () => {
@@ -344,8 +349,8 @@ describe('the throwaway deployment configuration', () => {
     // the containers. A clean room that inherits the desk it runs on is measuring
     // something other than "this stack comes up from nothing".
     const override = renderOverride('/tmp/drill/drill.env');
-    expect(override.match(/env_file:/g)).toHaveLength(2);
-    expect(override.match(/env_file: !override/g)).toHaveLength(2);
+    expect(override.match(/env_file:/g)).toHaveLength(1);
+    expect(override.match(/env_file: !override/g)).toHaveLength(1);
   });
 
   it('keeps a Windows path intact through the YAML it emits', () => {
@@ -362,6 +367,167 @@ describe('the throwaway deployment configuration', () => {
     // quietly resolve inside the repository.
     expect(() => renderOverride('drill.env')).toThrow(/must be absolute/);
     expect(() => renderOverride('./tmp/drill.env')).toThrow(/must be absolute/);
+  });
+});
+
+describe('no credential on a command line in the database container (F-18)', () => {
+  const ROOT = 'a1'.repeat(32);
+  const APP = 'b2'.repeat(32);
+  const secrets = [
+    { name: 'MONGO_ROOT_PASSWORD', value: ROOT },
+    { name: 'MONGO_APP_PASSWORD', value: APP },
+  ];
+  /** What the sampler printed against the fixed probe (shape measured in a clean room). */
+  const fixedSample = [
+    "/bin/sh -c mongosh --quiet --eval '",
+    '  try { db.getSiblingDB("admin").auth(process.env.MONGO_INITDB_ROOT_USERNAME, process.env.MONGO_INITDB_ROOT_PASSWORD) }',
+    'mongosh --quiet --eval ',
+    'mongosh mongodb://127.0.0.1:27017/?directConnection=true&serverSelectionTimeoutMS=2000',
+    'mongosh --quiet --eval ',
+  ].join('\n');
+
+  const NOT_SEEN =
+    'no mongosh command line as started (with --eval) was seen in the sample, so it proves nothing about the healthcheck';
+
+  it('passes a sample that saw the probe start and no secret value, counting distinct command lines', () => {
+    // The retitled `mongosh mongodb://…` line is not counted: only the command
+    // line as started (with `--eval`) shows the window the leak was in.
+    expect(argvCredentialProblems(fixedSample, secrets)).toEqual({ problems: [], observed: 1 });
+  });
+
+  it('refuses a sample that saw mongosh only after it retitled itself', () => {
+    const retitledOnly =
+      'mongosh mongodb://127.0.0.1:27017/?directConnection=true&serverSelectionTimeoutMS=2000';
+    expect(argvCredentialProblems(retitledOnly, secrets)).toEqual({
+      problems: [NOT_SEEN],
+      observed: 0,
+    });
+  });
+
+  it('names the secret whose value was on a command line, and never prints the value', () => {
+    // The shape the old probe produced: the shell expanded the password into
+    // mongosh's argv before mongosh retitled itself.
+    const leaked = `${fixedSample}\nmongosh --quiet -u hvault -p ${ROOT} --authenticationDatabase admin --eval `;
+    const verdict = argvCredentialProblems(leaked, secrets);
+    expect(verdict.problems).toEqual([
+      "MONGO_ROOT_PASSWORD appeared in a process's command line, readable by every account on the host",
+    ]);
+    expect(JSON.stringify(verdict)).not.toContain(ROOT);
+    // A value anywhere in a line counts, not only as its own token.
+    expect(
+      argvCredentialProblems(`mongosh --quiet --eval x\nfoo --uri=mongodb://u:${APP}@h/`, secrets)
+        .problems,
+    ).toEqual([
+      "MONGO_APP_PASSWORD appeared in a process's command line, readable by every account on the host",
+    ]);
+  });
+
+  it('refuses a sample that never saw the probe, rather than passing it by vacuity', () => {
+    for (const empty of ['', '\n\n', '/bin/sh -c sleep 1', undefined]) {
+      expect(argvCredentialProblems(empty as string, secrets)).toEqual({
+        problems: [NOT_SEEN],
+        observed: 0,
+      });
+    }
+  });
+
+  it('refuses a secret too short to search for', () => {
+    expect(() =>
+      argvCredentialProblems(fixedSample, [{ name: 'X', value: 'f'.repeat(15) }]),
+    ).toThrow(/X is too short/);
+    expect(() => argvCredentialProblems(fixedSample, [{ name: 'Y', value: '' }])).toThrow(
+      /Y is too short/,
+    );
+    expect(
+      argvCredentialProblems(fixedSample, [{ name: 'Z', value: 'f'.repeat(16) }]).problems,
+    ).toEqual([]);
+  });
+
+  it('samples long enough to see two healthcheck runs, with a pattern that cannot match itself', () => {
+    // The db healthcheck runs every 10 s.
+    expect(ARGV_SAMPLE_SECONDS).toBeGreaterThanOrEqual(20);
+    const script = argvSamplerScript();
+    expect(script).toContain(`SECONDS+${String(ARGV_SAMPLE_SECONDS)}`);
+    expect(script).toContain('/proc/[0-9]*/cmdline');
+    expect(script).toContain('*mongo[s]h*');
+    // The sampler's own command line carries the script; if it named mongosh it
+    // would report itself as a probe and the vacuity check would mean nothing.
+    expect(script).not.toContain('mongosh');
+    // It reads argv only, never another process's environment.
+    expect(script).not.toContain('environ');
+    expect(argvSamplerScript(3)).toContain('SECONDS+3)');
+    expect(argvSamplerScript(1)).toContain('SECONDS+1)');
+    expect(argvSamplerScript(120)).toContain('SECONDS+120)');
+    for (const bad of [0, 121, 1.5, Number.NaN]) {
+      expect(() => argvSamplerScript(bad)).toThrow(/1\.\.120/);
+    }
+  });
+});
+
+describe('the index bootstrap ran with the index keys and no secret (F-20)', () => {
+  const ROOT = 'c3'.repeat(32);
+  const JWT = 'd4'.repeat(32);
+  const secrets = [
+    { name: 'MONGO_ROOT_PASSWORD', value: ROOT },
+    { name: 'JWT_ACCESS_SECRET', value: JWT },
+  ];
+  const imageEnv = [
+    'PATH=/usr/local/bin:/usr/bin:/bin',
+    'NODE_VERSION=24.0.0',
+    'NODE_ENV=production',
+  ];
+  const indexEnv = [
+    'NODE_ENV=production',
+    'MONGODB_URI=mongodb://hvault_app:e5e5e5e5e5e5e5e5e5e5@hvault-db:27017/hvault?replicaSet=rs0',
+    'MONGO_MAX_POOL_SIZE=10',
+    'MONGO_MIN_POOL_SIZE=2',
+    'AUDIT_LOG_RETENTION_DAYS=365',
+    'BACKUP_RETENTION_DAYS=30',
+    'BREACH_CACHE_TTL_DAYS=30',
+  ];
+
+  it('restates exactly the keys the server declares for the bootstrap', async () => {
+    const { INDEX_CONFIG_KEYS } = await import('../src/config/indexConfigSchema.js');
+    expect([...BOOTSTRAP_ENVIRONMENT_KEYS].sort()).toEqual([...INDEX_CONFIG_KEYS].sort());
+  });
+
+  it('passes the index keys plus what the image itself declares', () => {
+    expect(
+      bootstrapEnvironmentProblems([...indexEnv, ...imageEnv.slice(0, 2)], imageEnv, secrets),
+    ).toEqual([]);
+  });
+
+  it('names a key the bootstrap does not read, as the whole .env would bring', () => {
+    const problems = bootstrapEnvironmentProblems(
+      [...indexEnv, `JWT_ACCESS_SECRET=${JWT}`, 'SMTP_HOST=smtp.example.test'],
+      imageEnv,
+      secrets,
+    );
+    expect(problems).toEqual([
+      'the bootstrap was given JWT_ACCESS_SECRET, which it does not read',
+      'the bootstrap was given SMTP_HOST, which it does not read',
+      "JWT_ACCESS_SECRET reached the bootstrap's environment",
+    ]);
+    expect(JSON.stringify(problems)).not.toContain(JWT);
+  });
+
+  it('finds a secret value under any key, and a missing index key', () => {
+    const renamed = indexEnv
+      .filter((entry) => !entry.startsWith('BREACH_CACHE_TTL_DAYS='))
+      .concat(`NODE_VERSION=${ROOT}`);
+    expect(bootstrapEnvironmentProblems(renamed, imageEnv, secrets)).toEqual([
+      'the bootstrap was not given BREACH_CACHE_TTL_DAYS',
+      "MONGO_ROOT_PASSWORD reached the bootstrap's environment",
+    ]);
+  });
+
+  it('refuses an empty environment, and a secret too short to search for', () => {
+    expect(bootstrapEnvironmentProblems([], imageEnv, secrets)).toContain(
+      'the bootstrap container reported no environment at all',
+    );
+    expect(() =>
+      bootstrapEnvironmentProblems(indexEnv, imageEnv, [{ name: 'X', value: 'short' }]),
+    ).toThrow(/X is too short/);
   });
 });
 

@@ -1469,10 +1469,18 @@ devices via clipboard sync. H-Vault reduces the exposure window but cannot elimi
   never as proven.
 - Every container sets `no-new-privileges` and drops all Linux capabilities, and every
   one but the database runs on a read-only root filesystem; the application, Nginx and
-  bootstrap images run as a numeric non-root user. The database container is the exception,
-  because its entrypoint starts as root to fix volume ownership, adds back exactly five
-  capabilities and keeps a writable root filesystem. The Compose stack publishes exactly one
+  bootstrap images run as a numeric non-root user. The object storage engine runs as root inside
+  its container (an accepted residual, see "The object storage service" below), and so does the
+  short-lived database-user provisioning one-shot. The database container is the exception to
+  the capability and read-only rules: its entrypoint starts as root to fix volume ownership, adds
+  back exactly five capabilities and keeps a writable root filesystem. The Compose stack publishes exactly one
   loopback-bound port; the database has no published port and no route to the internet.
+- Secrets reach only the containers that use them. The application gets the root `.env`; the
+  index-building one-shot, which runs the stack's largest image (its whole development toolchain),
+  gets only the database URI, the pool sizes, the three retention settings and the mode, never a
+  JWT, session, 2FA, mail or storage secret; and the database root credential exists only in the
+  database and its user-provisioning one-shot. A test holds the one-shot's settings to exactly the
+  keys it reads, and the deployment drill checks the environment it actually ran with.
 - Secrets are validated at boot: the app refuses to start in production with a
   placeholder secret, a non-HTTPS origin, or a partial mail configuration.
 - Dependency install scripts are reviewed rather than trusted by default: the root
@@ -1509,6 +1517,34 @@ put an instance in front of real data — in particular: set a dedicated
 to `127.0.0.1`. If the server must make no request to a third party it was not asked to,
 set `UPDATE_CHECK_ENABLED=false`; the release check is then off, and the app says so.
 
+### The database's root credential
+
+The root password reaches two containers through their environment: the database, and the
+one-shot that provisions the application's own database user. A command line
+(`/proc/<pid>/cmdline`) can be read by every account on the Docker host under the default
+`hidepid=0`, while a process's environment can be read only by the account that owns it. So the
+database healthcheck reads the password from its environment and signs in from inside its script,
+and the README's backup, restore and rotation commands do the same. A test fails if any service's
+healthcheck, entrypoint or command expands a password or secret, or if a documented command
+passes one as an argument; and once the stack is up, the deployment drill watches the command
+lines of the database container's `mongosh` processes across two healthcheck runs for every
+secret it generated.
+
+One exposure is outside this repository's control. On the **first** start against an empty data
+volume, the official MongoDB image's initialisation passes the root user name and password to its
+`jq` helper as arguments, for a few milliseconds, while it creates the root user; later starts skip
+that step. Nothing this repository runs or documents does so otherwise.
+
+Releases up to and including 0.15.x passed the password to `mongosh` as `-p` in that healthcheck,
+every ten seconds, and the README's earlier command for rotating `MONGO_APP_PASSWORD` put the new
+application password on the command line once. **If other people have accounts on your Docker
+host, rotate `MONGO_ROOT_PASSWORD`** (and `MONGO_APP_PASSWORD`, if you rotated it with that earlier
+command): inside the database first, then in `.env`, then `docker compose up -d --wait` (the
+README's "Rotating secrets" table has the exact commands, which keep the new value off the command
+line). Changing `.env` alone does not rotate it: the database creates the root user only on its
+first start, so the healthcheck would then fail to sign in and the stack would not come up. On a
+host where only you and the Docker daemon's account log in, rotating it is optional.
+
 ### The object storage service
 
 The bundled Docker stack runs an S3-compatible storage service for the document store. Three
@@ -1532,3 +1568,21 @@ The service holds nothing but ciphertext: documents are sealed in the browser un
 server never sees, so it holds no filename, no MIME type, no tag, no note and no content. That
 is what makes it safe for it to be a separate service at all — but it is also why its volume,
 and only its volume, holds your users' files. See the backup boundary above.
+
+**It runs as root inside its container: an accepted residual.** The engine's image declares no
+user, so in the default stack its process runs as root inside its container. That is bounded. The
+test suite holds these parts of the bound: it sits on the internal network only, with no published
+port; every capability is dropped and `no-new-privileges` is set; and it has a read-only root
+filesystem. The remaining part is the document store's design rather than the stack's: it holds
+nothing but ciphertext, sealed in the browser. Within the internal network it can still connect to the
+database and the application like any process there, so a compromise of it is a foothold on that
+network; using its root on the host would take a container-runtime escape, and where Docker runs
+rootless, the container's root is an unprivileged account on the host. It is not closed by
+default because the volumes an existing deployment's engine wrote are owned by root, and an engine
+started as another user on them refuses to start (a crash loop under the restart policy; measured
+against the pinned image). An operator who wants it closed can switch to the optional non-root
+image, `docker/garage.Dockerfile` (the same pinned image plus a numeric non-root user), with a
+one-shot that first hands both volumes to that user; the compose wiring for both is shipped
+commented out in `docker-compose.yml`, with the instructions, and was validated against a fresh
+volume and against one the stock image had filled. Going back to the stock image needs the volumes
+handed back to root first; the same comment gives that command.

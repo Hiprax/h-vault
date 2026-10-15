@@ -75,22 +75,29 @@ describe('Server Config Validation', () => {
       const fs = (await import('node:fs')).default;
       const rootEnvPath = path.join(repoRoot, '.env');
       const realExistsSync = fs.existsSync.bind(fs);
-      vi.spyOn(fs, 'existsSync').mockImplementation((candidate) =>
-        candidate === rootEnvPath ? rootExists : realExistsSync(candidate),
-      );
+      const existsSync = vi
+        .spyOn(fs, 'existsSync')
+        .mockImplementation((candidate) =>
+          candidate === rootEnvPath ? rootExists : realExistsSync(candidate),
+        );
       // The hoisted mock outlives `vi.resetModules()`, so earlier loads in this
       // file have already called it: count only this load.
       const config = vi.mocked((await import('dotenv')).default.config);
       config.mockClear();
       await loadConfigWithEnv();
-      return { rootEnvPath, config };
+      return { rootEnvPath, config, existsSync };
     }
 
     it('reads the root .env, once, with every option that decides what is loaded pinned', async () => {
-      const { rootEnvPath, config } = await loadWithRootEnv(true);
+      const { rootEnvPath, config, existsSync } = await loadWithRootEnv(true);
 
       expect(config).toHaveBeenCalledTimes(1);
       expect(config).toHaveBeenCalledWith({ ...PINNED, path: rootEnvPath });
+      // The root it looks for is the repository root, four levels above
+      // `src/config/`, checked by its own path. Asserted directly, because where the
+      // working directory IS the repository root (the mutation runner's workers)
+      // a wrong root still ends at the same file through the fallback.
+      expect(existsSync).toHaveBeenCalledWith(rootEnvPath);
     });
 
     it('falls back to the working directory .env, named explicitly, with the same pins', async () => {
@@ -1391,6 +1398,21 @@ describe('Server Config Validation', () => {
       await expect(loadConfigWithEnv({ AUDIT_LOG_RETENTION_DAYS: '4000' })).rejects.toThrow(
         /Invalid environment configuration/,
       );
+    });
+
+    it('lists an index-key issue together with every other one, in one refusal', async () => {
+      // The index keys (config/indexConfigSchema.ts) are composed into this schema
+      // and parsed with the rest; the application must not validate them first on
+      // their own and hide the other problems until the next boot (F-20).
+      const attempt = loadConfigWithEnv({
+        BACKUP_RETENTION_DAYS: '400',
+        BCRYPT_ROUNDS: '2',
+        JWT_ACCESS_SECRET: 'short',
+      });
+      await expect(attempt).rejects.toThrow(/^Invalid environment configuration:\n/);
+      await expect(attempt).rejects.toThrow(/\n {2}BACKUP_RETENTION_DAYS: /);
+      await expect(attempt).rejects.toThrow(/\n {2}BCRYPT_ROUNDS: /);
+      await expect(attempt).rejects.toThrow(/\n {2}JWT_ACCESS_SECRET: /);
     });
 
     it('HIBP_CACHE_MAX_BYTES below the 1 MiB floor is rejected', async () => {

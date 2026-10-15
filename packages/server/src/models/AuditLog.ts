@@ -1,7 +1,7 @@
 import mongoose, { Schema, type Model, type Types } from 'mongoose';
 import { AUDIT_ACTIONS } from '@hvault/shared';
 import type { AuditAction } from '@hvault/shared';
-import { config } from '../config/index.js';
+import { indexConfig } from '../config/indexConfig.js';
 
 // ----- Interface -----
 
@@ -96,7 +96,7 @@ auditLogSchema.index(
 );
 auditLogSchema.index(
   { timestamp: 1 },
-  { expireAfterSeconds: config.AUDIT_LOG_RETENTION_DAYS * 24 * 60 * 60 },
+  { expireAfterSeconds: indexConfig.AUDIT_LOG_RETENTION_DAYS * 24 * 60 * 60 },
 );
 
 // ----- Model -----

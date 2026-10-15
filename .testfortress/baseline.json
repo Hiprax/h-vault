@@ -1,9 +1,9 @@
 {
   "version": 1,
   "recordedAt": "2026-10-15",
-  "commit": "f3a1bf7",
+  "commit": "3d7cf38",
   "tests": {
-    "count": 13250
+    "count": 13286
   },
   "coverage": {
     "diff": 100
@@ -59,8 +59,8 @@
         "line": 99.38,
         "branch": 94.59,
         "function": 98.94,
-        "linesTotal": 6406,
-        "branchesTotal": 3509,
+        "linesTotal": 6413,
+        "branchesTotal": 3511,
         "filesMeasured": [
           "src/app.ts",
           "src/cli/invite.ts",
@@ -68,7 +68,10 @@
           "src/cli/seedBreachesArgs.ts",
           "src/config/clientArtifacts.ts",
           "src/config/database.ts",
+          "src/config/envFile.ts",
           "src/config/index.ts",
+          "src/config/indexConfig.ts",
+          "src/config/indexConfigSchema.ts",
           "src/config/permissionsPolicy.ts",
           "src/config/sandboxCsp.ts",
           "src/config/swagger.ts",
@@ -187,7 +190,7 @@
         ]
       },
       "tests": {
-        "count": 5719
+        "count": 5755
       }
     },
     "packages/client": {
@@ -607,7 +610,7 @@
     ]
   },
   "duplication": {
-    "percentage": 1,
+    "percentage": 0.99,
     "clones": 93,
     "duplicatedLines": 1047,
     "totalLines": 52849,
@@ -639,11 +642,11 @@
     },
     "inputsExamined": {
       "actionlint": 1,
-      "hadolint": 2,
+      "hadolint": 3,
       "spectral": 1
     }
   },
-  "reason": "Phase 12 (F-15/F-16/F-17): new regression suites for atomic row caps, reuse auditing and bounded logs; measured by npm run ci, 31/31 green",
+  "reason": "Phase 13 deployment-hardening (F-18/F-19/F-20): new suites index-config + create-indexes-boot and added docker-hardening/clean-room/config tests (tests 13250->13286, server 5719->5755); new measured modules config/envFile.ts, indexConfig.ts, indexConfigSchema.ts (server linesTotal 6406->6413, branchesTotal 3509->3511, filesMeasured 122->125); the shared formatter lowered duplication 1 -> 0.99; hadolint now also lints the optional docker/garage.Dockerfile (inputsExamined 2->3). npm run ci #2 green, 31/31.",
   "bundle": {
     "budgetKb": {
       "VaultItemForm": 230,

@@ -235,12 +235,16 @@ RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
       /app/node_modules/.bin/tsc /app/node_modules/.bin/tsc6 /app/node_modules/.bin/tsserver
 
 # The log directory MUST exist and be owned by `node` before the drop to that user.
-# This is the difference between a stack that comes up on a fresh clone and one
-# that does not:
+# This was the difference between a stack that comes up on a fresh clone and one
+# that does not, and it is kept although the script no longer opens a log file:
 #   * `npm run <script> -w packages/server` runs with cwd = /app/packages/server
 #     (the script is `tsx scripts/create-indexes.ts`, a relative path that only
 #     resolves from there);
-#   * the script imports src/config, which calls createLogger() at MODULE SCOPE;
+#   * the script used to import src/config, which calls createLogger() at MODULE
+#     SCOPE. It now reads only src/config/indexConfig.ts, which loads no logger
+#     (F-20: the one-shot is given no secret, so it cannot load the application
+#     configuration), but any later import that reaches the logger brings the
+#     next point back;
 #   * @hiprax/logger eagerly mkdirs `<cwd>/logs` and THROWS if it cannot;
 #   * /app/packages/server was created by COPY as root (0755), so uid 1000 cannot
 #     create anything inside it -> EACCES -> the bootstrap exits non-zero -> the
