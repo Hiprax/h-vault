@@ -126,7 +126,6 @@ vi.mock('../src/services/crypto/cryptoService', () => ({
     decryptData: vi.fn(),
     decryptDataWithAad: vi.fn(),
     vaultKeyEqualsRaw: vi.fn(),
-    generateSearchHash: vi.fn(),
     clearKey: vi.fn(),
     clearCryptoKey: vi.fn(),
     rotateVaultKey: vi.fn(),
@@ -515,7 +514,6 @@ function installCryptoStubs() {
       key === OLD_VAULT_KEY && raw === `raw:${HELD_WRAPPER.encryptedVaultKey}:under:mek`,
     ),
   );
-  cs.generateSearchHash.mockImplementation((name: string) => Promise.resolve(`sh:${name}`));
   cs.rotateVaultKey.mockResolvedValue({
     newVaultKey: NEW_VAULT_KEY,
     encrypted: 'newEnc',
@@ -1653,7 +1651,6 @@ describe('SettingsPage — error paths and branches', () => {
       encryptedData: 'enc:plain:i1-data',
       dataIv: 'v2:iv:new-vault-key',
       dataTag: boundTag('new-vault-key', dataAad('login', i1)),
-      searchHash: 'sh:plain:i1-name',
       passwordHistory: [
         {
           encryptedPassword: 'enc:plain:i1-pw',
@@ -1912,12 +1909,12 @@ describe('SettingsPage — error paths and branches', () => {
     });
   });
 
-  it('carries a skipped row’s search hash and password history across untouched, and counts several skips by kind', async () => {
+  it('carries a skipped row’s password history across untouched, sends no name hash, and counts several skips by kind', async () => {
     // Two rows, in two different legs, so the report has to name each kind rather
-    // than pluralise one count — and the item carries the two OPTIONAL fields a
-    // pass-through must not drop: its search hash (an HMAC of a name nothing can
-    // read, so there is no plaintext to recompute it from) and its password
-    // history (ciphertext under the same superseded key).
+    // than pluralise one count — and the item carries the OPTIONAL field a
+    // pass-through must not drop, its password history (ciphertext under the same
+    // superseded key). It also carries the name hash an older server returned,
+    // which a pass-through must NOT carry on (F-12; this used to pin carrying it).
     const poisoned = {
       ...vaultItem('bad', true),
       searchHash: 'a'.repeat(64),
@@ -1954,11 +1951,9 @@ describe('SettingsPage — error paths and branches', () => {
       encryptedData: 'bad-data',
       dataIv: 'bad-dataIv',
       dataTag: 'bad-dataTag',
-      searchHash: 'a'.repeat(64),
       passwordHistory: poisoned.passwordHistory,
     });
-    // Neither optional field was re-encrypted on the way through.
-    expect(cs.generateSearchHash).not.toHaveBeenCalledWith(expect.stringContaining('bad'), MEK);
+    // The optional field was not re-encrypted on the way through.
     expect(cs.encryptDataWithAad).not.toHaveBeenCalledWith(
       'plain:bad-pw',
       expect.anything(),
@@ -2965,7 +2960,6 @@ describe('SettingsPage — error paths and branches', () => {
       encryptedData: 'enc:plain:i1-data',
       dataIv: 'v2:iv:old-vault-key',
       dataTag: boundTag('old-vault-key', dataAad('login', i1)),
-      searchHash: 'sh:plain:i1-name',
       passwordHistory: [
         {
           encryptedPassword: 'enc:plain:i1-pw',
@@ -3479,10 +3473,10 @@ describe('SettingsPage — error paths and branches', () => {
     expect(payload.operations.inserts).toHaveLength(1);
     expect(payload.operations.updates).toEqual([]);
     // Client-side encryption ran (mocked encryptData → `enc:<plain>`): the wire
-    // payload carries ciphertext fields + a search hash, not raw columns.
+    // payload carries ciphertext fields, not raw columns, and no name hash (F-12).
     expect(payload.operations.inserts[0]?.encryptedData).toMatch(/^enc:/);
     expect(payload.operations.inserts[0]?.encryptedName).toMatch(/^enc:/);
-    expect(payload.operations.inserts[0]?.searchHash).toMatch(/^sh:/);
+    expect(payload.operations.inserts[0]).not.toHaveProperty('searchHash');
     // Sealed in format v2 under this session's key, to the id the insert's nonce
     // derives for this account (the id the server will store it under).
     const insert = payload.operations.inserts[0] ?? {};

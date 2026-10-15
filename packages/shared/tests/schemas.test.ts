@@ -544,20 +544,24 @@ describe('createVaultItemSchema', () => {
     expect(result.success).toBe(false);
   });
 
-  it('accepts valid searchHash', () => {
+  // F-12: the keyed name hash is no longer stored, so an older client's value is
+  // accepted and dropped whatever its shape, never validated.
+  it('accepts a searchHash from an older client and drops it', () => {
     const result = createVaultItemSchema.safeParse({
       ...validItem,
       searchHash: 'a'.repeat(64),
     });
     expect(result.success).toBe(true);
+    expect(result.data).not.toHaveProperty('searchHash');
   });
 
-  it('rejects invalid searchHash format', () => {
+  it('drops a malformed searchHash too, rather than refusing the item', () => {
     const result = createVaultItemSchema.safeParse({
       ...validItem,
       searchHash: 'not-a-hash',
     });
-    expect(result.success).toBe(false);
+    expect(result.success).toBe(true);
+    expect(result.data).not.toHaveProperty('searchHash');
   });
 });
 
@@ -884,20 +888,24 @@ describe('bulkReEncryptSchema', () => {
     expect(bulkReEncryptSchema.safeParse({ ...validReEncrypt, authHash: '' }).success).toBe(false);
   });
 
-  it('accepts optional searchHash in items', () => {
+  it('drops a searchHash an older client sends with an item (F-12)', () => {
     const withHash = {
       ...validReEncrypt,
       items: [{ ...validReEncrypt.items[0]!, searchHash: 'a'.repeat(64) }],
     };
-    expect(bulkReEncryptSchema.safeParse(withHash).success).toBe(true);
+    const result = bulkReEncryptSchema.safeParse(withHash);
+    expect(result.success).toBe(true);
+    expect(result.data?.items[0]).not.toHaveProperty('searchHash');
   });
 
-  it('rejects invalid searchHash format', () => {
+  it('drops a malformed searchHash too, rather than refusing the rotation', () => {
     const withBadHash = {
       ...validReEncrypt,
       items: [{ ...validReEncrypt.items[0]!, searchHash: 'not-a-hash' }],
     };
-    expect(bulkReEncryptSchema.safeParse(withBadHash).success).toBe(false);
+    const result = bulkReEncryptSchema.safeParse(withBadHash);
+    expect(result.success).toBe(true);
+    expect(result.data?.items[0]).not.toHaveProperty('searchHash');
   });
 
   it('accepts folders array in bulkReEncrypt', () => {
@@ -3340,7 +3348,6 @@ const minimalImportInsert = {
   encryptedData: 'enc-data',
   dataIv: 'data-iv',
   dataTag: 'data-tag',
-  searchHash: 'c'.repeat(64),
 };
 
 /** A minimal, schema-valid `operations` payload for envelope-level tests. */
@@ -3433,7 +3440,6 @@ describe('importSchema operations contract', () => {
     encryptedData: 'enc-data',
     dataIv: 'data-iv',
     dataTag: 'data-tag',
-    searchHash: 'a'.repeat(64),
     tags: ['work'],
     favorite: false,
   };
@@ -3446,7 +3452,6 @@ describe('importSchema operations contract', () => {
     encryptedData: 'enc-data',
     dataIv: 'data-iv',
     dataTag: 'data-tag',
-    searchHash: 'b'.repeat(64),
   };
 
   const validHistoryEntry = {
@@ -3539,13 +3544,18 @@ describe('importSchema operations contract', () => {
     expect(result.success).toBe(false);
   });
 
-  it('rejects an insert missing its required searchHash', () => {
-    const { searchHash: _omit, ...noHash } = validInsert;
+  it('accepts an insert and an update without a searchHash, and drops one an older client sends (F-12)', () => {
     const result = importSchema.safeParse({
       format: 'json',
-      operations: { inserts: [noHash] },
+      operations: {
+        inserts: [validInsert, { ...validInsert, searchHash: 'a'.repeat(64) }],
+        updates: [{ ...validUpdate, searchHash: 'b'.repeat(64) }],
+      },
     });
-    expect(result.success).toBe(false);
+    expect(result.success).toBe(true);
+    expect(result.data?.operations.inserts[0]).not.toHaveProperty('searchHash');
+    expect(result.data?.operations.inserts[1]).not.toHaveProperty('searchHash');
+    expect(result.data?.operations.updates[0]).not.toHaveProperty('searchHash');
   });
 
   it('rejects a non-hex update id', () => {
@@ -3635,11 +3645,10 @@ describe('vaultItemResponseSchema', () => {
     expect(vaultItemResponseSchema.safeParse(validItem).success).toBe(true);
   });
 
-  it('accepts optional fields (folderId, searchHash, deletedAt, passwordHistory)', () => {
+  it('accepts optional fields (folderId, deletedAt, passwordHistory)', () => {
     const result = vaultItemResponseSchema.safeParse({
       ...validItem,
       folderId: '507f1f77bcf86cd799439013',
-      searchHash: 'hash',
       deletedAt: '2025-06-01T00:00:00Z',
       passwordHistory: [
         { encryptedPassword: 'ep', iv: 'iv', tag: 'tg', changedAt: '2025-01-01T00:00:00Z' },
@@ -3710,10 +3719,9 @@ describe('folderResponseSchema', () => {
     expect(folderResponseSchema.safeParse(validFolder).success).toBe(true);
   });
 
-  it('accepts optional fields (searchHash, parentId, icon, color)', () => {
+  it('accepts optional fields (parentId, icon, color)', () => {
     const result = folderResponseSchema.safeParse({
       ...validFolder,
-      searchHash: 'hash',
       parentId: '507f1f77bcf86cd799439013',
       icon: 'folder',
       color: '#ff0000',

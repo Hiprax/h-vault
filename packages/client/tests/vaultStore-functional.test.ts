@@ -52,7 +52,6 @@ vi.mock('../src/services/crypto/cryptoService', () => ({
     encryptData: vi.fn(),
     encryptDataWithAad: vi.fn(),
     decryptData: vi.fn(),
-    generateSearchHash: vi.fn(),
     clearKey: vi.fn(),
     clearCryptoKey: vi.fn().mockResolvedValue(undefined),
   },
@@ -352,8 +351,6 @@ describe('vaultStore – CRUD actions', () => {
         .mockResolvedValueOnce({ encrypted: 'enc-name', iv: 'n-iv', tag: 'n-tag' })
         .mockResolvedValueOnce({ encrypted: 'enc-data', iv: 'd-iv', tag: 'd-tag' });
 
-      vi.mocked(cryptoService.generateSearchHash).mockResolvedValue('mock-search-hash');
-
       // API response
       const created = respondToCreate(createItemApi, {
         data: {
@@ -394,9 +391,6 @@ describe('vaultStore – CRUD actions', () => {
       );
       expect(cryptoService.encryptData).not.toHaveBeenCalled();
 
-      // Verify search hash generation
-      expect(cryptoService.generateSearchHash).toHaveBeenCalledWith('My Login', mockVaultKey);
-
       // Verify API call
       expect(createItemApi).toHaveBeenCalledWith({
         itemType: 'login',
@@ -407,7 +401,6 @@ describe('vaultStore – CRUD actions', () => {
         encryptedData: 'enc-data',
         dataIv: 'v2:d-iv',
         dataTag: 'd-tag',
-        searchHash: 'mock-search-hash',
         tags: [],
         favorite: false,
         idNonce: expect.stringMatching(/^[0-9a-f]{40}$/),
@@ -432,7 +425,6 @@ describe('vaultStore – CRUD actions', () => {
         iv: 'iv',
         tag: 'tag',
       });
-      vi.mocked(cryptoService.generateSearchHash).mockResolvedValue('hash');
 
       respondToCreate(createItemApi, {
         data: {
@@ -481,7 +473,6 @@ describe('vaultStore – CRUD actions', () => {
         iv: 'iv',
         tag: 'tag',
       });
-      vi.mocked(cryptoService.generateSearchHash).mockResolvedValue('hash');
 
       const created = respondToCreate(createItemApi, {
         data: {
@@ -511,7 +502,6 @@ describe('vaultStore – CRUD actions', () => {
         iv: 'iv',
         tag: 'tag',
       });
-      vi.mocked(cryptoService.generateSearchHash).mockResolvedValue('hash');
 
       respondToCreate(createItemApi, {
         data: {
@@ -536,7 +526,6 @@ describe('vaultStore – CRUD actions', () => {
         iv: 'iv',
         tag: 'tag',
       });
-      vi.mocked(cryptoService.generateSearchHash).mockResolvedValue('hash');
       vi.mocked(createItemApi).mockResolvedValue({
         data: { success: true, data: makeRawItemResponse({ _id: GHOST }) },
       } as unknown as Awaited<ReturnType<typeof createItemApi>>);
@@ -557,7 +546,6 @@ describe('vaultStore – CRUD actions', () => {
         iv: 'iv',
         tag: 'tag',
       });
-      vi.mocked(cryptoService.generateSearchHash).mockResolvedValue('hash');
 
       vi.mocked(createItemApi).mockRejectedValue(new Error('Network error'));
 
@@ -594,7 +582,6 @@ describe('vaultStore – CRUD actions', () => {
         tag: 'tag',
       });
       vi.mocked(cryptoService.decryptData).mockResolvedValue('{}');
-      vi.mocked(cryptoService.generateSearchHash).mockResolvedValue('hash');
       respondToCreate(createItemApi, {
         data: { success: true, data: makeRawItemResponse() },
       } as unknown as Awaited<ReturnType<typeof createItemApi>>);
@@ -1680,7 +1667,6 @@ describe('vaultStore – CRUD actions', () => {
         iv: 'iv',
         tag: 'tag',
       });
-      vi.mocked(cryptoService.generateSearchHash).mockResolvedValue('hash');
 
       // The response is held until the test releases it, and then names the id
       // the request's nonce derives, as the server would.
@@ -1780,7 +1766,6 @@ describe('vaultStore – CRUD actions', () => {
         iv: 'iv',
         tag: 'tag',
       });
-      vi.mocked(cryptoService.generateSearchHash).mockResolvedValue('hash');
 
       const api = deferred<Awaited<ReturnType<typeof updateItemApi>>>();
       vi.mocked(updateItemApi).mockReturnValue(api.promise);
@@ -1942,7 +1927,6 @@ describe('vaultStore – renameItem', () => {
       iv: 'new-n-iv',
       tag: 'new-n-tag',
     });
-    vi.mocked(cryptoService.generateSearchHash).mockResolvedValue('a'.repeat(64));
     vi.mocked(updateItemApi).mockResolvedValue({
       data: {
         success: true,
@@ -1980,7 +1964,7 @@ describe('vaultStore – renameItem', () => {
     );
   });
 
-  it('sends the name trio and searchHash, and NO data ciphertext at all', async () => {
+  it('sends the name trio alone (no name hash), and NO data ciphertext at all', async () => {
     setupUnlockedVault();
     armRename();
     useVaultStore.setState({ items: [brokenItem()] });
@@ -1995,9 +1979,7 @@ describe('vaultStore – renameItem', () => {
       // Bound to the item it renames (format v2), which the marker declares.
       nameIv: 'v2:new-n-iv',
       nameTag: 'new-n-tag',
-      // Refreshed, not omitted: it is an HMAC of the NAME, and the server uses it
-      // for duplicate detection.
-      searchHash: 'a'.repeat(64),
+      // F-12: no keyed hash of the name is sent (this used to pin one refreshed).
       // A rename is still a ciphertext write, so it names its generation too.
       vaultKeyVersion: 0,
     });
@@ -2023,7 +2005,7 @@ describe('vaultStore – renameItem', () => {
     expect(item._raw.dataIv).toBe('d-iv');
     expect(item._raw.dataTag).toBe('d-tag');
     expect(item._raw.encryptedName).toBe('new-enc-name');
-    expect(item._raw.searchHash).toBe('a'.repeat(64));
+    expect(item._raw).not.toHaveProperty('searchHash');
     // The placeholder is untouched too — a rename decrypts nothing and re-parses
     // nothing, so it cannot "fix" or further damage the payload.
     expect(item.data).toEqual({ _validationError: true });

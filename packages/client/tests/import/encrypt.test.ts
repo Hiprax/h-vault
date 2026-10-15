@@ -8,7 +8,6 @@ import {
   validateImportItems,
 } from '../../src/services/import';
 import type { ParsedImportItem } from '../../src/services/import';
-import { cryptoService } from '../../src/services/crypto/cryptoService';
 import { decryptVaultField } from '../../src/services/crypto/vaultField';
 import { sealImportItem } from '../../src/services/import/encrypt';
 
@@ -28,7 +27,7 @@ beforeAll(async () => {
 });
 
 describe('buildImportOperations — validate + encrypt', () => {
-  it('encrypts valid items (all six ciphertext fields + searchHash) and round-trips', async () => {
+  it('encrypts valid items (all six ciphertext fields, no name hash) and round-trips', async () => {
     const parsed: ParsedImportItem[] = [
       {
         itemType: 'login',
@@ -61,7 +60,8 @@ describe('buildImportOperations — validate + encrypt', () => {
     ] as const) {
       expect(item[f].length).toBeGreaterThan(0);
     }
-    expect(item.searchHash).toMatch(/^[a-f0-9]{64}$/);
+    // F-12: no keyed hash of the name travels with the row any more.
+    expect(item).not.toHaveProperty('searchHash');
     expect(item.tags).toEqual(['Work']);
     expect(item.favorite).toBe(true);
 
@@ -226,7 +226,9 @@ describe('buildImportOperations — validate + encrypt', () => {
     expect(warnings[0]).toContain('bad');
   });
 
-  it('produces a deterministic search hash for the same name', async () => {
+  // F-12: this used to pin a deterministic name hash, which made two rows of one
+  // name linkable on the server. Nothing deterministic about the name is sent now.
+  it('sends nothing deterministic about a name: two imports of one name share no field', async () => {
     const parsed: ParsedImportItem[] = [
       { itemType: 'note', name: 'Same', data: { content: 'x' }, tags: [], favorite: false },
     ];
@@ -242,7 +244,12 @@ describe('buildImportOperations — validate + encrypt', () => {
       userId: USER_ID,
       vaultKey,
     });
-    expect(a.inserts[0]!.searchHash).toBe(b.inserts[0]!.searchHash);
+    const first = a.inserts[0]!;
+    const second = b.inserts[0]!;
+    expect(first).not.toHaveProperty('searchHash');
+    expect(second).not.toHaveProperty('searchHash');
+    expect(first.encryptedName).not.toBe(second.encryptedName);
+    expect(first.nameIv).not.toBe(second.nameIv);
   });
 
   it('keeps a Bitwarden identity whose source email/phone fail the shared schema', async () => {
@@ -337,9 +344,7 @@ describe('sealImportItem — sealing to a destination', () => {
         vaultKey,
       ),
     ).rejects.toThrow();
-    expect(sealed.searchHash).toBe(
-      await cryptoService.generateSearchHash('Recovery kit', vaultKey),
-    );
+    expect(sealed).not.toHaveProperty('searchHash');
   });
 
   it('binds the data to the DESTINATION type, not the one the parsed row claims', async () => {

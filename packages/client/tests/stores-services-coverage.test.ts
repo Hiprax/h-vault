@@ -58,7 +58,6 @@ vi.mock('../src/services/crypto/cryptoService', () => ({
     encryptData: vi.fn(),
     encryptDataWithAad: vi.fn(),
     decryptData: vi.fn(),
-    generateSearchHash: vi.fn(),
     clearKey: vi.fn(),
     clearCryptoKey: vi.fn().mockResolvedValue(undefined),
   },
@@ -286,7 +285,6 @@ describe('vaultStore — additional edge cases', () => {
     vi.mocked(cryptoService.encryptData).mockReset();
     vi.mocked(cryptoService.encryptDataWithAad).mockReset();
     vi.mocked(cryptoService.decryptData).mockReset();
-    vi.mocked(cryptoService.generateSearchHash).mockReset();
     useVaultStore.setState(vaultInitialState);
     useAuthStore.setState(authInitialState);
   });
@@ -811,8 +809,6 @@ describe('vaultStore — additional edge cases', () => {
         .mockResolvedValueOnce({ encrypted: 'enc-data', iv: 'd-iv', tag: 'd-tag' })
         .mockResolvedValueOnce({ encrypted: 'enc-old-pass', iv: 'op-iv', tag: 'op-tag' });
 
-      vi.mocked(cryptoService.generateSearchHash).mockResolvedValue('hash');
-
       vi.mocked(updateItemApi).mockResolvedValue({
         data: {
           success: true,
@@ -869,8 +865,6 @@ describe('vaultStore — additional edge cases', () => {
         .mockResolvedValueOnce({ encrypted: 'enc-name', iv: 'n-iv', tag: 'n-tag' })
         .mockResolvedValueOnce({ encrypted: 'enc-data', iv: 'd-iv', tag: 'd-tag' });
 
-      vi.mocked(cryptoService.generateSearchHash).mockResolvedValue('hash');
-
       vi.mocked(updateItemApi).mockResolvedValue({
         data: {
           success: true,
@@ -913,8 +907,6 @@ describe('vaultStore — additional edge cases', () => {
         .mockResolvedValueOnce({ encrypted: 'enc-name', iv: 'n-iv', tag: 'n-tag' })
         .mockResolvedValueOnce({ encrypted: 'enc-data', iv: 'd-iv', tag: 'd-tag' });
 
-      vi.mocked(cryptoService.generateSearchHash).mockResolvedValue('hash');
-
       vi.mocked(updateItemApi).mockResolvedValue({
         data: {
           success: true,
@@ -950,8 +942,6 @@ describe('vaultStore — additional edge cases', () => {
         .mockResolvedValueOnce({ encrypted: 'enc-name', iv: 'n-iv', tag: 'n-tag' })
         .mockResolvedValueOnce({ encrypted: 'enc-data', iv: 'd-iv', tag: 'd-tag' });
 
-      vi.mocked(cryptoService.generateSearchHash).mockResolvedValue('hash');
-
       vi.mocked(updateItemApi).mockResolvedValue({
         data: {
           success: true,
@@ -980,7 +970,6 @@ describe('vaultStore — additional edge cases', () => {
       vi.mocked(cryptoService.encryptDataWithAad)
         .mockResolvedValueOnce({ encrypted: 'enc-name', iv: 'n-iv', tag: 'n-tag' })
         .mockResolvedValueOnce({ encrypted: 'enc-data', iv: 'd-iv', tag: 'd-tag' });
-      vi.mocked(cryptoService.generateSearchHash).mockResolvedValue('hash');
 
       vi.mocked(updateItemApi).mockResolvedValue({
         data: {
@@ -1011,7 +1000,6 @@ describe('vaultStore — additional edge cases', () => {
       vi.mocked(cryptoService.encryptDataWithAad)
         .mockResolvedValueOnce({ encrypted: 'enc', iv: 'iv', tag: 'tag' })
         .mockResolvedValueOnce({ encrypted: 'enc', iv: 'iv', tag: 'tag' });
-      vi.mocked(cryptoService.generateSearchHash).mockResolvedValue('hash');
 
       vi.mocked(updateItemApi).mockResolvedValue({
         data: {

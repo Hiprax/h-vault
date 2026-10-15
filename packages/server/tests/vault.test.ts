@@ -380,8 +380,8 @@ describe('Vault API', () => {
     it('accepts a NAME-ONLY update and leaves the item ciphertext byte-identical', async () => {
       // The server half of the client's `renameItem` path, which exists so an item
       // whose decrypted payload could not be read can still be renamed. Its request
-      // carries the `encryptedName` trio plus a refreshed `searchHash` and omits the
-      // `encryptedData` trio entirely — `updateVaultItemSchema` permits that, and
+      // carries the `encryptedName` trio (an older client's adds a `searchHash`,
+      // which is dropped) and omits the `encryptedData` trio entirely — `updateVaultItemSchema` permits that, and
       // `$set` is built only from the fields actually present, so the row's data
       // ciphertext must be untouched. If that ever stopped holding, a rename would
       // destroy the very item it was offered to rescue, with no way back.
@@ -413,7 +413,8 @@ describe('Vault API', () => {
       expect(after!.encryptedData).toBe(before!.encryptedData);
       expect(after!.dataIv).toBe(before!.dataIv);
       expect(after!.dataTag).toBe(before!.dataTag);
-      expect(after!.searchHash).toBe('b'.repeat(64));
+      // F-12: the name hash the request carried is not stored.
+      expect(after).not.toHaveProperty('searchHash');
     });
 
     it('rejects a name trio sent without its IV and tag', async () => {
@@ -1389,7 +1390,7 @@ describe('Vault API', () => {
   // 8. Filter by folderId and searchHash
   // ========================================================================
 
-  describe('Filtering by folderId and searchHash', () => {
+  describe('Filtering by folderId, and no searchHash', () => {
     it('should filter items by folderId', async () => {
       // Create a folder for the user
       const folder = await Folder.create({
@@ -1413,18 +1414,20 @@ describe('Vault API', () => {
       expect(res.body.data[0].folderId).toBe(folderId);
     });
 
-    it('should store and return searchHash on a created item', async () => {
-      // searchHash must be a valid 64-char hex string (SHA-256 format)
-      const searchHash = 'a'.repeat(64);
-
-      const { id } = await createItemViaApi(user.accessToken, { searchHash });
+    // F-12: this used to pin the hash being stored and returned; no keyed name
+    // hash is stored any more, so the create accepts it and neither keeps nor
+    // returns it.
+    it('neither stores nor returns a searchHash sent on create', async () => {
+      const { id } = await createItemViaApi(user.accessToken, { searchHash: 'a'.repeat(64) });
 
       const res = await request(app)
         .get(`/api/v1/vault/items/${id}`)
         .set('Authorization', authHeader(user.accessToken))
         .expect(200);
 
-      expect(res.body.data.searchHash).toBe(searchHash);
+      expect(res.body.data.searchHash).toBeUndefined();
+      expect(res.body.data.encryptedName).toBe('test-encrypted-name');
+      expect(await VaultItem.findById(id).lean()).not.toHaveProperty('searchHash');
     });
   });
 
@@ -2072,7 +2075,8 @@ describe('Vault API', () => {
       expect(updatedUser!.encryptedVaultKey).toBe('test-encrypted-vault-key');
     });
 
-    it('should update searchHash when provided', async () => {
+    // F-12: this used to pin a rotation storing the hash it was sent.
+    it('stores no searchHash a rotation is sent', async () => {
       const { id } = await createItemViaApi(user.accessToken);
       const newSearchHash = 'a'.repeat(64);
 
@@ -2106,8 +2110,9 @@ describe('Vault API', () => {
 
       expect(res.body.success).toBe(true);
 
-      const item = await VaultItem.findById(id);
-      expect(item!.searchHash).toBe(newSearchHash);
+      const item = await VaultItem.findById(id).lean();
+      expect(item!.encryptedName).toBe('rotated-name');
+      expect(item).not.toHaveProperty('searchHash');
     });
 
     it('should re-encrypt folders during vault key rotation', async () => {

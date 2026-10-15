@@ -457,16 +457,15 @@ export const ALLOWED_ITEM_FIELDS = new Set([
   'tags',
   'favorite',
   'folderId',
-  'searchHash',
   'passwordHistory',
 ]);
 
 /**
  * Fields an import UPDATE is allowed to write. Deliberately NARROWER than
- * {@link ALLOWED_ITEM_FIELDS}: the six ciphertext fields, the client-recomputed
- * `searchHash` (an overwrite replaces `encryptedName`, so the stored hash must
- * be refreshed alongside it or it strands against the old name), and the
- * optional `passwordHistory` — and nothing else.
+ * {@link ALLOWED_ITEM_FIELDS}: the six ciphertext fields and the optional
+ * `passwordHistory` — and nothing else. Neither list names `searchHash`: no
+ * keyed hash of a name is stored (F-12), and an older client that still sends
+ * one has it dropped by the schema before this projection runs.
  *
  * `tags`, `favorite`, `folderId` and `itemType` are absent on purpose: an import
  * updates CONTENT and must never silently reorganize or retype a vault the user
@@ -487,7 +486,6 @@ export const ALLOWED_UPDATE_FIELDS = new Set([
   'encryptedData',
   'dataIv',
   'dataTag',
-  'searchHash',
   'passwordHistory',
 ]);
 
@@ -720,12 +718,16 @@ export const exportVault = catchAsync(async (req: Request, res: Response): Promi
   };
   const liveItems = () =>
     VaultItem.find({ userId, deletedAt: { $exists: false } })
-      .select('-sourceRefId')
+      .select('-sourceRefId -searchHash')
       .batchSize(ROW_CURSOR_BATCH_SIZE)
       .lean()
       .cursor();
   const allFolders = () =>
-    Folder.find({ userId }).select('-sourceRefId').batchSize(ROW_CURSOR_BATCH_SIZE).lean().cursor();
+    Folder.find({ userId })
+      .select('-sourceRefId -searchHash')
+      .batchSize(ROW_CURSOR_BATCH_SIZE)
+      .lean()
+      .cursor();
 
   // The size is decided BEFORE the first byte, so a refusal is a whole 413 rather
   // than a truncated file: a walk of both cursors with the conservative field-length
@@ -828,10 +830,10 @@ interface ImportOperationsParams {
  * The server is a validated EXECUTOR here, never a matcher. Conflict resolution
  * happens on the CLIENT — the match key for a login is its site and username,
  * both of which live inside the encrypted blob, so the server physically cannot
- * compute it. This path therefore performs NO `searchHash` / `encryptedName`
- * matching and does not act on `conflictStrategy` (retained as audit metadata
- * only): it validates ownership, caps and field lengths, then applies exactly
- * the `inserts` and `updates` it was handed.
+ * compute it. This path therefore performs NO name matching of any kind and
+ * does not act on `conflictStrategy` (retained as audit metadata only): it
+ * validates ownership, caps and field lengths, then applies exactly the
+ * `inserts` and `updates` it was handed.
  *
  * Order of operations is load-bearing:
  *   1. per-item encrypted-field lengths, over BOTH arrays, before any DB work

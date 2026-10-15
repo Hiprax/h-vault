@@ -244,7 +244,6 @@ export interface IVaultItemResponse {
   encryptedName: string;
   nameIv: string;
   nameTag: string;
-  searchHash?: string | undefined;
   passwordHistory?: IPasswordHistoryEntry[] | undefined;
   createdAt: string;
   updatedAt: string;
@@ -264,7 +263,6 @@ export interface IFolderResponse {
   encryptedName: string;
   nameIv: string;
   nameTag: string;
-  searchHash?: string | undefined;
   parentId?: string | undefined;
   icon?: string | undefined;
   color?: string | undefined;
@@ -506,16 +504,14 @@ export interface IFolderSkipReason {
   folderId: string;
   /**
    * Why the folder was not stored as-requested:
-   * - `conflict_skipped` — already exists, conflictStrategy was `skip` (or a
-   *   keep_both duplicate whose searchHash still collided after the strip).
+   * - `conflict_skipped` — already exists, conflictStrategy was `skip`.
    * - `invalid_folder_data` — the folder passed the structural checks but a
    *   persistence-layer validator rejected it (e.g. a missing/over-length
    *   required field or an un-castable field). The folder is skipped instead of
    *   aborting the whole restore, mirroring the item loop's `invalid_item_data`.
    *   Note: non-owned folders are inserted with a fresh server-minted `_id`, so a
-   *   backup's foreign/duplicate `_id` never collides; a residual `(userId,
-   *   searchHash)` collision is resolved by retrying without the hash, so E11000
-   *   only reaches this skip path in a rare concurrent-write race.
+   *   backup's foreign/duplicate `_id` never collides, and folders have no other
+   *   unique index, so E11000 only reaches this skip path in a rare race.
    * - `storage_limit` — storing the folder would take the account past its vault
    *   storage quota. When the backup's folder matched one the account already has
    *   (an overwrite, or the duplicate a keep-both would have added), the items the

@@ -17,6 +17,7 @@ import mongoose from 'mongoose';
 import cron from 'node-cron';
 import { startTrashCleanupJob } from '../src/jobs/trashCleanup.js';
 import { VaultItem } from '../src/models/VaultItem.js';
+import { Folder } from '../src/models/Folder.js';
 import { User } from '../src/models/User.js';
 import {
   installVaultBytes,
@@ -1027,29 +1028,44 @@ describe('a single-row write hands its reservation back exactly when it certainl
     await expectCounterExact(user);
   });
 
-  it('a folder rename onto a name the account already has (409): reserved, then released whole', async () => {
+  // This used to reach the refusal through the folder name index (a rename onto a
+  // name hash the account already had: E11000, 409). F-12 removed that index, so no
+  // rename can conflict any more; the property it pinned — a growing rename the
+  // database certainly refused hands its reservation back whole — is reached here
+  // through a definite refusal injected at the driver, as the tests above do.
+  it('a folder rename the database certainly refused: reserved, then released whole', async () => {
     const user = await createTestUser();
-    const taken = 'b'.repeat(64);
-    expect(
-      (await apiCall(user, 'post', '/folders', sampleFolder({ searchHash: taken }))).status,
-    ).toBe(201);
-    const other = await apiCall(
-      user,
-      'post',
-      '/folders',
-      sampleFolder({ searchHash: 'c'.repeat(64) }),
-    );
+    const created = await apiCall(user, 'post', '/folders', sampleFolder());
+    expect(created.status).toBe(201);
+    const id = String(created.body.data._id);
     await expectCounterExact(user);
     const epoch = await quotaEpochOf(user.id);
+    const grown = 'a-much-longer-name-that-would-grow-the-folder-row';
+    const real = mongoose.mongo.Collection.prototype.findOneAndUpdate;
+    vi.spyOn(mongoose.mongo.Collection.prototype, 'findOneAndUpdate').mockImplementation(function (
+      this: mongoose.mongo.Collection,
+      ...args: Parameters<typeof real>
+    ) {
+      const update = args[1] as { $set?: { encryptedName?: unknown } };
+      if (this.collectionName === 'folders' && update.$set?.encryptedName === grown) {
+        return Promise.reject(
+          new mongoose.mongo.MongoServerError({
+            message: 'the database refused the write',
+            code: 121,
+          }),
+        );
+      }
+      return real.apply(this, args);
+    } as never);
 
-    const res = await apiCall(user, 'put', `/folders/${String(other.body.data._id)}`, {
-      encryptedName: 'a-much-longer-name-that-would-grow-the-folder-row',
+    const res = await apiCall(user, 'put', `/folders/${id}`, {
+      encryptedName: grown,
       nameIv: 'renamed-iv',
       nameTag: 'renamed-tag',
-      searchHash: taken,
     });
 
-    expect(res.status).toBe(409);
+    expect(res.status).toBe(500);
+    expect((await Folder.findById(id).lean())?.encryptedName).not.toBe(grown);
     expect(await quotaEpochOf(user.id)).toBe((epoch ?? 0) + 2);
     await expectCounterExact(user);
   });

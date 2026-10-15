@@ -82,7 +82,9 @@ describe('Import validation and edge cases', () => {
       expect(await VaultItem.countDocuments({ userId: user.id })).toBe(0);
     });
 
-    it('rejects a row that omits its searchHash', async () => {
+    // F-12: the hash is no longer required (it is no longer stored), so a row
+    // without one is the current client's shape, not a malformed one.
+    it('accepts a row that carries no searchHash', async () => {
       const { searchHash: _omitted, ...withoutHash } = insertRow({ encryptedName: 'no-hash' });
 
       const res = await postImport(user.accessToken, {
@@ -90,8 +92,8 @@ describe('Import validation and edge cases', () => {
         operations: { inserts: [withoutHash] },
       });
 
-      expect(res.status).toBe(400);
-      expect(await VaultItem.countDocuments({ userId: user.id })).toBe(0);
+      expect(res.status).toBe(201);
+      expect(await VaultItem.countDocuments({ userId: user.id, encryptedName: 'no-hash' })).toBe(1);
     });
   });
 
@@ -247,21 +249,24 @@ describe('Import validation and edge cases', () => {
       expect(item!.itemType).toBe('login');
       expect(item!.favorite).toBe(true);
       expect(item!.tags).toEqual(['legit']);
-      expect(item!.searchHash).toBe('a'.repeat(64));
+      // F-12: the name hash is no longer an honoured field.
+      expect(item).not.toHaveProperty('searchHash');
       // The attacker-chosen _id must NOT be honoured (server mints its own).
       expect(String(item!._id)).not.toBe('aaaaaaaaaaaaaaaaaaaaaaaa');
       expect(item!.createdAt.getTime()).toBeGreaterThanOrEqual(before);
     });
 
-    it('rejects an insert whose searchHash is not 64 lowercase hex characters', async () => {
+    // F-12: an older client's hash is dropped whatever its shape, never validated.
+    it('accepts an insert whose searchHash is not 64 lowercase hex characters, storing none', async () => {
       const res = await postImport(user.accessToken, {
         format: 'json',
         operations: { inserts: [insertRow({ searchHash: 'not-a-valid-hash' })] },
       });
 
-      expect(res.status).toBe(400);
-      expect(res.body.success).toBe(false);
-      expect(await VaultItem.countDocuments({ userId: user.id })).toBe(0);
+      expect(res.status).toBe(201);
+      const item = await VaultItem.findOne({ userId: user.id }).lean();
+      expect(item).not.toBeNull();
+      expect(item).not.toHaveProperty('searchHash');
     });
   });
 });

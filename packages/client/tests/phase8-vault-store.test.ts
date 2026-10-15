@@ -54,7 +54,6 @@ vi.mock('../src/services/crypto/cryptoService', () => ({
     encryptData: vi.fn(),
     encryptDataWithAad: vi.fn(),
     decryptData: vi.fn(),
-    generateSearchHash: vi.fn(),
     clearKey: vi.fn(),
     clearCryptoKey: vi.fn().mockResolvedValue(undefined),
   },
@@ -531,7 +530,6 @@ describe('8.2 — createItem / updateItem pre-flight size checks', () => {
     vi.clearAllMocks();
     resetVault();
     setupUnlockedVault();
-    vi.mocked(cryptoService.generateSearchHash).mockResolvedValue('deadbeef'.repeat(8));
   });
 
   // Row fields are sealed through the bound (v2) path, `encryptDataWithAad`, so
@@ -721,7 +719,6 @@ describe('updateItem refuses an item type other than the row’s stored type', (
     vi.clearAllMocks();
     resetVault();
     setupUnlockedVault();
-    vi.mocked(cryptoService.generateSearchHash).mockResolvedValue('deadbeef'.repeat(8));
     vi.mocked(cryptoService.encryptDataWithAad).mockResolvedValue({
       encrypted: 'sealed',
       iv: 'sealed-iv',
@@ -734,7 +731,6 @@ describe('updateItem refuses an item type other than the row’s stored type', (
     expect(updateItemApi).not.toHaveBeenCalled();
     expect(cryptoService.encryptDataWithAad).not.toHaveBeenCalled();
     expect(cryptoService.encryptData).not.toHaveBeenCalled();
-    expect(cryptoService.generateSearchHash).not.toHaveBeenCalled();
   }
 
   function getItemResponse(data: unknown, success = true): Awaited<ReturnType<typeof getItemApi>> {
@@ -1961,7 +1957,6 @@ describe('a refresh that fails part-way loses no change made while it ran', () =
     await vi.waitFor(() => {
       expect(walk.pageTwoAsked()).toBe(true);
     });
-    vi.mocked(cryptoService.generateSearchHash).mockResolvedValue('deadbeef'.repeat(8));
     vi.mocked(cryptoService.encryptDataWithAad).mockResolvedValue({
       encrypted: 'sealed',
       iv: 'sealed-iv',

@@ -554,11 +554,6 @@ async function decryptFolderNameUnderAnyKey(
  * matters: the server refuses a payload that does not name every row the account
  * holds, so dropping the row would refuse the whole rotation and the one poisoned
  * entry would wedge every future attempt as well.
- *
- * `searchHash` travels with it and stays under the superseded key. That is
- * correct rather than tolerated: the hash is an HMAC of a name nothing can read,
- * so there is no plaintext from which to recompute it and nothing that could
- * usefully match it.
  */
 function passThroughItem(item: IVaultItemResponse): BulkReEncryptInput['items'][number] {
   return {
@@ -569,7 +564,6 @@ function passThroughItem(item: IVaultItemResponse): BulkReEncryptInput['items'][
     encryptedData: item.encryptedData,
     dataIv: item.dataIv,
     dataTag: item.dataTag,
-    ...(item.searchHash !== undefined ? { searchHash: item.searchHash } : {}),
     ...(item.passwordHistory !== undefined ? { passwordHistory: item.passwordHistory } : {}),
   };
 }
@@ -1913,7 +1907,6 @@ export default function SettingsPage() {
             { role: 'item.data', rowId: item._id, itemType: item.itemType },
             newVaultKey,
           );
-          const searchHash = await cryptoService.generateSearchHash(plaintext.name, newVaultKey);
 
           // Re-encrypt password history entries if present. Each rewritten
           // password carries the `changedAt` it was decrypted beside, so the
@@ -1944,7 +1937,6 @@ export default function SettingsPage() {
             encryptedData: encData.encrypted,
             dataIv: encData.iv,
             dataTag: encData.tag,
-            searchHash,
             ...(reEncryptedHistory !== undefined ? { passwordHistory: reEncryptedHistory } : {}),
           });
         }

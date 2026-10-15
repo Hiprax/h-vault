@@ -67,6 +67,11 @@ const migrations: MigrationDefinition[] = [
     name: 'backup-recipients',
     up: migrateBackupRecipients,
   },
+  {
+    version: 5,
+    name: 'remove-search-hash',
+    up: removeSearchHash,
+  },
 ];
 
 /** How long migration v3 may spend installing counters before it leaves the rest. */
@@ -290,6 +295,111 @@ async function migrateBackupRecipients(): Promise<void> {
   logger.info(
     `Migration v4: converted the backup recipients of ${String(converted)} account(s); cleared the empty legacy field on ${String(cleared.modifiedCount)}`,
   );
+}
+
+/** How many rows one write of migration v5 clears. */
+const SEARCH_HASH_MIGRATION_BATCH = 1_000;
+
+/**
+ * v5 — no keyed hash of a name is stored any more (F-12).
+ *
+ * Items and folders carried `searchHash`, an HMAC of the decrypted name under a
+ * subkey of the vault key. Nothing read it, and it made every entry of one name
+ * linkable, so the models no longer declare it and no write path stores it.
+ * This removes what an existing database still holds: every index whose key
+ * names the field first (the folder compound one is UNIQUE, and an unset under
+ * an index is index work for nothing), then the field,
+ * in batches of {@link SEARCH_HASH_MIGRATION_BATCH} ids named explicitly, each
+ * write re-stating `searchHash: {$exists: true}`.
+ *
+ * Raw collection writes, deliberately leaving `__v` and `updatedAt` alone: the
+ * unset is not an edit, and a vault write racing it (the migration lock does not
+ * stop the workers that lost it from serving) is pinned on `__v`, so bumping it
+ * would refuse that write for nothing. The per-account byte counter is NOT
+ * adjusted: each row shrinks by the field's size, so the counter OVERCOUNTS by
+ * that much (the safe direction) until the hourly recount measures the account
+ * again; subtracting here instead could subtract a row twice when a racing write
+ * has already settled the shrink as part of its own difference.
+ *
+ * Idempotent: a missing index (27) or collection (26) is what a second run, or a
+ * database that never had them, looks like, and a row already cleared no longer
+ * matches. Any other failure leaves the migration unrecorded, so the next boot
+ * runs it again. The field name is a literal; the indexes are found by listing.
+ * It is not time-boxed: a large collection is cleared in one run (its count is
+ * logged), and a run the migration lock outlives is harmless because it repeats.
+ */
+async function removeSearchHash(): Promise<void> {
+  const collections = [
+    mongoose.connection.collection('vault_items'),
+    mongoose.connection.collection('folders'),
+  ];
+  for (const collection of collections) {
+    await dropSearchHashIndexes(collection);
+  }
+  for (const collection of collections) {
+    const cleared = await unsetSearchHashInBatches(collection);
+    if (cleared > 0) {
+      logger.info(
+        `Migration v5: removed the name hash from ${String(cleared)} row(s) of ${collection.collectionName}`,
+      );
+    }
+  }
+}
+
+/**
+ * Drop every index of one collection whose key names `searchHash`.
+ *
+ * Found by LISTING, not by name: an earlier release built more than the compound
+ * `userId_1_searchHash_1` it declared, because the folder model's `sparse: true`
+ * path option made a single-field `searchHash_1` index of its own, and an operator
+ * may have built one under another name. A collection that does not exist (26)
+ * has none; an index dropped meanwhile by another process (27) is gone already.
+ */
+async function dropSearchHashIndexes(collection: mongoose.mongo.Collection): Promise<void> {
+  let indexes: { name?: string; key: Record<string, unknown> }[];
+  try {
+    indexes = await collection.indexes();
+  } catch (error: unknown) {
+    if (hasCode(error, NAMESPACE_NOT_FOUND)) return;
+    throw error;
+  }
+  for (const index of indexes) {
+    if (index.name === undefined || !('searchHash' in index.key)) continue;
+    try {
+      await collection.dropIndex(index.name);
+      logger.info(`Migration v5: dropped ${collection.collectionName}.${index.name}`);
+    } catch (error: unknown) {
+      if (!hasCode(error, INDEX_NOT_FOUND) && !hasCode(error, NAMESPACE_NOT_FOUND)) throw error;
+    }
+  }
+}
+
+/** Clear `searchHash` from every row of one collection, a batch of ids at a time. */
+async function unsetSearchHashInBatches(collection: mongoose.mongo.Collection): Promise<number> {
+  const hasHash = { searchHash: { $exists: true } };
+  const cursor = collection.find(hasHash, { projection: { _id: 1 }, sort: { _id: 1 } });
+  let cleared = 0;
+  let pending: mongoose.mongo.ObjectId[] = [];
+  const flush = async (): Promise<void> => {
+    if (pending.length === 0) return;
+    const ids = pending;
+    pending = [];
+    const result = await collection.updateMany(
+      { _id: { $in: ids }, ...hasHash },
+      { $unset: { searchHash: '' } },
+    );
+    cleared += result.modifiedCount;
+  };
+  try {
+    for await (const { _id } of cursor) {
+      pending.push(_id);
+      if (pending.length >= SEARCH_HASH_MIGRATION_BATCH) await flush();
+    }
+    await flush();
+  } finally {
+    await cursor.close();
+  }
+  return cleared;
 }
 
 /** `IndexNotFound`: dropping an index that is not there. */

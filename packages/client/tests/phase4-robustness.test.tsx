@@ -109,7 +109,6 @@ describe('4.1 — vaultItemResponseSchema', () => {
     const result = vaultItemResponseSchema.safeParse({
       ...validItem,
       folderId: '507f1f77bcf86cd799439013',
-      searchHash: 'abc123',
       deletedAt: '2025-06-01T00:00:00Z',
       passwordHistory: [
         {

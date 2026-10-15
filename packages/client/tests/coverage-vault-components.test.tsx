@@ -67,7 +67,6 @@ vi.mock('../src/services/crypto/cryptoService', () => ({
     decryptVaultKey: vi.fn(),
     encryptData: vi.fn(),
     decryptData: vi.fn(),
-    generateSearchHash: vi.fn(),
     clearCryptoKey: vi.fn().mockResolvedValue(undefined),
   },
 }));
@@ -289,7 +288,6 @@ function makeItem(
     tags: overrides.tags ?? [],
     folderId: overrides.folderId,
     data: { username: 'u', password: 'p', uris: [], customFields: [] },
-    searchHash: 'abc',
     createdAt: overrides.createdAt ?? now,
     updatedAt: overrides.updatedAt ?? now,
   } as unknown as DecryptedVaultItem;

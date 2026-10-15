@@ -434,7 +434,6 @@ describe('POST /documents/uploads/:id/complete', () => {
         encryptedName: 'folder-ciphertext',
         nameIv: 'iv',
         nameTag: 'tag',
-        searchHash: 'a'.repeat(64),
         sortOrder: 0,
       });
       const kept = await seedTransfer(user, { folderId: String(folder._id) });

@@ -266,10 +266,11 @@ export async function openBound(
 }
 
 /**
- * The HMAC-SHA256 search hash of an item or folder name, as hex.
+ * The HMAC-SHA256 name hash an older client sent with an item or folder, as hex.
  *
- * Keyed on the RAW vault key (not an HKDF subkey), over the trimmed, lowercased
- * name — the server uses it for duplicate detection and never learns the name.
+ * Keyed on the RAW vault key, over the trimmed, lowercased name, as releases
+ * before 0.16 computed it. Nothing stores it any more (F-12); the crash probes
+ * send it so the request is the one an older client makes.
  */
 export async function searchHashOf(name: string, rawVaultKey: Bytes): Promise<string> {
   const key = await subtle.importKey('raw', rawVaultKey, { name: 'HMAC', hash: 'SHA-256' }, false, [

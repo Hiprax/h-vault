@@ -63,7 +63,6 @@ export function estimateItemJsonSize(item: Record<string, unknown>): number {
     'dataTag',
     'nameIv',
     'nameTag',
-    'searchHash',
   ];
   for (const field of stringFields) {
     const value = item[field];
@@ -108,14 +107,7 @@ export function estimateItemJsonSize(item: Record<string, unknown>): number {
  */
 export function estimateFolderJsonSize(folder: Record<string, unknown>): number {
   let size = PER_FOLDER_JSON_OVERHEAD;
-  const stringFields: readonly string[] = [
-    'encryptedName',
-    'nameIv',
-    'nameTag',
-    'searchHash',
-    'icon',
-    'color',
-  ];
+  const stringFields: readonly string[] = ['encryptedName', 'nameIv', 'nameTag', 'icon', 'color'];
   for (const field of stringFields) {
     const value = folder[field];
     if (typeof value === 'string') {

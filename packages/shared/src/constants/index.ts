@@ -836,16 +836,6 @@ export const ROW_ID_DERIVATION_PREFIX = 'hvault/row-id/v1|';
 export const ROW_ID_NONCE_PATTERN = /^[0-9a-f]{40}$/;
 
 // ---------------------------------------------------------------------------
-// VAULT SEARCH KEY
-// ---------------------------------------------------------------------------
-// An item's `searchHash` is HMAC-SHA256 of its normalised name under a SUBKEY of
-// the vault key, `HKDF-SHA256(ikm = vault key, salt = empty, info = this)`, and
-// never under the vault key itself: the vault key is an AES-GCM key, and using the
-// same bytes as an HMAC key as well is exactly the key reuse NIST SP 800-108
-// separates. FORMAT constant: changing it changes every hash written afterwards.
-export const VAULT_SEARCH_KEY_INFO = 'hvault/item/search/v1';
-
-// ---------------------------------------------------------------------------
 // DOCUMENT PREVIEW
 // ---------------------------------------------------------------------------
 // The application decides WHETHER a preview is offered; the isolated sandbox

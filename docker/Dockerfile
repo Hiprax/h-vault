@@ -183,8 +183,8 @@ RUN chmod -R a+rX,go-w packages/client && npm run build -w packages/client
 # -----------------------------------------------------------------------------
 # In production Mongoose runs with `autoIndex: false` (config/database.ts), so
 # indexes are NEVER created implicitly. They are not merely a performance
-# concern here: the Folder `(userId, searchHash)` UNIQUE partial index is what
-# makes duplicate-folder detection return 409, and the AuditLog / RefreshToken
+# concern here: the `users.email` UNIQUE index is what refuses a second account
+# for one address, and the AuditLog / RefreshToken
 # TTL indexes are what bound their collections' growth. Without this step the
 # stack boots and *appears* healthy while silently losing those guarantees — so
 # compose gates the app on this container completing successfully.

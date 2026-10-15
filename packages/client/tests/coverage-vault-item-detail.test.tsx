@@ -78,7 +78,6 @@ vi.mock('../src/services/crypto/cryptoService', () => ({
     decryptData: mockDecryptData,
     decryptDataWithAad: mockDecryptDataWithAad,
     encryptData: vi.fn(),
-    generateSearchHash: vi.fn(),
     clearCryptoKey: vi.fn().mockResolvedValue(undefined),
   },
 }));
@@ -169,7 +168,6 @@ function makeItem(overrides: ItemOverrides = {}) {
       notes: '',
       customFields: [],
     },
-    searchHash: 'abc',
     createdAt: created,
     updatedAt: updated,
     _raw: {
@@ -1777,7 +1775,7 @@ describe('VaultItemDetail / IdentityDetail stored extras', () => {
 // only the placeholder wrapper, so a rename through it would overwrite the item's
 // real — and only — ciphertext. `updateItemMeta` sends plaintext metadata only and
 // cannot change an encrypted name. `renameItem` is the third path: the name trio
-// plus its `searchHash`, and no `encryptedData` in the payload at all.
+// alone, and no `encryptedData` in the payload at all.
 // ===========================================================================
 
 describe('VaultItemDetail / rename for an undecodable item', () => {

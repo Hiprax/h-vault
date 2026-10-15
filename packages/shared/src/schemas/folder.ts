@@ -21,10 +21,6 @@ export const createFolderSchema = z.object({
   encryptedName: z.string().min(1).max(MAX_ENCRYPTED_NAME_LENGTH),
   nameIv: z.string().min(1).max(24),
   nameTag: z.string().min(1).max(32),
-  searchHash: z
-    .string()
-    .regex(/^[a-f0-9]{64}$/)
-    .optional(),
   parentId: objectIdSchema.optional(),
   icon: z
     .string()
@@ -52,10 +48,6 @@ export const updateFolderSchema = z
     encryptedName: z.string().min(1).max(MAX_ENCRYPTED_NAME_LENGTH).optional(),
     nameIv: z.string().min(1).max(24).optional(),
     nameTag: z.string().min(1).max(32).optional(),
-    searchHash: z
-      .string()
-      .regex(/^[a-f0-9]{64}$/)
-      .optional(),
     parentId: objectIdSchema.nullable().optional(),
     icon: z
       .string()

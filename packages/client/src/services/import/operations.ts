@@ -5,12 +5,11 @@
  * this module is what finally produces ciphertext, and it runs AFTER that
  * decision so nothing is encrypted that will not be sent. Two shapes come out:
  *
- *  - `inserts` — a new item, carrying the six ciphertext fields, a search hash,
+ *  - `inserts` — a new item, carrying the six ciphertext fields,
  *    tags/favorite and (native re-imports only) a folder id.
  *  - `updates` — an existing item to overwrite in place, naming the `_id` the
- *    resolver matched, with the search hash RECOMPUTED (an overwrite replaces
- *    `encryptedName`, so a stale hash would strand against the old name) and,
- *    when a login's password changes, the previous password prepended to
+ *    resolver matched, with its six ciphertext fields and, when a login's
+ *    password changes, the previous password prepended to
  *    `passwordHistory` by the SHARED helper `vaultStore.updateItem` also uses.
  *
  * Every row is sealed here, in format v2, to the row it will be stored as, and
@@ -145,11 +144,8 @@ export async function buildImportOperations<E extends ImportUpdateTarget>({
 
 /**
  * Seal one row to its destination: a native re-import's stored data string
- * verbatim, anything else validated and serialised from its parsed data.
- *
- * The search hash is computed either way. It is a deterministic HMAC of the name
- * under the vault key's search subkey, so computing it costs nothing and covers
- * both an export that predates the field and an update whose name is replaced.
+ * verbatim, anything else validated and serialised from its parsed data. No keyed
+ * hash of the name is computed or sent (F-12).
  */
 async function sealRow(
   item: ResolvableImportItem,

@@ -138,7 +138,6 @@ const cryptoServiceDefaults = vi.hoisted(() => ({
       iv: 'iv',
       tag: 'tag',
     }),
-  generateSearchHash: (fn: Mock) => fn.mockResolvedValue('hash'),
   clearKey: (fn: Mock) => fn,
   clearCryptoKey: (fn: Mock) => fn.mockResolvedValue(undefined),
   rotateVaultKey: (fn: Mock) =>
@@ -1574,8 +1573,8 @@ describe('SettingsPage', () => {
     ]);
     // Nothing is sealed unbound (v1).
     expect(cryptoService.encryptData).not.toHaveBeenCalled();
-    // The search hash is recomputed — it is a deterministic HMAC of the name.
-    expect(insert.searchHash).toBe('hash');
+    // F-12: no name hash is computed or sent.
+    expect(insert).not.toHaveProperty('searchHash');
   });
 
   it('shows CSV field mapping UI when CSV format is selected', async () => {

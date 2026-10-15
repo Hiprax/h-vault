@@ -21,7 +21,6 @@ describe('sizeEstimator helpers', () => {
       encryptedName: 'y'.repeat(200),
       nameIv: 'c'.repeat(16),
       nameTag: 'd'.repeat(24),
-      searchHash: 'e'.repeat(64),
       tags: ['banking', 'work', 'archive'],
       favorite: true,
       folderId: '507f1f77bcf86cd799439013',
@@ -55,7 +54,6 @@ describe('sizeEstimator helpers', () => {
       encryptedName: 'name'.repeat(50),
       nameIv: 'iv'.repeat(8),
       nameTag: 'tag'.repeat(8),
-      searchHash: 'h'.repeat(64),
       icon: 'lock',
       color: '#ff8800',
       parentId: '507f1f77bcf86cd799439016',
@@ -86,7 +84,7 @@ describe('sizeEstimator helpers', () => {
     expect(estimated).toBeGreaterThanOrEqual(Buffer.byteLength(JSON.stringify(item), 'utf-8'));
   });
 
-  it('handles folders missing optional fields (icon/color/searchHash)', () => {
+  it('handles folders missing optional fields (icon/color)', () => {
     const folder = {
       _id: '507f1f77bcf86cd799439014',
       encryptedName: 'minimal',

@@ -24,7 +24,7 @@ import {
  * and the content digest live inside `encryptedMeta`, sealed under a key derived
  * from the document's own DEK, which is itself wrapped under a key derived from
  * the user's vault key. The server therefore holds no name signal at all: there
- * is deliberately no `searchHash` here (there is one on `VaultItem`), duplicate
+ * is deliberately no keyed name hash here (items and folders carry none either), duplicate
  * names are legal, and `MAX_DOCUMENTS_PER_USER` plus the byte quota are the only
  * bounds on how many documents an account may hold.
  *

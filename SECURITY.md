@@ -65,14 +65,22 @@ security posture, not a disclaimer.
   wrapped key and a set of sizes. **A hostile server cannot reorder, truncate, or splice one
   document into another either** — a segment's position and an end-of-file marker are inside
   its nonce, and the document's id is inside every key derivation, so each of those
-  tamperings makes the decryption fail rather than producing plausible bytes. **Vault
+  tamperings makes the decryption fail rather than producing plausible bytes. Because a
+  segment's nonce is derived from its position, a resumed upload re-reads the file and stops
+  unless every slice is byte-identical (by SHA-256) to the one first encrypted at its
+  position, so one nonce never encrypts two different plaintexts. **Vault
   entries are bound the same way**: every entry field the app writes (a restore is the one
   exception, below) is sealed to its entry,
   its field and its item type, so one moved elsewhere is refused (the limits of that are under
-  _What it cannot protect against_). The keyed hash of each item's name that the server stores
-  is computed under a separate subkey derived from the vault key and held by the browser as
-  non-extractable, so the vault key is never used as a hashing key, and its raw bytes are
-  exported once per vault key to derive that subkey rather than on every save.
+  _What it cannot protect against_). **No keyed hash of an item's or a folder's name is
+  stored**: a name exists on the server only as ciphertext under a fresh random IV, so the
+  stored rows do not show which entries share a name. An earlier release stored such a hash;
+  migration v5 removes it from every row and drops every index over it when this release
+  first starts. Two things it cannot reach: a backup or export made before the upgrade still
+  carries the old hashes (a restore or import ignores them), and an entry written in the
+  seconds of a rolling restart by a server process still running the earlier release keeps
+  the hash it was given, at rest, until the entry is deleted (no list, read, update answer,
+  export or backup returns it).
 - **A passive network attacker.** All traffic is expected to run over TLS terminated by
   your reverse proxy, and the vault payloads are already ciphertext underneath it.
 - **Copies of API answers kept by a cache.** Every response the application sends under

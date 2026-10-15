@@ -268,7 +268,7 @@ describe('Phase 6 — Backup Integrity and Edge Cases', () => {
             __proto__: { polluted: true },
             createdAt: '1970-01-01T00:00:00.000Z',
             deletedAt: '2099-01-01T00:00:00.000Z', // attempt to mark as trashed
-            searchHash: 'a'.repeat(64), // must be 64 hex if present — this is valid format
+            searchHash: 'a'.repeat(64), // an earlier release's name hash: dropped by the allowlist (F-12)
           },
         ],
         folders: [],

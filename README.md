@@ -480,26 +480,26 @@ must compare the two and refuse on a mismatch**, which is what turns a plaintext
 could edit into one it cannot.
 
 Content is immutable after upload — a segment is never rewritten, so a nonce is never reused under
-a segment key — and replacing bytes means a new document. Renaming or retagging re-seals only the
+a segment key — and replacing bytes means a new document. A resumed upload re-reads the file, and
+ends unless every slice is byte-identical (by SHA-256) to the one first read at its position. Renaming or retagging re-seals only the
 metadata blob, under a freshly generated IV each time.
 
 ### Cryptographic parameters
 
-| Parameter                 | Value                                                                                                                                                                |
-| ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Key derivation            | PBKDF2-SHA256, **600,000 iterations** (a registration below 500,000 is rejected)                                                                                     |
-| Master-key salt           | The account email — see the note above                                                                                                                               |
-| Backup-key salt           | 16 random bytes                                                                                                                                                      |
-| Encryption                | AES-256-GCM                                                                                                                                                          |
-| Key size                  | 256 bits                                                                                                                                                             |
-| IV                        | 12 bytes, freshly random for **every** field                                                                                                                         |
-| Authentication tag        | 16 bytes                                                                                                                                                             |
-| Name hash                 | HMAC-SHA256 over the trimmed, lower-cased name under a subkey, HKDF-SHA256(vault key, info `hvault/item/search/v1`), never the vault key itself; not used for search |
-| Field binding             | AES-GCM additional data naming the field and the entry's id (and an item's type), so ciphertext moved to another entry or field fails to decrypt                     |
-| Server-side password hash | bcrypt, 12 rounds (configurable, 4–31)                                                                                                                               |
-| File encryption tool      | Argon2id (32 MiB, t=3, p=1) wrapping a random per-file key                                                                                                           |
-| Document key              | Random 256-bit per document, wrapped under HKDF-SHA256(vault key, info bound to the document id)                                                                     |
-| Document segment          | AES-256-GCM over 8,388,592 bytes of plaintext, sealing to exactly 8 MiB; nonce = 7 random bytes ‖ big-endian segment index ‖ last-segment flag                       |
+| Parameter                 | Value                                                                                                                                            |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Key derivation            | PBKDF2-SHA256, **600,000 iterations** (a registration below 500,000 is rejected)                                                                 |
+| Master-key salt           | The account email — see the note above                                                                                                           |
+| Backup-key salt           | 16 random bytes                                                                                                                                  |
+| Encryption                | AES-256-GCM                                                                                                                                      |
+| Key size                  | 256 bits                                                                                                                                         |
+| IV                        | 12 bytes, freshly random for **every** field                                                                                                     |
+| Authentication tag        | 16 bytes                                                                                                                                         |
+| Field binding             | AES-GCM additional data naming the field and the entry's id (and an item's type), so ciphertext moved to another entry or field fails to decrypt |
+| Server-side password hash | bcrypt, 12 rounds (configurable, 4–31)                                                                                                           |
+| File encryption tool      | Argon2id (32 MiB, t=3, p=1) wrapping a random per-file key                                                                                       |
+| Document key              | Random 256-bit per document, wrapped under HKDF-SHA256(vault key, info bound to the document id)                                                 |
+| Document segment          | AES-256-GCM over 8,388,592 bytes of plaintext, sealing to exactly 8 MiB; nonce = 7 random bytes ‖ big-endian segment index ‖ last-segment flag   |
 
 ### Honest strength metering
 
@@ -709,8 +709,8 @@ failure the stack does not have is **re-running it to recover from an app outage
 That is the whole deployment. Indexes are created automatically by the one-shot bootstrap
 container before the API is allowed to start, so there is no manual index step. (Production runs
 Mongoose with `autoIndex` off, and the indexes are not merely a performance matter: the
-`(userId, searchHash)` unique partial index on folders is what makes duplicate detection return
-409, and the audit-log and refresh-token TTLs are what bound those collections, together with the
+`users.email` unique index is what refuses a second account for one address, and the audit-log
+and refresh-token TTLs are what bound those collections, together with the
 audit log's per-account caps.)
 
 ### 3. Put your system Nginx in front
@@ -1232,7 +1232,7 @@ such header (a probe, a scraper, `curl`) is unaffected.
 | Method | Endpoint            | Description                                                    |
 | ------ | ------------------- | -------------------------------------------------------------- |
 | GET    | `/folders`          | List every folder                                              |
-| POST   | `/folders`          | Create (409 on a duplicate name)                               |
+| POST   | `/folders`          | Create (409 when its derived id is already taken)              |
 | PUT    | `/folders/:id`      | Update, re-parent — with cycle and depth checks on the subtree |
 | DELETE | `/folders/:id`      | Delete, moving or deleting the contents                        |
 | PUT    | `/folders/:id/sort` | Reorder                                                        |
@@ -1583,14 +1583,14 @@ npm run test:e2e                # Playwright
 
 | Suite      | Files | What it covers                                                                                                                                                                                                                                                                                                                                                                             |
 | ---------- | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Server** | 237   | Supertest against an in-memory MongoDB: auth, refresh reuse detection, vault and folder CRUD, cycle and depth guards, 2FA, backup/restore atomicity and cross-account restore, import/export, cross-user isolation, concurrent operations, rate limiters, background jobs, CSRF, config validation, and the Docker/pipeline invariants                                                     |
-| **Client** | 203   | jsdom: crypto round-trips (IV uniqueness, tamper detection), stores, hooks, Axios interceptors, offline cache, accessibility, entropy metering, the import parsers + identity/conflict resolution + client-side import encryption, and the file-encryption tool against the **real** crypto library                                                                                        |
-| **Shared** | 20    | Schemas, constants, utilities, barrel exports                                                                                                                                                                                                                                                                                                                                              |
+| **Server** | 249   | Supertest against an in-memory MongoDB: auth, refresh reuse detection, vault and folder CRUD, cycle and depth guards, 2FA, backup/restore atomicity and cross-account restore, import/export, cross-user isolation, concurrent operations, rate limiters, background jobs, CSRF, config validation, and the Docker/pipeline invariants                                                     |
+| **Client** | 204   | jsdom: crypto round-trips (IV uniqueness, tamper detection), stores, hooks, Axios interceptors, offline cache, accessibility, entropy metering, the import parsers + identity/conflict resolution + client-side import encryption, and the file-encryption tool against the **real** crypto library                                                                                        |
+| **Shared** | 21    | Schemas, constants, utilities, barrel exports                                                                                                                                                                                                                                                                                                                                              |
 | **E2E**    | 25    | Playwright, Chromium over all of it plus a Firefox leg over the clipboard and auto-lock specs: full auth, vault, folder, 2FA, import/export, backup/restore, lock/unlock, address-field and file-encryption journeys, plus the encrypted document store — upload, byte-exact download, the format-and-repair review, trash/restore/purge, a quota refusal — and the isolated preview frame |
 
 **Files** counts every test file each suite owns on disk, which is not the same as the number the
 command above runs: the server's default Vitest config excludes `tests/resource/**` and
-`tests/storage/**`, so `npm run test -w packages/server` collects fewer than the 237 on disk and
+`tests/storage/**`, so `npm run test -w packages/server` collects fewer than the 249 on disk and
 those two directories run under their own gates (`test:resource`, `test:storage`). The number of
 test _cases_ is a third figure again, and it is ratcheted rather than written down here —
 `.testfortress/baseline.json`'s `tests.count` is a floor fed from the JUnit reports, and it only

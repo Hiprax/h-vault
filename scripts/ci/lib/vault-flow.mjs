@@ -92,7 +92,7 @@ export const REQUEST_TIMEOUT_MS = 60_000;
 
 /** Base64 of n random bytes — an opaque stand-in for real ciphertext. */
 const b64 = (bytes) => randomBytes(bytes).toString('base64');
-/** Lowercase hex, which is what `searchHash` and `authHash` look like on the wire. */
+/** Lowercase hex, which is what `authHash` looks like on the wire. */
 const hex = (bytes) => randomBytes(bytes).toString('hex');
 
 /**
@@ -438,7 +438,6 @@ export function buildFlowFixture() {
       encryptedName: b64(24),
       nameIv: b64(12),
       nameTag: b64(16),
-      searchHash: hex(32),
       tags: ['clean-room'],
       favorite: false,
     },

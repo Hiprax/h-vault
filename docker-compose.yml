@@ -390,9 +390,9 @@ services:
 
   # --- One-shot bootstrap: MongoDB indexes, then exits -----------------------
   # In production Mongoose runs with `autoIndex: false`, so indexes are never
-  # created implicitly. They are not just a performance matter here: the Folder
-  # (userId, searchHash) UNIQUE partial index is what makes duplicate-folder
-  # detection return 409 instead of silently inserting, and the AuditLog /
+  # created implicitly. They are not just a performance matter here: the
+  # `users.email` UNIQUE index is what refuses a second account for one address
+  # instead of silently inserting it, and the AuditLog /
   # RefreshToken TTL indexes are what bound those collections' growth. Without this
   # step the stack boots and looks healthy while quietly losing both guarantees —
   # which is why the app gates on it completing successfully.

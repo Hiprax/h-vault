@@ -775,8 +775,8 @@ describe('Docker deployment', () => {
 
     it('waits for the index bootstrap to finish before it starts', () => {
       // Production disables autoIndex, so nothing creates indexes implicitly. The
-      // Folder (userId, searchHash) UNIQUE partial index is what makes duplicate
-      // detection return 409, and the AuditLog / RefreshToken TTL indexes are what
+      // `users.email` UNIQUE index is what refuses a second account for one
+      // address, and the AuditLog / RefreshToken TTL indexes are what
       // bound those collections — an app started without them looks healthy and
       // quietly loses both guarantees.
       expect(app?.depends_on?.['hvault-bootstrap']?.condition).toBe(

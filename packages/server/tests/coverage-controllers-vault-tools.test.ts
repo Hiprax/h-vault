@@ -260,7 +260,7 @@ describe('vault + tools controller edge branches', () => {
   // ======================================================================
 
   describe('POST /vault/items/bulk-reencrypt — rollback of partially-written ciphertext', () => {
-    it('restores every already-written ITEM (including $unset of a searchHash the rotation added) and preserves the vault key when a later item write fails', async () => {
+    it('restores every already-written ITEM (with and without a password history) and preserves the vault key when a later item write fails', async () => {
       const originalHistory = [
         {
           encryptedPassword: 'old-history-cipher',
@@ -269,12 +269,13 @@ describe('vault + tools controller edge branches', () => {
           changedAt: new Date('2026-01-01T00:00:00.000Z'),
         },
       ];
-      // item1 HAS a searchHash + passwordHistory; item2 has NEITHER (so the
-      // rollback must $unset the searchHash the rotation wrote onto it).
+      // item1 HAS a passwordHistory (restored by `$set`); item2 has none (the
+      // rollback's `$unset` branch). The rotation payload still carries a
+      // `searchHash`, as an older client's does, and none is ever stored (F-12;
+      // this test used to pin the rollback restoring and removing that hash).
       const item1 = await seedItem(user.id, {
         encryptedName: 'orig-name-1',
         encryptedData: 'orig-data-1',
-        searchHash: 'a'.repeat(64),
         passwordHistory: originalHistory,
       });
       const item2 = await seedItem(user.id, {
@@ -354,16 +355,15 @@ describe('vault + tools controller edge branches', () => {
       const p1 = await VaultItem.findById(item1._id).lean();
       expect(p1!.encryptedName).toBe('orig-name-1');
       expect(p1!.encryptedData).toBe('orig-data-1');
-      expect(p1!.searchHash).toBe('a'.repeat(64));
+      expect(p1).not.toHaveProperty('searchHash');
       expect(p1!.passwordHistory).toHaveLength(1);
       expect(p1!.passwordHistory![0]!.encryptedPassword).toBe('old-history-cipher');
 
       const p2 = await VaultItem.findById(item2._id).lean();
       expect(p2!.encryptedName).toBe('orig-name-2');
       expect(p2!.encryptedData).toBe('orig-data-2');
-      // The rotation ADDED a searchHash to a row that had none — the rollback
-      // must remove it again, not leave the new-key hash behind.
-      expect(p2!.searchHash).toBeUndefined();
+      expect(p2).not.toHaveProperty('searchHash');
+      expect(p2!.passwordHistory).toBeUndefined();
 
       // item3 never got written at all.
       const p3 = await VaultItem.findById(item3._id).lean();

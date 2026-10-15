@@ -1530,12 +1530,18 @@ describe('Folder Routes', () => {
 
   // ── 10. Folder searchHash ──────────────────────────────────────────
 
-  describe('Folder searchHash', () => {
-    it('should store and return searchHash on a created folder', async () => {
-      const searchHash = 'a'.repeat(64);
-      const folder = await apiCreateFolder({ searchHash });
+  // F-12: no keyed hash of a folder's name is stored any more. These four tests
+  // used to pin the hash being stored, refused as a duplicate (409), shared across
+  // accounts and replaced on rename; each now pins the opposite, through the API
+  // and in the stored row, because the feature was removed rather than changed.
+  describe('Folder searchHash (no longer stored, F-12)', () => {
+    it('drops a searchHash sent on create: the reply and the stored row carry none', async () => {
+      const folder = await apiCreateFolder({ searchHash: 'a'.repeat(64) });
 
-      expect(folder.searchHash).toBe(searchHash);
+      expect(folder.searchHash).toBeUndefined();
+      const stored = await Folder.findById(folder._id).lean();
+      expect(stored).not.toBeNull();
+      expect(stored).not.toHaveProperty('searchHash');
     });
 
     it('should accept folders without searchHash (legacy compat)', async () => {
@@ -1555,7 +1561,7 @@ describe('Folder Routes', () => {
       expect(res.body.data).toHaveLength(3);
     });
 
-    it('should reject duplicate searchHash for the same user', async () => {
+    it('creates a second folder that sends the same searchHash: there is nothing to compare', async () => {
       const searchHash = 'b'.repeat(64);
       await apiCreateFolder({ encryptedName: 'folder-1', searchHash });
 
@@ -1566,14 +1572,12 @@ describe('Folder Routes', () => {
         .set('x-csrf-token', csrf.token)
         .send(sampleFolder({ encryptedName: 'folder-2', searchHash }));
 
-      // Duplicate searchHash now surfaces as a clean 409 Conflict instead of
-      // bubbling the raw E11000 to the global error handler as a 500.
-      expect(res.status).toBe(409);
-      expect(res.body.success).toBe(false);
-      expect(res.body.message).toMatch(/already exists/i);
+      expect(res.status).toBe(201);
+      expect(res.body.data.searchHash).toBeUndefined();
+      expect(await Folder.countDocuments({ userId: user.id })).toBe(2);
     });
 
-    it('should allow same searchHash for different users', async () => {
+    it('creates a folder for another account that sends the same searchHash, storing none', async () => {
       const searchHash = 'c'.repeat(64);
       await apiCreateFolder({ encryptedName: 'user-a-folder', searchHash });
 
@@ -1589,14 +1593,13 @@ describe('Folder Routes', () => {
         .send(sampleFolder({ encryptedName: 'user-b-folder', searchHash }));
 
       expect(res.status).toBe(201);
-      expect(res.body.data.searchHash).toBe(searchHash);
+      expect(res.body.data.searchHash).toBeUndefined();
+      expect(await Folder.countDocuments({ searchHash: { $exists: true } })).toBe(0);
     });
 
-    it('should update searchHash on an existing folder', async () => {
-      const searchHash = 'd'.repeat(64);
-      const folder = await apiCreateFolder({ searchHash });
+    it('renames a folder and drops the searchHash sent with the new name', async () => {
+      const folder = await apiCreateFolder();
 
-      const newHash = 'e'.repeat(64);
       const res = await agent
         .put(`${BASE}/${folder._id}`)
         .set('Authorization', authHeader(user.accessToken))
@@ -1606,11 +1609,15 @@ describe('Folder Routes', () => {
           encryptedName: 'updated-name',
           nameIv: 'updated-iv',
           nameTag: 'updated-tag',
-          searchHash: newHash,
+          searchHash: 'e'.repeat(64),
         });
 
       expect(res.status).toBe(200);
-      expect(res.body.data.searchHash).toBe(newHash);
+      expect(res.body.data.encryptedName).toBe('updated-name');
+      expect(res.body.data.searchHash).toBeUndefined();
+      const stored = await Folder.findById(folder._id).lean();
+      expect(stored?.encryptedName).toBe('updated-name');
+      expect(stored).not.toHaveProperty('searchHash');
     });
   });
 

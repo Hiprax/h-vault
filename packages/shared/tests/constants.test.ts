@@ -134,7 +134,6 @@ import {
   VAULT_FIELD_V2_IV_MARKER,
   ROW_ID_DERIVATION_PREFIX,
   ROW_ID_NONCE_PATTERN,
-  VAULT_SEARCH_KEY_INFO,
 } from '../src/constants/index.js';
 import {
   HIBP_MAX_MISSES_PER_USER_PER_DAY,
@@ -651,21 +650,13 @@ describe('Document-store constants', () => {
     expect(16 + VAULT_FIELD_V2_IV_MARKER.length).toBeLessThanOrEqual(24);
   });
 
-  it('pins the row-id derivation and the search-key label as format constants', () => {
+  it('pins the row-id derivation as a format constant', () => {
     // Both sides compute a created row's id from these bytes independently, so a
     // change on one side alone stores every new row under an id its fields were
-    // not sealed to; and the search label decides every stored `searchHash`.
+    // not sealed to. (The search-key label pinned here before F-12 is gone with
+    // the name hash it derived.)
     expect(ROW_ID_DERIVATION_PREFIX).toBe('hvault/row-id/v1|');
     expect(ROW_ID_DERIVATION_PREFIX.indexOf('|')).toBe(ROW_ID_DERIVATION_PREFIX.length - 1);
-    expect(VAULT_SEARCH_KEY_INFO).toBe('hvault/item/search/v1');
-    // Distinct from every other HKDF label in the app, so no two purposes share a key.
-    for (const other of [
-      DOCUMENT_STREAM_INFO_PREFIX,
-      DOCUMENT_META_INFO_PREFIX,
-      DOCUMENT_DEK_WRAP_INFO_PREFIX,
-    ]) {
-      expect(other.startsWith(VAULT_SEARCH_KEY_INFO)).toBe(false);
-    }
     // The nonce alphabet: exactly 40 lower-case hex characters, at 39, 40 and 41.
     expect(ROW_ID_NONCE_PATTERN.test('a'.repeat(40))).toBe(true);
     expect(ROW_ID_NONCE_PATTERN.test('a'.repeat(39))).toBe(false);

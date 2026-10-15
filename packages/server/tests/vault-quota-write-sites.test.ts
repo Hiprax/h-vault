@@ -116,6 +116,15 @@ const ACCOUNTED_SITES: Record<string, { count: number; reason: string }> = {
     count: 1,
     reason: 'restore: breaks a cycle by unsetting one `parentId` (placement)',
   },
+  "utils/migrations.ts#removeSearchHash#acquire mongoose.connection.collection('vault_items')": {
+    count: 1,
+    reason:
+      'migration v5 (F-12): drops the name-hash index and unsets `searchHash` in batches; the counter is NOT moved, so it overcounts by the removed bytes (the safe direction) until the hourly recount',
+  },
+  "utils/migrations.ts#removeSearchHash#acquire mongoose.connection.collection('folders')": {
+    count: 1,
+    reason: 'migration v5 (F-12), as for vault_items',
+  },
   'controllers/toolsController.ts#execute#VaultItem.insertMany': {
     count: 1,
     reason: 'import: one reservation for the whole request; what landed is settled',

@@ -72,7 +72,6 @@ vi.mock('../src/services/crypto/cryptoService', () => ({
     encryptData: vi.fn(),
     decryptData: vi.fn(),
     decryptDataWithAad: vi.fn(),
-    generateSearchHash: vi.fn().mockResolvedValue('hash'),
     clearKey: vi.fn(),
     clearCryptoKey: vi.fn().mockResolvedValue(undefined),
     generateSalt: vi.fn().mockReturnValue(new Uint8Array(16)),

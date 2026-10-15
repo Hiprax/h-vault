@@ -17,7 +17,7 @@
  *   Vault data encrypted with Vault Key (AES-256-GCM)
  */
 
-import { KDF_ITERATIONS, VAULT_SEARCH_KEY_INFO } from '@hvault/shared';
+import { KDF_ITERATIONS } from '@hvault/shared';
 
 /*
  * The PBKDF2 work factor for every password-based derivation here (the master
@@ -180,10 +180,9 @@ export class CryptoService {
    *
    * The resulting CryptoKey is extractable so that we can export it for
    * encryption (e.g. when encrypting the vault key with MEK or BWK), as HKDF
-   * input (once per key for the search subkey, and per document for its wrap
-   * key), and for best-effort zeroing via `clearCryptoKey`. It is NOT exported
-   * per item write: the search hash, which used to export it on every save, now
-   * reads a memoised non-extractable subkey.
+   * input (per document, for its wrap key), and for best-effort zeroing via
+   * `clearCryptoKey`. It is NOT exported per item write: no keyed hash of an item
+   * name is computed any more (F-12), which was the one per-save export.
    *
    * SECURITY TRADE-OFF: an extractable key means page script can call
    * `exportKey()` to obtain raw key material. Accepted for the VAULT key (and
@@ -445,83 +444,6 @@ export class CryptoService {
 
     const decoder = new TextDecoder();
     return decoder.decode(decrypted);
-  }
-
-  // ---------------------------------------------------------------------------
-  // Search Hash
-  // ---------------------------------------------------------------------------
-
-  /**
-   * The search subkey of each vault key this session has hashed a name under.
-   *
-   * Keyed by the vault key's own handle, so a rotation, which installs a new
-   * handle, gets a new entry, and the entry of a key nothing holds any more goes
-   * with it. The value is the derivation's PROMISE, so concurrent first calls
-   * share one derivation, and a derivation that rejects is evicted so the next
-   * call can retry rather than inheriting the failure for the life of the key.
-   */
-  private readonly searchKeys = new WeakMap<CryptoKey, Promise<CryptoKey>>();
-
-  /**
-   * `SK_search = HKDF-SHA256(ikm = vault key, salt = empty, info =
-   * VAULT_SEARCH_KEY_INFO)`, imported as a NON-extractable HMAC key.
-   *
-   * Two defects this replaces, both of the kind the backup key and the documents
-   * already avoid (NIST SP 800-108 key separation). The vault key was used
-   * directly as the HMAC key, so one key served AES-GCM and HMAC at once; and it
-   * was EXPORTED on every item write to do it, putting the raw vault key on the
-   * JavaScript heap once per save. Now the raw bytes are exported once per vault
-   * key, as HKDF input, and zeroed before this resolves; the HMAC key itself never
-   * exists as bytes script can read, since `deriveKey` produces it inside the
-   * crypto engine and it is not extractable. The empty salt is RFC 5869 compliant
-   * because the input keying material is already a uniformly random key.
-   */
-  private searchKeyFor(vaultKey: CryptoKey): Promise<CryptoKey> {
-    const memoised = this.searchKeys.get(vaultKey);
-    if (memoised) return memoised;
-    const derived = (async () => {
-      const raw = await this.subtle.exportKey('raw', vaultKey);
-      try {
-        const base = await this.subtle.importKey('raw', raw, 'HKDF', false, ['deriveKey']);
-        return await this.subtle.deriveKey(
-          {
-            name: 'HKDF',
-            hash: 'SHA-256',
-            salt: new Uint8Array(0),
-            info: new TextEncoder().encode(VAULT_SEARCH_KEY_INFO),
-          },
-          base,
-          { name: 'HMAC', hash: 'SHA-256', length: 256 },
-          false,
-          ['sign'],
-        );
-      } finally {
-        this.clearKey(raw);
-      }
-    })();
-    this.searchKeys.set(vaultKey, derived);
-    derived.catch(() => {
-      if (this.searchKeys.get(vaultKey) === derived) this.searchKeys.delete(vaultKey);
-    });
-    return derived;
-  }
-
-  /**
-   * A deterministic HMAC-SHA256 of an item name, normalised by trimming and
-   * lower-casing, under the vault key's search subkey (see `searchKeyFor`). It
-   * lets the server compare names for equality without learning them.
-   *
-   * A hash computed before the subkey existed was taken under the raw vault key,
-   * so the same name hashes differently in the two schemes. Nothing in this app
-   * matches ITEMS by their hash (import identity is computed from decrypted
-   * content), and a rotation or a re-seal recomputes every item's hash; a
-   * folder's hash is written only by a restore and is not recomputed by either.
-   */
-  async generateSearchHash(name: string, vaultKey: CryptoKey): Promise<string> {
-    const message = new TextEncoder().encode(name.trim().toLowerCase());
-    const hmacKey = await this.searchKeyFor(vaultKey);
-    const signature = await this.subtle.sign('HMAC', hmacKey, message);
-    return Array.from(new Uint8Array(signature), (b) => b.toString(16).padStart(2, '0')).join('');
   }
 
   // ---------------------------------------------------------------------------

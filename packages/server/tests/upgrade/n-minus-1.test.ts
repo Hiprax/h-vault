@@ -51,6 +51,7 @@ import { RefreshToken } from '../../src/models/RefreshToken.js';
 import { hashToken } from '../../src/utils/token.js';
 import { RELEASE_NOTES } from '../../src/content/releaseNotes.js';
 import { RELEASE_NOTES_BASELINE_VERSION } from '../../src/constants/index.js';
+import { runMigrations } from '../../src/utils/migrations.js';
 import { generateAccessToken, getCsrf } from '../helpers.js';
 import {
   deriveMasterKeys,
@@ -143,11 +144,17 @@ async function seedNMinusOneVault(): Promise<{
       encryptedName: folder.encryptedName,
       nameIv: folder.nameIv,
       nameTag: folder.nameTag,
-      searchHash: folder.searchHash,
       sortOrder: folder.sortOrder,
       ...(folder.parent ? { parentId: folderIds.get(folder.parent) } : {}),
       ...(folder.sourceRefId ? { sourceRefId: folder.sourceRefId } : {}),
     });
+    // 0.7.0 stored a keyed hash of the name, which the current model no longer
+    // declares (F-12), so `create()` drops it; it is put back as 0.7.0 wrote it,
+    // the same way the settings keys above are taken back to 0.7.0's shape.
+    await Folder.collection.updateOne(
+      { _id: created._id },
+      { $set: { searchHash: folder.searchHash } },
+    );
     folderIds.set(folder.id, created._id.toString());
   }
 
@@ -159,11 +166,14 @@ async function seedNMinusOneVault(): Promise<{
       encryptedName: item.encryptedName,
       nameIv: item.nameIv,
       nameTag: item.nameTag,
-      searchHash: item.searchHash,
       encryptedData: item.encryptedData,
       dataIv: item.dataIv,
       dataTag: item.dataTag,
     });
+    await VaultItem.collection.updateOne(
+      { _id: created._id },
+      { $set: { searchHash: item.searchHash } },
+    );
     itemIds.set(item.id, created._id.toString());
   }
 
@@ -298,8 +308,10 @@ describe('a vault written by the previous release still decrypts and parses', ()
         ),
       ).toBe(item.name);
 
-      // The search hash the server matches duplicates on is an HMAC of the name
-      // under the vault key, and the fixture recorded the one 0.7.0 produced.
+      // The fixture's recorded name hash is the one 0.7.0 produced: an HMAC of the
+      // name under the raw vault key. Nothing stores or computes it any more
+      // (F-12); this checks the fixture itself, which migration v5 is tested on
+      // below.
       expect(await searchHashOf(item.name, searchHashKey)).toBe(item.searchHash);
     },
   );
@@ -453,6 +465,30 @@ describe('the current models accept the documents the previous release persisted
       expect(row!.dataIv, item.id).toBe(item.dataIv);
       expect(row!.dataTag, item.id).toBe(item.dataTag);
       // And it still opens after the round trip through mongod and the route.
+      expect(
+        await openText(
+          { encrypted: row!.encryptedData, iv: row!.dataIv, tag: row!.dataTag },
+          vaultKey,
+        ),
+      ).toBe(item.plaintext);
+    }
+  });
+
+  it('migration v5 removes the name hashes 0.7.0 stored, and every row still opens', async () => {
+    expect(await VaultItem.collection.countDocuments({ searchHash: { $exists: true } })).toBe(
+      items.length,
+    );
+    expect(await Folder.collection.countDocuments({ searchHash: { $exists: true } })).toBe(
+      folders.length,
+    );
+
+    await runMigrations();
+
+    expect(await VaultItem.collection.countDocuments({ searchHash: { $exists: true } })).toBe(0);
+    expect(await Folder.collection.countDocuments({ searchHash: { $exists: true } })).toBe(0);
+    for (const item of items) {
+      const row = await VaultItem.findById(seeded.itemIds.get(item.id)).lean();
+      expect(row, item.id).not.toBeNull();
       expect(
         await openText(
           { encrypted: row!.encryptedData, iv: row!.dataIv, tag: row!.dataTag },

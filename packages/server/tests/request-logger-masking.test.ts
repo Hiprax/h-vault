@@ -265,9 +265,6 @@ const LOGGABLE_BODY_KEYS = new Map<string, string>([
   // A rotation's re-seal flag: rewrite under the same key.
   ['reseal', METADATA],
   ['scheduleHour', METADATA],
-  // An HMAC of the item NAME, stored server-side for duplicate detection; it reveals
-  // nothing the stored row does not.
-  ['searchHash', METADATA],
   // Whether the release notes open by themselves after an update.
   ['showReleaseNotes', METADATA],
   ['sortOrder', METADATA],

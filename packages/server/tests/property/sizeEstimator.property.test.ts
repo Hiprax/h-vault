@@ -35,7 +35,6 @@ const itemArbitrary = fc.record({
   encryptedName: anyText(200),
   nameIv: anyText(24),
   nameTag: anyText(32),
-  searchHash: fc.option(anyText(64), { nil: undefined }),
   tags: fc.array(anyText(50), { maxLength: 20 }),
   passwordHistory: fc.option(
     fc.array(fc.record({ encryptedPassword: anyText(400), iv: anyText(24), tag: anyText(32) }), {
@@ -49,7 +48,6 @@ const folderArbitrary = fc.record({
   encryptedName: anyText(200),
   nameIv: anyText(24),
   nameTag: anyText(32),
-  searchHash: fc.option(anyText(64), { nil: undefined }),
   icon: fc.option(anyText(50), { nil: undefined }),
   color: fc.option(anyText(20), { nil: undefined }),
 });
@@ -98,7 +96,6 @@ describe('the size estimate is never below the streamed JSON', () => {
       encryptedName: '\u0000'.repeat(200),
       nameIv: '\u001f'.repeat(24),
       nameTag: '\n'.repeat(32),
-      searchHash: undefined,
       tags: Array.from({ length: 20 }, () => '\u0002'.repeat(50)),
       passwordHistory: Array.from({ length: 10 }, () => ({
         encryptedPassword: '\u0003'.repeat(400),

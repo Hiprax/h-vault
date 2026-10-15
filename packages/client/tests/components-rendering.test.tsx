@@ -60,7 +60,6 @@ vi.mock('../src/services/crypto/cryptoService', () => ({
     decryptVaultKey: vi.fn(),
     encryptData: vi.fn(),
     decryptData: vi.fn(),
-    generateSearchHash: vi.fn(),
     clearKey: vi.fn(),
     clearCryptoKey: vi.fn().mockResolvedValue(undefined),
   },
@@ -326,7 +325,6 @@ function makeDecryptedItem(
       notes: '',
       customFields: [],
     },
-    searchHash: 'abc',
     createdAt: now,
     updatedAt: now,
     _raw: {

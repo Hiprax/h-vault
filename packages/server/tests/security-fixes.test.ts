@@ -187,7 +187,8 @@ describe('Import operations: server-side execution without matching', () => {
     expect(persisted).not.toBeNull();
     expect(persisted!.encryptedName).toBe('rewritten-name');
     expect(persisted!.encryptedData).toBe('rewritten-data');
-    expect(persisted!.searchHash).toBe('b'.repeat(64));
+    // F-12: the update's name hash (an older client's) is not stored.
+    expect(persisted).not.toHaveProperty('searchHash');
     expect(persisted!.tags).toEqual(['keep-me']);
     expect(persisted!.favorite).toBe(true);
     expect(persisted!.itemType).toBe('login');

@@ -45,6 +45,7 @@ import {
   documentChunkCountFor,
 } from '@hvault/shared';
 import type { DocumentMeta, DocumentResponse } from '@hvault/shared';
+import { createHash } from 'node:crypto';
 import { installTestClock } from './clock.js';
 
 // ---------------------------------------------------------------------------
@@ -2176,32 +2177,6 @@ describe('documentsStore — cancel and teardown', () => {
     expect(useDocumentsStore.getState().uploads).toEqual({});
   });
 
-  it('refuses to resume when the source changed underneath the transfer', async () => {
-    // `timers: 'timeouts'` and NOT `'all'`: these tests drive the backoff deadline
-    // forward while awaiting a WebAssembly instantiation, Web Crypto and
-    // `Blob.arrayBuffer()` in the same test, and a faked `setImmediate` /
-    // `queueMicrotask` makes those awaits hang rather than run late.
-    installTestClock({ timers: 'timeouts' });
-    committedRow = await makeRow(ID_A, 'a.txt', { plaintextBytes: 3 });
-    partOutcomes = [400];
-    const file = new File([bytes(1, 2, 3)], 'a.txt', { lastModified: 1_000 });
-
-    await expect(
-      settleWithBackoff(
-        useDocumentsStore
-          .getState()
-          .startUpload({ source: file, name: 'a.txt', mime: 'text/plain' }),
-      ),
-    ).rejects.toThrow();
-
-    // The file on disk moved. Re-reading it would seal segment 0 over DIFFERENT
-    // bytes under the same key and nonce, which is the catastrophic case rather
-    // than the annoying one.
-    Object.defineProperty(file, 'lastModified', { value: 2_000, configurable: true });
-    await expect(useDocumentsStore.getState().retryUpload(ID_A)).rejects.toThrow(/changed/i);
-    expect(useDocumentsStore.getState().uploads).toEqual({});
-  });
-
   it('refuses to retry a transfer it has never heard of', async () => {
     await expect(useDocumentsStore.getState().retryUpload(ID_A)).rejects.toThrow(
       /no longer available/i,
@@ -2384,6 +2359,349 @@ describe('documentsStore — cancel and teardown', () => {
     await expect(useDocumentsStore.getState().retryUpload(ID_A)).resolves.toBe(ID_A);
     expect(useDocumentsStore.getState().uploads).toEqual({});
     expect(useDocumentsStore.getState().documents[0]?.id).toBe(ID_A);
+  });
+});
+
+// ===========================================================================
+// A resume re-reads the file: one (key, nonce) seals one plaintext (F-11)
+// ===========================================================================
+
+describe('documentsStore — a resume seals a slice only if it is the slice it read first', () => {
+  const ORIGINAL = bytes(104, 118, 97, 117, 108, 116); // "hvault"
+  /** The same length and the same name, one byte different. */
+  const CHANGED = bytes(104, 118, 97, 117, 108, 84); // "hvaulT"
+  const CHANGED_MESSAGE = 'The file changed since the upload started; start it again.';
+
+  /**
+   * A `File` whose bytes change between two reads while everything the File API
+   * reports about it stays put: the same `size`, the same `lastModified`, the
+   * same object. That is exactly what a comparison of those two properties cannot
+   * see, and a browser that hands back the new bytes instead of failing the read
+   * produces exactly this. The first `servedFirst` calls to `slice()` (one per
+   * segment the first pass reads) answer from `first`, every later one from `later`.
+   */
+  class ShiftingFile extends File {
+    slices = 0;
+    readonly first: DocumentBytes;
+    readonly later: DocumentBytes;
+    readonly servedFirst: number;
+
+    constructor(first: DocumentBytes, later: DocumentBytes, servedFirst = 1) {
+      super([first], 'a.txt', { lastModified: 1_000 });
+      this.first = first;
+      this.later = later;
+      this.servedFirst = servedFirst;
+    }
+
+    override slice(start?: number, end?: number, contentType?: string): Blob {
+      this.slices += 1;
+      const content = this.slices <= this.servedFirst ? this.first : this.later;
+      return new Blob([content]).slice(start, end, contentType);
+    }
+  }
+
+  /**
+   * A short, stable name for a run of bytes: their SHA-256, from Node's own
+   * hasher, so recording an 8 MiB plaintext costs a hash rather than a 16-million
+   * character string. Never the hasher under test, which is Web Crypto.
+   */
+  function fingerprint(source: BufferSource): string {
+    const view = ArrayBuffer.isView(source)
+      ? new Uint8Array(source.buffer, source.byteOffset, source.byteLength)
+      : new Uint8Array(source);
+    return createHash('sha256').update(view).digest('hex');
+  }
+
+  function hex(source: BufferSource): string {
+    const view = ArrayBuffer.isView(source)
+      ? new Uint8Array(source.buffer, source.byteOffset, source.byteLength)
+      : new Uint8Array(source);
+    return Array.from(view, (b) => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  /**
+   * Every AES-GCM seal the page performs, as (nonce, plaintext) pairs.
+   *
+   * A PASS-THROUGH on the Web Crypto boundary, like the entropy capture: the real
+   * engine still seals, and what is recorded is what it was asked to seal. The
+   * property under test is stated over exactly this list — no nonce appears twice
+   * with two different plaintexts — so it does not depend on how the store is
+   * arranged internally.
+   */
+  let seals: { iv: string; plaintext: string }[] = [];
+
+  /**
+   * Every SHA-256 the page asks Web Crypto for, with the input it hashed and the
+   * buffer it got back. The store's per-slice digests are the ones whose input is
+   * a plaintext slice, and holding the returned buffer is what lets a test see a
+   * later `fill(0)` inside the store, the same way `captured32` sees the DEK's.
+   */
+  let digests: { input: string; output: Uint8Array }[] = [];
+
+  /** Run just before the digest of a slice whose bytes are `content` is handed back. */
+  let beforeSliceDigestReturns: { content: string; run: () => void } | null = null;
+
+  beforeEach(() => {
+    seals = [];
+    digests = [];
+    beforeSliceDigestReturns = null;
+    const subtle = globalThis.crypto.subtle;
+    const realEncrypt = subtle.encrypt.bind(subtle);
+    const realDigest = subtle.digest.bind(subtle);
+    vi.spyOn(subtle, 'encrypt').mockImplementation(async (algorithm, key, data) => {
+      const iv = (algorithm as AesGcmParams).iv;
+      seals.push({ iv: hex(iv), plaintext: fingerprint(data) });
+      return realEncrypt(algorithm, key, data);
+    });
+    vi.spyOn(subtle, 'digest').mockImplementation(async (algorithm, data) => {
+      const input = fingerprint(data);
+      const output = await realDigest(algorithm, data);
+      digests.push({ input, output: new Uint8Array(output) });
+      if (beforeSliceDigestReturns?.content === input) beforeSliceDigestReturns.run();
+      return output;
+    });
+  });
+
+  /** The seals made under this transfer's segment nonces, i.e. the file's content. */
+  function segmentSeals(): { iv: string; plaintext: string }[] {
+    const init = JSON.parse(requestsFor('POST', '/documents/uploads')[0]?.data as string) as {
+      noncePrefix: string;
+    };
+    const prefix = hex(new Uint8Array(cryptoService.base64ToArrayBuffer(init.noncePrefix)));
+    return seals.filter((seal) => seal.iv.startsWith(prefix));
+  }
+
+  /** The digests the store took of a plaintext slice. */
+  function sliceDigests(...contents: DocumentBytes[]): Uint8Array[] {
+    const inputs = new Set(contents.map((content) => fingerprint(content)));
+    return digests.filter((digest) => inputs.has(digest.input)).map((digest) => digest.output);
+  }
+
+  async function failFirstPass(file: File): Promise<void> {
+    await expect(
+      settleWithBackoff(
+        useDocumentsStore
+          .getState()
+          .startUpload({ source: file, name: 'a.txt', mime: 'text/plain' }),
+      ),
+    ).rejects.toThrow();
+    expect(useDocumentsStore.getState().uploads[ID_A]?.status).toBe('failed');
+  }
+
+  it('refuses a resume whose re-read slice differs, before sealing it under the nonce it used', async () => {
+    installTestClock({ timers: 'timeouts' });
+    committedRow = await makeRow(ID_A, 'a.txt', { plaintextBytes: ORIGINAL.length });
+    const entropyBaseline = captured32.length;
+    // 400 is the `fail` verdict: the session is KEPT, so a Retry is offered.
+    partOutcomes = [400];
+    const file = new ShiftingFile(ORIGINAL, CHANGED);
+    await failFirstPass(file);
+    const partsBefore = partRequests().length;
+
+    await expect(useDocumentsStore.getState().retryUpload(ID_A)).rejects.toThrow(CHANGED_MESSAGE);
+
+    // The slice WAS re-read, and its size and modification time had not moved, so
+    // the refusal is the bytes' and nothing else's.
+    expect(file.slices).toBe(2);
+    expect(file.size).toBe(ORIGINAL.length);
+    expect(file.lastModified).toBe(1_000);
+    // Segment 0 was sealed exactly once, over the bytes first read. The second
+    // seal under the same (key, nonce) over different bytes is the harm itself.
+    expect(segmentSeals()).toEqual([
+      { iv: expect.any(String) as string, plaintext: fingerprint(ORIGINAL) },
+    ]);
+    // Nothing more left the page: no part, no completion.
+    expect(partRequests()).toHaveLength(partsBefore);
+    expect(requestsFor('POST', '/complete')).toHaveLength(0);
+    // The session is over: no Retry is offered, the DEK is zeroed (and only the
+    // DEK: the stream salt is not a secret), and the staging row is released.
+    expect(useDocumentsStore.getState().uploads).toEqual({});
+    expect(captured32.slice(entropyBaseline).filter(isAllZero)).toHaveLength(1);
+    // Fire-and-forget, so waited for rather than assumed to have landed already.
+    await until(
+      () => requestsFor('DELETE', `/documents/uploads/${ID_A}`).length === 1,
+      'the staging upload to be released',
+    );
+    // And the slice digests went with it.
+    const recorded = sliceDigests(ORIGINAL, CHANGED);
+    expect(recorded).toHaveLength(2);
+    expect(recorded.every(isAllZero)).toBe(true);
+  });
+
+  it('refuses a resume whose HELD slice changed, so the sealed digest never describes bytes the server does not hold', async () => {
+    installTestClock({ timers: 'timeouts' });
+    committedRow = await makeRow(ID_A, 'a.txt', { plaintextBytes: ORIGINAL.length });
+    const entropyBaseline = captured32.length;
+    // The part lands and the COMPLETION is refused, so the ledger holds part 1
+    // and the resume will skip sending it — but it still reads and hashes it.
+    completeOutcomes = [{ status: 400 }, 'ok'];
+    const file = new ShiftingFile(ORIGINAL, CHANGED);
+    await failFirstPass(file);
+    expect(partRequests()).toHaveLength(1);
+    ledgerParts = [1];
+
+    await expect(useDocumentsStore.getState().retryUpload(ID_A)).rejects.toThrow(CHANGED_MESSAGE);
+
+    expect(file.slices).toBe(2);
+    // The one completion is the refused first one: no metadata sealed over a
+    // whole-file digest of bytes the stored part does not contain was sent.
+    expect(completeBodies).toHaveLength(1);
+    expect(segmentSeals()).toEqual([
+      { iv: expect.any(String) as string, plaintext: fingerprint(ORIGINAL) },
+    ]);
+    expect(partRequests()).toHaveLength(1);
+    expect(useDocumentsStore.getState().uploads).toEqual({});
+    expect(captured32.slice(entropyBaseline).filter(isAllZero)).toHaveLength(1);
+    // Fire-and-forget, so waited for rather than assumed to have landed already.
+    await until(
+      () => requestsFor('DELETE', `/documents/uploads/${ID_A}`).length === 1,
+      'the staging upload to be released',
+    );
+    expect(useDocumentsStore.getState().documents).toEqual([]);
+  });
+
+  it('resumes a slice that did not change, and zeroes its digests when the transfer ends', async () => {
+    installTestClock({ timers: 'timeouts' });
+    committedRow = await makeRow(ID_A, 'a.txt', { plaintextBytes: ORIGINAL.length });
+    partOutcomes = [400];
+    const file = new ShiftingFile(ORIGINAL, ORIGINAL);
+    await failFirstPass(file);
+    // Taken before the resume: the transfer is paused, not over, so the digest it
+    // will compare against must still be there.
+    const held = sliceDigests(ORIGINAL);
+    expect(held).toHaveLength(1);
+    expect(held.some(isAllZero)).toBe(false);
+
+    await expect(useDocumentsStore.getState().retryUpload(ID_A)).resolves.toBe(ID_A);
+
+    expect(file.slices).toBe(2);
+    // Sealed twice under the same nonce, and that is allowed precisely because it
+    // is the SAME plaintext: the second seal is byte-identical to the first.
+    const sealed = segmentSeals();
+    expect(sealed).toHaveLength(2);
+    expect(new Set(sealed.map((seal) => `${seal.iv}:${seal.plaintext}`)).size).toBe(1);
+    expect(requestsFor('POST', '/complete')).toHaveLength(1);
+    expect(useDocumentsStore.getState().uploads).toEqual({});
+    // Both reads were digested, and neither digest outlives the session.
+    const recorded = sliceDigests(ORIGINAL);
+    expect(recorded).toHaveLength(2);
+    expect(recorded.every(isAllZero)).toBe(true);
+  });
+
+  it('drops the digest of a slice read while a lock lands, and seals nothing after it', async () => {
+    committedRow = await makeRow(ID_A, 'a.txt', { plaintextBytes: ORIGINAL.length });
+    // The lock arrives while the slice's digest is being computed: the session's
+    // records are zeroed and the controller aborted before the digest is back.
+    beforeSliceDigestReturns = {
+      content: fingerprint(ORIGINAL),
+      run: () => {
+        useDocumentsStore.getState().clearStore();
+      },
+    };
+
+    await expect(
+      useDocumentsStore.getState().startUpload({
+        source: new ShiftingFile(ORIGINAL, ORIGINAL),
+        name: 'a.txt',
+        mime: 'text/plain',
+      }),
+    ).rejects.toBeInstanceOf(UploadCancelledError);
+
+    // The digest that came back after the teardown was not kept: it is zeroed.
+    const recorded = sliceDigests(ORIGINAL);
+    expect(recorded).toHaveLength(1);
+    expect(recorded.every(isAllZero)).toBe(true);
+    // And nothing was sealed or sent under a key the lock has just zeroed.
+    expect(segmentSeals()).toEqual([]);
+    expect(partRequests()).toHaveLength(0);
+    expect(useDocumentsStore.getState().uploads).toEqual({});
+  });
+
+  it('zeroes the digests of a paused transfer when the user cancels it', async () => {
+    installTestClock({ timers: 'timeouts' });
+    committedRow = await makeRow(ID_A, 'a.txt', { plaintextBytes: ORIGINAL.length });
+    partOutcomes = [400];
+    await failFirstPass(new ShiftingFile(ORIGINAL, ORIGINAL));
+    expect(sliceDigests(ORIGINAL).some(isAllZero)).toBe(false);
+
+    // Cancel goes through `endSession`, not the teardown loop.
+    useDocumentsStore.getState().cancelUpload(ID_A);
+
+    const recorded = sliceDigests(ORIGINAL);
+    expect(recorded).toHaveLength(1);
+    expect(recorded.every(isAllZero)).toBe(true);
+    expect(useDocumentsStore.getState().uploads).toEqual({});
+  });
+
+  it('zeroes the digests of a paused transfer when the store is torn down', async () => {
+    installTestClock({ timers: 'timeouts' });
+    committedRow = await makeRow(ID_A, 'a.txt', { plaintextBytes: ORIGINAL.length });
+    partOutcomes = [400];
+    await failFirstPass(new ShiftingFile(ORIGINAL, CHANGED));
+    expect(sliceDigests(ORIGINAL).some(isAllZero)).toBe(false);
+
+    // A lock or a logout: the same teardown, which does not go through endSession.
+    useDocumentsStore.getState().clearStore();
+
+    const recorded = sliceDigests(ORIGINAL);
+    expect(recorded).toHaveLength(1);
+    expect(recorded.every(isAllZero)).toBe(true);
+  });
+
+  it('resumes a file whose reported modification time moved while its bytes did not', async () => {
+    // The bytes decide. A File's `size` and `lastModified` are a snapshot taken
+    // when it was picked, so a check on them cannot see a change on disk; and when
+    // a property does move but the bytes are the same, resealing them is safe.
+    installTestClock({ timers: 'timeouts' });
+    committedRow = await makeRow(ID_A, 'a.txt', { plaintextBytes: 3 });
+    partOutcomes = [400];
+    const file = new File([bytes(1, 2, 3)], 'a.txt', { lastModified: 1_000 });
+    await failFirstPass(file);
+
+    Object.defineProperty(file, 'lastModified', { value: 2_000, configurable: true });
+
+    await expect(useDocumentsStore.getState().retryUpload(ID_A)).resolves.toBe(ID_A);
+    expect(requestsFor('POST', '/complete')).toHaveLength(1);
+    expect(useDocumentsStore.getState().uploads).toEqual({});
+    // Negative: the transfer was never treated as changed, so nothing was released.
+    // The release would be fire-and-forget, so real turns are let pass first, as
+    // the refusals above wait for theirs, before its absence is believed.
+    for (let turn = 0; turn < 20; turn += 1) await realTurn();
+    expect(requestsFor('DELETE', `/documents/uploads/${ID_A}`)).toHaveLength(0);
+  });
+
+  it('checks every segment of a longer file, and refuses at the one that changed', async () => {
+    installTestClock({ timers: 'timeouts' });
+    // Two segments: the first is a full chunk, the second is the tail. The second
+    // segment's last byte is what changes on disk.
+    const length = DOCUMENT_PLAINTEXT_CHUNK_BYTES + 3;
+    const original = new Uint8Array(length) as DocumentBytes;
+    original.fill(7);
+    const changed = new Uint8Array(original) as DocumentBytes;
+    changed[length - 1] = 8;
+    committedRow = await makeRow(ID_A, 'a.txt', { plaintextBytes: length });
+    // Part 1 lands; part 2 is refused, so the ledger will hold part 1 only.
+    partOutcomes = [null, 400];
+    // The first pass reads both segments from the original bytes.
+    const file = new ShiftingFile(original, changed, 2);
+    await failFirstPass(file);
+    expect(partRequests()).toHaveLength(2);
+    ledgerParts = [1];
+
+    await expect(useDocumentsStore.getState().retryUpload(ID_A)).rejects.toThrow(CHANGED_MESSAGE);
+
+    // Both segments were re-read: the first matched (and, being held, was not
+    // re-sent), the second did not.
+    expect(file.slices).toBe(4);
+    const sealed = segmentSeals();
+    expect(sealed).toHaveLength(2);
+    expect(new Set(sealed.map((seal) => seal.iv)).size).toBe(2);
+    // The last segment was sealed once, over the bytes first read.
+    const tail = fingerprint(original.subarray(DOCUMENT_PLAINTEXT_CHUNK_BYTES));
+    expect(sealed.filter((seal) => seal.plaintext === tail)).toHaveLength(1);
+    expect(partRequests()).toHaveLength(2);
+    expect(requestsFor('POST', '/complete')).toHaveLength(0);
+    expect(useDocumentsStore.getState().uploads).toEqual({});
   });
 });
 

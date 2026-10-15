@@ -541,11 +541,10 @@ describe('Tools routes', () => {
       ]);
     });
 
-    it('rewrites content in place for an updates-only request and refreshes searchHash', async () => {
+    it('rewrites content in place for an updates-only request and stores no searchHash', async () => {
       const existing = await seedItem(user.id, {
         encryptedName: 'original-name',
         encryptedData: 'original-data',
-        searchHash: searchHashFor(7),
       });
 
       const { csrfToken, csrfCookie } = await getCsrf(agent);
@@ -563,9 +562,9 @@ describe('Tools routes', () => {
       expect(stored).toHaveLength(1);
       expect(stored[0]!.encryptedName).toBe('updated-encrypted-name');
       expect(stored[0]!.encryptedData).toBe('updated-encrypted-data');
-      // An update replaces `encryptedName`, so the stored hash must follow it
-      // or it strands against the old name.
-      expect(stored[0]!.searchHash).toBe(searchHashFor(4095));
+      // F-12: the update row's name hash (an older client's) is not stored; this
+      // used to pin it following the new name.
+      expect(stored[0]).not.toHaveProperty('searchHash');
     });
 
     it('applies inserts and updates together in one mixed request', async () => {
@@ -625,10 +624,9 @@ describe('Tools routes', () => {
       expect(await VaultItem.countDocuments({ userId: user.id })).toBe(0);
     });
 
-    it('rejects an insert row without a searchHash', async () => {
-      // Every non-import creation path writes a searchHash and the restore flow
-      // relies on its presence, so it is required on the wire rather than
-      // optional-and-hopefully-present.
+    it('accepts an insert row without a searchHash', async () => {
+      // F-12: no keyed name hash is stored, so none is required; a row without one
+      // is the current client's shape. This used to pin a 400.
       const { csrfToken, csrfCookie } = await getCsrf(agent);
       const { searchHash: _omitted, ...withoutHash } = insertRow(1);
 
@@ -639,9 +637,8 @@ describe('Tools routes', () => {
         .set('Cookie', csrfCookie)
         .send({ format: 'json', operations: { inserts: [withoutHash] } });
 
-      expect(res.status).toBe(400);
-      expect(res.body.message).toContain('searchHash');
-      expect(await VaultItem.countDocuments({ userId: user.id })).toBe(0);
+      expect(res.status).toBe(201);
+      expect(await VaultItem.countDocuments({ userId: user.id })).toBe(1);
     });
 
     it('executes a schema-valid operations body and persists the insert verbatim', async () => {
@@ -675,7 +672,8 @@ describe('Tools routes', () => {
       expect(stored).not.toBeNull();
       expect(stored!.encryptedName).toBe('imported-name-9');
       expect(stored!.encryptedData).toBe('imported-data-9');
-      expect(stored!.searchHash).toBe(searchHashFor(9));
+      // The row's name hash (an older client's) is not part of what is persisted.
+      expect(stored).not.toHaveProperty('searchHash');
       expect(stored!.tags).toEqual(['work']);
       expect(stored!.favorite).toBe(true);
       expect(await VaultItem.countDocuments({ userId: user.id })).toBe(1);

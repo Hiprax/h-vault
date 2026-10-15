@@ -121,7 +121,6 @@ vi.mock('../src/services/crypto/cryptoService', () => ({
     encryptDataWithAad: vi.fn((plain: string, _key: CryptoKey, aad: Uint8Array) =>
       Promise.resolve({ ...sealBound(plain, new TextDecoder().decode(aad)), iv: 'iv' }),
     ),
-    generateSearchHash: vi.fn(() => Promise.resolve('a'.repeat(64))),
     deriveKeys: vi.fn(),
     getAuthHash: vi.fn(),
     clearKey: vi.fn(),
@@ -270,7 +269,6 @@ function existingGithubItem() {
     ),
     dataIv: 'iv',
     dataTag: 'tag',
-    searchHash: 'a'.repeat(64),
     createdAt: '2026-01-01T00:00:00.000Z',
     updatedAt: '2026-01-01T00:00:00.000Z',
   };

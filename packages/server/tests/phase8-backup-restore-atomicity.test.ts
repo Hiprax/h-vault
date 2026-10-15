@@ -717,20 +717,21 @@ describe('Backup restore — trashed_auto_restored skip reason', () => {
 // folder is created without it (the user can rename later, which rebuilds
 // the searchHash).
 
-describe('Backup restore — keep_both with colliding folder searchHash', () => {
+// F-12: a backup written by an earlier release carries a `searchHash` on each
+// row. These tests used to pin the restore stripping it and retrying when it
+// collided with the folder name index; that index is gone and the hash is never
+// stored, so what they pin now is that such a backup restores whole and leaves no
+// hash behind.
+describe('Backup restore — keep_both of folders whose backup rows carry a name hash', () => {
   let user: TestUser;
   let agent: request.Agent;
 
   beforeEach(async () => {
     agent = request(app);
     user = await createTestUser();
-    // The collision paths under test rely on the unique partial (userId,
-    // searchHash) index being live to raise E11000. autoIndex builds it
-    // lazily, so await it here to keep these assertions order-independent.
-    await Folder.init();
   });
 
-  it('returns 200 and creates a duplicate folder without searchHash on collision', async () => {
+  it('returns 200 and creates the duplicate folder, with no hash on either', async () => {
     const sharedHash = 'a'.repeat(64);
     const existingFolderId = new Types.ObjectId().toString();
 
@@ -740,7 +741,6 @@ describe('Backup restore — keep_both with colliding folder searchHash', () => 
       encryptedName: 'existing',
       nameIv: 'iv',
       nameTag: 'tag',
-      searchHash: sharedHash,
     });
 
     const { csrfToken, csrfCookie } = await getCsrf(agent);
@@ -767,35 +767,30 @@ describe('Backup restore — keep_both with colliding folder searchHash', () => 
     expect(res.body.data.foldersRestored).toBe(1);
     expect(res.body.data.foldersSkipped).toBe(0);
 
-    // Two folders now exist for the user. The original keeps its searchHash;
-    // the duplicate must NOT carry the colliding hash (otherwise the unique
-    // partial index would have rejected it).
     const folders = await Folder.find({ userId: user.id }).lean();
     expect(folders.length).toBe(2);
 
     const original = folders.find((f) => String(f._id) === existingFolderId);
     expect(original).toBeDefined();
-    expect(original!.searchHash).toBe(sharedHash);
+    expect(original!.encryptedName).toBe('existing');
 
     const duplicate = folders.find((f) => String(f._id) !== existingFolderId);
     expect(duplicate).toBeDefined();
     expect(duplicate!.encryptedName).toBe('duplicate-from-backup');
-    expect(duplicate!.searchHash).toBeUndefined();
+    for (const folder of folders) expect(folder).not.toHaveProperty('searchHash');
   });
 
-  it('does not leak a 5xx when the searchHash collides on a fresh _id under keep_both', async () => {
+  it('restores a NEW folder whose backup hash another folder of the account once shared', async () => {
     const sharedHash = 'b'.repeat(64);
     const newBackupId = new Types.ObjectId().toString();
 
-    // Existing folder with the colliding searchHash but a DIFFERENT _id, so
-    // the controller goes down the !exists branch and tries to create a new
-    // folder with the same searchHash.
+    // A sibling with a DIFFERENT _id, so the controller goes down the
+    // fresh-insert branch.
     await Folder.create({
       userId: user.id,
       encryptedName: 'sibling',
       nameIv: 'iv',
       nameTag: 'tag',
-      searchHash: sharedHash,
     });
 
     const { csrfToken, csrfCookie } = await getCsrf(agent);
@@ -826,9 +821,8 @@ describe('Backup restore — keep_both with colliding folder searchHash', () => 
       encryptedName: 'colliding-fresh-folder',
     }).lean();
     expect(restored).not.toBeNull();
-    // searchHash stripped on collision — defense-in-depth fallback path
-    expect(restored!.searchHash).toBeUndefined();
-    expect(restored!.encryptedName).toBe('colliding-fresh-folder');
+    expect(restored).not.toHaveProperty('searchHash');
+    expect(await Folder.countDocuments({ userId: user.id })).toBe(2);
   });
 });
 
@@ -983,47 +977,42 @@ describe('Backup restore — folderId ownership validation', () => {
 // hash, mirroring the keep_both / fresh-insert siblings.
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe('Backup restore — folder overwrite survives searchHash collisions', () => {
+// F-12 (see the keep_both block above): an overwrite from a backup row that
+// carries a name hash, well-formed or not, applies the row and stores no hash.
+// These used to pin the E11000 strip-and-retry and the malformed-hash drop.
+describe('Backup restore — folder overwrite from rows that carry a name hash', () => {
   let user: TestUser;
   let agent: request.Agent;
 
   beforeEach(async () => {
     agent = request(app);
     user = await createTestUser();
-    // The unique partial (userId, searchHash) index must be live for the
-    // collision to raise E11000. autoIndex builds it lazily; await it so the
-    // assertion is deterministic regardless of test ordering.
-    await Folder.init();
   });
 
-  it('returns 200 (not 500) when overwrite would set a searchHash already owned by a sibling folder', async () => {
-    const hashA = 'a'.repeat(64);
+  it('returns 200 and applies the overwrite, storing no hash, and the restore goes on', async () => {
     const hashB = 'b'.repeat(64);
     const folderAId = new Types.ObjectId().toString();
 
-    // F_A owns hashA (this is the folder we overwrite); F_B owns hashB.
     await Folder.create({
       _id: folderAId,
       userId: user.id,
       encryptedName: 'folder-A',
       nameIv: 'iv',
       nameTag: 'tag',
-      searchHash: hashA,
     });
     await Folder.create({
       userId: user.id,
       encryptedName: 'folder-B',
       nameIv: 'iv',
       nameTag: 'tag',
-      searchHash: hashB,
     });
 
     const { csrfToken, csrfCookie } = await getCsrf(agent);
 
     const restoredItemId = new Types.ObjectId().toString();
     const data = JSON.stringify({
-      // Folders restore before items: if the overwrite threw, the loop would
-      // abort before this item — so its presence proves the restore continued.
+      // Folders restore before items, so the trailing item's presence proves the
+      // restore continued past the folder.
       items: [{ _id: restoredItemId, ...sampleVaultItem({ encryptedName: 'after-folder' }) }],
       folders: [
         {
@@ -1041,31 +1030,28 @@ describe('Backup restore — folder overwrite survives searchHash collisions', (
     expect(res.status).toBe(200);
     expect(res.body.data.foldersRestored).toBe(1);
 
-    // F_A's content was overwritten; the colliding hash was stripped on retry.
     const folderA = await Folder.findById(folderAId).lean();
     expect(folderA!.encryptedName).toBe('folder-A-overwritten');
-    expect(folderA!.searchHash).toBeUndefined();
+    expect(folderA).not.toHaveProperty('searchHash');
 
-    // F_B is untouched and keeps its hash — no folder was lost.
+    // F_B is untouched.
     const folderB = await Folder.findOne({ userId: user.id, encryptedName: 'folder-B' }).lean();
-    expect(folderB!.searchHash).toBe(hashB);
+    expect(folderB).not.toBeNull();
+    expect(folderB).not.toHaveProperty('searchHash');
 
-    // The collision did not abort the restore — the trailing item still landed.
     const item = await VaultItem.findOne({ userId: user.id, encryptedName: 'after-folder' }).lean();
     expect(item).not.toBeNull();
-    expect(item!.encryptedName).toBe('after-folder');
+    expect(item).not.toHaveProperty('searchHash');
   });
 
-  it('returns 200 and ignores a malformed-format searchHash on overwrite (would otherwise be a ValidationError)', async () => {
+  it('returns 200 and applies an overwrite whose row carries a malformed hash, never validating it', async () => {
     const folderId = new Types.ObjectId().toString();
-    const originalHash = 'c'.repeat(64);
     await Folder.create({
       _id: folderId,
       userId: user.id,
       encryptedName: 'orig',
       nameIv: 'iv',
       nameTag: 'tag',
-      searchHash: originalHash,
     });
 
     const { csrfToken, csrfCookie } = await getCsrf(agent);
@@ -1075,7 +1061,6 @@ describe('Backup restore — folder overwrite survives searchHash collisions', (
       folders: [
         {
           _id: folderId,
-          // Uppercase hex fails the model's /^[a-f0-9]{64}$/ match validator.
           ...sampleFolder({ encryptedName: 'orig-overwritten', searchHash: 'A'.repeat(64) }),
         },
       ],
@@ -1088,12 +1073,11 @@ describe('Backup restore — folder overwrite survives searchHash collisions', (
 
     expect(res.status).toBe(200);
     expect(res.body.data.foldersRestored).toBe(1);
+    expect(res.body.data.foldersSkipped).toBe(0);
 
     const folder = await Folder.findById(folderId).lean();
     expect(folder!.encryptedName).toBe('orig-overwritten');
-    // The garbage hash was dropped before the write, so it never reached the
-    // $set; the folder keeps its existing valid hash rather than 500-ing.
-    expect(folder!.searchHash).toBe(originalHash);
+    expect(folder).not.toHaveProperty('searchHash');
   });
 });
 
@@ -1101,12 +1085,12 @@ describe('Backup restore — folder overwrite survives searchHash collisions', (
 // T4 — a single malformed item must never abort the whole restore.
 //
 // The item loop previously wrote each row straight to Mongoose with no
-// per-item guard and no searchHash/length sanitization, so one bad row (a
-// legacy/tampered backup with an over-length field or a non-hex searchHash)
-// raised a ValidationError that 500'd the entire restore mid-flight. Each
-// write is now guarded: validation/duplicate-key failures skip just that item
-// (reason `invalid_item_data`); an invalid-format searchHash is stripped so a
-// salvageable item is still restored.
+// per-item guard and no length sanitization, so one bad row (a legacy/tampered
+// backup with an over-length field) raised a ValidationError that 500'd the
+// entire restore mid-flight. Each write is now guarded: validation/duplicate-key
+// failures skip just that item (reason `invalid_item_data`). A backup row's
+// `searchHash` is not in the restore allowlist (F-12), so its shape no longer
+// matters at all.
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('Backup restore — malformed item data is skipped, not fatal', () => {
@@ -1157,7 +1141,7 @@ describe('Backup restore — malformed item data is skipped, not fatal', () => {
     expect(bad).toBeNull();
   });
 
-  it('strips an invalid-format searchHash and still restores the item (no abort)', async () => {
+  it('drops an invalid-format searchHash and still restores the item (no abort)', async () => {
     const { csrfToken, csrfCookie } = await getCsrf(agent);
 
     const itemId = new Types.ObjectId().toString();
@@ -1165,7 +1149,8 @@ describe('Backup restore — malformed item data is skipped, not fatal', () => {
       items: [
         {
           _id: itemId,
-          // Non-hex/too-short — fails VaultItem.searchHash /^[a-f0-9]{64}$/.
+          // Non-hex/too-short: an earlier release's model refused it; nothing
+          // reads or stores a name hash now (F-12).
           ...sampleVaultItem({ encryptedName: 'bad-hash', searchHash: 'ZZZ' }),
         },
       ],
@@ -1183,7 +1168,7 @@ describe('Backup restore — malformed item data is skipped, not fatal', () => {
 
     const item = await VaultItem.findOne({ userId: user.id, encryptedName: 'bad-hash' }).lean();
     expect(item).not.toBeNull();
-    expect(item!.searchHash).toBeUndefined();
+    expect(item).not.toHaveProperty('searchHash');
     expect(item!.encryptedName).toBe('bad-hash');
   });
 

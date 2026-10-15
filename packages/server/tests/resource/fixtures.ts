@@ -68,11 +68,6 @@ function buildItemDoc(userId: string, index: number, shape: VaultShape): Record<
     encryptedName: `name-${String(index)}`.padEnd(40, 'n'),
     nameIv: IV,
     nameTag: TAG,
-    // A 64-hex string, which is what the model's `match` validator accepts and
-    // what the restore path's SEARCH_HASH_RE checks. Derived from the index so
-    // every row differs, because a shared value would collide on the unique
-    // partial index the folder model carries and would make items indistinguishable.
-    searchHash: index.toString(16).padStart(64, '0'),
     tags: Array.from({ length: shape.tags ?? 0 }, (_unused, t) => `t${String(t)}`),
     favorite: false,
     ...(history.length > 0 ? { passwordHistory: history } : {}),

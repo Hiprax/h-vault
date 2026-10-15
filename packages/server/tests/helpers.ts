@@ -200,7 +200,7 @@ export async function getCsrf(agent: request.Agent, extraCookies?: string): Prom
 
 /**
  * Seeds a folder directly in the DB for a user. `overrides` may include an
- * explicit `_id`, `parentId`, `searchHash`, `encryptedName`, etc. Returns the
+ * explicit `_id`, `parentId`, `encryptedName`, etc. Returns the
  * created document as a plain object (with its real `_id`).
  */
 export async function seedFolder(

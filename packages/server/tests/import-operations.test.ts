@@ -54,7 +54,11 @@ import {
 
 const API = '/api/v1';
 
-/** A distinct, well-formed (lowercase hex, 64-char) searchHash per index. */
+/**
+ * A distinct, well-formed (lowercase hex, 64-char) searchHash per index. The rows
+ * below carry one as an OLDER client's do; the server drops it (F-12), which is
+ * why every test that sends them keeps passing unchanged.
+ */
 function searchHashFor(index: number): string {
   return index.toString(16).padStart(64, '0');
 }
@@ -155,11 +159,10 @@ describe('Phase 6 — POST /tools/import executes structured operations', () => 
     expect(stored.every((item) => String(item.userId) === user.id)).toBe(true);
   });
 
-  it('rewrites content in place for an updates-only request and refreshes searchHash', async () => {
+  it('rewrites content in place for an updates-only request and stores no searchHash', async () => {
     const existing = await seedItem(user.id, {
       encryptedName: 'original-name',
       encryptedData: 'original-data',
-      searchHash: searchHashFor(7),
     });
 
     const res = await postOperations(user.accessToken, {
@@ -173,9 +176,9 @@ describe('Phase 6 — POST /tools/import executes structured operations', () => 
     expect(stored).toHaveLength(1);
     expect(stored[0]!.encryptedName).toBe('updated-name');
     expect(stored[0]!.encryptedData).toBe('updated-data');
-    // An overwrite replaces `encryptedName`, so the stored hash must follow it
-    // or it strands against the old name.
-    expect(stored[0]!.searchHash).toBe(searchHashFor(999));
+    // F-12: the update row carries a hash, as an older client's does, and none is
+    // stored (this test used to pin the stored hash following the new name).
+    expect(stored[0]).not.toHaveProperty('searchHash');
   });
 
   it('applies inserts and updates together in one mixed request', async () => {
@@ -361,7 +364,6 @@ describe('Phase 6 — POST /tools/import executes structured operations', () => 
       'encryptedName',
       'nameIv',
       'nameTag',
-      'searchHash',
     ]);
   });
 
@@ -716,8 +718,9 @@ describe('import projections and lock naming', () => {
       'nameIv',
       'nameTag',
       'passwordHistory',
-      'searchHash',
     ]);
+    // F-12: neither allowlist carries a name hash any more.
+    expect(Object.keys(asInsert)).not.toContain('searchHash');
   });
 
   it('names the import lock per user, not globally', () => {

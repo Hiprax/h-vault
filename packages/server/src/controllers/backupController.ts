@@ -88,11 +88,13 @@ const BACKUP_TRIGGER_LOCK_TTL_MS = 5 * 60 * 1000;
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
+// Neither list names `searchHash`: a backup written by an earlier release carries
+// a keyed hash of each row's name, and nothing stores one any more (F-12), so the
+// projection is what drops it.
 const ALLOWED_FOLDER_FIELDS = new Set([
   'encryptedName',
   'nameIv',
   'nameTag',
-  'searchHash',
   'parentId',
   'icon',
   'color',
@@ -110,16 +112,8 @@ const ALLOWED_ITEM_FIELDS = new Set([
   'tags',
   'favorite',
   'folderId',
-  'searchHash',
   'passwordHistory',
 ]);
-
-// A searchHash is an HMAC-SHA256 digest rendered as 64 lowercase hex chars. The
-// Folder/VaultItem models enforce this via a `match` validator, so a backup row
-// (legacy or tampered) carrying any other shape would otherwise throw a Mongoose
-// ValidationError mid-restore. The import path enforces the same shape through
-// its `searchHash` schema pattern.
-const SEARCH_HASH_RE = /^[a-f0-9]{64}$/;
 
 /**
  * Counts how many backup rows a restore will actually INSERT as net-new documents,
@@ -184,10 +178,14 @@ async function countNetNewRestoreRows(
 
 /** The rows a backup carries: every folder, and every live (untrashed) item. */
 const backupFolderRows = (userId: string) =>
-  Folder.find({ userId }).select('-sourceRefId').batchSize(ROW_CURSOR_BATCH_SIZE).lean().cursor();
+  Folder.find({ userId })
+    .select('-sourceRefId -searchHash')
+    .batchSize(ROW_CURSOR_BATCH_SIZE)
+    .lean()
+    .cursor();
 const backupItemRows = (userId: string) =>
   VaultItem.find({ userId, deletedAt: { $exists: false } })
-    .select('-sourceRefId')
+    .select('-sourceRefId -searchHash')
     .batchSize(ROW_CURSOR_BATCH_SIZE)
     .lean()
     .cursor();
@@ -1353,18 +1351,6 @@ async function restoreUnderRotationLock(
         sanitizedFolder.sortOrder = sanitizedFolder.sortOrder + 0;
       }
 
-      // Drop a malformed searchHash up front so it can never trip the model's
-      // `match` validator (a ValidationError here would otherwise abort the whole
-      // restore). A valid-format hash is kept; collisions are handled per-branch
-      // below via the unique partial index's E11000.
-      if (
-        sanitizedFolder.searchHash !== undefined &&
-        (typeof sanitizedFolder.searchHash !== 'string' ||
-          !SEARCH_HASH_RE.test(sanitizedFolder.searchHash))
-      ) {
-        sanitizedFolder.searchHash = undefined;
-      }
-
       // Drop a malformed parentId up front so an un-castable value can't throw a
       // CastError and abort the restore — the primary goal of this sanitization,
       // mirroring the item loop's folderId handling. On the create paths (fresh
@@ -1383,13 +1369,14 @@ async function restoreUnderRotationLock(
       }
 
       // Each folder write is guarded so one bad row never aborts the whole
-      // restore. The bespoke per-branch E11000 searchHash-strip retries below
-      // still run FIRST (this is a compose, not a replace); this outer guard
-      // catches a residual persistence-layer data error — a ValidationError
-      // (missing/over-length required field), a CastError, or an E11000 that
-      // even the retry couldn't resolve — and skips just that folder as
-      // `invalid_folder_data`, mirroring the item loop. Anything else (a
-      // transient DB failure) still propagates and fails the request.
+      // restore: a residual persistence-layer data error — a ValidationError
+      // (missing/over-length required field), a CastError, or an E11000 (no
+      // unique index but `_id` remains on folders, and every insert below mints
+      // a fresh one, so that is a race, not a shape a backup can carry) — skips
+      // just that folder as `invalid_folder_data`, mirroring the item loop.
+      // Anything else (a transient DB failure) still propagates and fails the
+      // request. A backup's `searchHash` (an earlier release wrote one) is not in
+      // ALLOWED_FOLDER_FIELDS, so it never reaches a write.
       // Set when the matched folder was deleted by another request while this
       // restore ran: it is gone, so nothing may be filed under it any more.
       let matchedFolderGone = false;
@@ -1407,40 +1394,14 @@ async function restoreUnderRotationLock(
             continue;
           }
           if (conflictStrategy === 'overwrite') {
-            // The folder's searchHash is in ALLOWED_FOLDER_FIELDS, so the $set can
-            // write a hash that collides with a *different* sibling folder (e.g. a
-            // tampered backup, or two folders renamed to the same name after the
-            // backup was taken). That violates the unique partial (userId,
-            // searchHash) index → E11000. Mirror the keep_both / fresh-insert
-            // siblings: retry the overwrite with searchHash stripped so the rest of
-            // the folder data is still applied rather than 500-ing the restore.
             // Through the byte quota (F-24): pinned on the row it measured, and
             // refused (skipped as `storage_limit`) when the growth does not fit.
-            let overwritten: Record<string, unknown> | null;
-            try {
-              overwritten = await updateCountedRow({
-                kind: 'folder',
-                userId,
-                id: matchedFolderId,
-                update: { $set: { ...sanitizedFolder, userId } },
-              });
-            } catch (err: unknown) {
-              if (
-                err instanceof Error &&
-                'code' in err &&
-                (err as { code?: number }).code === 11000
-              ) {
-                const { searchHash: _ovwHash, ...folderWithoutHash } = sanitizedFolder;
-                overwritten = await updateCountedRow({
-                  kind: 'folder',
-                  userId,
-                  id: matchedFolderId,
-                  update: { $set: { ...folderWithoutHash, userId }, $unset: { searchHash: 1 } },
-                });
-              } else {
-                throw err;
-              }
-            }
+            const overwritten = await updateCountedRow({
+              kind: 'folder',
+              userId,
+              id: matchedFolderId,
+              update: { $set: { ...sanitizedFolder, userId } },
+            });
             if (overwritten) {
               foldersRestored++;
               // The overwrite writes `parentId` from the raw backup row (a backup
@@ -1454,32 +1415,14 @@ async function restoreUnderRotationLock(
           }
           // keep_both: create a new folder with a new _id and record the mapping.
           // Duplication is keep_both's contract, so this fires even for a
-          // sourceRefId match. The Folder model has a unique partial index on
-          // (userId, searchHash); since the backup folder shares its searchHash
-          // with the existing one, re-using it would throw E11000 and crash the
-          // entire restore. Strip searchHash from the duplicate so the insert
-          // succeeds — the user can rename the folder later, rebuilding the hash.
-          // Stamp `sourceRefId = folderId` so a later restore recognizes this row.
-          const { searchHash: _dupSearchHash, ...folderWithoutHash } = sanitizedFolder;
-          try {
-            const duplicate = { ...folderWithoutHash, userId, sourceRefId: folderId };
-            const newFolder = await createCountedRow('folder', userId, duplicate, () =>
-              Folder.create(duplicate),
-            );
-            folderIdMap.set(folderId, String(newFolder._id));
-            foldersRestored++;
-          } catch (err: unknown) {
-            if (
-              err instanceof Error &&
-              'code' in err &&
-              (err as { code?: number }).code === 11000
-            ) {
-              foldersSkipped++;
-              folderSkipReasons.push({ folderId, reason: 'conflict_skipped' });
-              continue;
-            }
-            throw err;
-          }
+          // sourceRefId match. Stamp `sourceRefId = folderId` so a later restore
+          // recognizes this row.
+          const duplicate = { ...sanitizedFolder, userId, sourceRefId: folderId };
+          const newFolder = await createCountedRow('folder', userId, duplicate, () =>
+            Folder.create(duplicate),
+          );
+          folderIdMap.set(folderId, String(newFolder._id));
+          foldersRestored++;
         } else {
           // NEW to this user: either a folder deleted since the backup was made,
           // or a foreign _id from a cross-account backup. NEVER reuse the backup's
@@ -1492,35 +1435,12 @@ async function restoreUnderRotationLock(
           // `(userId, sourceRefId)` instead of duplicating it. Record backupRefId
           // -> newId so child folders and items that referenced the backup id are
           // rewired by the remap below.
-          //
-          // The searchHash may still collide with a sibling folder (e.g. one the
-          // user created post-backup with the same name) — the only remaining
-          // unique index on this path is the partial (userId, searchHash). Catch
-          // that E11000 and retry without searchHash rather than failing.
-          try {
-            const fresh = { ...sanitizedFolder, userId, sourceRefId: folderId };
-            const newFolder = await createCountedRow('folder', userId, fresh, () =>
-              Folder.create(fresh),
-            );
-            folderIdMap.set(folderId, String(newFolder._id));
-            foldersRestored++;
-          } catch (err: unknown) {
-            if (
-              err instanceof Error &&
-              'code' in err &&
-              (err as { code?: number }).code === 11000
-            ) {
-              const { searchHash: _siblingHash, ...folderWithoutHash } = sanitizedFolder;
-              const retry = { ...folderWithoutHash, userId, sourceRefId: folderId };
-              const retryFolder = await createCountedRow('folder', userId, retry, () =>
-                Folder.create(retry),
-              );
-              folderIdMap.set(folderId, String(retryFolder._id));
-              foldersRestored++;
-            } else {
-              throw err;
-            }
-          }
+          const fresh = { ...sanitizedFolder, userId, sourceRefId: folderId };
+          const newFolder = await createCountedRow('folder', userId, fresh, () =>
+            Folder.create(fresh),
+          );
+          folderIdMap.set(folderId, String(newFolder._id));
+          foldersRestored++;
         }
       } catch (err: unknown) {
         if (err instanceof VaultQuotaExceededError) {
@@ -1763,22 +1683,6 @@ async function restoreUnderRotationLock(
         !validFolderIds.has(sanitizedItem.folderId)
       ) {
         sanitizedItem.folderId = undefined;
-      }
-
-      // Drop a malformed searchHash (legacy/tampered backups) so it can't trip
-      // the model's `match` validator. The import path enforces the same SHAPE
-      // — `/^[a-f0-9]{64}$/` — but REJECTS a violation outright, because there
-      // `searchHash` is a required schema field the client always recomputes.
-      // Restore must SANITIZE instead, and the difference is deliberate: a
-      // legacy or partially-valid backup still has to restore, so one bad hash
-      // may not fail the whole file. A valid item with a bad searchHash is still
-      // restored — just without the hash, which the user rebuilds on next edit.
-      if (
-        sanitizedItem.searchHash !== undefined &&
-        (typeof sanitizedItem.searchHash !== 'string' ||
-          !SEARCH_HASH_RE.test(sanitizedItem.searchHash))
-      ) {
-        sanitizedItem.searchHash = undefined;
       }
 
       // Each per-item write is guarded so one bad row never aborts the whole

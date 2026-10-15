@@ -40,7 +40,6 @@ const ALLOWED_CREATE_FOLDER_FIELDS = new Set([
   'encryptedName',
   'nameIv',
   'nameTag',
-  'searchHash',
   'parentId',
   'icon',
   'color',
@@ -51,7 +50,6 @@ const ALLOWED_UPDATE_FOLDER_FIELDS = new Set([
   'encryptedName',
   'nameIv',
   'nameTag',
-  'searchHash',
   'parentId',
   'icon',
   'color',
@@ -59,12 +57,11 @@ const ALLOWED_UPDATE_FOLDER_FIELDS = new Set([
 ]);
 
 /**
- * The folder update fields that carry ciphertext (or are derived from it): a
- * rename. An update without them changed only where the folder sits or how it
+ * The folder update fields that carry ciphertext: a rename. An update without them changed only where the folder sits or how it
  * looks, and its audit row says so (`contentChanged: false`) — see
  * `vaultController`'s `ITEM_CONTENT_FIELDS` for why.
  */
-const FOLDER_CONTENT_FIELDS = ['encryptedName', 'nameIv', 'nameTag', 'searchHash'] as const;
+const FOLDER_CONTENT_FIELDS = ['encryptedName', 'nameIv', 'nameTag'] as const;
 
 /**
  * Validates that adding a folder under `parentId` would not exceed
@@ -132,7 +129,7 @@ export const listFolders = catchAsync(async (req: Request, res: Response): Promi
   const userId = getUserId(req);
 
   const folders = await Folder.find({ userId })
-    .select('-userId -sourceRefId')
+    .select('-userId -sourceRefId -searchHash')
     .sort({ sortOrder: 1 })
     .lean();
 
@@ -185,13 +182,10 @@ export const createFolder = catchAsync(async (req: Request, res: Response): Prom
   try {
     folder = await createCountedRow('folder', userId, folderData, () => Folder.create(folderData));
   } catch (err: unknown) {
-    // Two unique indexes can refuse this insert, and they mean different things:
-    // the derived `_id` (a retried create) and `(userId, searchHash)` (a name this
-    // account already uses). The id is told apart by the index it violated.
+    // The derived `_id` is the one unique index a folder insert can violate (a
+    // retried create). Two folders may share a name: no keyed hash of it is
+    // stored (F-12), so there is nothing to compare names by.
     if (isDuplicateIdError(err)) throw httpErrors.conflict(ROW_ID_TAKEN_MESSAGE);
-    if (err instanceof Error && 'code' in err && (err as { code?: number }).code === 11000) {
-      throw httpErrors.conflict('A folder with this name already exists');
-    }
     throw err;
   }
 
@@ -287,21 +281,15 @@ export const updateFolder = catchAsync(async (req: Request, res: Response): Prom
   }
 
   // Through the quota (F-24): a rename that grows the row is reserved first, the
-  // write is pinned on the row it measured, and the change is settled.
-  let updated;
-  try {
-    updated = await updateCountedRow({ kind: 'folder', userId, id, update: updateOp });
-  } catch (err: unknown) {
-    if (err instanceof Error && 'code' in err && (err as { code?: number }).code === 11000) {
-      throw httpErrors.conflict('A folder with this name already exists');
-    }
-    throw err;
-  }
+  // write is pinned on the row it measured, and the change is settled. No unique
+  // index covers a field an update can write, so a rename never conflicts.
+  const updated = await updateCountedRow({ kind: 'folder', userId, id, update: updateOp });
 
   if (!updated) {
     throw httpErrors.notFound('Folder not found');
   }
-  const { userId: _owner, sourceRefId: _sourceRefId, ...folder } = updated;
+  // Without its owner, its restore provenance and a residual name hash (F-12).
+  const { userId: _owner, sourceRefId: _sourceRefId, searchHash: _searchHash, ...folder } = updated;
 
   // The pre-write circular check above and this write are not atomic. Two
   // concurrent re-parents (A → B and B → A) can each pass their own check
@@ -521,7 +509,8 @@ export const reorderFolder = catchAsync(async (req: Request, res: Response): Pro
   if (!updated) {
     throw httpErrors.notFound('Folder not found');
   }
-  const { userId: _owner, sourceRefId: _sourceRefId, ...folder } = updated;
+  // Without its owner, its restore provenance and a residual name hash (F-12).
+  const { userId: _owner, sourceRefId: _sourceRefId, searchHash: _searchHash, ...folder } = updated;
 
   const reorderCtx = getRequestContext(req);
   await createAuditLog(

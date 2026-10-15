@@ -178,7 +178,7 @@ async function buildAndMailBackup(user: {
     try {
       await forEachRow(
         Folder.find({ userId })
-          .select('-sourceRefId')
+          .select('-sourceRefId -searchHash')
           .batchSize(ROW_CURSOR_BATCH_SIZE)
           .lean()
           .cursor(),
@@ -191,7 +191,7 @@ async function buildAndMailBackup(user: {
       walking = 'item';
       await forEachRow(
         VaultItem.find({ userId, deletedAt: { $exists: false } })
-          .select('-sourceRefId')
+          .select('-sourceRefId -searchHash')
           .batchSize(ROW_CURSOR_BATCH_SIZE)
           .lean()
           .cursor(),

@@ -497,6 +497,48 @@ describe('Backup routes', () => {
       expect(backup.metadata.itemCount).toBe(1);
     });
 
+    it('never puts a name hash a row still carries into the backup (F-12)', async () => {
+      await setupBackupForUser(agent, user.accessToken);
+      // Residual rows: written, hash and all, by an earlier release's process.
+      await VaultItem.collection.insertOne({
+        userId: new Types.ObjectId(user.id),
+        itemType: 'login',
+        encryptedData: 'residual-data',
+        dataIv: 'iv',
+        dataTag: 'tag',
+        encryptedName: 'residual-name',
+        nameIv: 'name-iv',
+        nameTag: 'name-tag',
+        tags: [],
+        favorite: false,
+        searchHash: 'a'.repeat(64),
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      await VaultItem.db.collection('folders').insertOne({
+        userId: new Types.ObjectId(user.id),
+        encryptedName: 'residual-folder',
+        nameIv: 'iv',
+        nameTag: 'tag',
+        sortOrder: 0,
+        searchHash: 'b'.repeat(64),
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      const res = await agent
+        .get('/api/v1/backup/download')
+        .set('Authorization', authHeader(user.accessToken));
+
+      expect(res.status).toBe(200);
+      const backup = JSON.parse(res.text) as { items: unknown[]; folders: unknown[] };
+      // Both rows are in the file (positive control), and no hash is.
+      expect(backup.items).toHaveLength(1);
+      expect(backup.folders).toHaveLength(1);
+      expect(res.text).toContain('residual-name');
+      expect(res.text).not.toContain('searchHash');
+    });
+
     it('should return 400 when downloading without encryption setup', async () => {
       const res = await agent
         .get('/api/v1/backup/download')

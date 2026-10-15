@@ -137,15 +137,18 @@ const DOCUMENT_SORT_ORDER_PARAM = {
 };
 
 /**
- * A folder's optional name hash. The server stores it and a unique index over it
- * turns a second folder with the same hash into a 409; the web client sends none
- * for an ordinary create or rename and checks duplicate names itself.
+ * The name hash an earlier release accepted on item and folder writes (F-12).
+ *
+ * Kept in the REQUEST schemas, unconstrained and deprecated, rather than removed:
+ * oasdiff grades a removed request property as a breaking change (measured), and
+ * an older client that still sends one is accepted, so the document says what
+ * happens to it. Nothing stores it.
  */
-const FOLDER_SEARCH_HASH_PROPERTY = {
+const IGNORED_SEARCH_HASH_PROPERTY = {
   type: 'string',
-  pattern: '^[a-f0-9]{64}$',
+  deprecated: true,
   description:
-    "HMAC-SHA256 of the folder's trimmed, lower-cased name under a subkey of the vault key. Optional; when sent, a second folder of this account carrying the same hash is refused with 409.",
+    'Ignored. An earlier release stored a keyed hash of the name; nothing stores one now, and a value sent by an older client is dropped.',
 };
 
 /** `sortOrder` as the two vault item lists declare it. */
@@ -266,7 +269,7 @@ const ID_NONCE_PROPERTY = {
  * profile before it can rewrap and retry; with it, the retry costs one request.
  *
  * `extraCauses` is the OTHER things the same status means on that endpoint — a
- * rotation already in progress, a duplicate folder name, a concurrent import —
+ * rotation already in progress, an id already taken, a concurrent import —
  * because 409 is one status key per operation and a reader needs every cause
  * under it, not just this one. Those causes carry no `data`, which is what the
  * `data` description says.
@@ -805,7 +808,13 @@ export const swaggerSpec: JsonObject = {
           encryptedName: { type: 'string' },
           nameIv: { type: 'string' },
           nameTag: { type: 'string' },
-          searchHash: { type: 'string', nullable: true },
+          searchHash: {
+            type: 'string',
+            nullable: true,
+            deprecated: true,
+            description:
+              'Never sent: lists, reads, restore-from-trash, update answers, exports and backups all exclude it. An earlier release stored and returned a keyed hash of the name; nothing stores one now.',
+          },
           passwordHistory: {
             type: 'array',
             items: {
@@ -845,7 +854,7 @@ export const swaggerSpec: JsonObject = {
           encryptedName: { type: 'string', minLength: 1, maxLength: 1000 },
           nameIv: { type: 'string', minLength: 1, maxLength: 24 },
           nameTag: { type: 'string', minLength: 1, maxLength: 32 },
-          searchHash: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+          searchHash: IGNORED_SEARCH_HASH_PROPERTY,
           idNonce: ID_NONCE_PROPERTY,
           vaultKeyVersion: VAULT_KEY_VERSION_PROPERTY,
         },
@@ -862,7 +871,7 @@ export const swaggerSpec: JsonObject = {
           encryptedName: { type: 'string', minLength: 1, maxLength: 1000 },
           nameIv: { type: 'string', minLength: 1, maxLength: 24 },
           nameTag: { type: 'string', minLength: 1, maxLength: 32 },
-          searchHash: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+          searchHash: IGNORED_SEARCH_HASH_PROPERTY,
           passwordHistory: {
             type: 'array',
             items: {
@@ -926,7 +935,7 @@ export const swaggerSpec: JsonObject = {
                 encryptedData: { type: 'string' },
                 dataIv: { type: 'string' },
                 dataTag: { type: 'string' },
-                searchHash: { type: 'string' },
+                searchHash: IGNORED_SEARCH_HASH_PROPERTY,
                 passwordHistory: {
                   type: 'array',
                   maxItems: 10,
@@ -1043,7 +1052,7 @@ export const swaggerSpec: JsonObject = {
           encryptedName: { type: 'string', minLength: 1, maxLength: 1000 },
           nameIv: { type: 'string', minLength: 1, maxLength: 24 },
           nameTag: { type: 'string', minLength: 1, maxLength: 32 },
-          searchHash: FOLDER_SEARCH_HASH_PROPERTY,
+          searchHash: IGNORED_SEARCH_HASH_PROPERTY,
           parentId: { type: 'string' },
           icon: { type: 'string', maxLength: 50 },
           color: { type: 'string', maxLength: 20 },
@@ -1058,7 +1067,7 @@ export const swaggerSpec: JsonObject = {
           encryptedName: { type: 'string', minLength: 1, maxLength: 1000 },
           nameIv: { type: 'string', minLength: 1, maxLength: 24 },
           nameTag: { type: 'string', minLength: 1, maxLength: 32 },
-          searchHash: FOLDER_SEARCH_HASH_PROPERTY,
+          searchHash: IGNORED_SEARCH_HASH_PROPERTY,
           parentId: { type: 'string', nullable: true },
           icon: { type: 'string', maxLength: 50 },
           color: { type: 'string', maxLength: 20 },
@@ -1633,7 +1642,6 @@ export const swaggerSpec: JsonObject = {
           'encryptedData',
           'dataIv',
           'dataTag',
-          'searchHash',
         ],
         properties: {
           itemType: {
@@ -1646,7 +1654,7 @@ export const swaggerSpec: JsonObject = {
           encryptedData: { type: 'string', minLength: 1, maxLength: 500000 },
           dataIv: { type: 'string', minLength: 1, maxLength: 24 },
           dataTag: { type: 'string', minLength: 1, maxLength: 32 },
-          searchHash: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+          searchHash: IGNORED_SEARCH_HASH_PROPERTY,
           idNonce: {
             ...ID_NONCE_PROPERTY,
             description: `${ID_NONCE_PROPERTY.description} Two inserts in one request may not name the same nonce.`,
@@ -1684,7 +1692,6 @@ export const swaggerSpec: JsonObject = {
           'encryptedData',
           'dataIv',
           'dataTag',
-          'searchHash',
         ],
         properties: {
           id: {
@@ -1698,12 +1705,7 @@ export const swaggerSpec: JsonObject = {
           encryptedData: { type: 'string', minLength: 1, maxLength: 500000 },
           dataIv: { type: 'string', minLength: 1, maxLength: 24 },
           dataTag: { type: 'string', minLength: 1, maxLength: 32 },
-          searchHash: {
-            type: 'string',
-            pattern: '^[a-f0-9]{64}$',
-            description:
-              'Recomputed by the client: an update replaces the encrypted name, so the stored hash must be refreshed alongside it.',
-          },
+          searchHash: IGNORED_SEARCH_HASH_PROPERTY,
           passwordHistory: {
             type: 'array',
             maxItems: 10,
@@ -3356,7 +3358,7 @@ export const swaggerSpec: JsonObject = {
           429: { $ref: '#/components/responses/RateLimited' },
           400: { $ref: '#/components/responses/ValidationError' },
           409: staleVaultKeyConflict(
-            'The same status, carrying no `data`, also reports a vault-key rotation currently in progress, a folder whose name already exists on this account, and a create whose `idNonce` derives an id that is already stored; none is about the vault key version.',
+            'The same status, carrying no `data`, also reports a vault-key rotation currently in progress and a create whose `idNonce` derives an id that is already stored; neither is about the vault key version. Two folders may share a name.',
           ),
         },
       },
@@ -3381,7 +3383,7 @@ export const swaggerSpec: JsonObject = {
           429: { $ref: '#/components/responses/RateLimited' },
           404: { $ref: '#/components/responses/NotFound' },
           409: staleVaultKeyConflict(
-            `The same status, carrying no \`data\`, also reports a vault-key rotation currently in progress, a folder whose name already exists on this account, and a re-parent that lost a race with a concurrent move. ${ROW_CHANGED_CONFLICT}`,
+            `The same status, carrying no \`data\`, also reports a vault-key rotation currently in progress and a re-parent that lost a race with a concurrent move. ${ROW_CHANGED_CONFLICT}`,
           ),
         },
       },
@@ -3953,7 +3955,7 @@ export const swaggerSpec: JsonObject = {
           },
           400: {
             description:
-              'The body failed schema validation (a missing or malformed ciphertext field, `searchHash`, tag or `passwordHistory` entry rejects the whole request); an update names an item that does not exist, is in the trash, or is not yours; the same id appears twice; a field is over-length; or the import would exceed the per-account item cap. Nothing is written.',
+              'The body failed schema validation (a missing or malformed ciphertext field, tag or `passwordHistory` entry rejects the whole request); an update names an item that does not exist, is in the trash, or is not yours; the same id appears twice; a field is over-length; or the import would exceed the per-account item cap. Nothing is written.',
           },
           401: { $ref: '#/components/responses/Unauthorized' },
           409: staleVaultKeyConflict(

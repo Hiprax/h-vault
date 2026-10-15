@@ -26,8 +26,9 @@
  *    all: two DIFFERENT plaintexts sealed under one (key, nonce) pair hand anyone
  *    holding both their XOR. Within one pass a part is sealed once and the same
  *    buffer is re-sent; across a resume the slice is re-read from the source, and
- *    {@link DocumentsState.retryUpload} refuses when the source's size or
- *    modification time has moved under it. It is also why an upload is not
+ *    the transfer ends unless its SHA-256 equals the one recorded when that index
+ *    was first read (`UploadSession.sliceDigests`), checked before the slice is
+ *    sealed or hashed, held parts included. It is also why an upload is not
  *    resumable across a page RELOAD, which is a stated non-goal rather than an
  *    oversight: the DEK is memory-only by design, and one that survived a reload
  *    would have to be persisted somewhere the vault key is not.
@@ -243,19 +244,26 @@ interface UploadSession {
   retrying: boolean;
   dek: DocumentBytes;
   source: Blob;
-  /**
-   * The source's size and modification time as they were when the transfer
-   * started, compared again before a resume re-reads it.
-   *
-   * `lastModified` is `null` for a `Blob` that is not a `File` — a transformed
-   * upload, which is held in memory and cannot change underneath us. For a real
-   * `File` the File API says a changed file must fail the read rather than return
-   * different bytes, but "must" is a guarantee to assert rather than to lean on:
-   * two different plaintexts under one AEAD nonce is the catastrophic outcome, not
-   * the annoying one.
-   */
+  /** The source's size when the transfer started, which fixes the framing. */
   sourceSize: number;
-  sourceLastModified: number | null;
+  /**
+   * The SHA-256 of each plaintext slice as it was FIRST read, by segment index.
+   *
+   * A resume re-reads the file, and segment `i`'s nonce is fixed for the life of
+   * the transfer, so the slice read now must be the slice sealed then: two
+   * different plaintexts under one AES-GCM nonce hand anyone holding both their
+   * XOR. `size` and `lastModified` cannot answer that question, because a `File`
+   * reports the values it was picked with, not the disk's; the File API says a
+   * changed file must fail the read, but that is a guarantee to assert rather than
+   * to lean on. So the bytes themselves are compared, in `runTransfer`, before the
+   * slice is hashed into the whole-file digest or sealed — including a slice whose
+   * part the server already holds, which is never re-sent but whose bytes the
+   * sealed digest still describes.
+   *
+   * Raw bytes rather than hex, so that the end of the session can zero them like
+   * the DEK: a digest of a plaintext slice confirms a guess at that slice.
+   */
+  sliceDigests: DocumentBytes[];
   name: string;
   mime: string;
   tags: string[];
@@ -995,7 +1003,7 @@ export const useDocumentsStore = create<DocumentsState>((set, get) => ({
       dek,
       source: input.source,
       sourceSize: totalBytes,
-      sourceLastModified: sourceLastModifiedOf(input.source),
+      sliceDigests: [],
       name: input.name,
       mime: input.mime,
       tags: input.tags ?? [],
@@ -1053,21 +1061,11 @@ export const useDocumentsStore = create<DocumentsState>((set, get) => ({
     // The ledger, not a local guess, decides what still has to be sent. A part the
     // server already holds is skipped, but its slice is still read and hashed
     // below: the whole-file digest has to cover bytes that are not being re-sent.
+    // A resume is the one moment a slice is read a second time, and whether it is
+    // the SAME slice is decided by its bytes, in `runTransfer`, before it is
+    // sealed (see `UploadSession.sliceDigests`).
     const held = new Set<number>();
     try {
-      // Two different plaintexts under one (key, nonce) pair is the catastrophic
-      // failure this whole design is arranged to prevent, and a resume is the one
-      // moment a slice is read a second time. If the file on disk moved underneath
-      // us, the safe answer is to refuse rather than to re-seal segment `i` over
-      // different bytes.
-      if (
-        session.source.size !== session.sourceSize ||
-        sourceLastModifiedOf(session.source) !== session.sourceLastModified
-      ) {
-        endSession(set, uploadId, { zero: true });
-        throw new Error('The file changed since the upload started; start it again.');
-      }
-
       try {
         // Validated, like every committed row this client reads: the part numbers
         // below decide which segments are re-sent, so a malformed ledger would
@@ -1411,6 +1409,7 @@ export const useDocumentsStore = create<DocumentsState>((set, get) => ({
     for (const [uploadId, session] of sessions) {
       session.controller.abort();
       zeroDek(session.dek);
+      zeroSliceDigests(session);
       fireAbort(uploadId);
     }
     sessions.clear();
@@ -1433,13 +1432,6 @@ type SetState = (
   partial: Partial<DocumentsState> | ((state: DocumentsState) => Partial<DocumentsState>),
 ) => void;
 
-/** A `File`'s modification time, or `null` for a plain in-memory `Blob`. */
-function sourceLastModifiedOf(source: Blob): number | null {
-  return 'lastModified' in source && typeof source.lastModified === 'number'
-    ? source.lastModified
-    : null;
-}
-
 /** Tell the server a transfer is over, best-effort and bounded. */
 function fireAbort(uploadId: string): void {
   void abortDocumentUploadApi(uploadId, ABORT_TIMEOUT_MS).catch((err: unknown) => {
@@ -1459,6 +1451,7 @@ function endSession(set: SetState, uploadId: string, options: { zero: boolean })
   const session = sessions.get(uploadId);
   if (session) {
     if (options.zero) zeroDek(session.dek);
+    zeroSliceDigests(session);
     sessions.delete(uploadId);
   }
   set((state) => {
@@ -1466,6 +1459,55 @@ function endSession(set: SetState, uploadId: string, options: { zero: boolean })
     const { [uploadId]: _removed, ...rest } = state.uploads;
     return { uploads: rest };
   });
+}
+
+/**
+ * Zero every slice digest a transfer recorded.
+ *
+ * The zeroed records are left in place rather than dropped: a loop that somehow
+ * outlived its session would then compare every re-read against zeroes and
+ * refuse, where an emptied list would accept any bytes as a first read.
+ */
+function zeroSliceDigests(session: UploadSession): void {
+  for (const digest of session.sliceDigests) digest.fill(0);
+}
+
+/** What a resume answers when a re-read slice is not the slice first read. */
+const SOURCE_CHANGED_MESSAGE = 'The file changed since the upload started; start it again.';
+
+/**
+ * Whether the slice just read at `index` is the one this transfer read there first.
+ *
+ * The first read of an index records its digest and answers `true`. Every later
+ * read compares against that record, and the comparison value is zeroed as soon
+ * as it has answered. Called BEFORE the slice is hashed or sealed: segment
+ * `index` has one nonce for the life of the transfer, so a slice that differs
+ * must never reach `encryptSegment`, and one whose part the server already holds
+ * must never reach the whole-file digest either.
+ *
+ * A lock that lands while the digest is computed has already zeroed this
+ * session's records, so the new digest is zeroed rather than stored into a
+ * session that is over.
+ */
+async function isSliceFirstRead(
+  session: UploadSession,
+  index: number,
+  slice: DocumentBytes,
+  signal: AbortSignal,
+): Promise<boolean> {
+  const digest = new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', slice));
+  if (isAborted(signal)) {
+    digest.fill(0);
+    throw new UploadCancelledError();
+  }
+  const recorded = session.sliceDigests[index];
+  if (recorded === undefined) {
+    session.sliceDigests[index] = digest;
+    return true;
+  }
+  const same = recorded.every((b, i) => b === digest[i]);
+  digest.fill(0);
+  return same;
 }
 
 /** Apply a change to one progress entry, leaving the rest of the registry alone. */
@@ -1740,6 +1782,14 @@ async function runTransfer(
       const slice = new Uint8Array(
         await session.source.slice(start, start + session.chunkPlaintextBytes).arrayBuffer(),
       );
+      if (!(await isSliceFirstRead(session, index, slice, signal))) {
+        // The file changed under a resume. Sealing this slice would put a second
+        // plaintext under segment `index`'s nonce, and skipping a held part would
+        // seal a whole-file digest of bytes the server does not hold: the transfer
+        // cannot continue either way, so it ends here, key zeroed, row released.
+        fireAbort(uploadId);
+        throw new UnresumableUploadError(new Error(SOURCE_CHANGED_MESSAGE));
+      }
       hasher.update(slice);
 
       const partNumber = index + 1;

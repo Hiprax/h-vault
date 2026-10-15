@@ -67,7 +67,6 @@ vi.mock('../src/services/crypto/cryptoService', () => ({
     decryptVaultKey: vi.fn(),
     encryptData: vi.fn(),
     decryptData: vi.fn(),
-    generateSearchHash: vi.fn(),
     clearKey: vi.fn(),
     clearCryptoKey: vi.fn().mockResolvedValue(undefined),
   },
@@ -330,7 +329,6 @@ describe('vaultStore.updateItemMeta — metadata-only update (#17)', () => {
     // ...and no crypto ran at all (neither encrypting the request nor
     // decrypting the response).
     expect(cryptoService.encryptData).not.toHaveBeenCalled();
-    expect(cryptoService.generateSearchHash).not.toHaveBeenCalled();
     expect(cryptoService.decryptData).not.toHaveBeenCalled();
   });
 

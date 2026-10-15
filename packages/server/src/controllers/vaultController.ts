@@ -104,7 +104,6 @@ const ALLOWED_CREATE_FIELDS = new Set([
   'encryptedName',
   'nameIv',
   'nameTag',
-  'searchHash',
 ]);
 
 const ALLOWED_UPDATE_FIELDS = new Set([
@@ -117,12 +116,11 @@ const ALLOWED_UPDATE_FIELDS = new Set([
   'encryptedName',
   'nameIv',
   'nameTag',
-  'searchHash',
   'passwordHistory',
 ]);
 
 /**
- * The update fields that carry ciphertext (or are derived from it). An update
+ * The update fields that carry ciphertext. An update
  * that sends none of them changed only an item's metadata — favourite, tags,
  * folder — and its audit row says so (`contentChanged: false`), which is what
  * lets `auditService` count a run of such edits into one row. An update that
@@ -135,7 +133,6 @@ const ITEM_CONTENT_FIELDS = [
   'encryptedName',
   'nameIv',
   'nameTag',
-  'searchHash',
   'passwordHistory',
 ] as const;
 
@@ -212,7 +209,7 @@ async function sendItemPage(
 ): Promise<void> {
   const total = await VaultItem.countDocuments(filter);
   const rows = VaultItem.find(filter)
-    .select('-userId -sourceRefId')
+    .select('-userId -sourceRefId -searchHash')
     .sort(sort)
     .skip((page - 1) * limit)
     .limit(limit)
@@ -311,7 +308,9 @@ export const getItem = catchAsync(async (req: Request, res: Response): Promise<v
   const userId = getUserId(req);
   const { id } = req.params as { id: string };
 
-  const item = await VaultItem.findOne({ _id: id, userId }).select('-userId -sourceRefId').lean();
+  const item = await VaultItem.findOne({ _id: id, userId })
+    .select('-userId -sourceRefId -searchHash')
+    .lean();
 
   if (!item) {
     throw httpErrors.notFound('Vault item not found');
@@ -429,10 +428,12 @@ export const updateItem = catchAsync(async (req: Request, res: Response): Promis
     throw httpErrors.notFound('Vault item not found');
   }
   // The response's shape is what it always was: the row without its owner and its
-  // restore provenance.
+  // restore provenance, and without a name hash a row an earlier release wrote may
+  // still carry (F-12).
   const {
     userId: _owner,
     sourceRefId: _sourceRefId,
+    searchHash: _searchHash,
     ...item
   } = updated as Record<string, unknown> & { _id: unknown; itemType: string };
 
@@ -537,7 +538,7 @@ export const restoreItem = catchAsync(async (req: Request, res: Response): Promi
     { $unset: { deletedAt: 1 } },
     { returnDocument: 'after' },
   )
-    .select('-userId -sourceRefId')
+    .select('-userId -sourceRefId -searchHash')
     .lean();
 
   if (!item) {
@@ -1004,7 +1005,6 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
       encryptedData: item.encryptedData,
       dataIv: item.dataIv,
       dataTag: item.dataTag,
-      ...(item.searchHash !== undefined ? { searchHash: item.searchHash } : {}),
       ...(item.passwordHistory !== undefined ? { passwordHistory: item.passwordHistory } : {}),
     });
 
@@ -1411,11 +1411,6 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
           dataTag: snap.dataTag,
         };
         const restoreUnset: Record<string, ''> = {};
-        if (snap.searchHash !== undefined) {
-          restoreSet.searchHash = snap.searchHash;
-        } else {
-          restoreUnset.searchHash = '';
-        }
         if (snap.passwordHistory !== undefined) {
           restoreSet.passwordHistory = snap.passwordHistory;
         } else {
@@ -1693,7 +1688,7 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
           if (!snap) continue;
           try {
             // All three columns are required on the model, so unlike an item's
-            // `searchHash` there is no absent-field case to `$unset`: the
+            // `passwordHistory` there is no absent-field case to `$unset`: the
             // snapshot always carries a full wrap to restore.
             await Document.updateOne(
               { _id: id, userId },

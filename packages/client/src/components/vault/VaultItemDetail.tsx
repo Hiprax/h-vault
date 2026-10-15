@@ -617,8 +617,7 @@ const UNDECODABLE_NOTICE_ID = 'undecodable-item-notice';
  * among them. Every action it does promise encrypts nothing the item depends on:
  * move, favorite, delete and restore route through `updateItemMeta`, which encrypts
  * NOTHING at all, and RENAME routes through `vaultStore.renameItem`, which sends the
- * name trio plus its `searchHash` and leaves `encryptedData` out of the payload
- * entirely. The edit FORM is the one that cannot be offered: it re-encrypts
+ * name trio alone and leaves `encryptedData` out of the payload entirely. The edit FORM is the one that cannot be offered: it re-encrypts
  * `JSON.stringify(item.data)` wholesale, and for one of these items `data` is only
  * the placeholder wrapper, so one Save would replace the real ciphertext with it,
  * permanently.
@@ -856,9 +855,9 @@ export function VaultItemDetail({ item, onEdit, isTrashed = false }: VaultItemDe
               Edit
             </button>
             {/* Offered ONLY for an undecodable item: every other item renames through
-                the edit form. `renameItem` sends the name trio and its `searchHash`
-                and omits `encryptedData` entirely, so the item's real ciphertext is
-                left byte-identical. */}
+                the edit form. `renameItem` sends the name trio alone and omits
+                `encryptedData` entirely, so the item's real ciphertext is left
+                byte-identical. */}
             {undecodable && (
               <button
                 type="button"

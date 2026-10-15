@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "recordedAt": "2026-10-14",
-  "commit": "9923194",
+  "recordedAt": "2026-10-15",
+  "commit": "11f7d12",
   "tests": {
-    "count": 13181
+    "count": 13203
   },
   "coverage": {
     "diff": 100
@@ -30,7 +30,7 @@
         "line": 100,
         "branch": 99.09,
         "function": 100,
-        "linesTotal": 814,
+        "linesTotal": 812,
         "branchesTotal": 439,
         "filesMeasured": [
           "src/constants/index.ts",
@@ -51,16 +51,16 @@
         ]
       },
       "tests": {
-        "count": 1522
+        "count": 1528
       }
     },
     "packages/server": {
       "coverage": {
-        "line": 99.32,
-        "branch": 94.52,
-        "function": 98.91,
-        "linesTotal": 6327,
-        "branchesTotal": 3465,
+        "line": 99.37,
+        "branch": 94.54,
+        "function": 98.92,
+        "linesTotal": 6325,
+        "branchesTotal": 3442,
         "filesMeasured": [
           "src/app.ts",
           "src/cli/invite.ts",
@@ -187,7 +187,7 @@
         ]
       },
       "tests": {
-        "count": 5657
+        "count": 5673
       }
     },
     "packages/client": {
@@ -195,8 +195,8 @@
         "line": 99.32,
         "branch": 94.15,
         "function": 99.01,
-        "linesTotal": 11198,
-        "branchesTotal": 8029,
+        "linesTotal": 11188,
+        "branchesTotal": 8021,
         "filesMeasured": [
           "src/App.tsx",
           "src/components/auth/ForgotPasswordPage.tsx",
@@ -607,9 +607,9 @@
     ]
   },
   "duplication": {
-    "percentage": 1.02,
-    "clones": 95,
-    "duplicatedLines": 1070,
+    "percentage": 1,
+    "clones": 93,
+    "duplicatedLines": 1047,
     "totalLines": 52849,
     "ceiling": 2.89,
     "sources": 190
@@ -643,7 +643,7 @@
       "spectral": 1
     }
   },
-  "reason": "Validation pass over Phases 1-10 (2026-10-14): accept the improvements of a green full run (CI EXIT 0, all 31 gates) and seed the two resource budgets Phase 5.3 registered but never recorded (test:resource ran green, every budget met).",
+  "reason": "Phase 11 crypto-client (F-11, F-12): improvements of the green phase-end npm run ci (tests added; server coverage up; duplication down), after the SUP-0062..0064 denominator reduction signed off by both read-only judges",
   "bundle": {
     "budgetKb": {
       "VaultItemForm": 230,

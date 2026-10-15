@@ -277,18 +277,15 @@ describe('Database indexes', () => {
       expect(index).toBeDefined();
     });
 
-    it('should have a sparse compound index on (userId, searchHash)', async () => {
+    it('has no index on searchHash: no keyed name hash is stored (F-12)', async () => {
       await VaultItem.ensureIndexes();
       const indexes = (await VaultItem.collection.indexes()) as {
         key: Record<string, number>;
-        sparse?: boolean;
-        [k: string]: unknown;
       }[];
 
-      const index = indexes.find((idx) => idx.key['userId'] === 1 && idx.key['searchHash'] === 1);
-
-      expect(index).toBeDefined();
-      expect(index!.sparse).toBe(true);
+      expect(indexes.some((idx) => 'searchHash' in idx.key)).toBe(false);
+      // Negative control: the model's other per-user indexes were built.
+      expect(indexes.some((idx) => idx.key['userId'] === 1 && idx.key['tags'] === 1)).toBe(true);
     });
 
     it('should have a compound index on (userId, tags)', async () => {
@@ -404,20 +401,17 @@ describe('Database indexes', () => {
       expect(index).toBeDefined();
     });
 
-    it('should have a unique compound index on (userId, searchHash) with partial filter', async () => {
+    it('has no index on searchHash, so two folders may share a name (F-12)', async () => {
       await Folder.ensureIndexes();
       const indexes = (await Folder.collection.indexes()) as {
         key: Record<string, number>;
-        unique?: boolean;
-        partialFilterExpression?: Record<string, unknown>;
-        [k: string]: unknown;
       }[];
 
-      const index = indexes.find((idx) => idx.key['userId'] === 1 && idx.key['searchHash'] === 1);
-
-      expect(index).toBeDefined();
-      expect(index!.unique).toBe(true);
-      expect(index!.partialFilterExpression).toBeDefined();
+      expect(indexes.some((idx) => 'searchHash' in idx.key)).toBe(false);
+      // Negative control: the model's other per-user indexes were built.
+      expect(indexes.some((idx) => idx.key['userId'] === 1 && idx.key['parentId'] === 1)).toBe(
+        true,
+      );
     });
 
     it('should have a non-unique partial compound index on (userId, sourceRefId) for restore idempotency', async () => {

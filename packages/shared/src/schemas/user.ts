@@ -421,7 +421,7 @@ export const exportSchema = z.object({
 // lengths but makes no matching decisions of its own.
 //
 // The former `data` envelope — a JSON string of encrypted items the server
-// de-duplicated by name/searchHash — has been removed. It is the defect this
+// de-duplicated by name and by a keyed name hash — has been removed. It is the defect this
 // contract replaces (ten accounts on one site collapsed into one), so it is not
 // accepted in any form; an old client is rejected by this schema.
 
@@ -443,15 +443,10 @@ export const importPasswordHistoryEntrySchema = z.object({
 
 /**
  * One encrypted item to INSERT. This mirrors the item shape the server maps
- * through its fixed `ALLOWED_ITEM_FIELDS` projection. `searchHash` is required
- * because every other creation path writes one, so an import that omitted it
- * would be the single source of rows whose stored hash does not match their
- * name. It is NOT required because restore matches on it — item restore matches
- * on an owned `_id` and then `(userId, sourceRefId)`, never on content or
- * `searchHash`, and `VaultItem`'s `(userId, searchHash)` index is non-unique
- * sparse. (Folders are the place a `searchHash` is genuinely load-bearing:
- * their `(userId, searchHash)` unique partial index is what makes a duplicate
- * folder name a 409.)
+ * through its fixed `ALLOWED_ITEM_FIELDS` projection. It carries no keyed hash of
+ * the name (F-12): nothing stores one, and a row from an older client that still
+ * sends `searchHash` has it dropped here like any other undeclared key, so that
+ * client keeps working.
  *
  * `passwordHistory` is optional and carried for one reason: re-importing a
  * native H-Vault export must not erase the history of an item it restores.
@@ -466,7 +461,6 @@ export const importInsertItemSchema = z.object({
   encryptedData: z.string().min(1).max(MAX_ENCRYPTED_DATA_LENGTH),
   dataIv: z.string().min(1).max(24),
   dataTag: z.string().min(1).max(32),
-  searchHash: z.string().regex(/^[a-f0-9]{64}$/),
   tags: z.array(z.string().trim().min(1).max(50)).max(MAX_TAGS_PER_ITEM).default([]),
   favorite: z.boolean().default(false),
   folderId: objectIdSchema.optional(),
@@ -479,9 +473,8 @@ export const importInsertItemSchema = z.object({
 /**
  * One existing item to UPDATE in place. Carries `id` (reusing the shared
  * `objectIdSchema` — a case-insensitive hex ObjectId with a lowercase transform),
- * the six ciphertext fields, a client-recomputed `searchHash` (an overwrite
- * replaces `encryptedName`, so the stored hash must be refreshed alongside it),
- * and an optional bounded `passwordHistory`. It deliberately does NOT carry
+ * the six ciphertext fields and an optional bounded `passwordHistory`; an older
+ * client's `searchHash` is dropped, as on an insert. It deliberately does NOT carry
  * `tags`/`favorite`/`folderId`: an import updates content only and must not
  * silently reorganize an existing vault.
  */
@@ -493,7 +486,6 @@ export const importUpdateItemSchema = z.object({
   encryptedData: z.string().min(1).max(MAX_ENCRYPTED_DATA_LENGTH),
   dataIv: z.string().min(1).max(24),
   dataTag: z.string().min(1).max(32),
-  searchHash: z.string().regex(/^[a-f0-9]{64}$/),
   passwordHistory: z.array(importPasswordHistoryEntrySchema).max(PASSWORD_HISTORY_MAX).optional(),
 });
 

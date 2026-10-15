@@ -415,51 +415,6 @@ describe('encryptData / decryptData', () => {
 });
 
 // ---------------------------------------------------------------------------
-// HMAC Search Hash Generation
-// ---------------------------------------------------------------------------
-
-describe('generateSearchHash', () => {
-  let vaultKey: CryptoKey;
-
-  beforeAll(async () => {
-    const rawVk = await crypto.generateVaultKey();
-    vaultKey = await crypto.importVaultKey(rawVk);
-  });
-
-  it('returns a 64-char lowercase hex string', async () => {
-    const hash = await crypto.generateSearchHash('My Login', vaultKey);
-    expect(typeof hash).toBe('string');
-    expect(hash).toMatch(/^[a-f0-9]{64}$/);
-  });
-
-  it('is deterministic — same name and key produce the same hash', async () => {
-    const h1 = await crypto.generateSearchHash('GitHub', vaultKey);
-    const h2 = await crypto.generateSearchHash('GitHub', vaultKey);
-    expect(h1).toBe(h2);
-  });
-
-  it('normalises name — case and whitespace insensitive', async () => {
-    const h1 = await crypto.generateSearchHash('  GitHub  ', vaultKey);
-    const h2 = await crypto.generateSearchHash('github', vaultKey);
-    expect(h1).toBe(h2);
-  });
-
-  it('produces different hashes for different names', async () => {
-    const h1 = await crypto.generateSearchHash('GitHub', vaultKey);
-    const h2 = await crypto.generateSearchHash('GitLab', vaultKey);
-    expect(h1).not.toBe(h2);
-  });
-
-  it('produces different hashes with different vault keys', async () => {
-    const rawOtherKey = await crypto.generateVaultKey();
-    const otherKey = await crypto.importVaultKey(rawOtherKey);
-    const h1 = await crypto.generateSearchHash('test', vaultKey);
-    const h2 = await crypto.generateSearchHash('test', otherKey);
-    expect(h1).not.toBe(h2);
-  });
-});
-
-// ---------------------------------------------------------------------------
 // Backup Key Derivation
 // ---------------------------------------------------------------------------
 
@@ -817,9 +772,8 @@ describe('end-to-end flow', () => {
     });
     const encData = await crypto.encryptData(secretData, vaultKey);
 
-    // 4. Generate search hash for the item name
-    const searchHash = await crypto.generateSearchHash('Example Login', vaultKey);
-    expect(typeof searchHash).toBe('string');
+    // 4. No keyed hash of the item name is computed any more (F-12).
+    expect('generateSearchHash' in crypto).toBe(false);
 
     // 5. Later: user logs in — derive the same keys
     const { masterEncryptionKey: mek2 } = await crypto.deriveKeys(

@@ -29,9 +29,9 @@ export const ROW_ID_TAKEN_MESSAGE =
  * Whether a write failed on a duplicate `_id`, as distinct from any other unique
  * index on the same collection.
  *
- * The distinction is the whole reason this exists: `Folder` also has a unique
- * `(userId, searchHash)` index, and "a folder with this name already exists" is
- * the wrong thing to tell a client whose derived id collided. The driver names the
+ * The distinction is the whole reason this exists: a refusal from any other
+ * unique index is a different conflict, and telling a client its derived id
+ * collided when it did not would send it to reload for nothing. The driver names the
  * violated index in two different ways: a single-document write carries
  * `keyPattern`, while a bulk write (`insertMany`) carries NO `keyPattern` at all,
  * only each write error's server message, `… index: _id_ dup key: …` — measured

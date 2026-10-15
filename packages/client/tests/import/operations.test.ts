@@ -192,9 +192,8 @@ describe('buildImportOperations', () => {
         itemType: 'login',
       }),
     ).rejects.toThrow();
-    // The search hash is recomputed: an export may not carry one, and it is a
-    // deterministic HMAC of the name under the vault key's search subkey.
-    expect(insert.searchHash).toBe(await cryptoService.generateSearchHash('GitHub', vaultKey));
+    // F-12: no name hash is sent, recomputed or carried over from the export.
+    expect(insert).not.toHaveProperty('searchHash');
   });
 
   it('carries a native row previous passwords through, sealed to the new row', async () => {
@@ -278,6 +277,37 @@ describe('buildImportOperations', () => {
       rowId: EXISTING_ID,
     });
     expect(recovered).toBe('old-password');
+  });
+
+  it('an overwrite sends the name only as ciphertext: no name hash, nothing else about it (F-12)', async () => {
+    // An overwrite replaces the name, which is why it used to recompute a hash of
+    // it. The update now names its target and its sealed fields, and nothing else.
+    const existing = existingItem(EXISTING_ID, { content: 'old' }, undefined, 'secret');
+    const incoming = loginRow({
+      itemType: 'secret',
+      name: 'Renamed kit',
+      data: { content: 'new' },
+    });
+    const built = await buildImportOperations({
+      inserts: [],
+      updates: [{ incoming, existing }],
+      userId: USER_ID,
+      vaultKey,
+    });
+
+    expect(built.failedCount).toBe(0);
+    const update = built.updates[0]!;
+    expect(update).not.toHaveProperty('searchHash');
+    expect(Object.keys(update).sort()).toEqual([
+      'dataIv',
+      'dataTag',
+      'encryptedData',
+      'encryptedName',
+      'id',
+      'nameIv',
+      'nameTag',
+    ]);
+    expect(JSON.stringify(update)).not.toContain('Renamed kit');
   });
 
   it('seals an overwrite to the matched row id and its STORED item type', async () => {
@@ -507,7 +537,6 @@ describe('assertInsertedWhereSealed', () => {
     encryptedData: 'ed',
     dataIv: 'v2:di',
     dataTag: 'dt',
-    searchHash: 'a'.repeat(64),
     tags: [],
     favorite: false,
     ...(idNonce !== undefined ? { idNonce } : {}),
@@ -603,7 +632,6 @@ describe('chunkImportOperations', () => {
     encryptedData: `ed${String(n)}`,
     dataIv: 'di',
     dataTag: 'dt',
-    searchHash: 'a'.repeat(64),
     tags: [],
     favorite: false,
   });
@@ -616,7 +644,6 @@ describe('chunkImportOperations', () => {
     encryptedData: `ued${String(n)}`,
     dataIv: 'di',
     dataTag: 'dt',
-    searchHash: 'b'.repeat(64),
   });
 
   it('keeps everything in one batch when it fits', () => {

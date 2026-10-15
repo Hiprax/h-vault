@@ -644,6 +644,45 @@
       "created": "2026-09-29",
       "expires": "2026-12-28",
       "approvedBy": ["judge:readonly"]
+    },
+    {
+      "id": "SUP-0062",
+      "rule": "BASELINE-REDUCTION",
+      "kind": "known-gap",
+      "file": ".testfortress/baseline.json",
+      "symbol": "packages/shared coverage.linesTotal 814 -> 812",
+      "maxHits": 1,
+      "reason": "The shared line denominator fell by two because Phase 11 (F-12, the search hash removal) deleted shared code. Per file: src/constants/index.ts 187 -> 186 (VAULT_SEARCH_KEY_INFO removed with the subkey it labelled), src/schemas/vault.ts 66 -> 65 (searchHashSchema removed; the write schemas no longer declare searchHash). BRF unchanged (439). NOTHING STOPPED BEING MEASURED: the measured file set is identical at both points (shared 15, server 122, client 208 files), no vitest.config.ts changed, and no coverage percentage fell at the gate's two-decimal resolution in the same `npm run ci` run (server line 99.32 -> 99.37, branch 94.52 -> 94.54, function 98.91 -> 98.92; shared and client held at two decimals, the client line and function rates moving in the fourth decimal only because covered code was deleted over unchanged uncovered counts). Keeping the deleted code to hold the denominator would be dead code retained for a metric, which is what this ledger exists to make visible. METHOD (the SUP-0061 method, extended to BRF): `git archive 11f7d12` (the commit that last recorded baseline.json) to /tmp/hv-lf-head with its own @hvault workspace links, a full coverage run per package (thresholds zeroed, reportOnFailure; two server test files fail in the archive only because it has no client build, which moves no denominator), per-file LF/BRF diffed against the working tree's `npm run ci` LCOV; 11f7d12 totals 814 / 6327 / 3465 / 11198 / 8029, identical to the baseline, which validates the method. REMOVAL CONDITION: delete at expiry (the integrity scan raises LEDGER-EXPIRED on that date); the reduction is recorded once and the fields ratchet upward from the new values.",
+      "owner": "maintainer",
+      "created": "2026-10-15",
+      "expires": "2027-01-13",
+      "approvedBy": ["judge:readonly"]
+    },
+    {
+      "id": "SUP-0063",
+      "rule": "BASELINE-REDUCTION",
+      "kind": "known-gap",
+      "file": ".testfortress/baseline.json",
+      "symbol": "packages/server coverage.linesTotal 6327 -> 6325, coverage.branchesTotal 3465 -> 3442",
+      "maxHits": 1,
+      "reason": "The server denominators fell because Phase 11 (F-12) deleted server code, partly offset by migration v5. Per file (LF, BRF): src/controllers/backupController.ts 536 -> 510, 317 -> 292 (the three folder E11000 searchHash strip-and-retry branches and both SEARCH_HASH_RE sanitisers deleted: no unique index remains for them to handle), src/controllers/folderController.ts 137 -> 131, 80 -> 70 (the 'folder with this name already exists' 409 branches on create and rename deleted with the name index), src/controllers/vaultController.ts 485 -> 482, 250 -> 246 (the rotation's searchHash spread and the rollback's searchHash set/unset branch), src/models/Folder.ts 8 -> 7 and src/models/VaultItem.ts 17 -> 16 (the path and index declarations), offset by src/utils/migrations.ts 131 -> 166, 57 -> 73 (migration v5: list-and-drop of every searchHash index, batched unset). NOTHING STOPPED BEING MEASURED: the measured file set is identical at both points (shared 15, server 122, client 208 files), no vitest.config.ts changed, and no coverage percentage fell at the gate's two-decimal resolution in the same `npm run ci` run (server line 99.32 -> 99.37, branch 94.52 -> 94.54, function 98.91 -> 98.92; shared and client held at two decimals, the client line and function rates moving in the fourth decimal only because covered code was deleted over unchanged uncovered counts). Keeping the deleted code to hold the denominator would be dead code retained for a metric, which is what this ledger exists to make visible. METHOD (the SUP-0061 method, extended to BRF): `git archive 11f7d12` (the commit that last recorded baseline.json) to /tmp/hv-lf-head with its own @hvault workspace links, a full coverage run per package (thresholds zeroed, reportOnFailure; two server test files fail in the archive only because it has no client build, which moves no denominator), per-file LF/BRF diffed against the working tree's `npm run ci` LCOV; 11f7d12 totals 814 / 6327 / 3465 / 11198 / 8029, identical to the baseline, which validates the method. REMOVAL CONDITION: delete at expiry (the integrity scan raises LEDGER-EXPIRED on that date); the reduction is recorded once and the fields ratchet upward from the new values.",
+      "owner": "maintainer",
+      "created": "2026-10-15",
+      "expires": "2027-01-13",
+      "approvedBy": ["judge:readonly"]
+    },
+    {
+      "id": "SUP-0064",
+      "rule": "BASELINE-REDUCTION",
+      "kind": "known-gap",
+      "file": ".testfortress/baseline.json",
+      "symbol": "packages/client coverage.linesTotal 11198 -> 11188, coverage.branchesTotal 8029 -> 8021",
+      "maxHits": 1,
+      "reason": "The client denominators fell because Phase 11 (F-12, and F-11's removed guard) deleted client code, partly offset by F-11's digest check. Per file (LF, BRF): src/services/crypto/cryptoService.ts 204 -> 187, 25 -> 21 (generateSearchHash and its memoised HKDF search subkey deleted), src/pages/BackupSettingsPage.tsx 507 -> 505 (restore no longer recomputes item and folder hashes), src/pages/SettingsPage.tsx 835 -> 834, 593 -> 591 (rotation no longer computes a hash; the pass-through's searchHash branch gone), src/services/import/encrypt.ts 28 -> 27 (the sealer's hash), src/stores/vaultStore.ts 476 -> 473 (create/update/rename hashes), offset by src/stores/documentsStore.ts 387 -> 401, 230 -> 228 (F-11: per-slice digest recording, comparison and zeroing added; the tautological size/lastModified guard, with its two branches, removed). NOTHING STOPPED BEING MEASURED: the measured file set is identical at both points (shared 15, server 122, client 208 files), no vitest.config.ts changed, and no coverage percentage fell at the gate's two-decimal resolution in the same `npm run ci` run (server line 99.32 -> 99.37, branch 94.52 -> 94.54, function 98.91 -> 98.92; shared and client held at two decimals, the client line and function rates moving in the fourth decimal only because covered code was deleted over unchanged uncovered counts). Keeping the deleted code to hold the denominator would be dead code retained for a metric, which is what this ledger exists to make visible. METHOD (the SUP-0061 method, extended to BRF): `git archive 11f7d12` (the commit that last recorded baseline.json) to /tmp/hv-lf-head with its own @hvault workspace links, a full coverage run per package (thresholds zeroed, reportOnFailure; two server test files fail in the archive only because it has no client build, which moves no denominator), per-file LF/BRF diffed against the working tree's `npm run ci` LCOV; 11f7d12 totals 814 / 6327 / 3465 / 11198 / 8029, identical to the baseline, which validates the method. REMOVAL CONDITION: delete at expiry (the integrity scan raises LEDGER-EXPIRED on that date); the reduction is recorded once and the fields ratchet upward from the new values.",
+      "owner": "maintainer",
+      "created": "2026-10-15",
+      "expires": "2027-01-13",
+      "approvedBy": ["judge:readonly"]
     }
   ]
 }

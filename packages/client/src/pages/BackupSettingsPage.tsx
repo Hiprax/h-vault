@@ -971,7 +971,6 @@ export default function BackupSettingsPage() {
                 item.encryptedName = reName.encrypted;
                 item.nameIv = reName.iv;
                 item.nameTag = reName.tag;
-                item.searchHash = await cryptoService.generateSearchHash(name, currentVaultKey);
                 // Password history entries are encrypted under the backup key too.
                 if (Array.isArray(item.passwordHistory)) {
                   const reHistory: Record<string, unknown>[] = [];
@@ -1046,7 +1045,6 @@ export default function BackupSettingsPage() {
                 folder.encryptedName = reName.encrypted;
                 folder.nameIv = reName.iv;
                 folder.nameTag = reName.tag;
-                folder.searchHash = await cryptoService.generateSearchHash(name, currentVaultKey);
               }
               validFolders.push(folder);
             } catch {

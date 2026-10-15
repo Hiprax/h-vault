@@ -423,7 +423,6 @@ describe('userApi wire contract', () => {
             encryptedData: 'ed',
             dataIv: 'di',
             dataTag: 'dt',
-            searchHash: 'a'.repeat(64),
             tags: [],
             favorite: false,
           },

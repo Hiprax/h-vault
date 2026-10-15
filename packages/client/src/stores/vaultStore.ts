@@ -7,7 +7,6 @@
  */
 
 import { create } from 'zustand';
-import { cryptoService } from '../services/crypto/cryptoService.js';
 import { buildPasswordHistoryPayload } from '../services/crypto/passwordHistory.js';
 import {
   assertStoredUnder,
@@ -72,7 +71,6 @@ export interface DecryptedVaultItem {
   name: string;
   /** Decrypted structured data (JSON-parsed) */
   data: Record<string, unknown>;
-  searchHash?: string | undefined;
   createdAt: string;
   updatedAt: string;
   deletedAt?: string | undefined;
@@ -181,8 +179,7 @@ interface VaultState {
    */
   updateItemMeta: (id: string, meta: ItemMetaUpdate) => Promise<void>;
   /**
-   * NAME-ONLY update: re-encrypts the name (and its `searchHash`) and sends nothing
-   * else. The item's `encryptedData`/`dataIv`/`dataTag` are not in the payload at
+   * NAME-ONLY update: re-encrypts the name and sends nothing else. The item's `encryptedData`/`dataIv`/`dataTag` are not in the payload at
    * all, so its ciphertext is left byte-identical.
    *
    * This is the one write an UNDECODABLE item can safely take. See the action's
@@ -812,7 +809,6 @@ async function decryptItem(
     favorite: raw.favorite,
     name,
     data,
-    searchHash: raw.searchHash,
     createdAt: raw.createdAt,
     updatedAt: raw.updatedAt,
     deletedAt: raw.deletedAt,
@@ -867,7 +863,6 @@ function toUndecodableItem(raw: IVaultItemResponse): DecryptedVaultItem {
     favorite: raw.favorite,
     name: '',
     data: { _raw: null },
-    searchHash: raw.searchHash,
     createdAt: raw.createdAt,
     updatedAt: raw.updatedAt,
     deletedAt: raw.deletedAt,
@@ -1400,7 +1395,6 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
     // so bail out early with a user-friendly error instead of round-tripping
     // to receive a cryptic 400.
     assertEncryptedSizes(encryptedName, encryptedData);
-    const searchHash = await cryptoService.generateSearchHash(name, vaultKey);
 
     // `vaultKeyVersion` names the generation the six ciphertext fields above
     // were sealed under. The server refuses the row rather than storing one
@@ -1415,7 +1409,6 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
         encryptedData: encryptedData.encrypted,
         dataIv: encryptedData.iv,
         dataTag: encryptedData.tag,
-        searchHash,
         ...(options?.folderId != null ? { folderId: options.folderId } : {}),
         tags: options?.tags ?? [],
         favorite: options?.favorite ?? false,
@@ -1480,7 +1473,6 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
     );
     // Pre-flight size check: same rationale as createItem.
     assertEncryptedSizes(encryptedName, encryptedData);
-    const searchHash = await cryptoService.generateSearchHash(name, vaultKey);
 
     // Build password history for login items when the password changes. The
     // detection + payload construction is shared with the import flow via
@@ -1506,7 +1498,6 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
         encryptedData: encryptedData.encrypted,
         dataIv: encryptedData.iv,
         dataTag: encryptedData.tag,
-        searchHash,
         ...(options?.folderId !== undefined ? { folderId: options.folderId } : {}),
         ...(options?.tags !== undefined ? { tags: options.tags } : {}),
         ...(options?.favorite !== undefined ? { favorite: options.favorite } : {}),
@@ -1535,8 +1526,8 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
   // -----------------------------------------------------------------------
   // Metadata-only update (favorite / folder / tags)
   //
-  // Sends ONLY the plaintext metadata fields — never encryptedName,
-  // encryptedData or searchHash — so the item's ciphertext is left untouched.
+  // Sends ONLY the plaintext metadata fields — never encryptedName or
+  // encryptedData — so the item's ciphertext is left untouched.
   //
   // This is not merely an optimization. When an item's decrypted payload fails
   // schema validation or JSON parsing, decryptItem() keeps a PLACEHOLDER in
@@ -1608,11 +1599,9 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
   // -----------------------------------------------------------------------
   // Name-only update
   //
-  // Sends the `encryptedName`/`nameIv`/`nameTag` trio plus the `searchHash` derived
-  // from it, and NOTHING else. `updateVaultItemSchema` permits exactly this: the
-  // name trio must travel together, the data trio may be omitted entirely, and
-  // `searchHash` is optional — it is an HMAC of the NAME, so it has to be refreshed
-  // or the server's duplicate detection would still be keyed to the old one.
+  // Sends the `encryptedName`/`nameIv`/`nameTag` trio and NOTHING else.
+  // `updateVaultItemSchema` permits exactly this: the name trio must travel
+  // together, and the data trio may be omitted entirely.
   //
   // This exists because renaming was the one safe operation an UNDECODABLE item
   // could not be offered. `updateItem` re-encrypts `JSON.stringify(item.data)`
@@ -1631,7 +1620,6 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
 
     const encryptedName = await encryptVaultField(name, { role: 'item.name', rowId: id }, vaultKey);
     assertEncryptedNameSize(encryptedName);
-    const searchHash = await cryptoService.generateSearchHash(name, vaultKey);
 
     // Name-only, but still ciphertext: a rename sealed under a superseded key
     // strands the one field this path exists to repair.
@@ -1640,7 +1628,6 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
         encryptedName: encryptedName.encrypted,
         nameIv: encryptedName.iv,
         nameTag: encryptedName.tag,
-        searchHash,
         vaultKeyVersion,
       }),
     );
@@ -1656,7 +1643,6 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
     const applyRename = (item: DecryptedVaultItem): DecryptedVaultItem => ({
       ...item,
       name,
-      searchHash,
       updatedAt,
       // Only the NAME ciphertext is replaced. `encryptedData`/`dataIv`/`dataTag`
       // are carried over byte-for-byte — that is the whole point of this path.
@@ -1665,7 +1651,6 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
         encryptedName: encryptedName.encrypted,
         nameIv: encryptedName.iv,
         nameTag: encryptedName.tag,
-        searchHash,
         updatedAt,
       },
     });

@@ -129,8 +129,8 @@ beforeAll(async () => {
   //     falls through to an INSERT; with no unique index that insert SUCCEEDS,
   //     creating a second lock document and handing a token to a caller while
   //     another holder is still live (mutual exclusion silently gone).
-  //   * Folder's `(userId, searchHash)` unique partial index is what turns a
-  //     duplicate folder name into a 409.
+  //   * `users.email`'s unique index is what refuses a second account for one
+  //     address.
   //
   // The race only loses under CPU contention (e.g. the three workspaces running
   // their suites at once), which made it an intermittent failure rather than a
