@@ -34,6 +34,7 @@ import type {
 } from '../schemas/folder.js';
 import type {
   updateSettingsSchema,
+  updateNotificationPreferencesSchema,
   passwordGenOptionsSchema,
   checkBreachSchema,
   checkBreachBatchSchema,
@@ -81,6 +82,7 @@ import type {
   ReleaseChangeKind,
   ReleaseIcon,
   RegistrationMode,
+  SecurityNotificationPreferences,
   Theme,
 } from '../constants/index.js';
 import type {
@@ -130,6 +132,9 @@ export type ReorderFolderInput = z.infer<typeof reorderFolderSchema>;
 
 // User/Settings types
 export type UpdateSettingsInput = z.infer<typeof updateSettingsSchema>;
+export type UpdateNotificationPreferencesInput = z.infer<
+  typeof updateNotificationPreferencesSchema
+>;
 export type PasswordGenOptions = z.infer<typeof passwordGenOptionsSchema>;
 export type CheckBreachInput = z.infer<typeof checkBreachSchema>;
 export type CheckBreachBatchInput = z.infer<typeof checkBreachBatchSchema>;
@@ -381,6 +386,8 @@ export interface IUserSettings {
   language: string;
   /** Whether the release notes open by themselves after an update. */
   showReleaseNotes: boolean;
+  /** Which security emails the owner receives (F-26): every event they may choose. */
+  notifications: SecurityNotificationPreferences;
   backup: IBackupSettings;
 }
 

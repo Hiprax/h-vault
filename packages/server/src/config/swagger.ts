@@ -36,6 +36,8 @@ import {
   MAX_IMPORT_ITEMS,
   MAX_ITEMS_PER_USER,
   MAX_FOLDERS_PER_USER,
+  SECURITY_NOTIFICATION_PREFERENCE_EVENTS,
+  CRITICAL_SECURITY_NOTIFICATION_EVENTS,
 } from '@hvault/shared';
 
 // ---------------------------------------------------------------------------
@@ -1210,6 +1212,29 @@ export const swaggerSpec: JsonObject = {
             description:
               'Open the release notes by themselves on the first visit after the server is updated (default true). When false they stay one click away.',
           },
+          notifications: {
+            $ref: '#/components/schemas/SecurityNotificationPreferences',
+          },
+        },
+      },
+      SecurityNotificationPreferences: {
+        type: 'object',
+        additionalProperties: false,
+        description: `Which security emails the account owner receives, one boolean per event (true = emailed, the default). In a request only the events named are changed. On PUT /user/settings, which takes no password, a critical event (${CRITICAL_SECURITY_NOTIFICATION_EVENTS.join(', ')}) may be turned on but not off: turning one off is refused with 400 and needs PUT /user/notifications with the master password. Two notices are always sent and are not preferences: an account deletion, and critical notices being turned off.`,
+        properties: Object.fromEntries(
+          SECURITY_NOTIFICATION_PREFERENCE_EVENTS.map((event) => [event, { type: 'boolean' }]),
+        ),
+      },
+      UpdateNotificationPreferencesRequest: {
+        type: 'object',
+        required: ['authHash', 'notifications'],
+        properties: {
+          authHash: {
+            type: 'string',
+            maxLength: 100,
+            description: 'The master-password proof, as at sign-in.',
+          },
+          notifications: { $ref: '#/components/schemas/SecurityNotificationPreferences' },
         },
       },
       ReleaseVersion: {
@@ -3481,6 +3506,29 @@ export const swaggerSpec: JsonObject = {
           ),
           401: { $ref: '#/components/responses/Unauthorized' },
           400: { $ref: '#/components/responses/ValidationError' },
+          429: { $ref: '#/components/responses/RateLimited' },
+        },
+      },
+    },
+    '/user/notifications': {
+      put: {
+        operationId: 'updateNotificationPreferences',
+        tags: ['User'],
+        summary: 'Choose which security emails are sent, with the master password',
+        description:
+          'Turns security emails on or off, including the critical ones PUT /user/settings refuses to turn off. Requires the master-password proof; the write is conditioned on the credential it proved, so a proof of a password that has since changed is refused with 401. Turning critical notices off emails the owner once, saying which. Rate limited: 5 req/user per 15 min, one budget per account shared by every request that re-checks the master password.',
+        security: [{ bearerAuth: [], csrfToken: [] }],
+        requestBody: jsonRequestBody('UpdateNotificationPreferencesRequest'),
+        responses: {
+          200: jsonEnvelope('The preferences now stored, every event filled in', {
+            type: 'object',
+            properties: {
+              notifications: { $ref: '#/components/schemas/SecurityNotificationPreferences' },
+            },
+          }),
+          400: { $ref: '#/components/responses/ValidationError' },
+          401: { $ref: '#/components/responses/Unauthorized' },
+          404: errorResponse('The account could not be read (it was deleted mid-request).'),
           429: { $ref: '#/components/responses/RateLimited' },
         },
       },

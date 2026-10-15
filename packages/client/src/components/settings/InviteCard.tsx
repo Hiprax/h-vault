@@ -7,7 +7,7 @@ import { Label } from '../ui/Label';
 import { FormAlert } from '../ui/FormAlert';
 import { useToast } from '../ui/Toast';
 import { getApiErrorMessage } from '../../lib/utils';
-import { cryptoService } from '../../services/crypto/cryptoService';
+import { proveMasterPassword } from '../../lib/masterPasswordProof';
 import { createInvitationApi } from '../../services/api/authApi';
 import { copySecretToClipboard } from '../../services/clipboard/clipboardService';
 
@@ -49,10 +49,7 @@ export function InviteCard({ email, clipboardClearSeconds }: InviteCardProps) {
     setMinting(true);
     setMinted(null);
     try {
-      const { masterEncryptionKey, authKey } = await cryptoService.deriveKeys(password, email);
-      const authHash = cryptoService.getAuthHash(authKey);
-      cryptoService.clearKey(authKey);
-      await cryptoService.clearCryptoKey(masterEncryptionKey);
+      const authHash = await proveMasterPassword(password, email);
       const res = await createInvitationApi({ authHash, email: address });
       const body = res.data;
       if (body.success) {

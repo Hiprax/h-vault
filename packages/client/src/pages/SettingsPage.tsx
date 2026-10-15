@@ -104,6 +104,7 @@ import {
 import { clearSettingsCache } from '../hooks/useUserSettings';
 import { copySecretToClipboard } from '../services/clipboard/clipboardService';
 import { InviteCard } from '../components/settings/InviteCard';
+import { SecurityNotificationsCard } from '../components/settings/SecurityNotificationsCard';
 import { getItemsFetchGeneration, useVaultStore } from '../stores/vaultStore';
 import { passwordDidChange } from '../services/crypto/passwordHistory';
 import { decryptVaultField, encryptVaultField } from '../services/crypto/vaultField';
@@ -2447,6 +2448,11 @@ export default function SettingsPage() {
           server that registers by invitation. */}
       {profile?.canInvite === true && (
         <InviteCard email={profile.email} clipboardClearSeconds={clipboardClearTimeout} />
+      )}
+
+      {/* Security emails (F-26): which events the account owner is emailed about. */}
+      {profile && (
+        <SecurityNotificationsCard email={profile.email} initial={profile.settings.notifications} />
       )}
 
       {/* Security */}

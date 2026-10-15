@@ -28,6 +28,7 @@ import { createAuditLog } from '../services/auditService.js';
 import { readStringCookie } from './cookies.js';
 import { createModuleLogger, errorMessage } from './logger.js';
 import { hashToken } from './token.js';
+import { notifySecurityEventLater } from './securityNotifications.js';
 
 const logger = createModuleLogger('device-proofs');
 
@@ -290,6 +291,7 @@ export async function recordProofFailure(
       context.ip,
       context.userAgent,
     );
+    notifySecurityEventLater(proof.userId, 'device_proof_revoked', { ip: context.ip });
   }
 }
 

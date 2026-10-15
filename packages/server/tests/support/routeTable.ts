@@ -558,6 +558,15 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
   },
   {
     method: 'put',
+    path: '/api/v1/user/notifications',
+    auth: 'required',
+    csrf: 'required',
+    limiters: ['passwordVerifyLimiter'],
+    owned: null,
+    when: 'always',
+  },
+  {
+    method: 'put',
     path: '/api/v1/user/change-password',
     auth: 'required',
     csrf: 'required',

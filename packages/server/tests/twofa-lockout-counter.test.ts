@@ -30,12 +30,22 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 // The unlock mail is stubbed so "did the threshold crossing mail exactly once?"
 // is directly observable; the real sender is an inert no-op in the test
 // environment (no SMTP configured), which makes the question unanswerable.
+// One unlock-link sender serves both factors since F-26 (`sendAccountUnlockEmail(email,
+// token, factor)`); the second factor's alert left the email module for the security
+// notice helper. Each factor's link is still observed on a spy of its own, so every
+// assertion below keeps its meaning: `password` for the password factor's link,
+// `secondFactor` for the two-factor step's.
+const unlockMails = vi.hoisted(() => ({
+  password: vi.fn().mockResolvedValue({ success: true, message: 'sent' }),
+  secondFactor: vi.fn().mockResolvedValue({ success: true, message: 'sent' }),
+}));
+
 vi.mock('../src/utils/email.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/utils/email.js')>();
   return {
     ...actual,
-    sendAccountUnlockEmail: vi.fn().mockResolvedValue({ success: true, message: 'sent' }),
-    sendSecondFactorLockoutEmail: vi.fn().mockResolvedValue({ success: true, message: 'sent' }),
+    sendAccountUnlockEmail: (email: string, token: string, factor = 'password') =>
+      (factor === 'second_factor' ? unlockMails.secondFactor : unlockMails.password)(email, token),
   };
 });
 
@@ -49,7 +59,6 @@ import { User } from '../src/models/User.js';
 import { RefreshToken } from '../src/models/RefreshToken.js';
 import { AuditLog } from '../src/models/AuditLog.js';
 import { TrustedDevice } from '../src/models/TrustedDevice.js';
-import { sendAccountUnlockEmail, sendSecondFactorLockoutEmail } from '../src/utils/email.js';
 import { hashToken } from '../src/utils/token.js';
 import { peekLoginAttempts } from '../src/utils/loginThrottle.js';
 import { createTestUser, getCsrf, type TestUser } from './helpers.js';
@@ -64,8 +73,8 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  */
 const UA = 'A1LockoutCounter/1.0';
 
-const mockedUnlockEmail = vi.mocked(sendAccountUnlockEmail);
-const mockedSecondFactorEmail = vi.mocked(sendSecondFactorLockoutEmail);
+const mockedUnlockEmail = unlockMails.password;
+const mockedSecondFactorEmail = unlockMails.secondFactor;
 const cm = new CryptoManager();
 const encKey = process.env['SESSION_SECRET'] ?? 'TestSessionSecret4Testing!!12345';
 

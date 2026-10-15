@@ -23,6 +23,7 @@ import {
   revokeDeviceProofs,
 } from '../utils/deviceProofs.js';
 import { suspendThirdPartyRecipients } from '../utils/backupRecipients.js';
+import { notifySecurityEventLater } from '../utils/securityNotifications.js';
 import { supportsTransactions } from '../utils/transactionSupport.js';
 import {
   generateAccessToken,
@@ -76,6 +77,7 @@ import {
   MAX_SESSIONS,
   MAX_TRUSTED_DEVICES,
   maskEmail,
+  CRITICAL_SECURITY_NOTIFICATION_EVENTS,
 } from '@hvault/shared';
 import type {
   RegisterInput,
@@ -687,6 +689,19 @@ export const login = catchAsync(async (req: Request, res: Response): Promise<voi
   // here clears the lockout: only the deadline passing, the unlock link, or a
   // completed sign-in outside a running lockout does.
   if (status.passwordLocked && !proven) {
+    // The ONE out-of-band signal that the guessing found the password (F-26): a
+    // mail to the owner, sent once the response is gone. The listener is added on
+    // BOTH branches and decides inside, so nothing done before the response differs
+    // by correctness; the mail's own work (an account read, the hourly slot, SMTP)
+    // happens after it, and nothing it writes is returned by any API.
+    const correct = isMatch;
+    const signal = () => {
+      if (correct) notifySecurityEventLater(user._id, 'locked_sign_in_correct_password', { ip });
+    };
+    // A client that left during the bcrypt compare has no response left to time,
+    // and its `close` has already fired.
+    if (res.destroyed) signal();
+    else res.once('close', signal);
     await extendPasswordLockout(user._id, email);
     await recordLockedAttempt(user._id.toString(), ip, userAgent);
     await applyFailedLoginDelay(email);
@@ -1249,6 +1264,7 @@ export const login2fa = catchAsync(async (req: Request, res: Response): Promise<
   if (remember && !usedBackupCode) {
     await grantTrustedDevice(res, user._id, sanitizedDeviceInfo);
     await createAuditLog(user._id.toString(), 'trusted_device_grant', undefined, ip, userAgent);
+    notifySecurityEventLater(user._id, 'trusted_device_granted', { ip });
   }
 
   // `backupCode` discriminates the two credentials on the row itself. The
@@ -1589,6 +1605,9 @@ export const refresh = catchAsync(async (req: Request, res: Response): Promise<v
           reuseCtx.ip,
           reuseCtx.userAgent,
         );
+        notifySecurityEventLater(existingToken.userId, 'token_reuse_detected', {
+          ip: reuseCtx.ip,
+        });
       }
       clearRefreshCookie(res);
       throw httpErrors.unauthorized(ERROR_CODES.TOKEN_REUSE_DETECTED);
@@ -1731,6 +1750,11 @@ export const logoutAll = catchAsync(async (req: Request, res: Response): Promise
       logoutAllCtx.ip,
       logoutAllCtx.userAgent,
     );
+    notifySecurityEventLater(userId, 'backup_recipients_suspended', {
+      ip: logoutAllCtx.ip,
+      count: suspendedRecipients,
+      reason: 'logout_all',
+    });
   }
 
   logger.info('All other sessions revoked', { userId, count: result.deletedCount });
@@ -1761,7 +1785,9 @@ export const verifyEmail = catchAsync(async (req: Request, res: Response): Promi
   }
 
   const user = await User.findById(payload.userId);
-  if (!user) {
+  // An account being erased (by its owner, or by the reaper of never-verified
+  // accounts, F-21) is answered exactly as an unknown one.
+  if (!user || user.deletionPending === true) {
     throw httpErrors.badRequest(ERROR_CODES.TOKEN_INVALID);
   }
 
@@ -1779,8 +1805,21 @@ export const verifyEmail = catchAsync(async (req: Request, res: Response): Promi
     return;
   }
 
-  user.emailVerified = true;
-  await user.save();
+  // A CONDITIONAL write, never `user.save()` on the document read above: the reaper
+  // of never-verified accounts claims an account by setting `deletionPending` and
+  // then erases it by id, so a verification that landed after that claim would
+  // mark verified an account whose data is already going. Of the two writes on
+  // this document exactly one wins: this one (and the claim then matches nothing),
+  // or the claim (and this matches nothing and is refused like an unknown account).
+  const verified = await User.updateOne(
+    // `$ne: true` rather than `false`: a row stored before the field existed has
+    // none, and its owner must still be able to verify.
+    { _id: user._id, emailVerified: { $ne: true }, deletionPending: { $ne: true } },
+    { $set: { emailVerified: true } },
+  );
+  if (verified.matchedCount === 0) {
+    throw httpErrors.badRequest(ERROR_CODES.TOKEN_INVALID);
+  }
 
   const verifyEmailCtx = getRequestContext(req);
   await createAuditLog(
@@ -1955,6 +1994,24 @@ export const resetPassword = catchAsync(async (req: Request, res: Response): Pro
   clearLockoutStateOnDocument(user, 'password');
   user.passwordChangedAt = new Date();
   await user.save();
+  // A reset is how an owner takes the account back, so every CRITICAL security
+  // email is turned back on (F-26): whoever held the old password could have turned
+  // them off, and the recovered owner must hear about what happens next. The
+  // optional ones are left as the owner chose them. Unconditional and AFTER the
+  // save: an opt-out written with a proof of the OLD password between this request's
+  // read and its save is cleared too (none can land after it, since that write is
+  // conditioned on the credential it proved).
+  await User.updateOne(
+    { _id: user._id },
+    {
+      $unset: Object.fromEntries(
+        CRITICAL_SECURITY_NOTIFICATION_EVENTS.map((event) => [
+          `settings.notifications.${event}`,
+          1,
+        ]),
+      ),
+    },
+  );
   // And once more AFTER the new credential is stored: a recipient-list update
   // carrying a proof of the OLD password could have landed between the first
   // suspension and the save (its write is conditioned on the credential it proved,
@@ -1977,7 +2034,13 @@ export const resetPassword = catchAsync(async (req: Request, res: Response): Pro
       resetCtx.ip,
       resetCtx.userAgent,
     );
+    notifySecurityEventLater(user._id, 'backup_recipients_suspended', {
+      ip: resetCtx.ip,
+      count: suspendedRecipients,
+      reason: 'password_reset',
+    });
   }
+  notifySecurityEventLater(user._id, 'password_reset', { ip: resetCtx.ip });
 
   logger.info('Password reset completed', { userId: user._id.toString() });
 

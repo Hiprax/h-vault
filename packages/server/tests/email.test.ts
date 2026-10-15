@@ -718,14 +718,21 @@ describe('Email utility', () => {
     });
   });
 
-  // ── sendSecondFactorLockoutEmail ─────────────────────────────────────────
+  // ── sendAccountUnlockEmail, second factor ───────────────────────────────
+  //
+  // Rewritten for F-26 (PLAN.md 14.2, judged design option A): the second-factor
+  // lockout mail was ONE mail carrying both the alert ("your master password was
+  // entered correctly") and the unlock link. A security notice may carry no token or
+  // link, so the alert moved to `utils/securityNotifications.ts` (pinned in
+  // `security-notifications.test.ts`) and the link is now the same factor-worded
+  // sender as the password factor's. What is pinned here is the link mail itself.
 
-  describe('sendSecondFactorLockoutEmail', () => {
-    it('tells the owner the master password was entered, with the second-factor link', async () => {
-      const { sendSecondFactorLockoutEmail } = await importWithSmtp();
+  describe('sendAccountUnlockEmail for the second factor', () => {
+    it('sends the two-factor unlock link, worded for that step, with the remedy if it was not the owner', async () => {
+      const { sendAccountUnlockEmail } = await importWithSmtp();
 
       const token = 'sf/token&special=true';
-      const result = await sendSecondFactorLockoutEmail('user@example.com', token);
+      const result = await sendAccountUnlockEmail('user@example.com', token, 'second_factor');
 
       expect(result.success).toBe(true);
       expect(mockSendMail).toHaveBeenCalledTimes(1);
@@ -735,22 +742,22 @@ describe('Email utility', () => {
         html: string;
       };
       expect(sent.to).toBe('user@example.com');
-      expect(sent.subject).toBe('Two-factor sign-in to your H-Vault account was locked');
-      // The one fact only this mail can tell: the password itself was right.
-      expect(sent.html).toContain('Your master password was entered correctly');
+      expect(sent.subject).toBe('Unlock two-factor sign-in to your H-Vault account');
+      expect(sent.html).toContain('It unlocks the two-factor step only.');
       // The remedy that evicts a password holder is named, not only the link.
       expect(sent.html).toContain('Change Password');
       expect(sent.html).toContain(
         `http://localhost:5000/unlock-account#token=${encodeURIComponent(token)}`,
       );
-      // It is not the password-lockout mail.
+      // It is not the password-lockout mail, nor does it advise a reset.
       expect(sent.subject).not.toBe('Your H-Vault account has been locked');
+      expect(sent.html).not.toContain('Do not reset your master password');
     });
 
     it('returns failure and sends nothing when email is not configured', async () => {
-      const { sendSecondFactorLockoutEmail } = await importWithoutEmail();
+      const { sendAccountUnlockEmail } = await importWithoutEmail();
 
-      const result = await sendSecondFactorLockoutEmail('user@example.com', 'token123');
+      const result = await sendAccountUnlockEmail('user@example.com', 'token123', 'second_factor');
 
       expect(result.success).toBe(false);
       expect(mockSendMail).not.toHaveBeenCalled();
@@ -954,7 +961,6 @@ describe('every one-time token link carries its token in the URL fragment, never
     ['verification', '/verify-email', 'sendVerificationEmail'],
     ['password reset', '/reset-password', 'sendPasswordResetEmail'],
     ['account unlock', '/unlock-account', 'sendAccountUnlockEmail'],
-    ['second-factor unlock', '/unlock-account', 'sendSecondFactorLockoutEmail'],
   ] as const)('the %s email links to %s#token=…', async (_label, path, sender) => {
     const email = await importWithSmtp();
 
@@ -971,6 +977,20 @@ describe('every one-time token link carries its token in the URL fragment, never
     expect(html).toContain(`>http://localhost:5000${path}#token=${TOKEN}</p>`);
     expect(html).not.toContain('?token=');
     expect(html).not.toContain('&token=');
+  });
+
+  it('the second-factor unlock email links to /unlock-account#token=…', async () => {
+    const { sendAccountUnlockEmail } = await importWithSmtp();
+
+    await sendAccountUnlockEmail('user@example.com', TOKEN, 'second_factor');
+
+    const html = (mockSendMail as Mock).mock.calls[0]?.[0]?.html as string;
+    const [link, ...others] = linksIn(html);
+    expect(others).toEqual([]);
+    expect(link?.pathname).toBe('/unlock-account');
+    expect(link?.hash).toBe(`#token=${TOKEN}`);
+    expect(link?.search).toBe('');
+    expect(html).not.toContain('?token=');
   });
 
   it('tokenLink builds the recipient confirmation link the same way, percent-encoding the token', async () => {
@@ -1042,10 +1062,10 @@ describe('email template URL display-text escaping', () => {
     expect(html).not.toContain('x=1&y=2/reset-password#token=tok</p>');
   });
 
-  it('should escape display-text URLs in the second-factor lockout email', async () => {
-    const { sendSecondFactorLockoutEmail } = await importWithSmtp();
+  it('should escape display-text URLs in the second-factor unlock email', async () => {
+    const { sendAccountUnlockEmail } = await importWithSmtp();
 
-    await sendSecondFactorLockoutEmail('user@example.com', 'tok');
+    await sendAccountUnlockEmail('user@example.com', 'tok', 'second_factor');
 
     const html = (mockSendMail as Mock).mock.calls[0]?.[0]?.html as string;
     expect(html).toContain('href="http://localhost:5000/app?x=1&y=2/unlock-account#token=tok"');

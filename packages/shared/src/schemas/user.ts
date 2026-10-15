@@ -25,6 +25,8 @@ import {
   DEFAULT_PASSWORD_LENGTH,
   MIN_PASSWORD_LENGTH,
   MAX_PASSWORD_LENGTH,
+  SECURITY_NOTIFICATION_PREFERENCE_EVENTS,
+  type SecurityNotificationPreferenceEvent,
 } from '../constants/index.js';
 import { objectIdSchema, optionalVaultKeyVersionSchema, rowIdNonceSchema } from './common.js';
 
@@ -103,6 +105,29 @@ export const passwordGenOptionsSchema = z
     path: ['lowercase'],
   });
 
+/**
+ * Which security emails an owner wants (F-26), as a PARTIAL map: only the events
+ * named are changed, anything else is left as stored. A key that is not one of the
+ * events an owner may choose (the two mandatory notices included) is refused.
+ */
+export const notificationPreferencesSchema = z.strictObject(
+  // A named key per event rather than a record, so every key a request can carry
+  // is visible to whatever walks the schema (the request logger's mask list is
+  // derived that way).
+  Object.fromEntries(
+    SECURITY_NOTIFICATION_PREFERENCE_EVENTS.map((event) => [event, z.boolean().optional()]),
+  ) as Record<SecurityNotificationPreferenceEvent, z.ZodOptional<z.ZodBoolean>>,
+);
+
+/**
+ * `PUT /user/notifications`: the same map, with the master-password proof that
+ * turning a critical notice off requires.
+ */
+export const updateNotificationPreferencesSchema = z.object({
+  authHash: z.string().min(1).max(100),
+  notifications: notificationPreferencesSchema,
+});
+
 export const updateSettingsSchema = z.object({
   autoLockTimeout: z
     .number()
@@ -142,6 +167,10 @@ export const updateSettingsSchema = z.object({
   // `SHOW_RELEASE_NOTES_DEFAULT`). Turning it off only stops the automatic
   // opening; the notes stay one click away.
   showReleaseNotes: z.boolean().optional(),
+  // Security emails (F-26). This route takes no password, so it may turn any of
+  // them ON and the optional ones off; turning a critical one off is refused here
+  // and done through `PUT /user/notifications` with the master password.
+  notifications: notificationPreferencesSchema.optional(),
 });
 
 export const setup2faSchema = z.object({

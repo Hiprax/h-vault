@@ -7,13 +7,9 @@ import { User, type IBackupRecipientDoc } from '../models/User.js';
 import { BackupLog } from '../models/BackupLog.js';
 import { config } from '../config/index.js';
 import { derivePurposeKey } from './token.js';
-import {
-  isEmailConfigured,
-  sendBackupNotSentNotice,
-  sendBackupRecipientConfirmationEmail,
-  tokenLink,
-} from './email.js';
+import { isEmailConfigured, sendBackupRecipientConfirmationEmail, tokenLink } from './email.js';
 import { claimOutboundMail } from './outboundMailBudget.js';
+import { notifySecurityEvent } from './securityNotifications.js';
 import { createModuleLogger, errorMessage } from './logger.js';
 
 /**
@@ -681,15 +677,25 @@ export async function recordUndeliverableBackup(
     { $set: { [NOTICED_PATH]: now } },
   );
   if (claimed.matchedCount === 0) return;
-  if (!(await claimOutboundMail(userId, 1, now))) {
-    logger.info('The backup-not-sent notice was skipped: the daily email budget is spent', {
-      userId,
-    });
-    return;
-  }
-  const result = await sendBackupNotSentNotice(owner.email);
-  if (!result.success) {
-    logger.warn('The backup-not-sent notice could not be sent', { userId, error: result.message });
+  // Through the ONE security-notice helper (F-26), which decides whether to send
+  // (the owner may have turned these off) BEFORE the daily backup budget is
+  // claimed, so a unit is spent only on a notice that is about to leave.
+  const outcome = await notifySecurityEvent(
+    userId,
+    'backup_not_sent',
+    {},
+    {
+      beforeSend: async () => {
+        if (await claimOutboundMail(userId, 1, now)) return true;
+        logger.info('The backup-not-sent notice was skipped: the daily email budget is spent', {
+          userId,
+        });
+        return false;
+      },
+    },
+  );
+  if (outcome === 'failed') {
+    logger.warn('The backup-not-sent notice could not be sent', { userId });
   }
 }
 

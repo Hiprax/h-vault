@@ -12,8 +12,14 @@ import {
   MAX_BACKUP_EMAILS,
   MAX_RELEASE_VERSION_LENGTH,
   SHOW_RELEASE_NOTES_DEFAULT,
+  SECURITY_NOTIFICATION_PREFERENCE_EVENTS,
 } from '@hvault/shared';
-import type { Theme, BackupStatus, BackupRecipientState } from '@hvault/shared';
+import type {
+  Theme,
+  BackupStatus,
+  BackupRecipientState,
+  SecurityNotificationPreferenceEvent,
+} from '@hvault/shared';
 
 // ----- Sub-interfaces -----
 
@@ -103,6 +109,12 @@ export interface IUserSettings {
   theme: Theme;
   language: string;
   showReleaseNotes: boolean;
+  /**
+   * Which security events the owner is emailed about (F-26). Stored only where the
+   * owner turned one OFF: an absent or `true` entry means "email me", and every
+   * reply fills the missing ones in (`withSettingsDefaults`).
+   */
+  notifications?: Partial<Record<SecurityNotificationPreferenceEvent, boolean>> | undefined;
   backup: IBackupSettingsDoc;
 }
 
@@ -270,6 +282,18 @@ export interface IUser {
    * Absent means none today.
    */
   outboundMail?: { day: string; count: number } | undefined;
+  /**
+   * The LAST security notice mailed to the owner (F-26): which one (`key`, the event
+   * and a digest of what it said) and when. A notice identical to it within the hour
+   * is not sent again; any other notice is, so the owner's latest mail is always
+   * true. `utils/securityNotifications.ts` claims it with one conditional update,
+   * written WITHOUT touching `updatedAt` (which the profile returns), before it
+   * sends. `select: false` and never in any reply: one of the events (a correct
+   * password presented during a lockout) must not be learnable through any API, and
+   * a field or a timestamp that moved only after a correct guess would be the very
+   * oracle the lockout's uniform answer exists to remove.
+   */
+  securityNotices?: { key: string; at: Date } | undefined;
   passwordChangedAt: Date;
   settings: IUserSettings;
   createdAt: Date;
@@ -417,6 +441,17 @@ const userSettingsSchema = new Schema<IUserSettings>(
     theme: { type: String, enum: ['light', 'dark', 'system'], default: 'system' },
     language: { type: String, default: 'en' },
     showReleaseNotes: { type: Boolean, default: SHOW_RELEASE_NOTES_DEFAULT },
+    // One optional Boolean per event and NO default: absent is "email me", so an
+    // event added later is on for every account without a backfill.
+    notifications: {
+      type: new Schema<Partial<Record<SecurityNotificationPreferenceEvent, boolean>>>(
+        Object.fromEntries(
+          SECURITY_NOTIFICATION_PREFERENCE_EVENTS.map((event) => [event, { type: Boolean }]),
+        ),
+        { _id: false },
+      ),
+      default: undefined,
+    },
     backup: { type: backupSettingsSchema, default: () => ({}) },
   },
   { _id: false },
@@ -534,6 +569,16 @@ const userSchema = new Schema<IUser>(
     outboundMail: {
       type: new Schema<{ day: string; count: number }>(
         { day: { type: String, maxlength: 10 }, count: { type: Number, min: 0 } },
+        { _id: false },
+      ),
+      default: undefined,
+      select: false,
+    },
+    // No default and `select: false`: see the interface. Nothing but the
+    // notification helper reads it.
+    securityNotices: {
+      type: new Schema<{ key: string; at: Date }>(
+        { key: { type: String, maxlength: 100 }, at: { type: Date } },
         { _id: false },
       ),
       default: undefined,

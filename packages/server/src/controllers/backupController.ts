@@ -59,6 +59,7 @@ import {
   sendDueConfirmations,
   type UndeliverableReason,
 } from '../utils/backupRecipients.js';
+import { notifySecurityEventLater } from '../utils/securityNotifications.js';
 import {
   APP_VERSION,
   ITEM_TYPES,
@@ -582,6 +583,11 @@ export const updateBackupRecipients = catchAsync(
       ctx.ip,
       ctx.userAgent,
     );
+    // The owner is told where backups go now, masked (F-26).
+    notifySecurityEventLater(userId, 'backup_recipients_changed', {
+      ip: ctx.ip,
+      recipients: update.recipients.map((entry) => entry.email),
+    });
     logger.info('Backup recipients updated', {
       userId,
       recipients: update.recipients.length,

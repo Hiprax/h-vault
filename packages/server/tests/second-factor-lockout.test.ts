@@ -22,12 +22,22 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
+// One unlock-link sender serves both factors since F-26 (`sendAccountUnlockEmail(email,
+// token, factor)`); the second factor's alert left the email module for the security
+// notice helper. Each factor's link is still observed on a spy of its own, so every
+// assertion below keeps its meaning: `password` for the password factor's link,
+// `secondFactor` for the two-factor step's.
+const unlockMails = vi.hoisted(() => ({
+  password: vi.fn().mockResolvedValue({ success: true, message: 'sent' }),
+  secondFactor: vi.fn().mockResolvedValue({ success: true, message: 'sent' }),
+}));
+
 vi.mock('../src/utils/email.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/utils/email.js')>();
   return {
     ...actual,
-    sendAccountUnlockEmail: vi.fn().mockResolvedValue({ success: true, message: 'sent' }),
-    sendSecondFactorLockoutEmail: vi.fn().mockResolvedValue({ success: true, message: 'sent' }),
+    sendAccountUnlockEmail: (email: string, token: string, factor = 'password') =>
+      (factor === 'second_factor' ? unlockMails.secondFactor : unlockMails.password)(email, token),
   };
 });
 
@@ -41,7 +51,6 @@ import app from '../src/app.js';
 import { User } from '../src/models/User.js';
 import { RefreshToken } from '../src/models/RefreshToken.js';
 import { AuditLog } from '../src/models/AuditLog.js';
-import * as email from '../src/utils/email.js';
 import {
   authHeader,
   createTestUser,
@@ -58,14 +67,10 @@ const LOCKOUT_MS = 30 * 60 * 1000;
 const cm = new CryptoManager();
 const encKey = process.env['SESSION_SECRET'] ?? 'TestSessionSecret4Testing!!12345';
 
-const mockedPasswordMail = vi.mocked(email.sendAccountUnlockEmail);
-// Looked up through the namespace, not destructured: the function does not exist
-// before the fix, and this file must still load against that code so its RED is
-// an assertion failure rather than an import error.
-const secondFactorMail = (): ReturnType<typeof vi.fn> | undefined =>
-  (email as unknown as Record<string, ReturnType<typeof vi.fn> | undefined>)[
-    'sendSecondFactorLockoutEmail'
-  ];
+const mockedPasswordMail = unlockMails.password;
+// The two-factor step's unlock link (its own sender until F-26 folded it into the
+// factor-parameterised `sendAccountUnlockEmail`).
+const secondFactorMail = (): ReturnType<typeof vi.fn> | undefined => unlockMails.secondFactor;
 
 interface RawLockout {
   failedAttempts?: number;

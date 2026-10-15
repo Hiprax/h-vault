@@ -15,6 +15,7 @@ import { cascadeDeleteUser } from '../utils/cascadeDelete.js';
 import { supportsTransactions } from '../utils/transactionSupport.js';
 import { revokeTrustedDevices } from '../utils/trustedDevices.js';
 import { revokeDeviceProofs } from '../utils/deviceProofs.js';
+import { notifySecurityEventLater } from '../utils/securityNotifications.js';
 import {
   publicBackupSettings,
   publicRecipients,
@@ -28,6 +29,7 @@ import {
   sendStaleVaultKey,
   assertVaultNotRotating,
   getRequestContext,
+  assertMasterPasswordProof,
   getUserId,
   vaultKeyVersionFilter,
   vaultKeyVersionOf,
@@ -59,8 +61,13 @@ import {
   LOCK_ON_HIDDEN_DEFAULT,
   LOCK_ON_HIDDEN_DELAY_MINUTES,
   SHOW_RELEASE_NOTES_DEFAULT,
+  SECURITY_NOTIFICATION_PREFERENCE_EVENTS,
+  CRITICAL_SECURITY_NOTIFICATION_EVENTS,
 } from '@hvault/shared';
 import type {
+  SecurityNotificationPreferenceEvent,
+  SecurityNotificationPreferences,
+  UpdateNotificationPreferencesInput,
   UpdateSettingsInput,
   ChangePasswordInput,
   AuditLogQueryInput,
@@ -110,7 +117,40 @@ function withSettingsDefaults<T extends IUserSettings>(settings: T): T {
     showReleaseNotes: raw.showReleaseNotes ?? SHOW_RELEASE_NOTES_DEFAULT,
     defaultPasswordLength: clampLength(raw.defaultPasswordLength),
     defaultPasswordOptions: normalisePasswordGenOptions(raw.defaultPasswordOptions),
+    notifications: notificationPreferences(raw.notifications),
   };
+}
+
+/**
+ * Every security email an owner may choose (F-26), as stored: only an explicit
+ * `false` is off, so an event added after the account was created is on.
+ */
+function notificationPreferences(
+  stored: Partial<Record<SecurityNotificationPreferenceEvent, boolean>> | undefined,
+): SecurityNotificationPreferences {
+  return Object.fromEntries(
+    SECURITY_NOTIFICATION_PREFERENCE_EVENTS.map((event) => [event, stored?.[event] !== false]),
+  ) as SecurityNotificationPreferences;
+}
+
+const CRITICAL_EVENTS: readonly SecurityNotificationPreferenceEvent[] =
+  CRITICAL_SECURITY_NOTIFICATION_EVENTS;
+
+/** The events a partial preference map names, with the value it gives each. */
+function notificationChanges(
+  notifications: Partial<Record<SecurityNotificationPreferenceEvent, boolean | undefined>>,
+): [SecurityNotificationPreferenceEvent, boolean][] {
+  return (Object.entries(notifications) as [SecurityNotificationPreferenceEvent, unknown][]).filter(
+    (entry): entry is [SecurityNotificationPreferenceEvent, boolean] =>
+      typeof entry[1] === 'boolean',
+  );
+}
+
+/** The `$set` fields that store those changes, one path per event. */
+function notificationFields(
+  changes: readonly [SecurityNotificationPreferenceEvent, boolean][],
+): Record<string, boolean> {
+  return Object.fromEntries(changes.map(([event, on]) => [`settings.notifications.${event}`, on]));
 }
 
 /** A stored length, repaired into the range the generator can actually use. */
@@ -303,6 +343,20 @@ export const updateSettings = catchAsync(async (req: Request, res: Response): Pr
   if (body.showReleaseNotes !== undefined) {
     setFields['settings.showReleaseNotes'] = body.showReleaseNotes;
   }
+  if (body.notifications !== undefined) {
+    // This route proves no password, so it may not silence the notices that exist
+    // to tell the owner about a stolen password or session (F-26): turning one of
+    // those off is refused, whatever is stored, and NOTHING in the request is
+    // written. Turning one back on, and either way for the others, is fine.
+    const changes = notificationChanges(body.notifications);
+    const critical = changes.some(([event, on]) => !on && CRITICAL_EVENTS.includes(event));
+    if (critical) {
+      throw httpErrors.badRequest(
+        'Turning off this security email needs your master password: use PUT /api/v1/user/notifications.',
+      );
+    }
+    Object.assign(setFields, notificationFields(changes));
+  }
 
   if (Object.keys(setFields).length === 0) {
     throw httpErrors.badRequest('No settings provided to update');
@@ -346,6 +400,71 @@ export const updateSettings = catchAsync(async (req: Request, res: Response): Pr
     },
   });
 });
+
+/**
+ * `PUT /user/notifications`: which security emails the owner receives (F-26), with
+ * the master-password proof, which is what turning a CRITICAL one off requires
+ * (`CRITICAL_SECURITY_NOTIFICATION_EVENTS`). On `passwordVerifyLimiter`, the budget
+ * every proof shares.
+ *
+ * The write is conditioned on the stored credential the proof was checked against,
+ * so a proof of a password that has since been reset or changed cannot land after
+ * the change (401). Turning critical notices off mails the owner, unconditionally,
+ * saying which: whoever silenced them held the master password, and the owner must
+ * not lose the trail without being told once.
+ */
+export const updateNotificationPreferences = catchAsync(
+  async (req: Request, res: Response): Promise<void> => {
+    const userId = getUserId(req);
+    const body = req.body as UpdateNotificationPreferencesInput;
+    const changes = notificationChanges(body.notifications);
+    if (changes.length === 0) {
+      throw httpErrors.badRequest('No notification preferences provided to update');
+    }
+
+    const user = await User.findById(userId).select('+authHash').lean();
+    if (!user) {
+      throw httpErrors.notFound('User not found');
+    }
+    await assertMasterPasswordProof(req, user, body.authHash, 'notifications');
+    const before = notificationPreferences(user.settings.notifications);
+
+    const updated = await User.findOneAndUpdate(
+      { _id: userId, authHash: user.authHash },
+      { $set: notificationFields(changes) },
+      { returnDocument: 'after', runValidators: true },
+    )
+      .select('settings.notifications')
+      .lean();
+    if (!updated) {
+      // The password changed between the proof and the write.
+      throw httpErrors.unauthorized('Current password is incorrect');
+    }
+
+    const ctx = getRequestContext(req);
+    await createAuditLog(
+      userId,
+      'settings_update',
+      { changedKeys: changes.map(([event]) => `notifications.${event}`) },
+      ctx.ip,
+      ctx.userAgent,
+    );
+    const silenced = changes
+      .filter(([event, on]) => !on && before[event] && CRITICAL_EVENTS.includes(event))
+      .map(([event]) => event);
+    if (silenced.length > 0) {
+      notifySecurityEventLater(userId, 'security_notices_turned_off', {
+        ip: ctx.ip,
+        events: silenced,
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      data: { notifications: notificationPreferences(updated.settings.notifications) },
+    });
+  },
+);
 
 /**
  * Thrown inside the transactional branch of {@link changePassword} to ABORT it
@@ -694,6 +813,11 @@ export const changePassword = catchAsync(async (req: Request, res: Response): Pr
       suspendCtx.ip,
       suspendCtx.userAgent,
     );
+    notifySecurityEventLater(userId, 'backup_recipients_suspended', {
+      ip: suspendCtx.ip,
+      count: suspendedRecipients,
+      reason: 'password_change',
+    });
   }
 
   if (interruptedRotationNotCarried) {
@@ -732,6 +856,7 @@ export const changePassword = catchAsync(async (req: Request, res: Response): Pr
 
   const pwCtx = getRequestContext(req);
   await createAuditLog(userId, 'password_change', undefined, pwCtx.ip, pwCtx.userAgent);
+  notifySecurityEventLater(userId, 'password_changed', { ip: pwCtx.ip });
 
   logger.info('Password changed', { userId });
 
@@ -922,6 +1047,7 @@ export const verify2fa = catchAsync(async (req: Request, res: Response): Promise
 
   const enable2faCtx = getRequestContext(req);
   await createAuditLog(userId, '2fa_enable', undefined, enable2faCtx.ip, enable2faCtx.userAgent);
+  notifySecurityEventLater(userId, 'two_factor_enabled', { ip: enable2faCtx.ip });
 
   logger.info('2FA enabled', { userId });
 
@@ -1036,6 +1162,7 @@ export const disable2fa = catchAsync(async (req: Request, res: Response): Promis
 
   const disable2faCtx = getRequestContext(req);
   await createAuditLog(userId, '2fa_disable', undefined, disable2faCtx.ip, disable2faCtx.userAgent);
+  notifySecurityEventLater(userId, 'two_factor_disabled', { ip: disable2faCtx.ip });
 
   logger.info('2FA disabled', { userId });
 
@@ -1150,6 +1277,7 @@ export const regenerateBackupCodes = catchAsync(
       regenCtx.ip,
       regenCtx.userAgent,
     );
+    notifySecurityEventLater(userId, 'backup_codes_regenerated', { ip: regenCtx.ip });
 
     logger.info('Backup codes regenerated', { userId });
 
@@ -1419,10 +1547,19 @@ export const deleteAccount = catchAsync(async (req: Request, res: Response): Pro
     throw httpErrors.badRequest('Invalid verification code');
   }
 
+  // The owner is told now, from what was read BEFORE the erasure: the cascade is
+  // about to delete the row the address lives on. Requested is what the mail says,
+  // so it goes even if the cascade below has to be finished by the cleanup job. It
+  // is not a preference: an account being erased has no settings left to honour.
+  const deleteCtx = getRequestContext(req);
+  notifySecurityEventLater(userId, 'account_deletion_requested', {
+    ip: deleteCtx.ip,
+    snapshot: { email: user.email, emailVerified: user.emailVerified },
+  });
+
   // Phase 2: Cascade delete all associated data. Uses a MongoDB transaction
   // when the topology supports it (replica set), otherwise falls back to
   // sequential deletes with retry via deletionPending flag.
-  const deleteCtx = getRequestContext(req);
   const deleted = await cascadeDeleteUser({
     userId,
     userEmail: user.email,

@@ -34,6 +34,7 @@ import {
   type TestUser,
 } from './helpers.js';
 import { seedConfirmedRecipients } from './support/backupRecipients.js';
+import { settleTrackedJobs } from './support/trackedJobs.js';
 import { useReplicaSetConnection } from './mongoHarness.js';
 import { supportsTransactions } from '../src/utils/transactionSupport.js';
 
@@ -95,7 +96,11 @@ async function send(
   const csrf = await getCsrf(agent);
   const req = agent[method](path).set('x-csrf-token', csrf.token).set('Cookie', csrf.cookie);
   if (accessToken !== undefined) req.set('Authorization', authHeader(accessToken));
-  return req.send(body);
+  const res = await req.send(body);
+  // Since F-26 a request can leave a security notice to send in the background;
+  // let it land now, so counting or clearing the relay afterwards is not a race.
+  await settleTrackedJobs();
+  return res;
 }
 
 async function backupUser(overrides: { emailVerified?: boolean } = {}): Promise<TestUser> {
@@ -209,7 +214,12 @@ describe('the list update when the world moves underneath it', () => {
     expect(res.status).toBe(200);
     expect(res.body.data.confirmationsSent).toBe(0);
     expect(res.body.data.confirmationsPending).toBe(1);
-    expect(transport.sent).toEqual([]);
+    // No confirmation left; the only mail is the owner's "recipients changed" notice
+    // (F-26: every saved list is reported to the owner, whatever its confirmations do).
+    expect(confirmationMailsTo()).toEqual([]);
+    expect(transport.sent.map((m) => [m.to, m.subject])).toEqual([
+      [user.email, 'Where your H-Vault backups are emailed was changed'],
+    ]);
     expect(await owedCount(user.id)).toBe(1);
   });
 });

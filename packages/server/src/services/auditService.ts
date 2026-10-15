@@ -78,6 +78,7 @@ export const AUDIT_ACTION_CLASS = {
   '2fa_backup_code_used': 'security',
   rotation_recovery: 'security',
   deletion_cleanup: 'security',
+  unverified_account_reaped: 'security',
   // Security, not activity: settings include how soon the vault locks itself and
   // how soon a copied secret leaves the clipboard, so a session that lowered them
   // must not be able to push the record of it out by flooding item edits.

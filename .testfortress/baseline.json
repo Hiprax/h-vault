@@ -1,9 +1,9 @@
 {
   "version": 1,
   "recordedAt": "2026-10-15",
-  "commit": "3d7cf38",
+  "commit": "6d75e67",
   "tests": {
-    "count": 13286
+    "count": 13381
   },
   "coverage": {
     "diff": 100
@@ -30,7 +30,7 @@
         "line": 100,
         "branch": 99.09,
         "function": 100,
-        "linesTotal": 812,
+        "linesTotal": 820,
         "branchesTotal": 439,
         "filesMeasured": [
           "src/constants/index.ts",
@@ -51,16 +51,16 @@
         ]
       },
       "tests": {
-        "count": 1528
+        "count": 1529
       }
     },
     "packages/server": {
       "coverage": {
-        "line": 99.38,
-        "branch": 94.59,
-        "function": 98.94,
-        "linesTotal": 6413,
-        "branchesTotal": 3511,
+        "line": 99.39,
+        "branch": 94.76,
+        "function": 98.97,
+        "linesTotal": 6575,
+        "branchesTotal": 3628,
         "filesMeasured": [
           "src/app.ts",
           "src/cli/invite.ts",
@@ -176,6 +176,7 @@
           "src/utils/releaseNotes.ts",
           "src/utils/rowIds.ts",
           "src/utils/secondFactor.ts",
+          "src/utils/securityNotifications.ts",
           "src/utils/sizeEstimator.ts",
           "src/utils/storageBreaker.ts",
           "src/utils/storageHealth.ts",
@@ -184,22 +185,23 @@
           "src/utils/transactionSupport.ts",
           "src/utils/trustedDevices.ts",
           "src/utils/ttlIndexReconcile.ts",
+          "src/utils/unverifiedAccounts.ts",
           "src/utils/updateCheck.ts",
           "src/utils/vaultFieldFormat.ts",
           "src/utils/vaultQuota.ts"
         ]
       },
       "tests": {
-        "count": 5755
+        "count": 5838
       }
     },
     "packages/client": {
       "coverage": {
         "line": 99.32,
-        "branch": 94.15,
+        "branch": 94.16,
         "function": 99.01,
-        "linesTotal": 11188,
-        "branchesTotal": 8021,
+        "linesTotal": 11245,
+        "branchesTotal": 8037,
         "filesMeasured": [
           "src/App.tsx",
           "src/components/auth/ForgotPasswordPage.tsx",
@@ -233,6 +235,7 @@
           "src/components/releases/WhatsNewDialog.tsx",
           "src/components/releases/releaseVisuals.ts",
           "src/components/settings/InviteCard.tsx",
+          "src/components/settings/SecurityNotificationsCard.tsx",
           "src/components/tools/FileDecryptPanel.tsx",
           "src/components/tools/FileEncryptPanel.tsx",
           "src/components/tools/TotpAttachDialog.tsx",
@@ -293,6 +296,7 @@
           "src/lib/linkToken.ts",
           "src/lib/logger.ts",
           "src/lib/markdownWhitespace.ts",
+          "src/lib/masterPasswordProof.ts",
           "src/lib/passwordGenerator.ts",
           "src/lib/releaseFormat.ts",
           "src/lib/sandboxFrame.ts",
@@ -412,7 +416,7 @@
         ]
       },
       "tests": {
-        "count": 5767
+        "count": 5778
       }
     },
     "e2e": {
@@ -610,7 +614,7 @@
     ]
   },
   "duplication": {
-    "percentage": 0.99,
+    "percentage": 0.98,
     "clones": 93,
     "duplicatedLines": 1047,
     "totalLines": 52849,
@@ -646,7 +650,7 @@
       "spectral": 1
     }
   },
-  "reason": "Phase 13 deployment-hardening (F-18/F-19/F-20): new suites index-config + create-indexes-boot and added docker-hardening/clean-room/config tests (tests 13250->13286, server 5719->5755); new measured modules config/envFile.ts, indexConfig.ts, indexConfigSchema.ts (server linesTotal 6406->6413, branchesTotal 3509->3511, filesMeasured 122->125); the shared formatter lowered duplication 1 -> 0.99; hadolint now also lints the optional docker/garage.Dockerfile (inputsExamined 2->3). npm run ci #2 green, 31/31.",
+  "reason": "Phase 14 (account-lifecycle, F-21/F-26): npm run ci #3 green 31/31; bank the measured improvements (new reaper, notification and preference suites, coverage totals)",
   "bundle": {
     "budgetKb": {
       "VaultItemForm": 230,

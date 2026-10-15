@@ -36,6 +36,7 @@ import { startBackupScheduler } from '../src/jobs/backupScheduler.js';
 import { suspendThirdPartyRecipients } from '../src/utils/backupRecipients.js';
 import { claimOutboundMail } from '../src/utils/outboundMailBudget.js';
 import { installTestClock, uninstallTestClock } from './clock.js';
+import { settleTrackedJobs } from './support/trackedJobs.js';
 import {
   createTestUser,
   authHeader,
@@ -148,7 +149,11 @@ async function send(
     .set('x-csrf-token', csrf.token)
     .set('Cookie', [csrf.cookie, ...cookies].join('; '));
   if (accessToken !== undefined) req.set('Authorization', authHeader(accessToken));
-  return req.send(body);
+  const res = await req.send(body);
+  // Since F-26 a request can leave a security notice to send in the background;
+  // let it land now, so counting or clearing the relay afterwards is not a race.
+  await settleTrackedJobs();
+  return res;
 }
 
 async function setUpBackup(user: TestUser): Promise<void> {
@@ -218,6 +223,15 @@ beforeEach(() => {
 });
 
 // ── 6.1: the list moves only with the master-password proof ─────────────────
+
+/**
+ * The "backup not sent" notices mailed to `address`. Selected by subject: since
+ * F-26 every saved recipient list also mails the owner a "recipients changed"
+ * security notice, in the background, so counting every mail to the owner would
+ * count that one too.
+ */
+const notSentNoticesTo = (address: string) =>
+  transport.sent.filter((m) => m.to === address && m.subject.endsWith('Backup not sent'));
 
 describe('PUT /backup/settings no longer carries recipients (F-05)', () => {
   it('refuses the old combined body with a 400 naming the new route, and stores NOTHING from it', async () => {
@@ -559,7 +573,7 @@ describe('the scheduler sends only to confirmed recipients (F-05)', () => {
     await runScheduledBackup();
 
     expect(backupMailsTo()).toEqual([]);
-    expect(transport.sent.filter((m) => m.to === user.email)).toHaveLength(1);
+    expect(notSentNoticesTo(user.email)).toHaveLength(1);
     const log = await BackupLog.findOne({ userId: user.id }).lean();
     expect(log!.status).toBe('failed');
     expect(log!.sentTo).toEqual([]);
@@ -599,13 +613,13 @@ describe('the scheduler sends only to confirmed recipients (F-05)', () => {
 
     await runScheduledBackup();
     await runScheduledBackup();
-    expect(transport.sent.filter((m) => m.to === user.email)).toHaveLength(1);
+    expect(notSentNoticesTo(user.email)).toHaveLength(1);
     expect(await BackupLog.countDocuments({ userId: user.id, status: 'failed' })).toBe(2);
 
     transport.sent.length = 0;
     await putRecipients(user, ['off@example.org']);
     await runScheduledBackup();
-    expect(transport.sent.filter((m) => m.to === user.email)).toHaveLength(1);
+    expect(notSentNoticesTo(user.email)).toHaveLength(1);
   });
 });
 

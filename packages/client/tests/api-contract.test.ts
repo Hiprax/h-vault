@@ -78,6 +78,7 @@ const SERVER_ROUTES = new Set<string>([
   // routes/user.ts
   'GET /user/profile',
   'PUT /user/settings',
+  'PUT /user/notifications',
   'PUT /user/change-password',
   'POST /user/2fa/setup',
   'POST /user/2fa/verify',
@@ -326,6 +327,12 @@ describe('userApi wire contract', () => {
     const pw = { currentAuthHash: 'c', newAuthHash: 'n' } as never;
     await userApi.changePasswordApi(pw);
     expectCall(mockPut, 'PUT', '/user/change-password', pw);
+  });
+
+  it('PUTs the security-email preferences, with the master-password proof, to their own route', async () => {
+    const body = { authHash: 'proof', notifications: { password_changed: false } };
+    await userApi.updateNotificationPreferencesApi(body);
+    expectCall(mockPut, 'PUT', '/user/notifications', body);
   });
 
   it('POSTs 2FA setup / verify / regenerate-backup-codes to their own routes', async () => {
@@ -636,6 +643,7 @@ describe('API surface', () => {
       'unlockAccountApi',
       'getProfileApi',
       'updateSettingsApi',
+      'updateNotificationPreferencesApi',
       'changePasswordApi',
       'setup2faApi',
       'verify2faApi',

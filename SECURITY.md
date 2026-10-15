@@ -156,14 +156,16 @@ security posture, not a disclaimer.
   **What a password lockout costs a stranger, and what it costs you.** While the password is
   locked, every sign-in that does not present a live device proof for the account gets exactly
   the answer a wrong password gets — the same status, message, delay and audit row — **whether
-  or not the password was right**, so a lockout never tells anyone that a guess was correct. Each
+  or not the password was right**, so no answer during a lockout tells the guesser that a guess was correct
+  (the account owner is told, by email only; see "Security emails to the account owner"). Each
   such attempt is counted and audited, and the accounting is bounded: the counter stops at the
   threshold, the deadline is pushed out at most once a minute while the attempts continue, and
   the attempts of one minute are recorded as **one** audit row with a count. The honest bound on
   the denial of service is therefore this: **someone who knows your address can keep new,
   unrecognised browsers out of your account for as long as they keep guessing**, in thirty-minute
-  windows that are renewed while the guessing goes on. What they cannot do: learn whether a
-  password is correct, end or freeze a session you already have (a lockout never refuses a
+  windows that are renewed while the guessing goes on. What they cannot do: learn from any
+  answer whether a password is correct (the one residual is timing measured after the answer,
+  described under "Security emails to the account owner"), end or freeze a session you already have (a lockout never refuses a
   session refresh), or lock out a browser that holds a live device proof for the account (one
   left by a completed sign-in on this version and used within the last 30 days, not since
   revoked). Such a browser holds a **device proof** (the `__hv_device` cookie, described below) and signs in
@@ -604,6 +606,78 @@ boot. The operator closes it with `REGISTRATION_MODE`:
 
 `GET /config` publishes the mode (so the register page can say "closed" before the form is filled),
 never the domain list or the inviters.
+
+### Accounts whose address is never verified
+
+A registration holds its address before anyone has shown they control the mailbox: the account
+cannot sign in until the address is verified, but nobody else can register that address while it
+exists. So an account whose address is still unverified **`UNVERIFIED_ACCOUNT_TTL_DAYS` (default 7)
+days after it was created is erased** by the token cleanup job, which runs every 6 hours and reaps
+oldest first for at most five minutes per run; whatever is left waits for the next run. The erasure
+is the same cascade an account deletion runs, and it leaves one system audit entry
+(`unverified_account_reaped`) naming the account by id with the address masked; if that erasure
+fails part way, the cleanup job finishes it on a later run and the entry then says
+`deletion_cleanup`. Two kinds of account are never erased this way: one that holds any vault,
+folder or document data, and one whose stored record has no verification field at all (an erasure
+is not the place to guess). An invitation still open for the reaped address is removed with it, as
+every erasure removes the invitations naming its address, so the inviter mints a new one.
+
+Each account is claimed by one conditional write before it is erased, and a verification is stored
+only while no erasure has claimed the account, so a verification link followed at the moment the
+reaper picks the account either wins (the account is kept) or is refused (the erasure finishes);
+an account is never verified while its data is being deleted.
+
+Until then, the mailbox's owner can take the address back at once: a password reset and an unlock
+link are still mailed for an unverified account, deliberately, because the mailbox is the rightful
+claimant, and a reset replaces the password whoever chose it. A verification link is not offered in
+their place, since following one would activate the password the first registrant chose.
+
+### Security emails to the account owner
+
+The owner is emailed when something security-relevant happens to the account: the correct master
+password entered from an unrecognised browser during a password lockout, a password reset or
+change, two-factor authentication turned on or off, new backup codes, a browser trusted to skip the
+two-factor step, a recognised browser losing that status after wrong passwords, a two-factor
+lockout, the backup recipient list changed or suspended, a backup that could not be sent, a copied
+session detected, and an account deletion. Every one of these goes through one sender with a fixed
+text per event. A notice carries **no token, no link with a parameter and no secret**: its only
+link is the plain Settings address, recipient addresses appear masked, and the only thing taken
+from the request is its IP address, shown only when it is one (never the browser's user agent,
+which anyone can set to any text, a link included). A two-factor lockout therefore sends two
+emails: the notice, and the separate unlock link that is the remedy.
+
+Notices go only to a **verified** address, never when email is not configured, and never for an
+account being erased (except the deletion notice, written from the address read before the erasure
+began). The same notice is not sent twice in a row within an hour; any notice that reads differently is.
+Two cases still read alike and are held back: two recipient lists whose masked forms are the same,
+and turning the same notices off a second time within the hour (turning them back on sends
+nothing). That makes a repeated event (the
+password guessed right again and again during a lockout, say) one email an hour, but it does not
+bound alternating events: someone able to cause two different events in turn causes an email each
+time. Almost every one of those events needs the master password, a signed-in session, a stolen
+session token, a browser that signed in before or a link mailed to the owner; a backup that could
+not be sent is the server's own. A notice whose sending fails is not retried within that hour. Notices do not count
+against the daily backup email budget, except the one about a backup that was not sent.
+
+The owner chooses which notices arrive. Turning one back on, and turning off the optional ones
+(new backup codes, a trusted browser, a browser no longer recognised, recipients suspended, a
+backup not sent), needs no password; turning off any other needs the
+master password, and the account is then emailed once to say which were turned off. That email
+and the deletion notice cannot be turned off. A password reset turns every notice that needs the
+master password back on. A stolen session alone therefore cannot silence the notices about a stolen
+password or session, and someone holding the password who silences them causes an email saying so
+(subject to the same limits as every notice: a verified address, email configured, the relay
+accepting it, and the hourly repeat rule).
+
+**A correct password during a lockout is never readable through the API.** The sign-in is refused
+with exactly the answer, the delay, the stored writes and the audit entry a wrong password gets,
+and the email is started only after the response has gone. Nothing it stores is returned by any
+endpoint: the record of the last notice is never part of a reply, and writing it does not move the
+account's `updatedAt`, which the profile returns. Two residuals remain. Whoever reads the account's
+mailbox learns that the password was guessed, which is the point of telling the owner. And the
+email's own work (one account read, one write and, at most once an hour, the delivery) runs in the
+same server process after the response, so a client measuring the server's response times to later
+requests could in principle tell the two apart; it is not equalised.
 
 ### Heavy responses and list pages
 
@@ -1213,10 +1287,11 @@ existing session is refused, a token refresh is refused, and signing in afresh i
 with the same answer a wrong password gets so that nothing new is revealed about the address.
 No session row and no audit row is written by any of those three, because the scheduled clean-up
 must find the record exactly as the failed erasure left it. What the marker does **not** stop is
-the four unauthenticated recovery routes, which are reached with an emailed token rather than a
-session: verifying an address, requesting a password reset, completing one, and spending an
-unlock link. Each of those still writes — a reset rewrites the stored credential and the wrapped
-vault key, and two of them write an audit row. They are left open deliberately, because gating
+the three unauthenticated recovery routes, which are reached with an emailed token rather than a
+session: requesting a password reset, completing one, and spending an unlock link. The last two
+still write: a reset rewrites the stored credential and the wrapped vault key, and both write an
+audit row. (Verifying an address is refused for such an account: a verification must
+never mark verified an account whose data is being deleted.) They are left open deliberately, because gating
 them would remove the account's last self-service exit for the sake of a record the clean-up is
 about to delete anyway; but "nothing is written" is true of the three doors a session goes
 through, not of the whole account.

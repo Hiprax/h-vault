@@ -1,4 +1,5 @@
 import { describe, it, expect, afterEach, beforeAll, vi } from 'vitest';
+import { SECURITY_NOTIFICATION_PREFERENCE_EVENTS } from '@hvault/shared';
 import { EventEmitter } from 'node:events';
 import express from 'express';
 import * as shared from '@hvault/shared';
@@ -177,6 +178,9 @@ const PERSONAL = 'personal data the server already stores in the clear, not a cr
  * secret and belongs in `maskBodyKeys` in app.ts.
  */
 const LOGGABLE_BODY_KEYS = new Map<string, string>([
+  // F-26: which security emails the owner wants, one boolean per event.
+  ['notifications', METADATA],
+  ...SECURITY_NOTIFICATION_PREFERENCE_EVENTS.map((event): [string, string] => [event, METADATA]),
   ['autoLockTimeout', METADATA],
   ['backupEmails', PERSONAL],
   ['bwkIv', PUBLIC_PARAMETER],

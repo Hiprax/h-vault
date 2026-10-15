@@ -44,6 +44,11 @@ import {
   NOTE_FORMATS,
   AUDIT_ACTIONS,
   STRANGER_WRITABLE_AUDIT_ACTIONS,
+  SECURITY_NOTIFICATION_EVENTS,
+  SECURITY_NOTIFICATION_PREFERENCE_EVENTS,
+  CRITICAL_SECURITY_NOTIFICATION_EVENTS,
+  MANDATORY_SECURITY_NOTIFICATION_EVENTS,
+  SECURITY_NOTIFICATION_INTERVAL_MINUTES,
   MAX_STRANGER_AUDIT_ROWS_PER_USER,
   MAX_ACTIVITY_AUDIT_ROWS_PER_USER,
   AUDIT_COALESCE_WINDOW_MS,
@@ -867,15 +872,17 @@ describe('Enum arrays', () => {
     expect(AUDIT_ACTIONS.length).toBeGreaterThanOrEqual(26);
   });
 
-  it('AUDIT_ACTIONS has exactly 53 distinct operations (keep README in sync)', () => {
+  it('AUDIT_ACTIONS has exactly 54 distinct operations (keep README in sync)', () => {
     // The README "Audit Logging" feature line documents this exact count
-    // ("53 distinct operations"). If a new audit action is added, bump both
+    // ("54 distinct operations"). If a new audit action is added, bump both
     // this assertion and the README number together. 48th: `device_proof_revoked`
     // (F-03, a device proof revoked by its failure budget); 49th:
     // `invitation_create` (F-24); 50th-52nd: the backup recipient list approved,
     // a recipient confirmed, recipients suspended by a recovery (F-05); 53rd:
-    // `token_reuse_detected` (F-16, a replayed refresh token).
-    expect(AUDIT_ACTIONS.length).toBe(53);
+    // `token_reuse_detected` (F-16, a replayed refresh token); 54th:
+    // `unverified_account_reaped` (F-21, the system row of a reaped account).
+    expect(AUDIT_ACTIONS.length).toBe(54);
+    expect(AUDIT_ACTIONS).toContain('unverified_account_reaped');
     expect(AUDIT_ACTIONS).toContain('token_reuse_detected');
     expect(AUDIT_ACTIONS).toContain('device_proof_revoked');
     expect(AUDIT_ACTIONS).toContain('invitation_create');
@@ -883,6 +890,39 @@ describe('Enum arrays', () => {
     expect(AUDIT_ACTIONS).toContain('backup_recipient_confirmed');
     expect(AUDIT_ACTIONS).toContain('backup_recipients_suspended');
     expect(new Set(AUDIT_ACTIONS).size).toBe(AUDIT_ACTIONS.length);
+  });
+
+  it('security emails: which ones the owner can never silence, and which only with the master password', () => {
+    // F-26: the critical set is what a stolen session must not be able to turn
+    // off, and the mandatory set is not a preference at all. Shrinking either is a
+    // threat-model change (SECURITY.md, "Security emails to the account owner").
+    expect([...CRITICAL_SECURITY_NOTIFICATION_EVENTS].sort()).toEqual(
+      [
+        'locked_sign_in_correct_password',
+        'password_reset',
+        'password_changed',
+        'two_factor_enabled',
+        'two_factor_disabled',
+        'second_factor_lockout',
+        'backup_recipients_changed',
+        'token_reuse_detected',
+      ].sort(),
+    );
+    expect([...MANDATORY_SECURITY_NOTIFICATION_EVENTS].sort()).toEqual(
+      ['account_deletion_requested', 'security_notices_turned_off'].sort(),
+    );
+    // Every event is exactly one of: a preference, or mandatory.
+    expect(
+      [
+        ...SECURITY_NOTIFICATION_PREFERENCE_EVENTS,
+        ...MANDATORY_SECURITY_NOTIFICATION_EVENTS,
+      ].sort(),
+    ).toEqual([...SECURITY_NOTIFICATION_EVENTS].sort());
+    expect(new Set(SECURITY_NOTIFICATION_EVENTS).size).toBe(SECURITY_NOTIFICATION_EVENTS.length);
+    for (const event of CRITICAL_SECURITY_NOTIFICATION_EVENTS) {
+      expect(SECURITY_NOTIFICATION_PREFERENCE_EVENTS).toContain(event);
+    }
+    expect(SECURITY_NOTIFICATION_INTERVAL_MINUTES).toBe(60);
   });
 
   it('caps exactly the three actions an unauthenticated request can write, at 5,000 rows', () => {

@@ -460,6 +460,17 @@ const envSchema = z
     // default fits the largest vault the per-account row caps allow at typical item
     // sizes many times over.
     VAULT_STORAGE_QUOTA_MB_PER_USER: z.coerce.number().int().min(1).max(1_048_576).default(512),
+    // How long an account whose address was never verified is kept (F-21). Such an
+    // account cannot sign in, but it holds its address: whoever registered first,
+    // by a typo or on purpose, keeps the address's owner out of it. The token
+    // cleanup job erases one this many days after it was created, unless it owns a
+    // vault, folder or document row. Bounded below at a day so a link mailed at
+    // registration (valid 24 hours) can always be used.
+    UNVERIFIED_ACCOUNT_TTL_DAYS: z.preprocess(
+      // An empty assignment keeps the default, as for HOST: coercing '' would read 0.
+      (v) => (v === '' ? undefined : v),
+      z.coerce.number().int().min(1).max(365).default(7),
+    ),
     // How long a staging upload row survives before its TTL index removes it.
     // Bounded at a week: the row pins quota against the user's budget, and the
     // stored object and the engine-side multipart upload are only reclaimed after

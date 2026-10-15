@@ -112,8 +112,12 @@ interface CascadeDeleteOptions {
   ip: string;
   /** User agent for audit log */
   userAgent: string;
-  /** Audit action name for the deletion log entry */
-  auditAction: 'account_delete' | 'deletion_cleanup';
+  /**
+   * The action of the system row recording the erasure: the owner's own request,
+   * the zombie loop finishing an interrupted one, or the reaper erasing an account
+   * that was never verified (F-21).
+   */
+  auditAction: 'account_delete' | 'deletion_cleanup' | 'unverified_account_reaped';
 }
 
 /** Rows per batch when erasing the bulky collections. */

@@ -879,6 +879,25 @@ describe('Server Config Validation', () => {
         expect(config.REGISTRATION_MODE).toBe(expected);
       });
 
+      it.each([
+        ['unset', undefined, 7],
+        ['an empty assignment', '', 7],
+        ['the lower bound', '1', 1],
+        ['the upper bound', '365', 365],
+      ])('UNVERIFIED_ACCOUNT_TTL_DAYS %s resolves to %s', async (_label, value, expected) => {
+        const { config } = await loadConfigWithEnv({ UNVERIFIED_ACCOUNT_TTL_DAYS: value });
+        expect(config.UNVERIFIED_ACCOUNT_TTL_DAYS).toBe(expected);
+      });
+
+      it.each(['0', '366', '1.5', 'seven'])(
+        'refuses to boot with UNVERIFIED_ACCOUNT_TTL_DAYS=%s',
+        async (value) => {
+          await expect(loadConfigWithEnv({ UNVERIFIED_ACCOUNT_TTL_DAYS: value })).rejects.toThrow(
+            'UNVERIFIED_ACCOUNT_TTL_DAYS',
+          );
+        },
+      );
+
       it.each(['OPEN', 'invite-only', 'off', '0'])(
         'refuses to boot with REGISTRATION_MODE=%s rather than guess',
         async (value) => {

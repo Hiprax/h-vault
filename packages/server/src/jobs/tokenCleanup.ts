@@ -1,9 +1,10 @@
 import cron, { type ScheduledTask } from 'node-cron';
-import { createModuleLogger } from '../utils/logger.js';
+import { createModuleLogger, errorMessage } from '../utils/logger.js';
 import { RefreshToken } from '../models/RefreshToken.js';
 import { User } from '../models/User.js';
 import { acquireJobLock, releaseJobLock } from '../utils/jobLock.js';
 import { cascadeDeleteUser } from '../utils/cascadeDelete.js';
+import { reapUnverifiedAccounts } from '../utils/unverifiedAccounts.js';
 import { trackJob } from '../utils/jobTracker.js';
 
 const logger = createModuleLogger('jobs/tokenCleanup');
@@ -25,6 +26,10 @@ const TOKEN_CLEANUP_LOCK_TTL_MS = 10 * 60 * 1000; // 10 minutes
  * whose `expiresAt` has passed (the TTL on `usedAt` cannot reach them since
  * `usedAt` is undefined). It also acts as a safety net for the TTL on
  * `usedAt` if the monitor falls behind.
+ *
+ * Under the same lock it also finishes every erasure left pending by a failed
+ * cascade (the zombie loop) and then reaps the accounts whose address was never
+ * verified within `UNVERIFIED_ACCOUNT_TTL_DAYS` (`utils/unverifiedAccounts.ts`).
  */
 export function startTokenCleanupJob(): ScheduledTask {
   // Run every 6 hours
@@ -108,6 +113,16 @@ export function startTokenCleanupJob(): ScheduledTask {
               const msg = cleanupErr instanceof Error ? cleanupErr.message : 'Unknown error';
               logger.error(`Deletion cleanup failed for user ${userId.toString()}: ${msg}`);
             }
+          }
+
+          // Then the accounts whose address was never verified (F-21), after the
+          // zombies: those are erasures already owed, and a reap whose cascade fails
+          // becomes one of them for the next run. Its own failure is contained here
+          // so it can never cost the cleanup above, which has already run.
+          try {
+            await reapUnverifiedAccounts();
+          } catch (reapErr: unknown) {
+            logger.error(`Unverified-account reaping failed: ${errorMessage(reapErr)}`);
           }
         } catch (error: unknown) {
           const message = error instanceof Error ? error.message : 'Unknown error';

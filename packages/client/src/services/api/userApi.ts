@@ -14,6 +14,8 @@ import type {
   IAuditLogEntry,
   TwoFactorSetupResponse,
   UpdateSettingsInput,
+  UpdateNotificationPreferencesInput,
+  SecurityNotificationPreferences,
   ChangePasswordInput,
   ExportInput,
   ExportResponse,
@@ -43,6 +45,16 @@ export function updateSettingsApi(
   data: UpdateSettingsInput,
 ): Promise<AxiosResponse<ApiResponse<IUserProfile>>> {
   return api.put('/user/settings', data);
+}
+
+/**
+ * Which security emails are sent, with the master-password proof: the only way to
+ * turn a critical one off (`PUT /user/settings` refuses that).
+ */
+export function updateNotificationPreferencesApi(
+  data: UpdateNotificationPreferencesInput,
+): Promise<AxiosResponse<ApiResponse<{ notifications: SecurityNotificationPreferences }>>> {
+  return api.put('/user/notifications', data);
 }
 
 export function changePasswordApi(

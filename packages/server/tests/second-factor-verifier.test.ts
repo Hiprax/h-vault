@@ -10,12 +10,22 @@
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
+// One unlock-link sender serves both factors since F-26 (`sendAccountUnlockEmail(email,
+// token, factor)`); the second factor's alert left the email module for the security
+// notice helper. Each factor's link is still observed on a spy of its own, so every
+// assertion below keeps its meaning: `password` for the password factor's link,
+// `secondFactor` for the two-factor step's.
+const unlockMails = vi.hoisted(() => ({
+  password: vi.fn().mockResolvedValue({ success: true, message: 'sent' }),
+  secondFactor: vi.fn().mockResolvedValue({ success: true, message: 'sent' }),
+}));
+
 vi.mock('../src/utils/email.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/utils/email.js')>();
   return {
     ...actual,
-    sendAccountUnlockEmail: vi.fn().mockResolvedValue({ success: true, message: 'sent' }),
-    sendSecondFactorLockoutEmail: vi.fn().mockResolvedValue({ success: true, message: 'sent' }),
+    sendAccountUnlockEmail: (email: string, token: string, factor = 'password') =>
+      (factor === 'second_factor' ? unlockMails.secondFactor : unlockMails.password)(email, token),
   };
 });
 
@@ -41,15 +51,14 @@ import {
   unlockEpisodeOf,
   unlockTokenNamesEpisode,
 } from '../src/utils/lockout.js';
-import { sendAccountUnlockEmail, sendSecondFactorLockoutEmail } from '../src/utils/email.js';
 import { createTestUser, generateStateHash } from './helpers.js';
 
 const cm = new CryptoManager();
 const encKey = process.env['SESSION_SECRET'] ?? 'TestSessionSecret4Testing!!12345';
 const LOCKOUT_MS = 30 * 60 * 1000;
 
-const passwordMail = vi.mocked(sendAccountUnlockEmail);
-const secondFactorMail = vi.mocked(sendSecondFactorLockoutEmail);
+const passwordMail = unlockMails.password;
+const secondFactorMail = unlockMails.secondFactor;
 
 function totpFor(secret: Secret): TOTP {
   return new TOTP({ algorithm: 'SHA1', digits: 6, period: 30, secret });

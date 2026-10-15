@@ -23,7 +23,8 @@ import { LOCKOUT_DURATION_MINUTES, MAX_LOGIN_ATTEMPTS, maskEmail } from '@hvault
 import { config } from '../config/index.js';
 import { User } from '../models/User.js';
 import type { IUser } from '../models/User.js';
-import { sendAccountUnlockEmail, sendSecondFactorLockoutEmail } from './email.js';
+import { sendAccountUnlockEmail } from './email.js';
+import { notifySecurityEventLater } from './securityNotifications.js';
 import { derivePurposeKey } from './token.js';
 import { createModuleLogger } from './logger.js';
 
@@ -296,10 +297,17 @@ async function lockFactor(
   });
 
   const unlockToken = signUnlockToken(userId.toString(), episodeId, factor);
-  const send = factor === 'password' ? sendAccountUnlockEmail : sendSecondFactorLockoutEmail;
+  // A second-factor lockout means the master password was entered correctly, which
+  // is a security notice of its own (F-26): sent through the ONE notification
+  // helper, with no link, from this same claim, so it goes once per link lifetime
+  // like the link itself. The link is the functional half and stays a mail of its
+  // own. Neither is awaited: this runs inside a sign-in request.
+  if (factor === 'second_factor') {
+    notifySecurityEventLater(userId, 'second_factor_lockout');
+  }
   // Fire-and-forget: the response must not wait on SMTP, and a send failure must
   // not turn a refusal into a 500.
-  void send(email, unlockToken).then((result) => {
+  void sendAccountUnlockEmail(email, unlockToken, factor).then((result) => {
     if (!result.success) {
       logger.error('Failed to send account unlock email', {
         userId: userId.toString(),

@@ -157,6 +157,82 @@ export const MAX_BACKUP_EMAILS = 10;
 // address on the account's behalf, so the day is what has to be bounded. Counted
 // by a per-account day counter claimed before each send, never by log rows.
 export const MAX_BACKUP_MAILS_PER_USER_PER_DAY = 30;
+// The security events the account owner is emailed about (F-26). Every one of them
+// is something the owner would want to know happened to the account WITHOUT having
+// to open the audit log, and most of them are exactly what an intruder would rather
+// the owner did not learn. Two identical notices in a row are sent at most once an
+// hour (`SECURITY_NOTIFICATION_INTERVAL_MINUTES`).
+export const SECURITY_NOTIFICATION_EVENTS = [
+  // The correct master password was presented from a browser that has not signed
+  // in before, during a password lockout. The sign-in was refused like every other
+  // (the answer and the audit entry are the same as for a wrong password), so this
+  // email is the only place the owner learns that the guessing found the password.
+  'locked_sign_in_correct_password',
+  'password_reset',
+  'password_changed',
+  'two_factor_enabled',
+  'two_factor_disabled',
+  'backup_codes_regenerated',
+  'trusted_device_granted',
+  'device_proof_revoked',
+  'second_factor_lockout',
+  'backup_recipients_changed',
+  'backup_recipients_suspended',
+  'token_reuse_detected',
+  'backup_not_sent',
+  'account_deletion_requested',
+  // Some of the notices above were turned off: the last one the owner gets about
+  // them, so whoever silenced them (it takes the master password) cannot do it
+  // unseen.
+  'security_notices_turned_off',
+] as const;
+// The events that are ALWAYS mailed and are not a preference at all: one about an
+// account that is being erased, and one about the preferences themselves.
+export const MANDATORY_SECURITY_NOTIFICATION_EVENTS = [
+  'account_deletion_requested',
+  'security_notices_turned_off',
+] as const satisfies readonly (typeof SECURITY_NOTIFICATION_EVENTS)[number][];
+// The events an owner may choose not to be mailed about (every event but the
+// mandatory two), stored under `settings.notifications`.
+export const SECURITY_NOTIFICATION_PREFERENCE_EVENTS = [
+  'locked_sign_in_correct_password',
+  'password_reset',
+  'password_changed',
+  'two_factor_enabled',
+  'two_factor_disabled',
+  'backup_codes_regenerated',
+  'trusted_device_granted',
+  'device_proof_revoked',
+  'second_factor_lockout',
+  'backup_recipients_changed',
+  'backup_recipients_suspended',
+  'token_reuse_detected',
+  'backup_not_sent',
+] as const satisfies readonly (typeof SECURITY_NOTIFICATION_EVENTS)[number][];
+// The preferences that can be turned OFF only with the master password
+// (`PUT /user/notifications`): each event is either the sign that someone holds the
+// password (or a stolen session) or a change only someone holding it could make,
+// so a stolen session that could silence them would erase its own trail.
+// `PUT /user/settings`, which takes no password, may turn any of them back ON.
+export const CRITICAL_SECURITY_NOTIFICATION_EVENTS = [
+  'locked_sign_in_correct_password',
+  'password_reset',
+  'password_changed',
+  // Turning two-factor ON is critical too: someone holding the password and a
+  // session could otherwise silence it and enrol their own authenticator unseen.
+  'two_factor_enabled',
+  'two_factor_disabled',
+  'second_factor_lockout',
+  'backup_recipients_changed',
+  'token_reuse_detected',
+] as const satisfies readonly (typeof SECURITY_NOTIFICATION_PREFERENCE_EVENTS)[number][];
+// The shortest gap between two IDENTICAL notices in a row to the same account.
+export const SECURITY_NOTIFICATION_INTERVAL_MINUTES = 60;
+export type SecurityNotificationEvent = (typeof SECURITY_NOTIFICATION_EVENTS)[number];
+export type SecurityNotificationPreferenceEvent =
+  (typeof SECURITY_NOTIFICATION_PREFERENCE_EVENTS)[number];
+/** Whether the owner is emailed about each event they may choose: absent means yes. */
+export type SecurityNotificationPreferences = Record<SecurityNotificationPreferenceEvent, boolean>;
 // Where a backup recipient stands. `pending`: the owner approved the address with
 // the master password (or it was carried over from before recipients were
 // confirmed, in which case the owner has NOT yet approved it) and the address has
@@ -1242,6 +1318,10 @@ export const AUDIT_ACTIONS = [
   '2fa_backup_code_used',
   'rotation_recovery',
   'deletion_cleanup',
+  // The system row recording that `tokenCleanup` erased an account whose address
+  // was never verified within `UNVERIFIED_ACCOUNT_TTL_DAYS` (F-21). Written with
+  // `userId: null` and the address masked, like the other two erasure records.
+  'unverified_account_reaped',
   'settings_update',
   'email_verified',
   'registration',
