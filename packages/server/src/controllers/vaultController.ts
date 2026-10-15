@@ -50,7 +50,6 @@ import {
   versionPin,
   type RowMeasure,
 } from '../utils/vaultQuota.js';
-import { MAX_ITEMS_PER_USER } from '@hvault/shared';
 import type {
   ListVaultItemsInput,
   ListTrashInput,
@@ -340,14 +339,6 @@ export const createItem = catchAsync(async (req: Request, res: Response): Promis
   // generation has already been answered.
   if ((await resolveVaultKeyVersion(res, userId, body.vaultKeyVersion)) === null) return;
 
-  // Enforce per-user vault item count limit
-  const itemCount = await VaultItem.countDocuments({ userId });
-  if (itemCount >= MAX_ITEMS_PER_USER) {
-    throw httpErrors.badRequest(
-      `Item limit reached. You can have a maximum of ${String(MAX_ITEMS_PER_USER)} items.`,
-    );
-  }
-
   if (body.folderId) {
     const folderExists = await Folder.exists({ _id: body.folderId, userId });
     if (!folderExists) {
@@ -362,8 +353,11 @@ export const createItem = catchAsync(async (req: Request, res: Response): Promis
   // `createdRowId`.
   const rowId = await createdRowId(userId, body.idNonce);
 
-  // Counted against the account's byte quota (F-24): reserved before the insert,
-  // refused with 400 when it does not fit, settled with the stored size after.
+  // Counted against the account's byte quota (F-24) AND the per-user item cap
+  // (F-15) in ONE conditional reservation before the insert, refused with 400
+  // when either has no room, settled with the stored size after. The cap is no
+  // longer a `countDocuments` read here: N concurrent creates each read one below
+  // the cap and all inserted, while the reservation admits exactly one.
   const rowData = { ...sanitizedBody, ...rowId, userId };
   let item;
   try {
@@ -509,7 +503,8 @@ export const permanentDelete = catchAsync(async (req: Request, res: Response): P
   if (!gone) {
     throw httpErrors.notFound('Vault item not found in trash');
   }
-  await settleVaultWrite(reservation, -gone.counted);
+  // A hard delete: the row leaves the item cap's count too (F-15).
+  await settleVaultWrite(reservation, -gone.counted, { items: -1 });
   const item = gone.row as { itemType?: string };
 
   const permanentDeleteCtx = getRequestContext(req);
@@ -676,7 +671,7 @@ export const emptyTrash = catchAsync(async (req: Request, res: Response): Promis
       purged,
     );
   } finally {
-    await settleVaultWrite(reservation, -purged.bytes);
+    await settleVaultWrite(reservation, -purged.bytes, { items: -purged.deleted });
   }
   const totalDeleted = purged.deleted;
 
@@ -1943,7 +1938,9 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
   } finally {
     // The sequential branch's rewritten rows (and any rollback), counted once. The
     // transactional branch moved its count inside its own transaction.
-    if (quotaDelta !== 0) await settleVaultWrite({ userId, bytes: 0 }, quotaDelta);
+    if (quotaDelta !== 0) {
+      await settleVaultWrite({ userId, bytes: 0, items: 0, folders: 0 }, quotaDelta);
+    }
     await releaseVaultRotationLock(userId, lockId);
   }
 

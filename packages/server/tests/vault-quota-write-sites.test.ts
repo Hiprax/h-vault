@@ -125,6 +125,17 @@ const ACCOUNTED_SITES: Record<string, { count: number; reason: string }> = {
     count: 1,
     reason: 'migration v5 (F-12), as for vault_items',
   },
+  "utils/migrations.ts#backfillVaultRowCounters#acquire mongoose.connection.collection('vault_items')":
+    {
+      count: 1,
+      reason:
+        'migration v6 (F-15): READS only, one grouped count of item rows per owner; its writes go to the `users` row counters, each only while that counter is absent',
+    },
+  "utils/migrations.ts#backfillVaultRowCounters#acquire mongoose.connection.collection('folders')":
+    {
+      count: 1,
+      reason: 'migration v6 (F-15), as for vault_items: a grouped count of folder rows, no write',
+    },
   'controllers/toolsController.ts#execute#VaultItem.insertMany': {
     count: 1,
     reason: 'import: one reservation for the whole request; what landed is settled',

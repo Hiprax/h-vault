@@ -625,7 +625,7 @@ describe('counter arithmetic refuses what it cannot store', () => {
     await expect(addVaultBytes(user.id, Number.POSITIVE_INFINITY)).rejects.toThrow(RangeError);
     // Best effort, as every settle is: logged, never thrown, nothing stored.
     await expect(
-      settleVaultWrite({ userId: user.id, bytes: 0 }, Number.NaN),
+      settleVaultWrite({ userId: user.id, bytes: 0, items: 0, folders: 0 }, Number.NaN),
     ).resolves.toBeUndefined();
 
     expect(await vaultBytesCounter(user.id)).toBe(used);

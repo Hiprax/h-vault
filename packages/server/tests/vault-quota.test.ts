@@ -152,6 +152,8 @@ describe('an account without a counter', () => {
     expect(after.body.data).not.toHaveProperty('quotaEpoch');
     expect(after.body.data).not.toHaveProperty('quotaRecountedAt');
     expect(after.body.data).not.toHaveProperty('vaultBytesWrittenAt');
+    // F-15: the row counters are bookkeeping too, kept off the profile's spread.
+    expect(after.body.data).not.toHaveProperty('counters');
   });
 });
 

@@ -47,3 +47,29 @@ export async function vaultBytesCounter(userId: string): Promise<number | undefi
   const value = (user as { vaultBytes?: unknown } | null)?.vaultBytes;
   return typeof value === 'number' ? value : undefined;
 }
+
+/**
+ * The rows `userId` owns, counted by the database: items (trashed included) and
+ * folders, which is what the per-user caps count (F-15).
+ */
+export async function storedRowCounts(userId: string): Promise<{ items: number; folders: number }> {
+  const owner = new mongoose.Types.ObjectId(userId);
+  return {
+    items: await mongoose.connection.collection('vault_items').countDocuments({ userId: owner }),
+    folders: await mongoose.connection.collection('folders').countDocuments({ userId: owner }),
+  };
+}
+
+/** The account's row counters as stored, each `undefined` when absent. */
+export async function rowCounters(
+  userId: string,
+): Promise<{ items: number | undefined; folders: number | undefined }> {
+  const user = await mongoose.connection
+    .collection('users')
+    .findOne({ _id: new mongoose.Types.ObjectId(userId) }, { projection: { counters: 1 } });
+  const counters = (user as { counters?: { items?: unknown; folders?: unknown } } | null)?.counters;
+  return {
+    items: typeof counters?.items === 'number' ? counters.items : undefined,
+    folders: typeof counters?.folders === 'number' ? counters.folders : undefined,
+  };
+}

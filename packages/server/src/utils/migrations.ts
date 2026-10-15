@@ -6,7 +6,7 @@ import { createModuleLogger } from './logger.js';
 import { Migration } from '../models/Migration.js';
 import { JobLock } from '../models/JobLock.js';
 import { acquireJobLock, releaseJobLock } from './jobLock.js';
-import { installVaultBytes } from './vaultQuota.js';
+import { installVaultCounters } from './vaultQuota.js';
 
 const logger = createModuleLogger('migrations');
 
@@ -72,6 +72,11 @@ const migrations: MigrationDefinition[] = [
     name: 'remove-search-hash',
     up: removeSearchHash,
   },
+  {
+    version: 6,
+    name: 'vault-row-counters',
+    up: backfillVaultRowCounters,
+  },
 ];
 
 /** How long migration v3 may spend installing counters before it leaves the rest. */
@@ -123,7 +128,7 @@ async function migrateVaultQuotaCounter(): Promise<void> {
         break;
       }
       try {
-        await installVaultBytes(String(_id), {
+        await installVaultCounters(String(_id), {
           maxTimeMS: VAULT_QUOTA_BACKFILL_AGGREGATE_MAX_TIME_MS,
         });
         installed += 1;
@@ -145,6 +150,137 @@ async function migrateVaultQuotaCounter(): Promise<void> {
           'installed by their first write or the hourly recount',
     { installed, failures },
   );
+}
+
+/** How many accounts one round of migration v6 counts and installs. */
+const ROW_COUNTER_BACKFILL_BATCH = 500;
+/** How long migration v6 may spend installing counters before it leaves the rest. */
+const ROW_COUNTER_BACKFILL_BUDGET_MS = 30_000;
+/** The longest each count aggregate of one round of migration v6 may take. */
+const ROW_COUNTER_BACKFILL_AGGREGATE_MAX_TIME_MS = 10_000;
+/** A stored number of any numeric BSON type; its negation matches an absent counter. */
+const NOT_A_NUMBER = { $not: { $gte: Number.NEGATIVE_INFINITY } };
+
+/**
+ * How many rows of `collection` each of `owners` has, from one grouped
+ * aggregate (an account with none is absent from the map). Reads only.
+ */
+async function countRowsByOwner(
+  collection: mongoose.mongo.Collection,
+  owners: mongoose.Types.ObjectId[],
+): Promise<Map<string, number>> {
+  const rows = await collection
+    .aggregate<{ _id: mongoose.Types.ObjectId; rows: number }>(
+      [{ $match: { userId: { $in: owners } } }, { $group: { _id: '$userId', rows: { $sum: 1 } } }],
+      { maxTimeMS: ROW_COUNTER_BACKFILL_AGGREGATE_MAX_TIME_MS },
+    )
+    .toArray();
+  return new Map(rows.map((row) => [String(row._id), row.rows]));
+}
+
+/**
+ * v6 — the row counters behind the per-user caps (F-15).
+ *
+ * Installs `counters.items` and `counters.folders` on accounts that have neither
+ * or one of them, in rounds of {@link ROW_COUNTER_BACKFILL_BATCH} accounts: one
+ * grouped count per collection per round, then one conditional write per missing
+ * counter, so an account costs two index-served counts shared with 499 others
+ * rather than two aggregates of its own. Bounded by
+ * {@link ROW_COUNTER_BACKFILL_BUDGET_MS}; a round that fails stops it the same way
+ * (logged), and it is recorded as applied either way.
+ *
+ * Correctness does not depend on it, exactly as for v3: every write path
+ * reserves before it touches a row, and a reservation installs whichever counter
+ * is missing from the rows (`installVaultCounters`), while the hourly recount
+ * rewrites all three. Safe against a write racing it for the same reason the
+ * inline install is: no row of an account is created or removed until all three
+ * of its counters exist, and each write here applies only while its counter is
+ * still absent, so a count taken before it is still the count when it lands.
+ * Accounts being erased are skipped (their counters go with the user row).
+ */
+async function backfillVaultRowCounters(): Promise<void> {
+  const users = mongoose.connection.collection('users');
+  // Counted, never written: the only writes v6 makes are to `users`.
+  const itemRows = mongoose.connection.collection('vault_items');
+  const folderRows = mongoose.connection.collection('folders');
+  const startedAt = Date.now();
+  let after: mongoose.Types.ObjectId | undefined;
+  let installed = 0;
+  let stoppedBy: 'budget' | 'failure' | null = null;
+  for (;;) {
+    if (Date.now() - startedAt >= ROW_COUNTER_BACKFILL_BUDGET_MS) {
+      stoppedBy = 'budget';
+      break;
+    }
+    let round: { owners: mongoose.Types.ObjectId[]; installed: number };
+    try {
+      round = await installRowCountersRound(users, itemRows, folderRows, after);
+    } catch (error: unknown) {
+      // A round that fails (a count past its time limit, a refused write) stops
+      // the backfill, never the boot: every account it did not reach is installed
+      // by its first write or the hourly recount, exactly as one past the budget.
+      logger.warn('Migration v6: a round failed', {
+        error: error instanceof Error ? error.message : 'Unknown error',
+      });
+      stoppedBy = 'failure';
+      break;
+    }
+    installed += round.installed;
+    after = round.owners.at(-1);
+    if (round.owners.length < ROW_COUNTER_BACKFILL_BATCH) break;
+  }
+  logger.info(
+    stoppedBy === null
+      ? 'Migration v6: vault row counters installed'
+      : 'Migration v6: vault row counters installed until the ' +
+          (stoppedBy === 'budget' ? 'time budget' : 'failure above') +
+          '; the rest are installed by their first write or the hourly recount',
+    { installed },
+  );
+}
+
+/**
+ * One round of migration v6: the next {@link ROW_COUNTER_BACKFILL_BATCH} accounts
+ * after `after` that miss a row counter, counted and installed. Resolves to the
+ * accounts it read and how many counters it wrote.
+ */
+async function installRowCountersRound(
+  users: mongoose.mongo.Collection,
+  itemRows: mongoose.mongo.Collection,
+  folderRows: mongoose.mongo.Collection,
+  after: mongoose.Types.ObjectId | undefined,
+): Promise<{ owners: mongoose.Types.ObjectId[]; installed: number }> {
+  const batch = await users
+    .find(
+      {
+        deletionPending: { $ne: true },
+        $or: [{ 'counters.items': NOT_A_NUMBER }, { 'counters.folders': NOT_A_NUMBER }],
+        ...(after ? { _id: { $gt: after } } : {}),
+      },
+      { projection: { _id: 1 }, sort: { _id: 1 }, limit: ROW_COUNTER_BACKFILL_BATCH },
+    )
+    .toArray();
+  const owners = batch.map((row) => row._id);
+  if (owners.length === 0) return { owners, installed: 0 };
+  const items = await countRowsByOwner(itemRows, owners);
+  const folders = await countRowsByOwner(folderRows, owners);
+  const result = await users.bulkWrite(
+    owners.flatMap((owner) =>
+      (
+        [
+          ['counters.items', items],
+          ['counters.folders', folders],
+        ] as const
+      ).map(([path, counts]) => ({
+        updateOne: {
+          filter: { _id: owner, [path]: NOT_A_NUMBER },
+          update: { $set: { [path]: counts.get(String(owner)) ?? 0 }, $inc: { quotaEpoch: 1 } },
+        },
+      })),
+    ),
+    { ordered: false },
+  );
+  return { owners, installed: result.modifiedCount };
 }
 
 /** How many accounts one write batch of migration v4 converts. */

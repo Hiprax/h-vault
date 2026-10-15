@@ -24,7 +24,7 @@ import { getMetrics } from '../src/controllers/metricsController.js';
 import { runMaintenance } from '../src/jobs/maintenance.js';
 import { runMigrations } from '../src/utils/migrations.js';
 import {
-  installVaultBytes,
+  installVaultCounters,
   QUOTA_RECOUNT_QUIESCENCE_MS,
   recountVaultQuotas,
   resetVaultStorageSnapshot,
@@ -272,7 +272,7 @@ describe('the time limits on background totals', () => {
 
   it('the request-path install takes NO time limit (a timed-out install would fail a delete)', async () => {
     const user = await legacyAccount();
-    expect(await aggregateLimits(() => installVaultBytes(user.id))).toEqual([
+    expect(await aggregateLimits(() => installVaultCounters(user.id))).toEqual([
       ['vault_items', undefined],
       ['folders', undefined],
     ]);

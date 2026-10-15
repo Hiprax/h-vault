@@ -255,6 +255,16 @@ export interface IUser {
   /** When {@link vaultBytes} was last written by a write path; the recount leaves a busy account alone. */
   vaultBytesWrittenAt?: Date | undefined;
   /**
+   * The number of vault item and folder rows the account owns, TRASHED ROWS
+   * INCLUDED, which is what `MAX_ITEMS_PER_USER` and `MAX_FOLDERS_PER_USER`
+   * count (F-15). Kept beside {@link vaultBytes} and moved by the same
+   * conditional update, so a cap is ONE write rather than a count followed by an
+   * insert. Absent (or either field absent) means "not installed yet", exactly as
+   * for {@link vaultBytes}; written only through `utils/vaultQuota.ts`, and by
+   * migration v6, which installs them where they are still absent.
+   */
+  counters?: { items?: number | undefined; folders?: number | undefined } | undefined;
+  /**
    * The backup feature's emails sent for this account on one UTC day (F-05):
    * `utils/outboundMailBudget.ts` claims each send here before it happens.
    * Absent means none today.
@@ -507,6 +517,18 @@ const userSchema = new Schema<IUser>(
     quotaEpoch: { type: Number, default: undefined, select: false },
     quotaRecountedAt: { type: Date, default: undefined, select: false },
     vaultBytesWrittenAt: { type: Date, default: undefined, select: false },
+    // The row counters behind the per-user caps (F-15), under the same rule: no
+    // default, because absent is "not installed yet" and a default would read as
+    // an empty vault. `select: false` keeps them out of the profile's spread; the
+    // quota module reads them through the driver.
+    counters: {
+      type: new Schema<{ items?: number; folders?: number }>(
+        { items: { type: Number }, folders: { type: Number } },
+        { _id: false },
+      ),
+      select: false,
+      default: undefined,
+    },
     // No default and `select: false`: absent is "nothing sent today", and nothing
     // but the budget helper reads it (the profile spreads the whole document).
     outboundMail: {

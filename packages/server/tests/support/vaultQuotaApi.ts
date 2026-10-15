@@ -8,7 +8,7 @@ import request from 'supertest';
 import app from '../../src/app.js';
 import { config } from '../../src/config/index.js';
 import { authHeader, getCsrf, sampleVaultItem, type TestUser } from '../helpers.js';
-import { storedVaultBytes, vaultBytesCounter } from './vaultBytes.js';
+import { rowCounters, storedRowCounts, storedVaultBytes, vaultBytesCounter } from './vaultBytes.js';
 
 const API = '/api/v1';
 const MB = 1024 * 1024;
@@ -56,10 +56,17 @@ export async function trashQuotaItem(user: TestUser, id: string): Promise<void> 
   expect((await apiCall(user, 'delete', `/vault/items/${id}`)).status).toBe(200);
 }
 
-/** Asserts the counter equals what the database says the account stores, and returns it. */
+/**
+ * Asserts the counters equal what the database says the account stores, and
+ * returns the bytes: the byte counter, and (F-15) the two row counters behind
+ * the per-user caps, which every reservation installs together with it. A
+ * path that wrote or removed rows without counting them fails here as surely as
+ * one that miscounted bytes.
+ */
 export async function expectCounterExact(user: TestUser): Promise<number> {
   const stored = await storedVaultBytes(user.id);
   expect(await vaultBytesCounter(user.id)).toBe(stored);
+  expect(await rowCounters(user.id)).toEqual(await storedRowCounts(user.id));
   return stored;
 }
 

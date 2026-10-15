@@ -204,7 +204,8 @@ async function purgeAccountItems(
   try {
     await deleteCountedItems(userId, { deletedAt: { $lte: cutoffDate } }, tally, ids);
   } finally {
-    if (reservation) await settleVaultWrite(reservation, -tally.bytes);
+    // The purged rows leave the item cap's count too (F-15): a hard delete.
+    if (reservation) await settleVaultWrite(reservation, -tally.bytes, { items: -tally.deleted });
   }
   return tally;
 }

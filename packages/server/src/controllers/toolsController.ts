@@ -34,7 +34,9 @@ import {
   settleVaultWrite,
   storedImage,
   versionPin,
+  VaultRowLimitError,
   type RowMeasure,
+  type VaultWriteReservation,
 } from '../utils/vaultQuota.js';
 import { acquireJobLock, releaseJobLock } from '../utils/jobLock.js';
 import { supportsTransactions } from '../utils/transactionSupport.js';
@@ -499,7 +501,7 @@ export const ALLOWED_UPDATE_FIELDS = new Set([
  */
 const IMPORT_LOCK_TTL_MS = 2 * 60 * 1000;
 
-/** Single source of the per-user cap rejection message (both cap checks). */
+/** Single source of the per-user cap rejection message (the reservation's row refusal). */
 function importCapExceededMessage(existingItemCount: number, netNewItems: number): string {
   return `Import would exceed the per-user item limit (${String(MAX_ITEMS_PER_USER)}). You currently have ${String(existingItemCount)} items and this import would add ${String(netNewItems)}.`;
 }
@@ -931,14 +933,16 @@ async function executeImportOperations(
     }
   }
 
-  // 4+5 ── Serialize the cap check and the writes per user.
+  // 4+5 ── Serialize imports per user.
   //
-  // Two mechanisms, both required. A transaction alone does not bound
-  // concurrency on every topology — a standalone deployment rejects
-  // multi-document transactions outright — so the JobLock is what actually
-  // makes the cap unbreachable: `acquireJobLock` is an atomic upsert against the
-  // unique `jobName` index and holds with or without transactions. The client
-  // sends its batches sequentially, so it never self-contends.
+  // The item cap itself is held by the account's row counter (the reservation
+  // below, F-15), which every inserter shares. This lock is what keeps two
+  // imports of one account from interleaving their derived-id pre-check, their
+  // measures and their writes: a transaction alone does not bound concurrency on
+  // every topology (a standalone deployment rejects multi-document transactions
+  // outright), while `acquireJobLock` is an atomic upsert against the unique
+  // `jobName` index and holds with or without them. The client sends its batches
+  // sequentially, so it never self-contends.
   const lockName = vaultImportLockName(userId);
   const lockId = await acquireJobLock(lockName, IMPORT_LOCK_TTL_MS);
   if (lockId === null) {
@@ -955,7 +959,7 @@ async function executeImportOperations(
     //
     // The generation check below is a READ, and a read is only worth the
     // distance to the write that trusts it. From here to `insertMany` lie the
-    // cap count, a transaction start and, on the way in, everything already
+    // reservation, a transaction start and, on the way in, everything already
     // done above; a rotation that raises its fence anywhere inside that span is
     // one both the fence read and the generation read have already decided does
     // not exist, and every row this handler then commits is sealed under a key
@@ -978,13 +982,6 @@ async function executeImportOperations(
     // reviewable rather than merely true today.
     rotationLockId = await acquireVaultRotationLock(userId);
 
-    // Cap measured against NET-NEW inserts only (updates rewrite rows that
-    // already exist), before any write, so a rejected import leaves nothing.
-    const existingItemCount = await VaultItem.countDocuments({ userId });
-    if (existingItemCount + insertDocs.length > MAX_ITEMS_PER_USER) {
-      throw httpErrors.badRequest(importCapExceededMessage(existingItemCount, insertDocs.length));
-    }
-
     // A derived id that is already stored, refused BEFORE the first insert. The
     // standalone path has no transaction, and an ordered `insertMany` that meets a
     // duplicate `_id` keeps every row ahead of it, so leaving this to the
@@ -995,12 +992,21 @@ async function executeImportOperations(
       throw httpErrors.conflict(ROW_ID_TAKEN_MESSAGE);
     }
 
-    // ── The byte quota (F-24): ONE reservation for the whole request ──────
+    // ── The byte quota (F-24) and the item cap (F-15): ONE reservation ─────
     //
     // Every insert's size plus every update's growth (never its shrink), measured
-    // in the database against the rows as they stand, so the request is refused
-    // WHOLE, with 400, before any row is written. What landed is settled once the
-    // outcome is known (below).
+    // in the database against the rows as they stand, AND one row per insert
+    // against the item cap (net-new inserts only: an update rewrites a row that
+    // already exists), in ONE conditional update on the account, so the request
+    // is refused WHOLE, with 400, before any row is written. What landed is
+    // settled once the outcome is known (below).
+    //
+    // The cap used to be a `countDocuments` here and again inside the
+    // transaction. The import lock serialised imports, but a create from another
+    // endpoint (`POST /items`, `POST /backup/restore`) could land between a count
+    // and the insert and take the account past the cap. Every inserter now
+    // reserves its rows in the same counters, so whichever reservation lands first
+    // takes the last place and the other is refused.
     const updateSets = updates.map((update) => pickAllowedFields(update, ALLOWED_UPDATE_FIELDS));
     const measureTargets = async (
       session?: mongoose.ClientSession,
@@ -1030,11 +1036,23 @@ async function executeImportOperations(
         );
       }
     });
-    const reservation = await reserveVaultWrite(userId, { bytes: predicted });
+    let reservation: VaultWriteReservation;
+    try {
+      reservation = await reserveVaultWrite(userId, {
+        bytes: predicted,
+        items: insertDocs.length,
+      });
+    } catch (err: unknown) {
+      if (err instanceof VaultRowLimitError) {
+        throw httpErrors.badRequest(importCapExceededMessage(err.stored, insertDocs.length));
+      }
+      throw err;
+    }
     /**
-     * The counted bytes of the import rows that are stored after an ordered insert
-     * failed part-way (standalone keeps the rows ahead of the failure): measured by
-     * the database, by the ids every insert was given before it was sent.
+     * The counted bytes, and the number, of the import rows that are stored after
+     * an ordered insert failed part-way (standalone keeps the rows ahead of the
+     * failure): measured by the database, by the ids every insert was given
+     * before it was sent.
      *
      * Only the rows AHEAD of the first refused one are this request's: an ordered
      * insert stops there, and the refused id may belong to a row another request
@@ -1042,11 +1060,11 @@ async function executeImportOperations(
      * A failure that names no row (a dropped connection) may have stored any
      * prefix, so every id is measured.
      */
-    async function landedInsertBytes(
+    async function landedInserts(
       insertDocs: Record<string, unknown>[],
       userId: string,
       failure: unknown,
-    ): Promise<number> {
+    ): Promise<{ bytes: number; rows: number }> {
       const writeErrors = (failure as { writeErrors?: unknown } | null)?.writeErrors;
       const refusedAt = Array.isArray(writeErrors)
         ? Math.min(
@@ -1064,32 +1082,24 @@ async function executeImportOperations(
           { projection: { counted: countedBytesExpression('item') }, readPreference: 'primary' },
         )
         .toArray();
-      return rows.reduce((sum, row) => sum + Number(row.counted), 0);
+      return {
+        bytes: rows.reduce((sum, row) => sum + Number(row.counted), 0),
+        rows: rows.length,
+      };
     }
 
     /** The counted bytes this request's writes actually added; reset per attempt. */
     let landed = 0;
+    /** The item rows this request's inserts actually added; reset per attempt. */
+    let landedRows = 0;
 
     const execute = async (session?: mongoose.ClientSession): Promise<void> => {
       const sessionOpt = session ? { session } : {};
       const updateOptions = session ? { runValidators: true, session } : { runValidators: true };
 
-      // Re-measure against the state the writes will observe. The lock already
-      // excludes a second import; this NARROWS — it does not close — the window
-      // against rows created by other endpoints (`POST /items`,
-      // `POST /backup/restore`) between the pre-check and the insert. A row those
-      // commit after this transaction's read snapshot is invisible here and does
-      // not write-conflict with our inserts, so the cap can still be overshot by
-      // such a row. That hairline is pre-existing and shared with
-      // `vaultController.createItem`'s own count-then-write check.
-      const liveItemCount = await VaultItem.countDocuments({ userId }, sessionOpt);
-      if (liveItemCount + insertDocs.length > MAX_ITEMS_PER_USER) {
-        throw httpErrors.badRequest(importCapExceededMessage(liveItemCount, insertDocs.length));
-      }
-
       // The vault-key generation, checked HERE rather than at the top of the
       // handler. Between the two lie the field-length checks, the folder
-      // lookups, the update-target lookups, `acquireJobLock` and the cap count
+      // lookups, the update-target lookups, `acquireJobLock` and the reservation
       // — hundreds of milliseconds in which a rotation can commit and leave
       // every row below sealed under a key the account has already replaced.
       // Inside the callback rather than merely inside the lock because
@@ -1108,6 +1118,7 @@ async function executeImportOperations(
       updatedCount = 0;
       insertedIds = [];
       landed = 0;
+      landedRows = 0;
 
       // The rows each update is pinned on: measured inside the transaction where
       // there is one (its snapshot is what the writes below see), else the
@@ -1123,7 +1134,9 @@ async function executeImportOperations(
           // failed: those landed, and are counted from the database.
           if (!session) {
             try {
-              landed += await landedInsertBytes(insertDocs, userId, err);
+              const partial = await landedInserts(insertDocs, userId, err);
+              landed += partial.bytes;
+              landedRows += partial.rows;
             } catch (measureErr: unknown) {
               // What landed cannot be read either: count every insert as landed (an
               // overcount the recount corrects) and report the insert's own error.
@@ -1132,12 +1145,14 @@ async function executeImportOperations(
                 error: errorMessage(measureErr),
               });
               landed += insertBytes;
+              landedRows += insertDocs.length;
             }
           }
           if (isDuplicateIdError(err)) throw httpErrors.conflict(ROW_ID_TAKEN_MESSAGE);
           throw err;
         }
         for (const doc of created) landed += countedBytes('item', storedImage(doc));
+        landedRows += created.length;
         insertedCount = created.length;
         // In insertion order, which `insertMany` preserves: the client checks each
         // against the id it sealed that row to.
@@ -1182,15 +1197,15 @@ async function executeImportOperations(
 
     // The `else` covers the topology that never had transactions at all — a
     // standalone deployment, and the default test harness. It is a real path,
-    // not an optimistic one, and it still fails closed on the cap: the lock
-    // serializes imports and the re-check runs there too.
+    // not an optimistic one, and it still fails closed on the cap: the
+    // reservation above decided it before either branch writes a row.
     //
     // What it deliberately does NOT cover: `supportsTransactions` only inspects
     // the URI's `replicaSet` option (`utils/transactionSupport.ts`), so a single
     // node ADVERTISING a replica set returns true here, takes the branch below,
     // and throws at `withTransaction` — a 500 that writes nothing. Catching that
     // to retry non-transactionally would be unsafe, because `execute` also
-    // throws the cap 400 and the mid-request 409 from inside the callback, and
+    // throws the generation 409 and the mid-request 409 from inside the callback, and
     // re-running after either would double-insert. `config/database.ts`'s
     // `verifyTopology` warns about the mismatch at boot instead.
     const transactional = supportsTransactions(mongoose.connection);
@@ -1220,11 +1235,11 @@ async function executeImportOperations(
       if (transactional) {
         if (!commitUnknown) await releaseVaultWrite(reservation);
       } else {
-        await settleVaultWrite(reservation, landed);
+        await settleVaultWrite(reservation, landed, { items: landedRows });
       }
       throw err;
     }
-    await settleVaultWrite(reservation, landed);
+    await settleVaultWrite(reservation, landed, { items: landedRows });
   } finally {
     // Reverse acquisition order, and the exclusion lock first because it is the
     // one whose loss blocks four other operations rather than one.

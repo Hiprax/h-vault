@@ -23,11 +23,7 @@ import {
 } from '../utils/vaultQuota.js';
 import { getAncestorChain, hasCycle } from '../utils/folderGraph.js';
 import { supportsTransactions } from '../utils/transactionSupport.js';
-import {
-  deleteFolderQuerySchema,
-  MAX_FOLDERS_PER_USER,
-  MAX_FOLDER_NESTING_DEPTH,
-} from '@hvault/shared';
+import { deleteFolderQuerySchema, MAX_FOLDER_NESTING_DEPTH } from '@hvault/shared';
 import type { CreateFolderInput, UpdateFolderInput, ReorderFolderInput } from '@hvault/shared';
 
 const logger = createModuleLogger('folder-controller');
@@ -154,14 +150,6 @@ export const createFolder = catchAsync(async (req: Request, res: Response): Prom
   // full is in `vaultController.createItem`.
   if ((await resolveVaultKeyVersion(res, userId, body.vaultKeyVersion)) === null) return;
 
-  // Enforce per-user folder count limit
-  const folderCount = await Folder.countDocuments({ userId });
-  if (folderCount >= MAX_FOLDERS_PER_USER) {
-    throw httpErrors.badRequest(
-      `Folder limit reached. You can have a maximum of ${String(MAX_FOLDERS_PER_USER)} folders.`,
-    );
-  }
-
   // Validate parentId belongs to the authenticated user (IDOR prevention)
   if (body.parentId) {
     const parentExists = await Folder.exists({ _id: body.parentId, userId });
@@ -176,7 +164,9 @@ export const createFolder = catchAsync(async (req: Request, res: Response): Prom
   // Spread in by name, past the allowlist, for the reason `createdRowId` gives.
   const rowId = await createdRowId(userId, body.idNonce);
 
-  // Counted against the account's byte quota (F-24), like an item.
+  // Counted against the account's byte quota (F-24) and the per-user folder cap
+  // (F-15) in one conditional reservation before the insert, like an item: the
+  // cap is never a count read here and trusted by the insert after it.
   const folderData = { ...filteredBody, ...rowId, userId };
   let folder;
   try {
@@ -363,9 +353,12 @@ export const deleteFolder = catchAsync(async (req: Request, res: Response): Prom
   const useTransaction = supportsTransactions(mongoose.connection);
 
   // Touch first (F-24): the folder row is counted, so its removal is subtracted
-  // once it is gone, by the bytes the database measured on the row it removed.
+  // once it is gone, by the bytes the database measured on the row it removed,
+  // and from the folder cap's count (F-15): without that, the count only grew and
+  // `MAX_FOLDERS_PER_USER` folders would become a lifetime limit.
   const reservation = await reserveVaultWrite(userId, { bytes: 0 });
   let folderBytes = 0;
+  let foldersRemoved = 0;
 
   const session = useTransaction ? await mongoose.startSession() : null;
   const sessionOpt = session ? { session } : {};
@@ -375,6 +368,7 @@ export const deleteFolder = catchAsync(async (req: Request, res: Response): Prom
       // Reset per attempt: `withTransaction` may run this again after a transient
       // error, and the aborted attempt removed nothing.
       folderBytes = 0;
+      foldersRemoved = 0;
       // The folder's MEMBERS are vault items and documents, and both are treated
       // identically: `action=delete` trashes them, `action=move` re-parents them
       // to this folder's parent or to the root. Writing the filter and the update
@@ -413,6 +407,7 @@ export const deleteFolder = catchAsync(async (req: Request, res: Response): Prom
         session ?? undefined,
       );
       folderBytes = gone?.counted ?? 0;
+      foldersRemoved = gone ? 1 : 0;
     };
 
     if (session) {
@@ -424,7 +419,7 @@ export const deleteFolder = catchAsync(async (req: Request, res: Response): Prom
     // the folder's delete, the last step, ran). A transaction that threw removed
     // nothing, or nothing anyone can be sure of, so it subtracts nothing; an
     // overcount is what the hourly recount corrects.
-    await settleVaultWrite(reservation, -folderBytes);
+    await settleVaultWrite(reservation, -folderBytes, { folders: -foldersRemoved });
   } finally {
     if (session) {
       await session.endSession();

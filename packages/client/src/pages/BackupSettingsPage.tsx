@@ -1128,7 +1128,7 @@ export default function BackupSettingsPage() {
           toast({
             title: `Storage limit reached: ${String(itemsOverQuota)} item(s) and ${String(foldersOverQuota)} folder(s) were not restored.`,
             description:
-              'Everything else in the backup was restored. Items filed in a folder you already have went into that folder; items filed in a new folder that could not be added were restored without a folder. Delete items or empty the trash to make room before restoring again; with "keep both", a second restore adds another copy of everything already restored.',
+              'Everything else in the backup was restored. Items filed in a folder you already have went into that folder; items filed in a new folder that could not be added were restored without a folder. Delete items or folders, or empty the trash, to make room before restoring again; with "keep both", a second restore adds another copy of everything already restored.',
             type: 'warning',
           });
         }

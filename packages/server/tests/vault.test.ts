@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import request from 'supertest';
 import mongoose from 'mongoose';
 import app from '../src/app.js';
@@ -105,44 +105,48 @@ describe('Vault API', () => {
     it('should reject creation when per-user item limit is reached', async () => {
       const { MAX_ITEMS_PER_USER } = await import('@hvault/shared');
 
-      // Stub countDocuments to simulate the limit being reached
-      const spy = vi
-        .spyOn(VaultItem, 'countDocuments')
-        .mockResolvedValueOnce(MAX_ITEMS_PER_USER as never);
-
+      // The cap is held by the account's row counter (F-15), so the account is put
+      // AT the cap there: install the counters with one real create, then plant
+      // the count. Seeding 10,000 rows would prove the same thing slowly.
       const agent = request.agent(app);
       const { csrfToken, csrfCookie } = await getCsrf(agent);
+      const send = (): request.Test =>
+        agent
+          .post('/api/v1/vault/items')
+          .set('Authorization', authHeader(user.accessToken))
+          .set('Cookie', csrfCookie)
+          .set('x-csrf-token', csrfToken)
+          .send(sampleVaultItem());
+      await send().expect(201);
+      await mongoose.connection
+        .collection('users')
+        .updateOne(
+          { _id: new mongoose.Types.ObjectId(user.id) },
+          { $set: { 'counters.items': MAX_ITEMS_PER_USER } },
+        );
 
-      const res = await agent
-        .post('/api/v1/vault/items')
-        .set('Authorization', authHeader(user.accessToken))
-        .set('Cookie', csrfCookie)
-        .set('x-csrf-token', csrfToken)
-        .send(sampleVaultItem())
-        .expect(400);
+      const res = await send().expect(400);
 
       expect(res.body.success).toBe(false);
-      expect(JSON.stringify(res.body)).toContain('Item limit reached');
-      // The cap must count only THIS user's items — assert the real query is
-      // scoped to the authenticated userId. Without this, the stub would hide a
-      // regression that counts every user's items (`countDocuments({})`) or an
-      // unscoped/wrong filter, and the test would still pass on the stubbed value.
-      expect(spy).toHaveBeenCalledWith({ userId: user.id });
-      spy.mockRestore();
+      expect(res.body.message).toBe(
+        `Item limit reached. You can have a maximum of ${String(MAX_ITEMS_PER_USER)} items.`,
+      );
+      // Nothing was written, and the refused reservation moved no counter.
+      expect(await VaultItem.countDocuments({ userId: user.id })).toBe(1);
+      const stored = await mongoose.connection
+        .collection('users')
+        .findOne({ _id: new mongoose.Types.ObjectId(user.id) }, { projection: { counters: 1 } });
+      expect(stored?.counters).toEqual({ items: MAX_ITEMS_PER_USER, folders: 0 });
     });
 
     it('counts only the authenticated user’s items toward the cap (real state, scoping)', async () => {
-      const { MAX_ITEMS_PER_USER } = await import('@hvault/shared');
-
       // Seed real items for a DIFFERENT user; they must not count toward this
-      // user's cap. This exercises the real countDocuments query against real
-      // persisted state (no stub) and proves cross-user isolation of the cap.
+      // user's cap. The counter this create installs is measured from real
+      // persisted rows (no stub), so it proves cross-user isolation of the cap.
       const otherUser = await createTestUser();
       await seedItem(otherUser.id);
       await seedItem(otherUser.id);
       await seedItem(user.id);
-
-      const spy = vi.spyOn(VaultItem, 'countDocuments');
 
       const agent = request.agent(app);
       const { csrfToken, csrfCookie } = await getCsrf(agent);
@@ -155,15 +159,19 @@ describe('Vault API', () => {
         .send(sampleVaultItem())
         .expect(201);
 
-      // The real count query ran and saw only this user's single pre-seeded
-      // item (1), far below the cap — the other user's 2 items were excluded.
-      expect(spy).toHaveBeenCalledWith({ userId: user.id });
-      const realCount = await VaultItem.countDocuments({ userId: user.id });
-      expect(realCount).toBe(2); // the seeded one + the just-created one
-      expect(realCount).toBeLessThan(MAX_ITEMS_PER_USER);
-      const otherCount = await VaultItem.countDocuments({ userId: otherUser.id });
-      expect(otherCount).toBe(2);
-      spy.mockRestore();
+      // This user's counter saw only this user's single pre-seeded item plus the
+      // one just created; the other user's 2 items were excluded, and that
+      // account's counters were never touched.
+      const counters = async (id: string): Promise<unknown> =>
+        (
+          await mongoose.connection
+            .collection('users')
+            .findOne({ _id: new mongoose.Types.ObjectId(id) }, { projection: { counters: 1 } })
+        )?.counters;
+      expect(await counters(user.id)).toEqual({ items: 2, folders: 0 });
+      expect(await counters(otherUser.id)).toBeUndefined();
+      expect(await VaultItem.countDocuments({ userId: user.id })).toBe(2);
+      expect(await VaultItem.countDocuments({ userId: otherUser.id })).toBe(2);
     });
 
     // ── Get single item ───────────────────────────────────────────────

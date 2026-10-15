@@ -1248,6 +1248,13 @@ export const AUDIT_ACTIONS = [
   'trusted_device_grant',
   'trusted_device_revoke',
   'trusted_device_rejected',
+  // A refresh token presented again after it was rotated: the cookie was copied,
+  // so the token's whole family, every trusted device and every device proof are
+  // revoked. The strongest compromise signal the server has, so it is a security
+  // row the owner can read; it carries what was revoked and the revoked family's
+  // device, never the token. Written at most once per family (the family is gone
+  // after the first detection).
+  'token_reuse_detected',
   // A device proof (the `__hv_device` cookie) revoked because wrong passwords
   // presented with it reached its budget. Only a browser that once signed in can
   // write it, so it is not stranger-writable.

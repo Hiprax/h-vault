@@ -83,6 +83,13 @@ x-hvault-app-environment: &hvault-app-environment
   # local Nginx among them, may connect); in a container that would refuse the stack's Nginx, which arrives
   # over the `edge` bridge. Nothing is published, so this reaches no host port.
   HOST: 0.0.0.0
+  # The logger's per-module files stay OFF in every container (the server's
+  # production default, pinned here so a value meant for local development in
+  # .env cannot switch them on). The log directory is a size-capped tmpfs: one
+  # file per module (about forty) cannot be bounded inside it, while the ONE
+  # global file, which already carries every module's lines, is at most 12 MB
+  # (see the tmpfs entries below and `LOG_FILE_ROTATION` in utils/logger.ts).
+  LOG_MODULE_FILES: 'false'
   # Single-node replica set (rs0), initiated by the db healthcheck below. The app
   # needs a replica set for its transactional paths (vault key rotation, account
   # cascade-delete, refresh-token rotation), all of which check the driver's
@@ -273,6 +280,14 @@ services:
       # The logger's rotating file transports. A tmpfs keeps the root filesystem
       # read-only while still giving them somewhere to go; the authoritative log
       # stream is stdout, which Docker captures and rotates (see `logging` above).
+      # CEILING: with LOG_MODULE_FILES false (the environment above) only the one
+      # global file is written, at most 3 files of 4 MB = 12 MB (`LOG_FILE_ROTATION`
+      # in packages/server/src/utils/logger.ts), plus the rotator's own audit file
+      # of under 1 KB, against this 64 MB. `tests/log-storage-bound.test.ts` sums
+      # every file the server's loggers open under this service's environment and
+      # holds the total below the size parsed from this line. That bound is what
+      # keeps the tmpfs from filling: a write that failed anyway is not caught by
+      # the logging library today and ends the process (restart: unless-stopped).
       - /app/logs:size=64m,uid=1000,gid=1000,mode=0700
     # 1 GB rather than 512 MB, for headroom on the heaviest thing this app legitimately
     # does: a 30 MB backup restore or full-vault key rotation, which decrypts,
@@ -426,6 +441,8 @@ services:
     read_only: true
     tmpfs:
       - /tmp:size=64m,uid=1000,gid=1000,mode=1777
+      # CEILING: the same 12 MB as hvault-app's log tmpfs (one global file, 3 x 4 MB;
+      # LOG_MODULE_FILES false), held below this 16 MB by tests/log-storage-bound.test.ts.
       - /app/packages/server/logs:size=16m,uid=1000,gid=1000,mode=0700
     mem_limit: 512m
     cpus: '1.0'

@@ -225,7 +225,8 @@ security posture, not a disclaimer.
   folder's encrypted contents always gets an entry of its own, and edits from two different
   addresses or user agents never share one (two browsers behind one address that send an identical
   user-agent string can). **Security** entries (sign-ins and sign-outs, password, 2FA, session and trusted-device
-  events, exports and imports, backup setup, download and restore, settings) are never trimmed and
+  events, among them a replayed refresh token, recorded at most once per stolen sign-in with the address
+  that replayed it and the browser the sign-in was issued to, exports and imports, backup setup, download and restore, settings) are never trimmed and
   never merged, so flooding edits can push only older edits out of the log, never a record of how
   the account was accessed. The exceptions are the entries a stranger can cause, which are capped
   separately at 5,000 per account and trimmed the same way. The residual, stated at its size:
@@ -645,6 +646,36 @@ an account past the quota. What this does not bound exactly:
   late.
 - **During a rolling upgrade**, a worker still running the previous release writes without
   counting. The recount corrects those accounts once the upgrade has finished.
+
+The same conditional update decides the **item and folder limits** (10,000 items, trashed ones
+included, and 500 folders). The account carries a running count of each beside the byte count, and
+a create, an import or a restore reserves its rows in it before writing, so requests sent together,
+from one endpoint or from several, cannot take an account past either limit: whichever reservation
+lands first takes the last place and the others are refused (a restore skips the rows that no longer
+fit as `storage_limit`). Only an insert adds to the count and only a permanent removal (deleting from
+the trash, emptying it, the nightly purge, deleting a folder) takes from it. The drift and rolling
+upgrade caveats above apply to these counts too, and the same hourly recount corrects them.
+
+### Log files
+
+The full log stream is the server's console output, which the Docker stack's container runtime
+keeps and rotates (PM2 writes it to `logs/out.log` and `logs/error.log` and does not rotate them
+unless `pm2-logrotate` is installed). The rotating log files the server also writes are bounded by **count**: a new file
+every 4 MB or day, at most 3 kept. Under `NODE_ENV=production` only the one shared file is written
+(each module's own file is off unless `LOG_MODULE_FILES=true`), so the files hold at most 12 MB
+per server process (PM2's two workers write the same file, each keeping its own count, so somewhat
+more there).
+In the Docker stack they live in a memory-backed directory of 64 MB (16 MB for the bootstrap
+one-shot), and a test holds the total every module's logger can open below that size. The bound
+is what keeps the directory from filling. A failure the logging library reports is written once to
+the console; a failed write to the file itself (the directory full after all, a permissions error)
+is not intercepted by the logging library in use and ends the process; Docker's restart policy
+starts the app again (the bootstrap one-shot then fails and is re-run by the next `up`). It is a
+defect written up for the library's owner. What this does not bound: the rotator removes the
+oldest file when it opens a new one, and a burst of more than 4 MB of log lines written in one
+uninterrupted run of code can open files faster than it removes them; a file it missed that way
+is never removed later, and stays until the directory is cleared (for the container's in-memory
+directory, a restart). No request logs anywhere near that much in one run.
 
 ### Where mailed backups go
 

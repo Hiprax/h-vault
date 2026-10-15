@@ -30,6 +30,7 @@ import app from '../src/app.js';
 import { VaultItem } from '../src/models/VaultItem.js';
 import { User } from '../src/models/User.js';
 import { supportsTransactions } from '../src/utils/transactionSupport.js';
+import { reserveVaultWrite } from '../src/utils/vaultQuota.js';
 import { createTestUser, authHeader, sampleVaultItem, seedItem, getCsrf } from './helpers.js';
 import type { TestUser } from './helpers.js';
 import { useReplicaSetConnection } from './mongoHarness.js';
@@ -141,21 +142,20 @@ describe('Import operations — transaction (replica-set) branch', () => {
     expect(stored[0]!.encryptedData).toBe('original-data');
   });
 
-  it('aborts when the cap re-check inside the transaction sees the vault at the limit', async () => {
+  it('refuses at the cap before the transaction opens, committing nothing', async () => {
     user = await createTestUser();
-
-    // The first count (taken before the lock) passes; the second — the one made
-    // against the state the writes actually observe — trips the cap. Only the
-    // in-transaction re-check can reject here, so this targets it specifically.
-    vi.spyOn(VaultItem, 'countDocuments')
-      .mockResolvedValueOnce(0 as never)
-      .mockResolvedValue(MAX_ITEMS_PER_USER as never);
+    // The cap is decided by the account's row counter in one conditional write
+    // BEFORE the transaction starts (F-15); there is no in-transaction count to
+    // trip any more, because a count inside a snapshot could not see a create
+    // another endpoint committed after it anyway.
+    await pinHeadroom(user.id, 0);
+    const startSession = vi.spyOn(mongoose, 'startSession');
 
     const res = await postOperations({ inserts: [insertRow(1)] });
 
     expect(res.status).toBe(400);
     expect(JSON.stringify(res.body)).toMatch(/per-user item limit/i);
-
+    expect(startSession).not.toHaveBeenCalled();
     const stored = await VaultItem.find({ userId: user.id }).lean();
     expect(stored).toHaveLength(0);
   });
@@ -174,41 +174,36 @@ describe('Import operations — transaction (replica-set) branch', () => {
   //
   // A transaction does NOT bound concurrency: two sessions can each read a count
   // of N, each insert, and each commit, because a count is not a document the
-  // other session write-conflicts with. So even here the cap is held by the
-  // per-user JobLock, and the in-transaction re-check only narrows the window
-  // against OTHER endpoints. These two tests pin that on the topology production
-  // actually runs (`docker-compose.yml` pins the `rs0` replica set), which the
-  // standalone harness can never reach.
+  // other session write-conflicts with. So the cap is held by the account's row
+  // counter, reserved in one conditional write before the transaction (F-15),
+  // and the per-user JobLock keeps two imports from interleaving. These two
+  // tests pin that on the topology production actually runs
+  // (`docker-compose.yml` pins the `rs0` replica set), which the standalone
+  // harness can never reach.
 
   /**
-   * Shrinks the user's effective headroom to `headroom` NET-NEW rows by calling
-   * THROUGH to the real count and adding a fixed offset — so the value the
-   * executor sees still tracks what has actually been written. A flat
-   * `mockResolvedValue` would pin it to a constant and the cap could then never
-   * notice rows a racing request had just committed, which is the very
+   * Shrinks the user's effective headroom to `headroom` NET-NEW rows by planting
+   * the account's row counter at `MAX_ITEMS_PER_USER - headroom` (F-15: the cap is
+   * held by that counter, which every inserter reserves against in one
+   * conditional write; `countDocuments` is no longer read). The counters are
+   * installed first by a zero reservation, exactly what any write does. Every
+   * insert that lands then moves the counter, so the headroom the next request
+   * sees still tracks what has actually been written, which is the very
    * interaction under test.
-   *
-   * Deliberately a local copy of the one in `import-cap-concurrency.test.ts`
-   * rather than a shared export: that file drives the STANDALONE connection and
-   * this one a replica set, and the two must stay independently readable. Keep
-   * them in step if either changes.
    */
-  function pinHeadroom(headroom: number): void {
-    const realCountDocuments = VaultItem.countDocuments.bind(VaultItem) as unknown as (
-      filter?: Record<string, unknown>,
-      options?: Record<string, unknown>,
-    ) => Promise<number>;
-    const offset = MAX_ITEMS_PER_USER - headroom;
-
-    vi.spyOn(VaultItem, 'countDocuments').mockImplementation(((
-      filter?: Record<string, unknown>,
-      options?: Record<string, unknown>,
-    ) => realCountDocuments(filter, options).then((count) => count + offset)) as never);
+  async function pinHeadroom(userId: string, headroom: number): Promise<void> {
+    await reserveVaultWrite(userId, { bytes: 0 });
+    await mongoose.connection
+      .collection('users')
+      .updateOne(
+        { _id: new mongoose.Types.ObjectId(userId) },
+        { $set: { 'counters.items': MAX_ITEMS_PER_USER - headroom } },
+      );
   }
 
   it('409s an overlapping import while the first one holds an OPEN transaction', async () => {
     user = await createTestUser();
-    pinHeadroom(4);
+    await pinHeadroom(user.id, 4);
 
     // Park the first import inside `insertMany` — which on this topology means
     // inside `session.withTransaction`, with the transaction still open and its
@@ -259,7 +254,7 @@ describe('Import operations — transaction (replica-set) branch', () => {
     const HEADROOM = 4;
     const ROWS_PER_REQUEST = 3;
     const REQUESTS = 4;
-    pinHeadroom(HEADROOM);
+    await pinHeadroom(user.id, HEADROOM);
 
     const responses = await Promise.all(
       Array.from({ length: REQUESTS }, (_, requestIndex) =>

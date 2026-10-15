@@ -20,7 +20,7 @@ import { VaultItem } from '../src/models/VaultItem.js';
 import { Folder } from '../src/models/Folder.js';
 import { User } from '../src/models/User.js';
 import {
-  installVaultBytes,
+  installVaultCounters,
   reserveVaultWrite,
   VaultQuotaExceededError,
 } from '../src/utils/vaultQuota.js';
@@ -215,7 +215,8 @@ describe('the first reservation of an account without a counter', () => {
 
     expect(reservations).toHaveLength(10);
     for (const reservation of reservations) {
-      expect(reservation).toEqual({ userId: user.id, bytes: 0 });
+      // F-15: a reservation also names the rows it took (none here).
+      expect(reservation).toEqual({ userId: user.id, bytes: 0, items: 0, folders: 0 });
     }
     expect(await vaultBytesCounter(user.id)).toBe(await storedVaultBytes(user.id));
     expect(await storedVaultBytes(user.id)).toBeGreaterThan(8_000);
@@ -240,7 +241,7 @@ describe('the first reservation of an account without a counter', () => {
         ?.projection;
       if (!done && this.collectionName === 'users' && projection && 'vaultBytes' in projection) {
         done = true;
-        await installVaultBytes(userId);
+        await installVaultCounters(userId);
       }
       return real.apply(this, args as never);
     } as never);
@@ -252,7 +253,7 @@ describe('the first reservation of an account without a counter', () => {
 
     const reservation = await reserveVaultWrite(user.id, { bytes: 1_000 });
 
-    expect(reservation).toEqual({ userId: user.id, bytes: 1_000 });
+    expect(reservation).toEqual({ userId: user.id, bytes: 1_000, items: 0, folders: 0 });
     expect(await vaultBytesCounter(user.id)).toBe((await storedVaultBytes(user.id)) + 1_000);
   });
 

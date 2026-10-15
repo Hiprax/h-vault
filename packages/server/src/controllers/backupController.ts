@@ -31,6 +31,7 @@ import {
 import { carriesBoundField } from '../utils/vaultFieldFormat.js';
 import {
   VaultQuotaExceededError,
+  VaultRowLimitError,
   createCountedRow,
   updateCountedRow,
 } from '../utils/vaultQuota.js';
@@ -1219,6 +1220,13 @@ async function restoreUnderRotationLock(
   // reject an idempotent repeat restore once it crosses the cap — breaking the
   // "fully idempotent across repeated restores" guarantee. keep_both always mints
   // fresh rows, so there every backup row counts (the growth the cap bounds).
+  //
+  // These two counts are the WHOLE-restore refusal, answered before anything is
+  // written. They are not what holds the caps: a create from another endpoint can
+  // land between them and the inserts below. Every insert reserves its row in the
+  // account's counters in one conditional write (`createCountedRow`, F-15), so a
+  // row that no longer fits is skipped as `storage_limit` rather than stored past
+  // the cap.
   const existingItemCount = await VaultItem.countDocuments({ userId });
   const netNewItems = await countNetNewRestoreRows(backupItems, conflictStrategy, async (ids) => {
     const objectIds = ids.map((id) => new mongoose.Types.ObjectId(id));
@@ -1443,12 +1451,15 @@ async function restoreUnderRotationLock(
           foldersRestored++;
         }
       } catch (err: unknown) {
-        if (err instanceof VaultQuotaExceededError) {
-          // No room in the account's storage quota for this folder. When the backup's
-          // folder matched one the account already has (an overwrite, or the
-          // duplicate a keep-both would have added), that folder is still mapped,
-          // so the rows that name it are filed there; only a folder that would have
-          // been new leaves them unfiled, as does one that was deleted meanwhile.
+        if (err instanceof VaultQuotaExceededError || err instanceof VaultRowLimitError) {
+          // No room in the account's storage quota for this folder, or none left
+          // under the folder cap (a folder another request created while this
+          // restore ran took the last place the count above saw free; the cap is
+          // decided per row, atomically, F-15). When the backup's folder matched
+          // one the account already has (an overwrite, or the duplicate a keep-both
+          // would have added), that folder is still mapped, so the rows that name it
+          // are filed there; only a folder that would have been new leaves them
+          // unfiled, as does one that was deleted meanwhile.
           if (targetFolderId !== undefined && !matchedFolderGone) {
             folderIdMap.set(folderId, targetFolderId);
           }
@@ -1755,9 +1766,12 @@ async function restoreUnderRotationLock(
           itemsRestored++;
         }
       } catch (err: unknown) {
-        if (err instanceof VaultQuotaExceededError) {
-          // No room in the account's storage quota for this row. The rest of the
-          // restore goes on: a later row may fit, or shrink one already stored.
+        if (err instanceof VaultQuotaExceededError || err instanceof VaultRowLimitError) {
+          // No room in the account's storage quota for this row, or none left under
+          // the item cap (a row another request created while this restore ran took
+          // the last place the count above saw free; the cap is decided per row,
+          // atomically, F-15). The rest of the restore goes on: a later row may
+          // fit, or shrink one already stored.
           itemsSkipped++;
           itemSkipReasons.push({ itemId, reason: 'storage_limit' });
           continue;

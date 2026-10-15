@@ -1,5 +1,6 @@
 import mongoose, { type ClientSession, type Model } from 'mongoose';
 import { ErrorHandler, httpErrors } from '@hiprax/errors';
+import { MAX_FOLDERS_PER_USER, MAX_ITEMS_PER_USER } from '@hvault/shared';
 import { config } from '../config/index.js';
 import { User } from '../models/User.js';
 import { VaultItem } from '../models/VaultItem.js';
@@ -45,6 +46,18 @@ const logger = createModuleLogger('vault-quota');
  *
  * A write that cannot grow the vault is never refused, however far over the quota
  * the account is: deletes, purges, shrinking updates, rotations and re-seals.
+ *
+ * THE ROW CAPS (F-15) ride the same machinery. `User.counters.items` and
+ * `User.counters.folders` count the account's item and folder rows, trashed rows
+ * included (that is what `MAX_ITEMS_PER_USER` and `MAX_FOLDERS_PER_USER` count),
+ * and a reservation names the rows it will add beside the bytes, so the bytes and
+ * both caps are decided by ONE conditional update before the first insert. A cap
+ * read with `countDocuments` and then trusted by an insert let every one of N
+ * concurrent requests through. Only an insert adds a row and only a HARD delete
+ * removes one (a permanent delete, emptying the trash, the nightly purge, a
+ * folder delete); trash, restore and move change neither counter. An absent
+ * counter is installed exactly like `vaultBytes`, from the rows, by the first
+ * operation that needs it, and never refused for being absent.
  */
 
 export type CountedKind = 'item' | 'folder';
@@ -80,6 +93,36 @@ export class VaultQuotaExceededError extends ErrorHandler {
   constructor() {
     super(VAULT_STORAGE_QUOTA_MESSAGE, 400);
     this.name = 'VaultQuotaExceededError';
+  }
+}
+
+/** The per-account row cap of each counted kind. */
+const ROW_CAP: Readonly<Record<CountedKind, number>> = {
+  item: MAX_ITEMS_PER_USER,
+  folder: MAX_FOLDERS_PER_USER,
+};
+
+/** The text of a refused row: the wording the item and folder creates have always used. */
+export function rowLimitMessage(kind: CountedKind): string {
+  return kind === 'item'
+    ? `Item limit reached. You can have a maximum of ${String(MAX_ITEMS_PER_USER)} items.`
+    : `Folder limit reached. You can have a maximum of ${String(MAX_FOLDERS_PER_USER)} folders.`;
+}
+
+/**
+ * The refusal of a write that would take the account past a row cap (F-15):
+ * always a 400. `stored` is the account's row count of that kind when it was
+ * refused, for a caller whose message names it (the import's).
+ */
+export class VaultRowLimitError extends ErrorHandler {
+  readonly kind: CountedKind;
+  readonly stored: number;
+
+  constructor(kind: CountedKind, stored: number) {
+    super(rowLimitMessage(kind), 400);
+    this.name = 'VaultRowLimitError';
+    this.kind = kind;
+    this.stored = stored;
   }
 }
 
@@ -351,10 +394,21 @@ export function storedImage(doc: { toObject(options: typeof STORED_IMAGE): unkno
   return doc.toObject(STORED_IMAGE) as object;
 }
 
+/** What an account stores, as the quota and the row caps count it. */
+interface VaultTotals {
+  /** The counted bytes of every item and folder row. */
+  bytes: number;
+  /** Item rows, trashed rows included. */
+  items: number;
+  /** Folder rows. */
+  folders: number;
+}
+
 /**
- * The counted bytes of every item and folder row `userId` owns, measured by the
- * database. From the primary, or inside `session` when one is given (a
- * transaction then sees its own snapshot plus its own writes).
+ * The counted bytes and the number of every item and folder row `userId` owns,
+ * measured by the database in one aggregate per collection. From the primary,
+ * or inside `session` when one is given (a transaction then sees its own
+ * snapshot plus its own writes).
  *
  * `maxTimeMS` bounds EACH of the two aggregates of a BACKGROUND total (the recount,
  * the boot migration) and nothing else. The
@@ -362,144 +416,284 @@ export function storedImage(doc: { toObject(options: typeof STORED_IMAGE): unkno
  * the zero reservation every delete takes fail, and an account over its quota
  * would be unable to delete anything.
  */
+async function storedVaultTotals(
+  userId: string,
+  options: { session?: ClientSession; maxTimeMS?: number } = {},
+): Promise<VaultTotals> {
+  const owner = new mongoose.Types.ObjectId(userId);
+  const totals: VaultTotals = { bytes: 0, items: 0, folders: 0 };
+  for (const kind of ['item', 'folder'] as const) {
+    const query = MODEL_OF[kind].aggregate<{ bytes: number; rows: number }>([
+      { $match: { userId: owner } },
+      {
+        $group: {
+          _id: null,
+          bytes: { $sum: countedBytesExpression(kind) },
+          rows: { $sum: 1 },
+        },
+      },
+    ]);
+    if (options.maxTimeMS !== undefined) query.option({ maxTimeMS: options.maxTimeMS });
+    const [row] = await (options.session ? query.session(options.session) : query.read('primary'));
+    totals.bytes += row?.bytes ?? 0;
+    totals[kind === 'item' ? 'items' : 'folders'] = row?.rows ?? 0;
+  }
+  return totals;
+}
+
+/** The counted bytes alone of {@link storedVaultTotals}, for a byte-only caller (a rotation). */
 export async function storedVaultBytes(
   userId: string,
   options: { session?: ClientSession; maxTimeMS?: number } = {},
 ): Promise<number> {
-  const owner = new mongoose.Types.ObjectId(userId);
-  let total = 0;
-  for (const kind of ['item', 'folder'] as const) {
-    const query = MODEL_OF[kind].aggregate<{ bytes: number }>([
-      { $match: { userId: owner } },
-      { $group: { _id: null, bytes: { $sum: countedBytesExpression(kind) } } },
-    ]);
-    if (options.maxTimeMS !== undefined) query.option({ maxTimeMS: options.maxTimeMS });
-    const [row] = await (options.session ? query.session(options.session) : query.read('primary'));
-    total += row?.bytes ?? 0;
-  }
-  return total;
+  return (await storedVaultTotals(userId, options)).bytes;
+}
+
+/** The three counters an account carries, by stored path. */
+const COUNTER_PATHS = ['vaultBytes', 'counters.items', 'counters.folders'] as const;
+
+/** Keeps a stored number at `path`, else takes `value`: an install never overwrites a counter. */
+function keepCounter(path: string, value: number): Record<string, unknown> {
+  return { $cond: [{ $isNumber: `$${path}` }, `$${path}`, value] };
 }
 
 /**
- * Installs a missing counter with the database's own total. Uncapped on the request
- * path; `maxTimeMS` is for a caller that must not wait (the boot migration). One
- * compare-and-set:
- * losing it means another request installed first, which is just as good. Safe
- * against an install racing a write because every write path reserves (and so
- * installs) BEFORE it touches a row.
+ * Installs whichever of the account's three counters (`vaultBytes`,
+ * `counters.items`, `counters.folders`) is missing, with the database's own
+ * totals, and leaves an installed one as it is. Uncapped on the request path;
+ * `maxTimeMS` is for a caller that must not wait (a boot migration). One
+ * compare-and-set: losing it means another request installed first, which is
+ * just as good.
+ *
+ * Safe against an install racing a write because every write path reserves (and
+ * so installs ALL THREE) before it touches a row: no row is created or removed
+ * while any counter is absent, so totals measured before the install are still
+ * the totals when it lands.
  */
-export async function installVaultBytes(
+export async function installVaultCounters(
   userId: string,
   options: { maxTimeMS?: number } = {},
 ): Promise<void> {
-  const total = await storedVaultBytes(userId, options);
+  const totals = await storedVaultTotals(userId, options);
   const now = new Date();
-  await User.updateOne(
-    { _id: userId, vaultBytes: { $not: IS_NUMBER } },
+  await User.collection.updateOne(
     {
-      $set: { vaultBytes: total, quotaRecountedAt: now, vaultBytesWrittenAt: now },
-      $inc: { quotaEpoch: 1 },
+      _id: new mongoose.Types.ObjectId(userId),
+      $or: COUNTER_PATHS.map((path) => ({ [path]: { $not: IS_NUMBER } })),
     },
-    { timestamps: false },
+    [
+      {
+        $set: {
+          vaultBytes: keepCounter('vaultBytes', totals.bytes),
+          counters: {
+            items: keepCounter('counters.items', totals.items),
+            folders: keepCounter('counters.folders', totals.folders),
+          },
+          quotaRecountedAt: now,
+          vaultBytesWrittenAt: now,
+          quotaEpoch: { $add: [{ $ifNull: ['$quotaEpoch', 0] }, 1] },
+        },
+      },
+    ],
   );
+}
+
+/** Rows of each kind an operation adds or removes. An omitted kind is zero. */
+export interface RowCounts {
+  readonly items?: number;
+  readonly folders?: number;
 }
 
 /** One reservation, to be settled or released by the operation that made it. */
 export interface VaultWriteReservation {
   readonly userId: string;
   readonly bytes: number;
+  readonly items: number;
+  readonly folders: number;
 }
 
 /** Attempts a reservation makes before deciding: an install, and an install race. */
 const RESERVE_ATTEMPTS = 3;
 
-/**
- * Reserves `bytes` (a non-negative integer) of growth for `userId` BEFORE the
- * operation writes its first row, installing a missing counter first. A zero
- * reservation is never refused. A growing one is refused with
- * {@link VaultQuotaExceededError} only when the stored total plus `bytes` exceeds
- * the quota. 404 when the account no longer exists.
- */
-export async function reserveVaultWrite(
-  userId: string,
-  { bytes }: { bytes: number },
-): Promise<VaultWriteReservation> {
-  if (!Number.isSafeInteger(bytes) || bytes < 0) {
+/** Refuses anything a reservation cannot be made of: a negative, fractional or unsafe amount. */
+function assertReservable(name: string, amount: number): void {
+  if (!Number.isSafeInteger(amount) || amount < 0) {
     throw new RangeError(
-      `A vault reservation must be a non-negative integer, not ${String(bytes)}`,
+      `A vault reservation's ${name} must be a non-negative integer, not ${String(amount)}`,
     );
   }
-  const quota = vaultQuotaBytes();
-  const filter =
-    bytes === 0
-      ? { _id: userId, vaultBytes: IS_NUMBER }
-      : { _id: userId, vaultBytes: { ...IS_NUMBER, $lte: quota - bytes } };
-  for (let attempt = 0; attempt < RESERVE_ATTEMPTS; attempt += 1) {
-    const result = await User.updateOne(
-      filter,
-      { $inc: { vaultBytes: bytes, quotaEpoch: 1 }, $set: { vaultBytesWrittenAt: new Date() } },
-      { timestamps: false },
-    );
-    if (result.matchedCount === 1) return { userId, bytes };
-    const stored = await User.findById(userId).select('vaultBytes').read('primary').lean();
-    if (!stored) throw httpErrors.notFound('User not found');
-    if (typeof stored.vaultBytes !== 'number') {
-      await installVaultBytes(userId);
-    } else if (bytes > 0 && stored.vaultBytes + bytes > quota) {
-      throw new VaultQuotaExceededError();
-    }
-    // Otherwise the update missed in the moment another request installed the
-    // counter: try again, which now matches.
-  }
-  if (bytes > 0) throw new VaultQuotaExceededError();
-  throw new Error(`The vault counter of ${userId} could not be touched`);
+}
+
+/** The filter on one counter: installed, and with room for `amount` below `ceiling` when it grows. */
+function counterRoom(amount: number, ceiling: number): Record<string, number> {
+  return amount === 0 ? IS_NUMBER : { ...IS_NUMBER, $lte: ceiling - amount };
+}
+
+/** The three counters as the driver returns them, each a number or not installed. */
+interface StoredCounters {
+  vaultBytes?: unknown;
+  counters?: { items?: unknown; folders?: unknown } | null;
 }
 
 /**
- * Adds `delta` to an INSTALLED counter, inside `session` when one is given, and
- * throws on failure. For a transaction that commits its rows and its count
- * together (a rotation): the filter requires the counter to exist, so a missing
- * one can never be installed as `delta` (the zero reservation every operation
- * takes first has installed it). Resolves to whether a counter was written.
+ * Reserves `bytes` (a non-negative integer) of growth and `items`/`folders` new
+ * rows (non-negative integers, zero when omitted) for `userId` BEFORE the
+ * operation writes its first row, in ONE conditional update: the bytes and both
+ * row caps are decided together, so no two requests can each see room for the
+ * same last row. Installs any missing counter first. A reservation that grows
+ * nothing is never refused. A growing one is refused with
+ * {@link VaultRowLimitError} when a row cap has no room (checked first: it is
+ * the refusal an account at its item limit has always been given), else with
+ * {@link VaultQuotaExceededError} when the stored total plus `bytes` exceeds the
+ * quota. 404 when the account no longer exists.
  */
-export async function addVaultBytes(
+export async function reserveVaultWrite(
   userId: string,
-  delta: number,
+  { bytes, items = 0, folders = 0 }: { bytes: number } & RowCounts,
+): Promise<VaultWriteReservation> {
+  assertReservable('bytes', bytes);
+  assertReservable('items', items);
+  assertReservable('folders', folders);
+  const quota = vaultQuotaBytes();
+  const filter = {
+    _id: userId,
+    vaultBytes: counterRoom(bytes, quota),
+    'counters.items': counterRoom(items, ROW_CAP.item),
+    'counters.folders': counterRoom(folders, ROW_CAP.folder),
+  };
+  // Every counter is named, a zero included: an `$inc` of zero changes nothing,
+  // and one shape for every reservation is one shape to recognise.
+  const increments = {
+    vaultBytes: bytes,
+    'counters.items': items,
+    'counters.folders': folders,
+    quotaEpoch: 1,
+  };
+  let lastRefusal: Error | null = null;
+  for (let attempt = 0; attempt < RESERVE_ATTEMPTS; attempt += 1) {
+    const result = await User.updateOne(
+      filter,
+      { $inc: increments, $set: { vaultBytesWrittenAt: new Date() } },
+      { timestamps: false },
+    );
+    if (result.matchedCount === 1) return { userId, bytes, items, folders };
+    const stored = await User.collection.findOne<StoredCounters>(
+      { _id: new mongoose.Types.ObjectId(userId) },
+      { projection: { vaultBytes: 1, counters: 1 }, readPreference: 'primary' },
+    );
+    if (!stored) throw httpErrors.notFound('User not found');
+    const storedItems = stored.counters?.items;
+    const storedFolders = stored.counters?.folders;
+    if (
+      typeof stored.vaultBytes !== 'number' ||
+      typeof storedItems !== 'number' ||
+      typeof storedFolders !== 'number'
+    ) {
+      await installVaultCounters(userId);
+      continue;
+    }
+    if (items > 0 && storedItems + items > ROW_CAP.item) {
+      throw new VaultRowLimitError('item', storedItems);
+    }
+    if (folders > 0 && storedFolders + folders > ROW_CAP.folder) {
+      throw new VaultRowLimitError('folder', storedFolders);
+    }
+    if (bytes > 0 && stored.vaultBytes + bytes > quota) throw new VaultQuotaExceededError();
+    // Otherwise the update missed in the moment another request installed a
+    // counter or released room: try again, which now matches. Should every
+    // attempt miss that way, the refusal is the one for the first thing the
+    // reservation grows.
+    lastRefusal =
+      items > 0
+        ? new VaultRowLimitError('item', storedItems)
+        : folders > 0
+          ? new VaultRowLimitError('folder', storedFolders)
+          : bytes > 0
+            ? new VaultQuotaExceededError()
+            : null;
+  }
+  throw lastRefusal ?? new Error(`The vault counter of ${userId} could not be touched`);
+}
+
+/** The signed change of each counter one write applies. An omitted one is zero. */
+export interface VaultCountDelta extends RowCounts {
+  readonly bytes?: number;
+}
+
+/**
+ * Adds `delta` to INSTALLED counters, inside `session` when one is given, and
+ * throws on failure. For a transaction that commits its rows and its count
+ * together (a rotation), and for {@link settleVaultWrite}: the filter requires
+ * every counter it moves to exist, so a missing one can never be installed as a
+ * delta (the zero reservation every operation takes first has installed it).
+ * Resolves to whether the counters were written.
+ */
+export async function addVaultCounts(
+  userId: string,
+  delta: VaultCountDelta,
   session?: ClientSession,
 ): Promise<boolean> {
-  // `$inc` with NaN or an infinity would store it, and no comparison matches
-  // NaN, so the counter would be stuck until a recount: refuse the arithmetic.
-  if (!Number.isFinite(delta)) {
-    throw new RangeError(`A vault byte delta must be finite, not ${String(delta)}`);
+  const moves: [string, number][] = [
+    ['vaultBytes', delta.bytes ?? 0],
+    ['counters.items', delta.items ?? 0],
+    ['counters.folders', delta.folders ?? 0],
+  ];
+  for (const [path, amount] of moves) {
+    // `$inc` with NaN or an infinity would store it, and no comparison matches
+    // NaN, so the counter would be stuck until a recount: refuse the arithmetic.
+    if (!Number.isFinite(amount)) {
+      throw new RangeError(`A vault ${path} delta must be finite, not ${String(amount)}`);
+    }
   }
-  if (delta === 0) return true;
+  const moved = moves.filter(([, amount]) => amount !== 0);
+  if (moved.length === 0) return true;
   const result = await User.updateOne(
-    { _id: userId, vaultBytes: IS_NUMBER },
-    { $inc: { vaultBytes: delta, quotaEpoch: 1 }, $set: { vaultBytesWrittenAt: new Date() } },
+    { _id: userId, ...Object.fromEntries(moved.map(([path]) => [path, IS_NUMBER])) },
+    {
+      $inc: { ...Object.fromEntries(moved), quotaEpoch: 1 },
+      $set: { vaultBytesWrittenAt: new Date() },
+    },
     session ? { timestamps: false, session } : { timestamps: false },
   );
   return result.matchedCount === 1;
 }
 
+/** {@link addVaultCounts} for a change in bytes alone. */
+export async function addVaultBytes(
+  userId: string,
+  delta: number,
+  session?: ClientSession,
+): Promise<boolean> {
+  return addVaultCounts(userId, { bytes: delta }, session);
+}
+
 /**
  * Applies what the operation actually wrote: `actualBytes` (the signed change in
- * counted bytes) less what it reserved. Never refused, and never fails the
+ * counted bytes) and `actualRows` (the signed change in rows of each kind, zero
+ * when omitted), each less what it reserved. Never refused, and never fails the
  * operation it closes: by now its rows are written, so a failure here is logged
  * (the recount corrects it) rather than turned into an error that invites a
  * duplicate retry. A zero correction writes nothing.
+ *
+ * An operation that RESERVED rows must say how many it added, since an omitted
+ * kind reads as zero and so hands the reservation back.
  */
 export async function settleVaultWrite(
   reservation: VaultWriteReservation,
   actualBytes: number,
+  actualRows: RowCounts = {},
 ): Promise<void> {
-  const correction = actualBytes - reservation.bytes;
-  if (correction === 0) return;
+  const correction = {
+    bytes: actualBytes - reservation.bytes,
+    items: (actualRows.items ?? 0) - reservation.items,
+    folders: (actualRows.folders ?? 0) - reservation.folders,
+  };
   try {
-    await addVaultBytes(reservation.userId, correction);
+    await addVaultCounts(reservation.userId, correction);
   } catch (error: unknown) {
-    logger.error('Could not settle a vault byte reservation; the hourly recount corrects it', {
+    logger.error('Could not settle a vault reservation; the hourly recount corrects it', {
       userId: reservation.userId,
-      correction,
+      ...correction,
       error: errorMessage(error),
     });
   }
@@ -624,11 +818,19 @@ export async function updateCountedRow(options: {
   throw httpErrors.conflict(VAULT_ROW_CHANGED_MESSAGE);
 }
 
+/** One row of `kind`, as a {@link RowCounts}. */
+function oneRowOf(kind: CountedKind): RowCounts {
+  return kind === 'item' ? { items: 1 } : { folders: 1 };
+}
+
 /**
- * Creates ONE counted row: reserves its predicted size, saves it, settles the size
- * of what was stored. An error propagates (after the reservation is handed back
- * when the save certainly did not apply), so a caller still maps a duplicate key
- * to its own 409.
+ * Creates ONE counted row: reserves its predicted size AND the row itself against
+ * its kind's cap (one conditional update, so the cap is atomic: F-15), saves it,
+ * settles the size of what was stored. Refused with {@link VaultRowLimitError}
+ * at the cap and {@link VaultQuotaExceededError} past the quota, before anything
+ * is written. An error from the save propagates (after the reservation is handed
+ * back when the save certainly did not apply), so a caller still maps a
+ * duplicate key to its own 409.
  */
 export async function createCountedRow<
   T extends { toObject(options: typeof STORED_IMAGE): unknown },
@@ -638,14 +840,17 @@ export async function createCountedRow<
   data: Record<string, unknown>,
   create: () => Promise<T>,
 ): Promise<T> {
-  const reservation = await reserveVaultWrite(userId, { bytes: countedBytesOfNew(kind, data) });
+  const reservation = await reserveVaultWrite(userId, {
+    bytes: countedBytesOfNew(kind, data),
+    ...oneRowOf(kind),
+  });
   let created: T;
   try {
     created = await create();
   } catch (error: unknown) {
     return releaseOnDefiniteFailure(reservation, error);
   }
-  await settleVaultWrite(reservation, countedBytes(kind, storedImage(created)));
+  await settleVaultWrite(reservation, countedBytes(kind, storedImage(created)), oneRowOf(kind));
   return created;
 }
 
@@ -751,7 +956,9 @@ export interface QuotaRecountSummary {
 /**
  * Corrects the counters that drift: a crash between a row write and its settle, an
  * ambiguous failure whose reservation was kept, a row written by something other
- * than this API. The maintenance step `vault-quota-recount` runs it hourly.
+ * than this API. The maintenance step `vault-quota-recount` runs it hourly. All
+ * THREE counters are rewritten together: the bytes and the two row counts behind
+ * the caps (F-15), from the same two aggregates.
  *
  * Only QUIET accounts are recounted (no counted write for
  * {@link QUOTA_RECOUNT_QUIESCENCE_MS}), oldest recount first, at most
@@ -780,7 +987,7 @@ export async function recountVaultQuotas(
         ],
       },
       {
-        projection: { vaultBytes: 1, quotaEpoch: 1, vaultBytesWrittenAt: 1 },
+        projection: { vaultBytes: 1, counters: 1, quotaEpoch: 1, vaultBytesWrittenAt: 1 },
         sort: { quotaRecountedAt: 1 },
         limit: QUOTA_RECOUNT_USERS_PER_RUN,
         readPreference: 'primary',
@@ -792,7 +999,7 @@ export async function recountVaultQuotas(
   for (const account of candidates) {
     const userId = String(account._id);
     try {
-      const total = await storedVaultBytes(userId, {
+      const total = await storedVaultTotals(userId, {
         maxTimeMS: QUOTA_RECOUNT_AGGREGATE_MAX_TIME_MS,
       });
       const result = await User.updateOne(
@@ -801,19 +1008,36 @@ export async function recountVaultQuotas(
           quotaEpoch: (account.quotaEpoch as unknown) ?? { $exists: false },
           vaultBytesWrittenAt: (account.vaultBytesWrittenAt as unknown) ?? { $exists: false },
         },
-        { $set: { vaultBytes: total, quotaRecountedAt: new Date() }, $inc: { quotaEpoch: 1 } },
+        {
+          $set: {
+            vaultBytes: total.bytes,
+            'counters.items': total.items,
+            'counters.folders': total.folders,
+            quotaRecountedAt: new Date(),
+          },
+          $inc: { quotaEpoch: 1 },
+        },
         { timestamps: false },
       );
       consecutiveFailures = 0;
       if (result.matchedCount === 1) {
         summary.recounted += 1;
-        if (typeof account.vaultBytes !== 'number') {
-          logger.info('Vault quota counter installed by the recount', { userId, stored: total });
-        } else if (account.vaultBytes !== total) {
+        const counted = {
+          bytes: account.vaultBytes as unknown,
+          items: (account.counters as StoredCounters['counters'])?.items,
+          folders: (account.counters as StoredCounters['counters'])?.folders,
+        };
+        if (Object.values(counted).some((value) => typeof value !== 'number')) {
+          logger.info('Vault quota counters installed by the recount', { userId, stored: total });
+        } else if (
+          counted.bytes !== total.bytes ||
+          counted.items !== total.items ||
+          counted.folders !== total.folders
+        ) {
           summary.corrected += 1;
           logger.warn('Vault quota recount corrected a drifted counter', {
             userId,
-            counted: account.vaultBytes,
+            counted,
             stored: total,
           });
         }
@@ -821,7 +1045,7 @@ export async function recountVaultQuotas(
     } catch (error: unknown) {
       summary.failures += 1;
       consecutiveFailures += 1;
-      logger.error("Could not recount an account's vault bytes", {
+      logger.error("Could not recount an account's vault counters", {
         userId,
         error: errorMessage(error),
       });

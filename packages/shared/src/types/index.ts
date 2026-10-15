@@ -488,8 +488,10 @@ export interface IItemSkipReason {
    *   occur here — non-owned items are inserted with a fresh server-minted `_id`,
    *   so a backup's foreign/duplicate `_id` can never collide.
    * - `storage_limit` — storing the item would take the account past its vault
-   *   storage quota (`VAULT_STORAGE_QUOTA_MB_PER_USER`). The rest of the restore
-   *   goes on: a later row may fit, or shrink an existing one.
+   *   storage quota (`VAULT_STORAGE_QUOTA_MB_PER_USER`), or past the item limit
+   *   when another request took the last place while the restore ran (the limit
+   *   is decided per row, atomically). The rest of the restore goes on: a later
+   *   row may fit, or shrink an existing one.
    */
   reason:
     | 'invalid_item_type'
@@ -513,7 +515,8 @@ export interface IFolderSkipReason {
    *   backup's foreign/duplicate `_id` never collides, and folders have no other
    *   unique index, so E11000 only reaches this skip path in a rare race.
    * - `storage_limit` — storing the folder would take the account past its vault
-   *   storage quota. When the backup's folder matched one the account already has
+   *   storage quota, or past the folder limit when another request took the last
+   *   place while the restore ran. When the backup's folder matched one the account already has
    *   (an overwrite, or the duplicate a keep-both would have added), the items the
    *   backup filed in it are restored into that existing folder; only a folder
    *   that would have been new leaves them unfiled.

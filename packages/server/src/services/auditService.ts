@@ -87,6 +87,9 @@ export const AUDIT_ACTION_CLASS = {
   trusted_device_grant: 'security',
   trusted_device_revoke: 'security',
   trusted_device_rejected: 'security',
+  // Written once per stolen family, and only by a client holding one of its spent
+  // tokens: never trimmed, never coalesced.
+  token_reuse_detected: 'security',
   device_proof_revoked: 'security',
   document_create: 'activity',
   document_update: 'activity',

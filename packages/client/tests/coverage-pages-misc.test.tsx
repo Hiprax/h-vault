@@ -756,6 +756,33 @@ describe('AuditLogPage - row rendering', () => {
       second.getByText(new Date('2025-06-02T08:30:00.000Z').toLocaleString()),
     ).toBeInTheDocument();
   });
+
+  it('names a replayed refresh token a stolen session, in the row and in the filter (F-16)', async () => {
+    mockGetAuditLogApi.mockResolvedValue(
+      auditOk([
+        {
+          _id: 'r1',
+          action: 'token_reuse_detected',
+          ipAddress: '203.0.113.9',
+          userAgent: 'replayer/1.0',
+          timestamp: '2025-06-03T09:00:00.000Z',
+          metadata: { sessionsRevoked: 1, trustedDevicesRevoked: 2 },
+        },
+      ]),
+    );
+
+    renderPage(<AuditLogPage />);
+
+    const table = await screen.findByRole('table');
+    const row = within(within(table).getAllByRole('row')[1]!);
+    const badge = row.getByText('Stolen Session Detected');
+    // A compromise signal, coloured like a failed sign-in rather than the neutral fallback.
+    expect(badge.className).toContain('bg-red-100');
+    expect(row.queryByText('token_reuse_detected')).toBeNull();
+    expect(screen.getByRole('option', { name: 'Stolen Session Detected' })).toHaveValue(
+      'token_reuse_detected',
+    );
+  });
 });
 
 describe('AuditLogPage - load failures', () => {

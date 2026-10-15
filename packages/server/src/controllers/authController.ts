@@ -89,6 +89,13 @@ const logger = createModuleLogger('auth');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+/**
+ * Hex characters of a refresh family id's SHA-256 kept on a reuse audit row
+ * (F-16): 64 bits, enough to tell one stolen family's rows from another's, and
+ * never the id itself.
+ */
+const FAMILY_ID_HASH_LENGTH = 16;
+
 // Pre-computed bcrypt hash used for timing-safe dummy comparisons when a user
 // is not found. This ensures the login endpoint takes approximately the same
 // time regardless of whether the email exists, preventing email enumeration
@@ -1535,18 +1542,54 @@ export const refresh = catchAsync(async (req: Request, res: Response): Promise<v
         userId: existingToken.userId.toString(),
         familyId: existingToken.familyId,
       });
+      // The family's live sessions first (counted for the record), then its other
+      // spent rows, then the devices, and only then the replayed row itself, on
+      // its own: exactly one request removes it, so exactly one request records
+      // the detection below, however many replays of one token race here. Last,
+      // so a failure part-way leaves the replayed row where the next replay finds
+      // it and runs all of this again.
+      const liveSessions = await RefreshToken.deleteMany({
+        userId: existingToken.userId,
+        familyId: existingToken.familyId,
+        usedAt: null,
+      });
       await RefreshToken.deleteMany({
         userId: existingToken.userId,
         familyId: existingToken.familyId,
+        _id: { $ne: existingToken._id },
       });
       // Reuse detection is the strongest compromise signal in the system: the
       // cookie has been replayed after rotation, so the device is presumed
       // stolen. Revoke the user's trusted devices too — otherwise a stolen-cookie
       // attacker's next login on that device would skip 2FA (§1.5 site 7).
-      await revokeTrustedDevices(existingToken.userId);
+      const trustedDevicesRevoked = await revokeTrustedDevices(existingToken.userId);
       // The device proofs go too: they share the cookie jar a stolen refresh token
       // came out of, and each one exempts a browser from the password lockout.
       await revokeDeviceProofs(existingToken.userId);
+      const detection = await RefreshToken.deleteOne({ _id: existingToken._id });
+      // And the owner can see why their sessions ended (F-16). The row's own
+      // address and user agent are THIS request's, the replayer's; the browser
+      // the stolen cookie was issued to is the family's stored device. Nothing
+      // that could be presented again is written: no token, no hash of one, and
+      // only a truncated hash of the family id, enough to tell two families apart.
+      if (detection.deletedCount === 1) {
+        const reuseCtx = getRequestContext(req);
+        await createAuditLog(
+          existingToken.userId.toString(),
+          'token_reuse_detected',
+          {
+            familyIdHash: hashToken(existingToken.familyId).slice(0, FAMILY_ID_HASH_LENGTH),
+            sessionsRevoked: liveSessions.deletedCount,
+            trustedDevicesRevoked,
+            revokedDeviceInfo: {
+              userAgent: existingToken.deviceInfo.userAgent,
+              ip: existingToken.deviceInfo.ip,
+            },
+          },
+          reuseCtx.ip,
+          reuseCtx.userAgent,
+        );
+      }
       clearRefreshCookie(res);
       throw httpErrors.unauthorized(ERROR_CODES.TOKEN_REUSE_DETECTED);
     }
@@ -1642,8 +1685,9 @@ export const logoutAll = catchAsync(async (req: Request, res: Response): Promise
   // "Log out everywhere" is an explicit user request to drop every other
   // session, so the second-factor trust granted to those devices must drop with
   // them (§1.5 site 6). Unlike per-session logout, this revokes ALL trusted
-  // devices — a returning device then has to complete 2FA again.
-  await revokeTrustedDevices(userId);
+  // devices — a returning device then has to complete 2FA again. How many went is
+  // recorded on the audit row below (F-16).
+  const trustedDevicesRevoked = await revokeTrustedDevices(userId);
 
   // EVERY device proof goes, including the one this browser holds: a stolen copy
   // of it is exactly what "log out everywhere" has to cut off, and keeping the
@@ -1675,7 +1719,7 @@ export const logoutAll = catchAsync(async (req: Request, res: Response): Promise
   await createAuditLog(
     userId,
     'session_revoke',
-    { sessionsRevoked: result.deletedCount },
+    { sessionsRevoked: result.deletedCount, trustedDevicesRevoked },
     logoutAllCtx.ip,
     logoutAllCtx.userAgent,
   );
@@ -1869,8 +1913,9 @@ export const resetPassword = catchAsync(async (req: Request, res: Response): Pro
 
   // A password reset invalidates every existing session; the second-factor trust
   // that let devices skip 2FA must drop with them (§1.5 site 1), or a device
-  // trusted under the old password would still bypass 2FA after the reset.
-  await revokeTrustedDevices(user._id);
+  // trusted under the old password would still bypass 2FA after the reset. How
+  // many went is recorded on the audit row below (F-16).
+  const trustedDevicesRevoked = await revokeTrustedDevices(user._id);
   // And every device proof: a reset changes the footing every one was granted on.
   await revokeDeviceProofs(user._id);
   // And every third-party backup recipient: suspended, its mailed links dead, until
@@ -1920,7 +1965,7 @@ export const resetPassword = catchAsync(async (req: Request, res: Response): Pro
   await createAuditLog(
     user._id.toString(),
     'password_change',
-    { method: 'reset' },
+    { method: 'reset', trustedDevicesRevoked },
     resetCtx.ip,
     resetCtx.userAgent,
   );

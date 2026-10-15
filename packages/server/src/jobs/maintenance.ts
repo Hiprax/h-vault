@@ -156,10 +156,11 @@ export async function trimEveryAccountsAuditLog(
 const MAINTENANCE_STEPS: readonly MaintenanceStep[] = [
   { name: 'audit-trim', run: () => trimEveryAccountsAuditLog() },
   { name: 'hibp-range-cap', run: () => capOnDemandRanges() },
-  // F-24: corrects the vault byte counters that drifted (a crash between a row
-  // write and its settle, an ambiguous failure whose reservation was kept), for a
-  // bounded batch of quiet accounts. 45 seconds, plus at most one account's two
-  // 5-second aggregates past it.
+  // F-24 and F-15: corrects the vault counters that drifted (a crash between a row
+  // write and its settle, an ambiguous failure whose reservation was kept): the
+  // byte count and the two row counts behind the per-user caps, rewritten together
+  // from the same two aggregates, for a bounded batch of quiet accounts. 45
+  // seconds, plus at most one account's two 5-second aggregates past it.
   { name: 'vault-quota-recount', run: () => recountVaultQuotas().then(() => undefined) },
   // Phase 6 (F-05): the confirmation mails backup recipients are still owed —
   // only ever for addresses the owner approved with the master password, within

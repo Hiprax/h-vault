@@ -392,12 +392,23 @@ const REPO_ROOT = path.resolve(__dirname, '..');
  */
 const LOG_DIRS = [path.join(REPO_ROOT, 'logs'), path.join(REPO_ROOT, 'packages', 'server', 'logs')];
 
-type LogOffsets = Map<string, number>;
+interface LogOffsets {
+  /** Every log file's size when the offsets were taken. */
+  sizes: Map<string, number>;
+  /** For each log, the file it was appending to then (the most recently written). */
+  live: Set<string>;
+}
+
+/** The log a file belongs to: its name without the date and the rotation index. */
+function logOf(file: string): string {
+  return file.replace(/-\d{4}-\d{2}-\d{2}\.log(?:\.\d+)?$/, '');
+}
 
 /**
  * A log file this scan must read, INCLUDING a rotated one.
  *
- * `@hiprax/logger` drives winston-daily-rotate-file with `maxSize: '20m'`, and
+ * The server drives winston-daily-rotate-file with `maxSize: '4m'` and at most
+ * three files kept (`LOG_FILE_ROTATION` in `utils/logger.ts`, F-17), and
  * file-stream-rotator names each new chunk by appending an INDEX to the current
  * name: once `http-2026-08-12.log` fills, the live file is
  * `http-2026-08-12.log.1`, then `.2`, while the plain `.log` never grows again.
@@ -433,9 +444,16 @@ async function logFiles(): Promise<string[]> {
 
 /** Sizes of every log file, so only what THIS session appends is read back. */
 async function logOffsets(): Promise<LogOffsets> {
-  const offsets: LogOffsets = new Map();
-  for (const file of await logFiles()) offsets.set(file, (await stat(file)).size);
-  return offsets;
+  const sizes = new Map<string, number>();
+  const newest = new Map<string, { file: string; mtimeMs: number }>();
+  for (const file of await logFiles()) {
+    const { size, mtimeMs } = await stat(file);
+    sizes.set(file, size);
+    const log = logOf(file);
+    const current = newest.get(log);
+    if (!current || mtimeMs >= current.mtimeMs) newest.set(log, { file, mtimeMs });
+  }
+  return { sizes, live: new Set([...newest.values()].map(({ file }) => file)) };
 }
 
 /**
@@ -443,16 +461,28 @@ async function logOffsets(): Promise<LogOffsets> {
  *
  * The file list is re-read here rather than taken from `before`, which is what
  * makes a rotation DURING the session visible: the new index did not exist when
- * the offsets were captured, so `before.get(file)` is undefined, `?? 0` reads it
+ * the offsets were captured, so `before.sizes.get(file)` is undefined, `?? 0` reads it
  * from the beginning, and nothing of this session is missed. Re-reading a chunk
  * in full is harmless — every sentinel is unique to this run, so an over-read
  * cannot produce a false positive.
  */
 async function logsWrittenSince(before: LogOffsets): Promise<string> {
+  // Retention keeps three files per log (F-17), deleting the oldest. Losing an
+  // older, frozen file costs this scan nothing; losing the file a log was
+  // appending to when the offsets were taken means three rotations followed it,
+  // and lines of THIS session went with it: the scan would pass over lines it
+  // never saw. That is a failure to report, never a quiet pass.
+  const now = new Set(await logFiles());
+  const pruned = [...before.live].filter((file) => !now.has(file));
+  if (pruned.length > 0) {
+    throw new Error(
+      `Log files were rotated away during the session, so its log lines cannot all be read: ${pruned.join(', ')}`,
+    );
+  }
   const chunks: string[] = [];
-  for (const file of await logFiles()) {
+  for (const file of now) {
     const size = (await stat(file)).size;
-    const from = before.get(file) ?? 0;
+    const from = before.sizes.get(file) ?? 0;
     // Nothing appended since the offsets were taken. With rotated names matched
     // this is the ordinary "idle file" case: the rotator renames forward and
     // never truncates in place, so a file that was live at capture time either

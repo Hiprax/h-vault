@@ -1574,7 +1574,12 @@ export const swaggerSpec: JsonObject = {
         properties: {
           _id: { type: 'string' },
           action: { type: 'string' },
-          metadata: { type: 'object', additionalProperties: true },
+          metadata: {
+            type: 'object',
+            additionalProperties: true,
+            description:
+              "Per action. `token_reuse_detected` (a refresh token presented again after it was rotated, so its family, every trusted device and every sign-in proof were revoked): `familyIdHash` (the first 16 hex characters of the SHA-256 of the revoked family id, never the id or any token), `sessionsRevoked` and `trustedDevicesRevoked` (what this detection revoked; a second replay racing it may have revoked some first) and `revokedDeviceInfo` (`userAgent`, `ip`: the browser the family was issued to; the row's own `ipAddress` and `userAgent` are those of the request that replayed the token). `session_revoke` (log out everywhere) carries `sessionsRevoked` and `trustedDevicesRevoked`; `password_change` with `method` `reset` carries `trustedDevicesRevoked`.",
+          },
           ipAddress: { type: 'string' },
           userAgent: { type: 'string' },
           timestamp: { type: 'string', format: 'date-time' },
@@ -4177,7 +4182,7 @@ export const swaggerSpec: JsonObject = {
                         itemSkipReasons: {
                           type: 'array',
                           description:
-                            'One entry per item not stored as requested: `itemId` and a machine-readable `reason` such as `conflict_skipped`, `invalid_item_type`, `missing_encryption_fields`, or `storage_limit` (no room left in the account storage quota; the rest of the restore goes on).',
+                            'One entry per item not stored as requested: `itemId` and a machine-readable `reason` such as `conflict_skipped`, `invalid_item_type`, `missing_encryption_fields`, or `storage_limit` (no room left in the account storage quota, or under the item limit once another request took the last place; the rest of the restore goes on).',
                           items: {
                             type: 'object',
                             properties: { itemId: { type: 'string' }, reason: { type: 'string' } },
@@ -4186,7 +4191,7 @@ export const swaggerSpec: JsonObject = {
                         folderSkipReasons: {
                           type: 'array',
                           description:
-                            'One entry per folder not stored as requested: `folderId` and a machine-readable `reason` such as `conflict_skipped`, or `storage_limit` (no room left in the account storage quota; when the folder in the backup matched one the account already has, overwrite or keep both, its items are restored into that folder, and only a folder that would have been new leaves them unfiled).',
+                            'One entry per folder not stored as requested: `folderId` and a machine-readable `reason` such as `conflict_skipped`, or `storage_limit` (no room left in the account storage quota, or under the folder limit once another request took the last place; when the folder in the backup matched one the account already has, overwrite or keep both, its items are restored into that folder, and only a folder that would have been new leaves them unfiled).',
                           items: {
                             type: 'object',
                             properties: {

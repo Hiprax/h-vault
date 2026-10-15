@@ -34,6 +34,7 @@ import { VaultItem } from '../src/models/VaultItem.js';
 import { AuditLog } from '../src/models/AuditLog.js';
 import { User } from '../src/models/User.js';
 import { acquireJobLock, releaseJobLock } from '../src/utils/jobLock.js';
+import { reserveVaultWrite } from '../src/utils/vaultQuota.js';
 import { JobLock } from '../src/models/JobLock.js';
 import {
   pickAllowedFields,
@@ -115,6 +116,17 @@ async function postOperations(
     .set('x-csrf-token', csrf.token)
     .set('Cookie', csrf.cookie)
     .send({ format: 'json', operations, ...extra });
+}
+
+/**
+ * Plants the account's item count in its row counter (F-15: the cap is held
+ * there, reserved against in one conditional write, and `countDocuments` is no
+ * longer read). The counters are installed first by a zero reservation, exactly
+ * what any write does. Minting 10,000 real rows would be far too slow.
+ */
+async function plantItemCount(userId: string, count: number): Promise<void> {
+  await reserveVaultWrite(userId, { bytes: 0 });
+  await User.updateOne({ _id: userId }, { $set: { 'counters.items': count } });
 }
 
 describe('Phase 6 — POST /tools/import executes structured operations', () => {
@@ -545,17 +557,15 @@ describe('Phase 6 — POST /tools/import executes structured operations', () => 
     // The rejection must originate INSIDE the locked region or this proves
     // nothing: validation failures (an unknown update id, an over-long field)
     // all fire before the lock is ever taken, so they would pass even with the
-    // `finally` release deleted. The cap check is the first step under the lock,
-    // so drive the failure through that.
-    const countSpy = vi
-      .spyOn(VaultItem, 'countDocuments')
-      .mockResolvedValue(MAX_ITEMS_PER_USER as never);
+    // `finally` release deleted. The cap reservation runs under the lock, so
+    // drive the failure through that.
+    await plantItemCount(user.id, MAX_ITEMS_PER_USER);
 
     const rejected = await postOperations(user.accessToken, { inserts: [insertRow(1)] });
     expect(rejected.status).toBe(400);
     expect(JSON.stringify(rejected.body)).toMatch(/per-user item limit/i);
 
-    countSpy.mockRestore();
+    await plantItemCount(user.id, 0);
 
     const retry = await postOperations(user.accessToken, { inserts: [insertRow(1)] });
     expect(retry.status).toBe(201);
@@ -586,9 +596,7 @@ describe('Phase 6 — POST /tools/import executes structured operations', () => 
     const existing = await seedItem(user.id, { encryptedData: 'original-data' });
 
     // Pinned rather than seeded: minting 10,000 real rows would be far too slow.
-    // The stub is persistent because the executor counts twice — once before the
-    // lock and once against the state the writes observe.
-    vi.spyOn(VaultItem, 'countDocuments').mockResolvedValue((MAX_ITEMS_PER_USER - 1) as never);
+    await plantItemCount(user.id, MAX_ITEMS_PER_USER - 1);
 
     const res = await postOperations(user.accessToken, {
       inserts: [insertRow(1), insertRow(2)],
@@ -608,7 +616,7 @@ describe('Phase 6 — POST /tools/import executes structured operations', () => 
   it('counts updates as free: an updates-only request at the cap still succeeds', async () => {
     const existing = await seedItem(user.id, { encryptedData: 'original-data' });
 
-    vi.spyOn(VaultItem, 'countDocuments').mockResolvedValue(MAX_ITEMS_PER_USER as never);
+    await plantItemCount(user.id, MAX_ITEMS_PER_USER);
 
     const res = await postOperations(user.accessToken, {
       updates: [updateRow(String(existing._id))],
@@ -620,7 +628,7 @@ describe('Phase 6 — POST /tools/import executes structured operations', () => 
   });
 
   it('allows a request that lands exactly on the cap', async () => {
-    vi.spyOn(VaultItem, 'countDocuments').mockResolvedValue((MAX_ITEMS_PER_USER - 2) as never);
+    await plantItemCount(user.id, MAX_ITEMS_PER_USER - 2);
 
     const res = await postOperations(user.accessToken, {
       inserts: [insertRow(1), insertRow(2)],
@@ -629,6 +637,10 @@ describe('Phase 6 — POST /tools/import executes structured operations', () => 
     expect(res.status).toBe(201);
     expect(res.body.data.insertedCount).toBe(2);
     expect(await rawItems(user.id)).toHaveLength(2);
+    // The two rows took the last two places.
+    expect((await User.findById(user.id).select('+counters').lean())?.counters?.items).toBe(
+      MAX_ITEMS_PER_USER,
+    );
   });
 
   // ── Audit trail ──────────────────────────────────────────────────────

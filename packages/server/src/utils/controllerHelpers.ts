@@ -344,21 +344,18 @@ export async function releaseVaultRotationLock(userId: string, lockId: string): 
  * The distributed-lock name a vault import holds for its user, mirroring
  * {@link vaultRotationLockName}.
  *
- * `toolsController.importVault` checks the per-user item cap and then writes;
- * without serialization two overlapping imports can each read a count that fits
- * and then both insert, breaching `MAX_ITEMS_PER_USER`. A transaction alone does
- * NOT close that race on every topology — a standalone deployment (and the
- * default test harness) rejects multi-document transactions entirely — so the
- * lock is what actually bounds concurrency. `acquireJobLock` is an atomic upsert
- * against the unique `jobName` index, which holds with or without transactions.
+ * It serialises one account's imports: their derived-id pre-check, their
+ * measures and their writes never interleave. A transaction alone does NOT do
+ * that on every topology — a standalone deployment (and the default test
+ * harness) rejects multi-document transactions entirely — so the lock is what
+ * bounds concurrency. `acquireJobLock` is an atomic upsert against the unique
+ * `jobName` index, which holds with or without transactions.
  *
- * Scope: `operations` is now the only import wire shape, so this lock covers
- * every import — import-vs-import cannot breach the cap on any topology. What it
- * does NOT cover is a row committed by a DIFFERENT endpoint (`POST /items`,
- * `POST /backup/restore`) between the executor's count and its insert; that
- * narrower window is pre-existing, is shared with `vaultController.createItem`'s
- * own count-then-write check, and is documented where it is taken in
- * `toolsController.executeImportOperations`.
+ * It is NOT what holds `MAX_ITEMS_PER_USER`, and could not be: a create from a
+ * DIFFERENT endpoint (`POST /items`, `POST /backup/restore`) does not take it.
+ * The cap is held by the account's row counter, which every inserter reserves in
+ * one conditional write before it inserts (`reserveVaultWrite`, F-15), so an
+ * import and a create racing for the last place cannot both have it.
  */
 export function vaultImportLockName(userId: string): string {
   return `vault-import:${userId}`;
@@ -371,8 +368,9 @@ export function vaultImportLockName(userId: string): string {
  *
  * That difference is the design. `documentController.initUpload` decides three
  * per-user budgets — the document count, the concurrent-transfer count and the
- * byte quota — by reading a count and then writing a staging row, which is the
- * same read-then-write an import performs against `MAX_ITEMS_PER_USER`. Two
+ * byte quota — by reading a count and then writing a staging row, the
+ * read-then-write an import used to perform against `MAX_ITEMS_PER_USER` before
+ * that cap became a counter reservation (F-15). Two
  * opens that each individually fit can therefore both pass the read and both
  * write, and the budgets they breach are per-user, so the lock has to be too. As
  * there, a transaction alone would not close it on every topology: a standalone

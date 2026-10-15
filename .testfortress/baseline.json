@@ -1,9 +1,9 @@
 {
   "version": 1,
   "recordedAt": "2026-10-15",
-  "commit": "11f7d12",
+  "commit": "f3a1bf7",
   "tests": {
-    "count": 13203
+    "count": 13250
   },
   "coverage": {
     "diff": 100
@@ -56,11 +56,11 @@
     },
     "packages/server": {
       "coverage": {
-        "line": 99.37,
-        "branch": 94.54,
-        "function": 98.92,
-        "linesTotal": 6325,
-        "branchesTotal": 3442,
+        "line": 99.38,
+        "branch": 94.59,
+        "function": 98.94,
+        "linesTotal": 6406,
+        "branchesTotal": 3509,
         "filesMeasured": [
           "src/app.ts",
           "src/cli/invite.ts",
@@ -187,7 +187,7 @@
         ]
       },
       "tests": {
-        "count": 5673
+        "count": 5719
       }
     },
     "packages/client": {
@@ -409,7 +409,7 @@
         ]
       },
       "tests": {
-        "count": 5766
+        "count": 5767
       }
     },
     "e2e": {
@@ -643,7 +643,7 @@
       "spectral": 1
     }
   },
-  "reason": "Phase 11 crypto-client (F-11, F-12): improvements of the green phase-end npm run ci (tests added; server coverage up; duplication down), after the SUP-0062..0064 denominator reduction signed off by both read-only judges",
+  "reason": "Phase 12 (F-15/F-16/F-17): new regression suites for atomic row caps, reuse auditing and bounded logs; measured by npm run ci, 31/31 green",
   "bundle": {
     "budgetKb": {
       "VaultItemForm": 230,

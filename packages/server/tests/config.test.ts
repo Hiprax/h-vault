@@ -2291,6 +2291,11 @@ describe('Server Config Validation', () => {
         readBy: 'packages/server/src/utils/logger.ts',
         reads: 'env.LOG_DIRECTORY',
       },
+      // Read from `process.env` by the logger too, for the same reason (F-17).
+      LOG_MODULE_FILES: {
+        readBy: 'packages/server/src/utils/logger.ts',
+        reads: 'env.LOG_MODULE_FILES',
+      },
     };
 
     it('exposes the schema key set it is derived from, and not an empty list', async () => {

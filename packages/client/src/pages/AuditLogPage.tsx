@@ -67,6 +67,7 @@ import { AUDIT_ACTIONS } from '@hvault/shared';
 const ACTION_COLORS: Record<string, string> = {
   login: 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400',
   login_failed: 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400',
+  token_reuse_detected: 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400',
   logout: 'bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-400',
   password_change: 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400',
   '2fa_enable': 'bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400',
@@ -125,6 +126,7 @@ const ACTION_LABELS: Record<string, string> = {
   trusted_device_grant: 'Trusted Device Added',
   trusted_device_revoke: 'Trusted Device Revoked',
   trusted_device_rejected: 'Trusted Device Rejected',
+  token_reuse_detected: 'Stolen Session Detected',
   device_proof_revoked: 'Sign-in Proof Revoked',
   document_create: 'Document Uploaded',
   document_update: 'Document Updated',

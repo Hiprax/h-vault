@@ -2162,7 +2162,7 @@ describe('BackupSettingsPage — emails, download, restore branches', () => {
   // so the account holds PART of the backup. That is said in its own notice,
   // never as a success, and the notice names the counts and the keep-both trap.
   const STORAGE_LIMIT_DESCRIPTION =
-    'Everything else in the backup was restored. Items filed in a folder you already have went into that folder; items filed in a new folder that could not be added were restored without a folder. Delete items or empty the trash to make room before restoring again; with "keep both", a second restore adds another copy of everything already restored.';
+    'Everything else in the backup was restored. Items filed in a folder you already have went into that folder; items filed in a new folder that could not be added were restored without a folder. Delete items or folders, or empty the trash, to make room before restoring again; with "keep both", a second restore adds another copy of everything already restored.';
 
   it('says a restore the storage quota cut short is partial, with the counts, and never calls it a success', async () => {
     mockApiPost.mockResolvedValue({

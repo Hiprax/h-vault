@@ -16,9 +16,10 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import request from 'supertest';
+import mongoose from 'mongoose';
 import { MAX_ITEMS_PER_USER } from '@hvault/shared';
 import app from '../src/app.js';
-import { VaultItem } from '../src/models/VaultItem.js';
+import { reserveVaultWrite } from '../src/utils/vaultQuota.js';
 import {
   createTestUser,
   authHeader,
@@ -82,21 +83,22 @@ function updateRow(id: string, overrides: Record<string, unknown> = {}): Record<
 }
 
 /**
- * Pins the user's existing item count one below the cap, so a 1+ row net-new
- * insert would cross it. Seeding 10,000 real rows would be prohibitively slow.
+ * Pins the user's existing item count (usually one below the cap), so a 1+ row
+ * net-new insert would cross it. Seeding 10,000 real rows would be prohibitively
+ * slow.
  *
- * The stub is PERSISTENT (`mockResolvedValue`), not single-shot. `vi.spyOn`
- * retains the real implementation, so with `mockResolvedValueOnce` a second
- * `countDocuments` call anywhere in the request would quietly fall through to
- * the true count (3, say) and the pin would stop pinning — the assertions below
- * would then pass or fail for a reason unrelated to the cap. The executor
- * deliberately counts TWICE (once before taking the per-user lock, once again
- * against the state the writes observe), so a single-shot pin is not safe to
- * reach for on this endpoint at all. `vi.restoreAllMocks()` in `afterEach`
- * clears it between tests.
+ * The cap is held by the account's row counter (`counters.items`, F-15), which
+ * the import reserves its inserts against in one conditional write; it no longer
+ * reads `countDocuments` at all. So the pin installs the counters (a zero
+ * reservation, exactly what any write does first) and then plants the count. The
+ * rows the test seeds are still real, so everything else the import does
+ * (matching update targets, writing) runs against the true state.
  */
-function pinExistingItemCount(count: number): void {
-  vi.spyOn(VaultItem, 'countDocuments').mockResolvedValue(count as never);
+async function pinExistingItemCount(userId: string, count: number): Promise<void> {
+  await reserveVaultWrite(userId, { bytes: 0 });
+  await mongoose.connection
+    .collection('users')
+    .updateOne({ _id: new mongoose.Types.ObjectId(userId) }, { $set: { 'counters.items': count } });
 }
 
 describe('import per-user cap counts net-new inserts', () => {
@@ -124,7 +126,7 @@ describe('import per-user cap counts net-new inserts', () => {
       );
     }
 
-    pinExistingItemCount(MAX_ITEMS_PER_USER - 1);
+    await pinExistingItemCount(user.id, MAX_ITEMS_PER_USER - 1);
 
     const res = await postImport(
       user.accessToken,
@@ -150,7 +152,7 @@ describe('import per-user cap counts net-new inserts', () => {
       });
     }
 
-    pinExistingItemCount(MAX_ITEMS_PER_USER - 1);
+    await pinExistingItemCount(user.id, MAX_ITEMS_PER_USER - 1);
 
     const res = await postImport(
       user.accessToken,
@@ -165,7 +167,7 @@ describe('import per-user cap counts net-new inserts', () => {
   });
 
   it('rejects an import whose net-new inserts would cross the cap', async () => {
-    pinExistingItemCount(MAX_ITEMS_PER_USER - 1);
+    await pinExistingItemCount(user.id, MAX_ITEMS_PER_USER - 1);
 
     const res = await postImport(
       user.accessToken,
@@ -179,7 +181,7 @@ describe('import per-user cap counts net-new inserts', () => {
   });
 
   it('allows an import that lands exactly on the cap', async () => {
-    pinExistingItemCount(MAX_ITEMS_PER_USER - 3);
+    await pinExistingItemCount(user.id, MAX_ITEMS_PER_USER - 3);
 
     const res = await postImport(user.accessToken, {
       inserts: [insertRow(10), insertRow(11), insertRow(12)],
@@ -212,7 +214,7 @@ describe('import per-user cap counts net-new inserts', () => {
 
     // Two rows are updates (net-new 0) and three are inserts — so net-new is 3
     // and the cap rejects. The updates must not have been applied first.
-    pinExistingItemCount(MAX_ITEMS_PER_USER - 1);
+    await pinExistingItemCount(user.id, MAX_ITEMS_PER_USER - 1);
 
     const res = await postImport(user.accessToken, {
       updates: seeded.map((item) => updateRow(String(item._id), { encryptedData: 'mutated' })),
