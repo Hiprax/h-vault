@@ -3748,3 +3748,28 @@ describe('folderResponseSchema', () => {
     expect(folderResponseSchema.safeParse(rest).success).toBe(false);
   });
 });
+
+describe('a folder sort position of -0', () => {
+  // JSON can spell `-0`, and BSON stores it as a double where `0` is an int32: the
+  // schemas normalise it, so a stored position never depends on how a client
+  // happened to write zero.
+  it('is stored as 0 by create, update and reorder alike', () => {
+    const created = createFolderSchema.parse({
+      encryptedName: 'n',
+      nameIv: 'i',
+      nameTag: 't',
+      sortOrder: -0,
+    });
+    const reordered = reorderFolderSchema.parse({ sortOrder: -0 });
+    const updated = updateFolderSchema.parse({ sortOrder: -0 });
+
+    expect(Object.is(created.sortOrder, 0)).toBe(true);
+    expect(Object.is(reordered.sortOrder, 0)).toBe(true);
+    expect(Object.is(updated.sortOrder, 0)).toBe(true);
+  });
+
+  it('leaves every other position as it was', () => {
+    expect(reorderFolderSchema.parse({ sortOrder: 7 }).sortOrder).toBe(7);
+    expect(reorderFolderSchema.parse({ sortOrder: 0 }).sortOrder).toBe(0);
+  });
+});

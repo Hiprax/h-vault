@@ -188,6 +188,23 @@ try {
 
   if (booted) {
     // -----------------------------------------------------------------------
+    // 2b. The emitted entry point binds where HOST says, and nowhere else
+    // -----------------------------------------------------------------------
+    // The server logs the address the KERNEL bound (`server.address()`), not the
+    // configured one, and this gate starts it with HOST=127.0.0.1. A `server.ts`
+    // that stopped passing the host would bind every interface and still answer
+    // every probe below on loopback; only this line tells the two apart (F-23).
+    const bound = boot.boundAddress();
+    const expectedBound = `127.0.0.1:${String(port)}`;
+    record(
+      'listen-address',
+      bound === expectedBound,
+      bound === expectedBound
+        ? `the artifact bound ${bound}, loopback only, as HOST asks`
+        : `the artifact reported binding ${String(bound)}, expected ${expectedBound}`,
+    );
+
+    // -----------------------------------------------------------------------
     // 3. The SPA shell, with the nonce production attaches to it (b)
     // -----------------------------------------------------------------------
     // A DEEP LINK, not `/`. `express.static` is mounted first and answers `/`

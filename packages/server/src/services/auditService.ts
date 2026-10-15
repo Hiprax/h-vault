@@ -160,7 +160,9 @@ function coalesceTarget(action: AuditAction, metadata: AuditMetadata | undefined
  *
  * Only the newest row, so a coalesced row always stands for one uninterrupted run
  * of identical edits, and two actors interleaving on one item — which is exactly
- * what the owner of a shared or hijacked account needs to see — never share a row.
+ * what the owner of a shared or hijacked account needs to see — never share a row,
+ * as far as an actor can be told apart: by address and user agent (two browsers
+ * behind one address sending an identical user-agent string are one actor here).
  * The row takes the LATEST edit's time and metadata (a locked-attempt row, by
  * contrast, keeps the first attempt's); `$max` keeps a slower concurrent request
  * from moving the time backwards, and `$inc` counts both. The write re-states the
@@ -588,6 +590,18 @@ function isDuplicateKey(err: unknown): boolean {
 }
 
 /**
+ * The filter that finds a coalesced row by its key, written so its index serves
+ * it. `{coalesceKey: 1}` is a PARTIAL index (`$type: 'string'`), and the planner
+ * uses a partial index only for a query that states its filter expression: an
+ * equality on a string is not taken to imply `$type`, so `{coalesceKey}` alone is
+ * a scan of every account's audit log on every locked, unknown-address or
+ * mid-deletion sign-in. The `$eq` still seeds the field of an upserted row.
+ */
+function byCoalesceKey(coalesceKey: string): Record<string, unknown> {
+  return { coalesceKey: { $eq: coalesceKey, $type: 'string' } };
+}
+
+/**
  * Records ONE unproven sign-in attempt made while the account's password is
  * locked, as `login_failed{reason:'locked'}`, coalesced into one row per account
  * per minute whatever the address or user agent, with `count` holding the
@@ -621,14 +635,14 @@ export async function recordLockedAttempt(
     let inserted: boolean;
     try {
       const result = await AuditLog.updateOne(
-        { coalesceKey },
+        byCoalesceKey(coalesceKey),
         { $inc: { count: 1 }, $setOnInsert: insertFields },
         { upsert: true, setDefaultsOnInsert: false },
       );
       inserted = result.upsertedCount === 1;
     } catch (err: unknown) {
       if (!isDuplicateKey(err)) throw err;
-      await AuditLog.updateOne({ coalesceKey }, { $inc: { count: 1 } });
+      await AuditLog.updateOne(byCoalesceKey(coalesceKey), { $inc: { count: 1 } });
       inserted = false;
     }
     if (inserted) {
@@ -649,7 +663,7 @@ export async function recordLockedAttempt(
  */
 export async function recordNothing(): Promise<void> {
   try {
-    await AuditLog.updateOne({ coalesceKey: '|nobody|' }, { $inc: { count: 1 } });
+    await AuditLog.updateOne(byCoalesceKey('|nobody|'), { $inc: { count: 1 } });
   } catch (err: unknown) {
     logger.error('Failed the equalising audit round trip', { error: errorMessage(err) });
   }

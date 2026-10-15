@@ -33,6 +33,7 @@ import {
   vaultKeyVersionOf,
 } from '../utils/controllerHelpers.js';
 import { canInvite } from '../utils/invitations.js';
+import { vaultQuotaBytes } from '../utils/vaultQuota.js';
 import { readStringCookie } from '../utils/cookies.js';
 import { lockoutClearUpdate } from '../utils/lockout.js';
 import {
@@ -225,6 +226,13 @@ export const getProfile = catchAsync(async (req: Request, res: Response): Promis
     // invitation AND this account is one of the operator's listed inviters. A
     // convenience for the UI only; `POST /auth/invitations` decides it again.
     canInvite: canInvite(user.email),
+    // The vault byte quota: what this account's items and folders occupy (trash
+    // included, since a trashed row stays stored until it is purged) and the
+    // ceiling a growing write is refused at. `null` until the counter is installed,
+    // which the first counted write or the hourly recount does; the client then
+    // shows no usage rather than a zero it cannot vouch for.
+    vaultBytes: typeof user.vaultBytes === 'number' ? user.vaultBytes : null,
+    vaultQuotaBytes: vaultQuotaBytes(),
     ...(interruptedRotation
       ? {
           pendingEncryptedVaultKey: user.pendingEncryptedVaultKey,

@@ -357,14 +357,17 @@ if the code is wrong, fix the code. See the next section.
 
 ### Refreshing the release workflow's pins
 
-`.github/workflows/release.yml` runs nothing it has not pinned. Each action it uses is
+`.github/workflows/release.yml` pins everything it fetches itself. Each action it uses is
 named by a full 40-character commit SHA, with the release it corresponds to in a trailing
-`# vX.Y.Z` comment. Each binary it downloads is checked against a SHA-256 committed on the
-line after the download. `diff-cover` and every package it imports come from the
+`# vX.Y.Z` comment. Each binary it downloads is checked against a SHA-256 committed in the
+`sha256sum --check` line that follows the download (the line above that check names the
+checksum file the hash came from). `diff-cover` and every package it imports come from the
 hash-locked `scripts/ci/requirements-diff-cover.txt`. None of these moves on its own. A
 new upstream release changes nothing here until someone edits the pin, which is the point:
 a moved tag or a replaced release asset can no longer reach the job. The cost is that
-refreshing a pin is a deliberate edit, done like this.
+refreshing a pin is a deliberate edit, done like this. (What the gauntlet itself pulls in
+without a hash committed here, such as the browsers, the base images and the scanner image,
+is listed in SECURITY.md; those are not pins this procedure moves.)
 
 - **An action.** Resolve the tag to the commit it points at, with read-only calls:
 

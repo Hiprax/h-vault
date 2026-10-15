@@ -30,8 +30,9 @@ function outboundMailDay(now: Date): string {
  *
  * ONE conditional update, so concurrent claims cannot both read a count that fits
  * and both spend it: the filter admits the write only while a stored count for
- * today leaves room for `count` more, or while the stored day is another day (or
- * absent), in which case the pipeline starts today's count at `count`. A claimed
+ * today leaves room for `count` more, or while the stored day is an EARLIER day (or
+ * absent), in which case the pipeline starts today's count at `count`. A claim
+ * stamped with a day before the stored one is refused, never a reset backwards. A claimed
  * message that then fails to send is NOT handed back: it was an attempt, and a
  * relay that keeps refusing is exactly what the budget must not let a caller
  * retry without bound.
@@ -48,8 +49,15 @@ export async function claimOutboundMail(
   const result = await User.updateOne(
     {
       _id: userId,
+      // FORWARD ONLY: a stored day that is absent or EARLIER than today starts
+      // today's count, and today's count admits the claim while it fits. A stored
+      // day LATER than this claim's (a run that started before midnight and claims
+      // after another request began the new day) matches neither branch, so the
+      // claim is refused rather than resetting the new day's count back to zero.
+      // `YYYY-MM-DD` strings order as the days do.
       $or: [
-        { 'outboundMail.day': { $ne: today } },
+        { 'outboundMail.day': null },
+        { 'outboundMail.day': { $lt: today } },
         {
           'outboundMail.day': today,
           'outboundMail.count': { $lte: MAX_BACKUP_MAILS_PER_USER_PER_DAY - count },

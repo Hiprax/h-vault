@@ -1095,6 +1095,14 @@ export default function BackupSettingsPage() {
         const trashedAutoRestoredCount = (restoreResponse.data.data.itemSkipReasons ?? []).filter(
           (r) => r.reason === 'trashed_auto_restored',
         ).length;
+        // Rows the server had no room for in the account's storage quota. The rest
+        // of the restore went on, so the account now holds PART of the backup.
+        const itemsOverQuota = (restoreResponse.data.data.itemSkipReasons ?? []).filter(
+          (r) => r.reason === 'storage_limit',
+        ).length;
+        const foldersOverQuota = (restoreResponse.data.data.folderSkipReasons ?? []).filter(
+          (r) => r.reason === 'storage_limit',
+        ).length;
 
         const totalFiltered = filteredCount + filteredFolderCount;
         if (totalFiltered > 0) {
@@ -1110,8 +1118,21 @@ export default function BackupSettingsPage() {
             title: `Backup restored. ${String(trashedAutoRestoredCount)} trashed item(s) were auto-restored regardless of the conflict strategy.`,
             type: 'warning',
           });
-        } else {
+        } else if (itemsOverQuota + foldersOverQuota === 0) {
           toast({ title: 'Backup restored successfully', type: 'success' });
+        }
+
+        // Its OWN notice, whichever branch above was taken: a partial restore is
+        // true alongside any of them, and the remedy (make room, then restore
+        // again) has a trap worth naming, since with "keep both" a second run
+        // stores another copy of everything the first one did restore.
+        if (itemsOverQuota + foldersOverQuota > 0) {
+          toast({
+            title: `Storage limit reached: ${String(itemsOverQuota)} item(s) and ${String(foldersOverQuota)} folder(s) were not restored.`,
+            description:
+              'Everything else in the backup was restored. Items filed in a folder you already have went into that folder; items filed in a new folder that could not be added were restored without a folder. Delete items or empty the trash to make room before restoring again; with "keep both", a second restore adds another copy of everything already restored.',
+            type: 'warning',
+          });
         }
 
         // Documents are not part of a backup, so a restored account can look

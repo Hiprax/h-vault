@@ -219,12 +219,26 @@ export async function issueDeviceProof(
  * minutes. Without it a stranger's next ten guesses re-lock the account within
  * seconds of the link being used, and an owner with no session and no proof would
  * be locked out of every new sign-in for as long as the guessing went on.
+ *
+ * Best effort, and it never throws, like {@link issueDeviceProof}: both of its
+ * callers run it AFTER a step that cannot be undone (the unlock link is already
+ * spent; log-out-everywhere has already revoked every proof), and what follows it
+ * there (the unlock's audit row; the suspension of every third-party backup
+ * recipient and the audit row) must still happen. The cost of a failure is only
+ * that this browser is not proven next time.
  */
 export async function issueUnlockProof(
   res: Response,
   userId: mongoose.Types.ObjectId,
 ): Promise<void> {
-  await mint(res, userId, UNLOCK_PROOF_MS, true);
+  try {
+    await mint(res, userId, UNLOCK_PROOF_MS, true);
+  } catch (err: unknown) {
+    logger.error('Failed to issue an unlock proof', {
+      userId: userId.toString(),
+      error: errorMessage(err),
+    });
+  }
 }
 
 /**
@@ -280,17 +294,17 @@ export async function recordProofFailure(
 }
 
 /**
- * Revokes an account's proofs: every one, or every one but `keep` (the calling
- * browser's own, for log-out-everywhere). Pass `session` inside a transaction so
- * the revocation commits or aborts with the rest.
+ * Revokes EVERY proof an account holds. Pass `session` inside a transaction so the
+ * revocation commits or aborts with the rest. Log-out-everywhere revokes the
+ * caller's own proof too (a stolen copy of it is what that action exists to cut
+ * off) and then re-proves the caller with a fresh one.
  */
 export async function revokeDeviceProofs(
   userId: mongoose.Types.ObjectId | string,
-  options: { session?: mongoose.ClientSession; keep?: mongoose.Types.ObjectId } = {},
+  options: { session?: mongoose.ClientSession } = {},
 ): Promise<number> {
-  const filter = options.keep === undefined ? { userId } : { userId, _id: { $ne: options.keep } };
   const result = await DeviceProof.deleteMany(
-    filter,
+    { userId },
     options.session ? { session: options.session } : {},
   );
   return result.deletedCount;

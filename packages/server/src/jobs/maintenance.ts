@@ -7,6 +7,7 @@ import { acquireJobLock, releaseJobLock } from '../utils/jobLock.js';
 import { trackJob } from '../utils/jobTracker.js';
 import { capOnDemandRanges } from '../utils/breachRangeCap.js';
 import { sendOwedRecipientConfirmations } from '../utils/backupRecipients.js';
+import { recountVaultQuotas } from '../utils/vaultQuota.js';
 
 const logger = createModuleLogger('jobs/maintenance');
 
@@ -155,10 +156,15 @@ export async function trimEveryAccountsAuditLog(
 const MAINTENANCE_STEPS: readonly MaintenanceStep[] = [
   { name: 'audit-trim', run: () => trimEveryAccountsAuditLog() },
   { name: 'hibp-range-cap', run: () => capOnDemandRanges() },
+  // F-24: corrects the vault byte counters that drifted (a crash between a row
+  // write and its settle, an ambiguous failure whose reservation was kept), for a
+  // bounded batch of quiet accounts. 45 seconds, plus at most one account's two
+  // 5-second aggregates past it.
+  { name: 'vault-quota-recount', run: () => recountVaultQuotas().then(() => undefined) },
   // Phase 6 (F-05): the confirmation mails backup recipients are still owed —
   // only ever for addresses the owner approved with the master password, within
-  // each account's daily email budget. Last and short (one minute): the two steps
-  // above budget 13 of the lock's 15 minutes.
+  // each account's daily email budget. Last and short (one minute): the steps
+  // above budget just under 14 of the lock's 15 minutes.
   { name: 'backup-recipient-confirmations', run: () => sendOwedRecipientConfirmations() },
 ];
 

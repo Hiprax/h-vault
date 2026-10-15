@@ -7,15 +7,16 @@ import { propertyJunitReport } from '../../tests/harness/propertyReport.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 /**
- * This package's leg of the `test:property` suite: the folder-graph model.
+ * This package's leg of the `test:property` suite: the folder-graph model, the
+ * backup/export size estimator (never below the streamed JSON), and the vault
+ * byte quota's measure (the JavaScript measure equals the database's).
  *
  * Every file here also runs under `test:integration`, which is the whole server
  * suite — so this narrows NOTHING. It exists for the same two reasons
- * `test:security` does: "no sequence of folder operations can produce a cycle or
- * a chain deeper than the cap, and `hasCycle` agrees with a hand-checked
- * reference" deserves a gate a reviewer can point at when a guard in
- * `folderController` is refactored, and that gate must be able to fail on its
- * own.
+ * `test:security` does: a property such as "no sequence of folder operations can
+ * produce a cycle or a chain deeper than the cap, and `hasCycle` agrees with a
+ * hand-checked reference" deserves a gate a reviewer can point at when the code
+ * behind it is refactored, and that gate must be able to fail on its own.
  *
  * The membership is declared HERE rather than as positional filters on the
  * command line: a config that names its files is a suite definition, whereas a
@@ -26,7 +27,11 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  * the include set matches NOTHING, so renaming one file would leave the others
  * running and this gate quietly smaller.
  */
-export const SERVER_PROPERTY_SUITE = ['tests/property/folderGraph.property.test.ts'];
+export const SERVER_PROPERTY_SUITE = [
+  'tests/property/folderGraph.property.test.ts',
+  'tests/property/sizeEstimator.property.test.ts',
+  'tests/property/vaultQuotaMeasure.property.test.ts',
+];
 
 /**
  * Its OWN JUnit report, per package AND per zone — see

@@ -2158,6 +2158,89 @@ describe('BackupSettingsPage — emails, download, restore branches', () => {
     expect(screen.queryByPlaceholderText('Backup encryption password')).not.toBeInTheDocument();
   });
 
+  // A restore the account's storage quota had no room for, in part: the server
+  // skips each row that does not fit as `storage_limit` and restores the rest,
+  // so the account holds PART of the backup. That is said in its own notice,
+  // never as a success, and the notice names the counts and the keep-both trap.
+  const STORAGE_LIMIT_DESCRIPTION =
+    'Everything else in the backup was restored. Items filed in a folder you already have went into that folder; items filed in a new folder that could not be added were restored without a folder. Delete items or empty the trash to make room before restoring again; with "keep both", a second restore adds another copy of everything already restored.';
+
+  it('says a restore the storage quota cut short is partial, with the counts, and never calls it a success', async () => {
+    mockApiPost.mockResolvedValue({
+      data: {
+        success: true,
+        data: {
+          itemsRestored: 1,
+          itemsSkipped: 2,
+          foldersRestored: 0,
+          foldersSkipped: 1,
+          itemSkipReasons: [
+            { itemId: 'i1', reason: 'storage_limit' },
+            { itemId: 'i2', reason: 'storage_limit' },
+          ],
+          folderSkipReasons: [{ folderId: 'f1', reason: 'storage_limit' }],
+        },
+      },
+    });
+
+    await performRestore({
+      items: [SAMPLE_ITEM],
+      folders: [],
+      backupEncryption: FILE_ENCRYPTION_META,
+    });
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith({
+        title: 'Storage limit reached: 2 item(s) and 1 folder(s) were not restored.',
+        description: STORAGE_LIMIT_DESCRIPTION,
+        type: 'warning',
+      });
+    });
+    expect(mockToast).not.toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Backup restored successfully' }),
+    );
+    expect(mockToast).toHaveBeenCalledTimes(1);
+  });
+
+  it('raises the storage-limit notice beside another result notice, counting only storage_limit skips', async () => {
+    mockApiPost.mockResolvedValue({
+      data: {
+        success: true,
+        data: {
+          itemsRestored: 1,
+          itemsSkipped: 2,
+          foldersRestored: 0,
+          foldersSkipped: 0,
+          itemSkipReasons: [
+            { itemId: 'i1', reason: 'trashed_auto_restored' },
+            { itemId: 'i2', reason: 'storage_limit' },
+            { itemId: 'i3', reason: 'conflict_skipped' },
+          ],
+        },
+      },
+    });
+
+    await performRestore({
+      items: [SAMPLE_ITEM],
+      folders: [],
+      backupEncryption: FILE_ENCRYPTION_META,
+    });
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith({
+        title: 'Storage limit reached: 1 item(s) and 0 folder(s) were not restored.',
+        description: STORAGE_LIMIT_DESCRIPTION,
+        type: 'warning',
+      });
+    });
+    expect(mockToast).toHaveBeenCalledWith({
+      title:
+        'Backup restored. 1 trashed item(s) were auto-restored regardless of the conflict strategy.',
+      type: 'warning',
+    });
+    expect(mockToast).toHaveBeenCalledTimes(2);
+  });
+
   it('reports a plain success when nothing was skipped or auto-restored', async () => {
     await performRestore({
       items: [SAMPLE_ITEM],

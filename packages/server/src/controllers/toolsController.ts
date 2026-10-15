@@ -22,10 +22,30 @@ import {
   vaultImportLockName,
 } from '../utils/controllerHelpers.js';
 import { createdRowId, isDuplicateIdError, ROW_ID_TAKEN_MESSAGE } from '../utils/rowIds.js';
+import {
+  countedBytes,
+  countedBytesExpression,
+  countedBytesOfNew,
+  deltaOfPinnedUpdate,
+  isDefiniteWriteFailure,
+  measureStoredRows,
+  releaseVaultWrite,
+  reserveVaultWrite,
+  settleVaultWrite,
+  storedImage,
+  versionPin,
+  type RowMeasure,
+} from '../utils/vaultQuota.js';
 import { acquireJobLock, releaseJobLock } from '../utils/jobLock.js';
 import { supportsTransactions } from '../utils/transactionSupport.js';
 import { estimateItemJsonSize, estimateFolderJsonSize } from '../utils/sizeEstimator.js';
-import { closingMembers, forEachRow, jsonArrayOf, sendJsonStream } from '../utils/jsonStream.js';
+import {
+  ROW_CURSOR_BATCH_SIZE,
+  closingMembers,
+  forEachRow,
+  jsonArrayOf,
+  sendJsonStream,
+} from '../utils/jsonStream.js';
 import { sendDeadlineMs } from '../utils/heavyResponseBudget.js';
 import { fetchRangeFromHibp } from '../utils/hibp.js';
 import { noteOnDemandRangeInsert } from '../utils/breachRangeCap.js';
@@ -701,9 +721,11 @@ export const exportVault = catchAsync(async (req: Request, res: Response): Promi
   const liveItems = () =>
     VaultItem.find({ userId, deletedAt: { $exists: false } })
       .select('-sourceRefId')
+      .batchSize(ROW_CURSOR_BATCH_SIZE)
       .lean()
       .cursor();
-  const allFolders = () => Folder.find({ userId }).select('-sourceRefId').lean().cursor();
+  const allFolders = () =>
+    Folder.find({ userId }).select('-sourceRefId').batchSize(ROW_CURSOR_BATCH_SIZE).lean().cursor();
 
   // The size is decided BEFORE the first byte, so a refusal is a whole 413 rather
   // than a truncated file: a walk of both cursors with the conservative field-length
@@ -782,12 +804,9 @@ export const exportVault = catchAsync(async (req: Request, res: Response): Promi
     { deadlineMs: sendDeadlineMs(estimatedSize), label: 'Vault export' },
   );
 
+  // `record` cannot throw: it is one audit write, which swallows its own failures.
   if (!outcome.completed && !recording.done) {
-    try {
-      await record(false);
-    } catch (err: unknown) {
-      logger.error('Could not record an interrupted export', { userId, error: errorMessage(err) });
-    }
+    await record(false);
     return;
   }
 
@@ -867,7 +886,10 @@ async function executeImportOperations(
     if (typeof doc.folderId === 'string' && !ownedFolderIds.has(doc.folderId)) {
       delete doc.folderId;
     }
-    insertDocs.push({ ...doc, ...(await createdRowId(userId, item.idNonce)), userId });
+    // Every insert carries its id from here on (a derived one, or one minted now),
+    // so after a partial failure the rows that landed can be measured by id.
+    const rowId = await createdRowId(userId, item.idNonce);
+    insertDocs.push({ ...doc, _id: new mongoose.Types.ObjectId(), ...rowId, userId });
   }
   const derivedIds = insertDocs
     .map((doc) => doc._id)
@@ -971,6 +993,81 @@ async function executeImportOperations(
       throw httpErrors.conflict(ROW_ID_TAKEN_MESSAGE);
     }
 
+    // ── The byte quota (F-24): ONE reservation for the whole request ──────
+    //
+    // Every insert's size plus every update's growth (never its shrink), measured
+    // in the database against the rows as they stand, so the request is refused
+    // WHOLE, with 400, before any row is written. What landed is settled once the
+    // outcome is known (below).
+    const updateSets = updates.map((update) => pickAllowedFields(update, ALLOWED_UPDATE_FIELDS));
+    const measureTargets = async (
+      session?: mongoose.ClientSession,
+    ): Promise<Map<string, RowMeasure>> => {
+      const measures = await measureStoredRows(
+        'item',
+        {
+          _id: { $in: updates.map((update) => new mongoose.Types.ObjectId(update.id)) },
+          userId: new mongoose.Types.ObjectId(userId),
+          deletedAt: { $exists: false },
+        },
+        { $set: Object.fromEntries([...ALLOWED_UPDATE_FIELDS].map((field) => [field, true])) },
+        session,
+      );
+      return new Map(measures.map((measure) => [String(measure._id), measure]));
+    };
+    const preMeasured = updates.length > 0 ? await measureTargets() : new Map<string, RowMeasure>();
+    let insertBytes = 0;
+    for (const doc of insertDocs) insertBytes += countedBytesOfNew('item', doc);
+    let predicted = insertBytes;
+    updates.forEach((update, index) => {
+      const measure = preMeasured.get(update.id);
+      if (measure) {
+        predicted += Math.max(
+          0,
+          deltaOfPinnedUpdate('item', measure, { $set: updateSets[index] ?? {} }),
+        );
+      }
+    });
+    const reservation = await reserveVaultWrite(userId, { bytes: predicted });
+    /**
+     * The counted bytes of the import rows that are stored after an ordered insert
+     * failed part-way (standalone keeps the rows ahead of the failure): measured by
+     * the database, by the ids every insert was given before it was sent.
+     *
+     * Only the rows AHEAD of the first refused one are this request's: an ordered
+     * insert stops there, and the refused id may belong to a row another request
+     * created meanwhile (a duplicate derived id), which that request has counted.
+     * A failure that names no row (a dropped connection) may have stored any
+     * prefix, so every id is measured.
+     */
+    async function landedInsertBytes(
+      insertDocs: Record<string, unknown>[],
+      userId: string,
+      failure: unknown,
+    ): Promise<number> {
+      const writeErrors = (failure as { writeErrors?: unknown } | null)?.writeErrors;
+      const refusedAt = Array.isArray(writeErrors)
+        ? Math.min(
+            ...writeErrors
+              .map((writeError: unknown) => (writeError as { index?: unknown }).index)
+              .filter((index): index is number => Number.isInteger(index)),
+          )
+        : insertDocs.length;
+      const ids = insertDocs
+        .slice(0, refusedAt)
+        .map((doc) => new mongoose.Types.ObjectId(String(doc._id)));
+      const rows = await VaultItem.collection
+        .find(
+          { _id: { $in: ids }, userId: new mongoose.Types.ObjectId(userId) },
+          { projection: { counted: countedBytesExpression('item') }, readPreference: 'primary' },
+        )
+        .toArray();
+      return rows.reduce((sum, row) => sum + Number(row.counted), 0);
+    }
+
+    /** The counted bytes this request's writes actually added; reset per attempt. */
+    let landed = 0;
+
     const execute = async (session?: mongoose.ClientSession): Promise<void> => {
       const sessionOpt = session ? { session } : {};
       const updateOptions = session ? { runValidators: true, session } : { runValidators: true };
@@ -1008,36 +1105,75 @@ async function executeImportOperations(
       insertedCount = 0;
       updatedCount = 0;
       insertedIds = [];
+      landed = 0;
+
+      // The rows each update is pinned on: measured inside the transaction where
+      // there is one (its snapshot is what the writes below see), else the
+      // measure taken under the locks above.
+      const measures = session && updates.length > 0 ? await measureTargets(session) : preMeasured;
 
       if (insertDocs.length > 0) {
         let created;
         try {
           created = await VaultItem.insertMany(insertDocs, sessionOpt);
         } catch (err: unknown) {
+          // Standalone, an ordered insert keeps the rows ahead of the one that
+          // failed: those landed, and are counted from the database.
+          if (!session) {
+            try {
+              landed += await landedInsertBytes(insertDocs, userId, err);
+            } catch (measureErr: unknown) {
+              // What landed cannot be read either: count every insert as landed (an
+              // overcount the recount corrects) and report the insert's own error.
+              logger.warn('Import could not measure the rows a failed insert left', {
+                userId,
+                error: errorMessage(measureErr),
+              });
+              landed += insertBytes;
+            }
+          }
           if (isDuplicateIdError(err)) throw httpErrors.conflict(ROW_ID_TAKEN_MESSAGE);
           throw err;
         }
+        for (const doc of created) landed += countedBytes('item', storedImage(doc));
         insertedCount = created.length;
         // In insertion order, which `insertMany` preserves: the client checks each
         // against the id it sealed that row to.
         insertedIds = created.map((doc) => String(doc._id));
       }
 
-      for (const update of updates) {
+      for (const [index, update] of updates.entries()) {
         // `runValidators: true` is load-bearing, not decoration: without it the
         // model's `passwordHistory` count and per-entry length validators never
         // fire on an update. Projected through the NARROW allowlist so an update
-        // cannot reach `tags` / `favorite` / `folderId` / `itemType`.
-        const result = await VaultItem.updateOne(
-          { _id: update.id, userId, deletedAt: { $exists: false } },
-          { $set: pickAllowedFields(update, ALLOWED_UPDATE_FIELDS) },
-          updateOptions,
-        );
-        if (result.matchedCount === 0) {
+        // cannot reach `tags` / `favorite` / `folderId` / `itemType`. Pinned on the
+        // row the quota measured (`__v` and `createdAt`), so its change is exact.
+        const set = updateSets[index] ?? {};
+        const measure = measures.get(update.id);
+        let result: { matchedCount: number };
+        try {
+          result = measure
+            ? await VaultItem.updateOne(
+                { _id: update.id, userId, deletedAt: { $exists: false }, ...versionPin(measure) },
+                { $set: set, $inc: { __v: 1 } },
+                updateOptions,
+              )
+            : { matchedCount: 0 };
+        } catch (err: unknown) {
+          // Standalone, an update whose outcome is unknown (a dropped connection)
+          // may have applied: what it could have added stays counted, an overcount
+          // the recount corrects rather than an undercount the account could repeat.
+          if (!session && measure && !isDefiniteWriteFailure(err)) {
+            landed += Math.max(0, deltaOfPinnedUpdate('item', measure, { $set: set }));
+          }
+          throw err;
+        }
+        if (result.matchedCount === 0 || !measure) {
           throw httpErrors.conflict(
             'Import failed: an item it targeted was modified or removed mid-request. Please retry.',
           );
         }
+        landed += deltaOfPinnedUpdate('item', measure, { $set: set });
         updatedCount++;
       }
     };
@@ -1055,20 +1191,38 @@ async function executeImportOperations(
     // throws the cap 400 and the mid-request 409 from inside the callback, and
     // re-running after either would double-insert. `config/database.ts`'s
     // `verifyTopology` warns about the mismatch at boot instead.
-    const session = supportsTransactions(mongoose.connection)
-      ? await mongoose.startSession()
-      : null;
-    if (session) {
-      try {
-        await session.withTransaction(async () => {
-          await execute(session);
-        });
-      } finally {
-        await session.endSession();
+    const transactional = supportsTransactions(mongoose.connection);
+    try {
+      if (transactional) {
+        // Opened INSIDE the try: a session that cannot be started wrote nothing,
+        // and the reservation is handed back below like any other refusal.
+        const session = await mongoose.startSession();
+        try {
+          await session.withTransaction(async () => {
+            await execute(session);
+          });
+        } finally {
+          await session.endSession();
+        }
+      } else {
+        await execute();
       }
-    } else {
-      await execute();
+    } catch (err: unknown) {
+      // Settled by POSITION. A transaction that threw wrote nothing, unless its
+      // commit's outcome is unknown, in which case the reservation is kept (an
+      // overcount the recount corrects, never an undercount). Standalone, what
+      // landed before the failure is counted and the rest handed back.
+      const commitUnknown =
+        err instanceof mongoose.mongo.MongoError &&
+        err.hasErrorLabel('UnknownTransactionCommitResult');
+      if (transactional) {
+        if (!commitUnknown) await releaseVaultWrite(reservation);
+      } else {
+        await settleVaultWrite(reservation, landed);
+      }
+      throw err;
     }
+    await settleVaultWrite(reservation, landed);
   } finally {
     // Reverse acquisition order, and the exclusion lock first because it is the
     // one whose loss blocks four other operations rather than one.

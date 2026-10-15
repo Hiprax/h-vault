@@ -122,10 +122,12 @@ export async function mintInvitation(
 
   try {
     if (inviterId !== null) {
+      // From the primary: this count licenses the insert below, and a lagging
+      // secondary would undercount a burst of mints and let it past the cap.
       const mintedToday = await Invitation.countDocuments({
         userId: new mongoose.Types.ObjectId(inviterId),
         createdAt: { $gte: new Date(Date.now() - DAY_MS) },
-      });
+      }).read('primary');
       if (mintedToday >= MAX_INVITATIONS_PER_INVITER_PER_DAY) {
         throw httpErrors.tooManyRequests(
           `You can create at most ${String(MAX_INVITATIONS_PER_INVITER_PER_DAY)} invitations a day. Try again tomorrow.`,

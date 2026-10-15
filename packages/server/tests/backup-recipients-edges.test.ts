@@ -4,7 +4,8 @@
  * pinned in `backup-recipients.test.ts`; every case here drives a path that suite
  * does not, and each names what must NOT happen as well as what must.
  */
-import { describe, it, expect, vi, beforeEach, beforeAll } from 'vitest';
+import { describe, it, expect, vi, beforeEach, beforeAll, afterEach } from 'vitest';
+import { installTestClock, uninstallTestClock } from './clock.js';
 import crypto from 'node:crypto';
 import jwt from 'jsonwebtoken';
 import mongoose from 'mongoose';
@@ -239,6 +240,17 @@ describe('a manual backup whose only recipient is suspended while it is built', 
 });
 
 describe('the scheduler at the edges', () => {
+  // The scheduler picks the accounts whose `scheduleHour` is the CURRENT UTC hour,
+  // read when its tick runs; these tests set that hour when they seed the account.
+  // A run straddling an hour boundary would seed one hour and tick in the next, so
+  // the wall clock is frozen for the block (the date only: timers stay real).
+  beforeEach(() => {
+    installTestClock();
+  });
+  afterEach(() => {
+    uninstallTestClock();
+  });
+
   it('records daily_mail_budget and mails nothing when the budget is spent', async () => {
     const user = await backupUser();
     await seedConfirmedRecipients(user.id, ['one@example.org']);

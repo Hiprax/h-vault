@@ -39,6 +39,26 @@ beforeEach(() => {
   vi.restoreAllMocks();
 });
 
+/**
+ * Runs `before(filter)` ahead of each per-row delete the purge makes on
+ * `vault_items` (it deletes row by row, so the row's bytes are counted by the one
+ * call that removed it), then lets the delete itself run unchanged.
+ */
+function beforeEachItemDelete(before: (filter: { _id: mongoose.Types.ObjectId }) => Promise<void>) {
+  const real = mongoose.mongo.Collection.prototype.findOneAndDelete;
+  return vi
+    .spyOn(mongoose.mongo.Collection.prototype, 'findOneAndDelete')
+    .mockImplementation(async function (
+      this: mongoose.mongo.Collection,
+      ...args: Parameters<typeof real>
+    ) {
+      if (this.collectionName === 'vault_items') {
+        await before(args[0] as unknown as { _id: mongoose.Types.ObjectId });
+      }
+      return real.apply(this, args);
+    } as never);
+}
+
 describe('trash purge: an item restored between the select and the delete survives', () => {
   it('keeps the restored item, purges the one still in the trash, and audits only the purge', async () => {
     const owner = await createTestUser();
@@ -47,13 +67,10 @@ describe('trash purge: an item restored between the select and the delete surviv
     const stillTrashed = await seedItem(owner.id, { deletedAt: expired });
     const restoredId = String(restored['_id']);
 
-    // The batch boundary: the job has READ both rows; before its delete runs, the
-    // owner restores one of them through the real endpoint.
-    const originalDeleteMany = VaultItem.deleteMany.bind(VaultItem) as (
-      ...args: unknown[]
-    ) => unknown;
+    // The batch boundary: the job has READ both rows; before its first delete
+    // runs, the owner restores one of them through the real endpoint.
     let restoredMidBatch = false;
-    vi.spyOn(VaultItem, 'deleteMany').mockImplementation((async (...args: unknown[]) => {
+    beforeEachItemDelete(async () => {
       if (!restoredMidBatch) {
         restoredMidBatch = true;
         const agent = request.agent(app);
@@ -65,8 +82,7 @@ describe('trash purge: an item restored between the select and the delete surviv
           .set('x-csrf-token', csrf.token)
           .expect(200);
       }
-      return originalDeleteMany(...args);
-    }) as never);
+    });
 
     await purgeTick()();
 
@@ -87,16 +103,12 @@ describe('trash purge: an item restored between the select and the delete surviv
     const owner = await createTestUser();
     const only = await seedItem(owner.id, { deletedAt: daysAgo(TRASH_AUTO_PURGE_DAYS + 1) });
 
-    const originalDeleteMany = VaultItem.deleteMany.bind(VaultItem) as (
-      ...args: unknown[]
-    ) => unknown;
-    vi.spyOn(VaultItem, 'deleteMany').mockImplementation((async (...args: unknown[]) => {
+    beforeEachItemDelete(async () => {
       await VaultItem.collection.updateOne(
         { _id: only['_id'] as mongoose.Types.ObjectId },
         { $unset: { deletedAt: 1 } },
       );
-      return originalDeleteMany(...args);
-    }) as never);
+    });
 
     await purgeTick()();
 
@@ -122,21 +134,13 @@ describe('trash purge: an item restored between the select and the delete surviv
     }));
     await VaultItem.collection.insertMany(docs);
 
-    const originalDeleteMany = VaultItem.deleteMany.bind(VaultItem) as (
-      ...args: unknown[]
-    ) => unknown;
     let first = true;
-    vi.spyOn(VaultItem, 'deleteMany').mockImplementation((async (...args: unknown[]) => {
+    beforeEachItemDelete(async (filter) => {
       if (first) {
         first = false;
-        const filter = args[0] as { _id: { $in: mongoose.Types.ObjectId[] } };
-        await VaultItem.collection.updateOne(
-          { _id: filter._id.$in[0]! },
-          { $unset: { deletedAt: 1 } },
-        );
+        await VaultItem.collection.updateOne({ _id: filter._id }, { $unset: { deletedAt: 1 } });
       }
-      return originalDeleteMany(...args);
-    }) as never);
+    });
 
     await purgeTick()();
 

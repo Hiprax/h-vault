@@ -1,4 +1,5 @@
-import { describe, it, expect, vi, beforeEach, beforeAll } from 'vitest';
+import { describe, it, expect, vi, beforeEach, beforeAll, afterEach } from 'vitest';
+import { installTestClock, uninstallTestClock } from './clock.js';
 import mongoose from 'mongoose';
 import crypto from 'node:crypto';
 
@@ -255,6 +256,17 @@ describe('cascadeDeleteUser — sequential failure path (standalone)', () => {
 // ─── backupScheduler: processUserBackup edge/error paths ─────────────────────
 
 describe('backupScheduler — processUserBackup edge and error paths', () => {
+  // The scheduler picks the accounts whose `scheduleHour` is the CURRENT UTC hour,
+  // read when its tick runs; these tests set that hour when they seed the account.
+  // A run straddling an hour boundary would seed one hour and tick in the next, so
+  // the wall clock is frozen for the block (the date only: timers stay real).
+  beforeEach(() => {
+    installTestClock();
+  });
+  afterEach(() => {
+    uninstallTestClock();
+  });
+
   it('aborts during FOLDER streaming when the shared size budget is blown', async () => {
     startBackupScheduler();
     const callback = getScheduledCallback();

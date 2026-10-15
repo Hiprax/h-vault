@@ -6,6 +6,7 @@ import { createModuleLogger } from './logger.js';
 import { Migration } from '../models/Migration.js';
 import { JobLock } from '../models/JobLock.js';
 import { acquireJobLock, releaseJobLock } from './jobLock.js';
+import { installVaultBytes } from './vaultQuota.js';
 
 const logger = createModuleLogger('migrations');
 
@@ -54,15 +55,92 @@ const migrations: MigrationDefinition[] = [
       await maskLegacyErasureRecords();
     },
   },
-  // v3 is the vault-quota counter install of the tenant-admission work, not yet
-  // written; versions are applied by set membership, never by "greater than the
-  // highest applied", so a v3 added later still runs on a database that has v4.
+  // v3 landed after v4. Versions are applied by set membership, never by "greater
+  // than the highest applied", so it still runs on a database that has v4.
+  {
+    version: 3,
+    name: 'vault-quota-counter',
+    up: migrateVaultQuotaCounter,
+  },
   {
     version: 4,
     name: 'backup-recipients',
     up: migrateBackupRecipients,
   },
 ];
+
+/** How long migration v3 may spend installing counters before it leaves the rest. */
+const VAULT_QUOTA_BACKFILL_BUDGET_MS = 30_000;
+/**
+ * The longest each of the two aggregates of one account's total may take in that
+ * backfill: 30 s plus one account's 2 x 10 s stays far inside the migration lock.
+ */
+const VAULT_QUOTA_BACKFILL_AGGREGATE_MAX_TIME_MS = 10_000;
+
+/**
+ * v3 — the per-account vault byte counter (F-24).
+ *
+ * Builds the `{quotaRecountedAt: 1}` index the hourly recount walks (production
+ * runs with `autoIndex` off, and a deployment that has not run `create-indexes`
+ * yet must not have that step scan `users` every hour), then installs the counter
+ * on as many accounts as fit in {@link VAULT_QUOTA_BACKFILL_BUDGET_MS}.
+ *
+ * Correctness does not depend on the backfill, which is why it is bounded rather
+ * than complete: a missing counter is installed by the account's first counted
+ * write (every write path reserves, and so installs, before it touches a row),
+ * and the recount takes accounts never recounted first. The budget only keeps a
+ * large deployment's boot from waiting on it. One account whose total fails is
+ * logged and passed over. The index spec is a literal, the one `models/User.ts`
+ * declares; the counted measure is the quota module's own, since the counter must
+ * agree with what the write paths add to it.
+ */
+async function migrateVaultQuotaCounter(): Promise<void> {
+  const users = mongoose.connection.collection('users');
+  try {
+    await users.createIndex({ quotaRecountedAt: 1 });
+  } catch (error: unknown) {
+    if (!hasCode(error, INDEX_OPTIONS_CONFLICT) && !hasCode(error, INDEX_KEY_SPECS_CONFLICT)) {
+      throw error;
+    }
+  }
+  const startedAt = Date.now();
+  const cursor = users.find(
+    { deletionPending: { $ne: true }, vaultBytes: { $not: { $gte: Number.NEGATIVE_INFINITY } } },
+    { projection: { _id: 1 }, sort: { _id: 1 } },
+  );
+  let installed = 0;
+  let failures = 0;
+  let complete = true;
+  try {
+    for await (const { _id } of cursor) {
+      if (Date.now() - startedAt >= VAULT_QUOTA_BACKFILL_BUDGET_MS) {
+        complete = false;
+        break;
+      }
+      try {
+        await installVaultBytes(String(_id), {
+          maxTimeMS: VAULT_QUOTA_BACKFILL_AGGREGATE_MAX_TIME_MS,
+        });
+        installed += 1;
+      } catch (error: unknown) {
+        failures += 1;
+        logger.warn("Migration v3: could not install an account's vault byte counter", {
+          userId: String(_id),
+          error: error instanceof Error ? error.message : 'Unknown error',
+        });
+      }
+    }
+  } finally {
+    await cursor.close();
+  }
+  logger.info(
+    complete
+      ? 'Migration v3: vault byte counters installed'
+      : 'Migration v3: vault byte counters installed until the time budget; the rest are ' +
+          'installed by their first write or the hourly recount',
+    { installed, failures },
+  );
+}
 
 /** How many accounts one write batch of migration v4 converts. */
 const BACKUP_RECIPIENT_MIGRATION_BATCH = 500;

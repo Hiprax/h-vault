@@ -149,16 +149,21 @@ describe('the entry point', () => {
   it('runs the command with the process arguments and sets the exit code from it', async () => {
     const savedArgv = process.argv;
     const savedExitCode = process.exitCode;
-    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
-    process.argv = ['node', 'invite.js', '--help'];
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    // The interpreter and the script are not arguments: only what follows them is
+    // the command's. A one-argument command that is not an address says so; with
+    // the first two included it would be three arguments, and the usage line.
+    process.argv = ['node', 'invite.js', 'not-an-address'];
     try {
       await import('../src/cli/invite.js');
-      expect(process.exitCode).toBe(0);
-      expect(String(log.mock.calls[0]?.[0])).toMatch(/^Usage: invite <email>/);
+      expect(process.exitCode).toBe(1);
+      expect(error.mock.calls.map((call) => String(call[0]))).toEqual([
+        'Not an e-mail address: not-an-address',
+      ]);
     } finally {
       process.argv = savedArgv;
       process.exitCode = savedExitCode;
-      log.mockRestore();
+      error.mockRestore();
     }
   });
 });

@@ -7,6 +7,7 @@ import { VaultItem } from '../src/models/VaultItem.js';
 import { Folder } from '../src/models/Folder.js';
 import { BackupLog } from '../src/models/BackupLog.js';
 import { JobLock } from '../src/models/JobLock.js';
+import { DeviceProof } from '../src/models/DeviceProof.js';
 import {
   ON_DEMAND_RANGE_RETENTION_WINDOWS,
   PwnedRangeCache,
@@ -694,6 +695,16 @@ describe('Database indexes', () => {
     });
   });
 
+  describe('DeviceProof model indexes', () => {
+    it('declares and builds a UNIQUE index on tokenHash (one row per presented cookie)', async () => {
+      expect(DeviceProof.schema.indexes()).toContainEqual([{ tokenHash: 1 }, { unique: true }]);
+      await DeviceProof.ensureIndexes();
+      const indexes = await DeviceProof.collection.indexes();
+      const byHash = indexes.find((idx) => JSON.stringify(idx.key) === '{"tokenHash":1}');
+      expect(byHash?.unique).toBe(true);
+    });
+  });
+
   describe('PwnedRangeCache model indexes', () => {
     it('should have a unique prefix index, a partial TTL on fetchedAt and the cap index', async () => {
       await PwnedRangeCache.ensureIndexes();
@@ -721,6 +732,16 @@ describe('Database indexes', () => {
         config.BREACH_CACHE_TTL_DAYS * ON_DEMAND_RANGE_RETENTION_WINDOWS * 86_400,
       );
       expect(ON_DEMAND_RANGE_RETENTION_WINDOWS).toBeGreaterThan(1);
+      // The declaration too, not only a live index: an index built earlier with
+      // these options would survive a schema that stopped declaring them.
+      expect(PwnedRangeCache.schema.indexes()).toContainEqual([
+        { fetchedAt: 1 },
+        {
+          expireAfterSeconds:
+            config.BREACH_CACHE_TTL_DAYS * ON_DEMAND_RANGE_RETENTION_WINDOWS * 86_400,
+          partialFilterExpression: { source: 'hibp' },
+        },
+      ]);
 
       // The row cap counts and walks the on-demand rows through this index.
       const capIndex = indexes.find(

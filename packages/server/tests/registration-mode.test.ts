@@ -28,6 +28,7 @@ vi.mock('../src/utils/email.js', async (importOriginal) => {
 });
 
 import request from 'supertest';
+import bcrypt from 'bcryptjs';
 import mongoose from 'mongoose';
 import app from '../src/app.js';
 import { config } from '../src/config/index.js';
@@ -338,7 +339,7 @@ describe('REGISTRATION_MODE=invite', () => {
     expect(await User.countDocuments({ email: 'unlucky@example.com' })).toBe(1);
   });
 
-  it('checks the domain allowlist before the invitation', async () => {
+  it('refuses an invited address outside the allowlist with the generic answer, without spending the invitation', async () => {
     const token = tokenOf((await mint(inviter, 'invitee@example.com')).body.data.link);
     mutableConfig.REGISTRATION_ALLOWED_DOMAINS = ['example.org'];
 
@@ -348,6 +349,52 @@ describe('REGISTRATION_MODE=invite', () => {
     expect(res.body).toEqual(GENERIC_SUCCESS);
     expect(await User.countDocuments({ email: 'invitee@example.com' })).toBe(0);
     expect((await invitations().findOne({ email: 'invitee@example.com' }))?.consumedAt).toBeFalsy();
+  });
+});
+
+describe('refusals keep their shape: no answer depends on the allowlist or on the address (F-24)', () => {
+  it('invite mode: a missing invitation is the same 403 inside and outside the allowlist', async () => {
+    // Checking the domain first answered an outside address with the generic 201
+    // and an inside one with the invitation 403: one guess at a time, the
+    // allowlist was readable from the status alone.
+    setRegistration({ mode: 'invite', domains: ['corp.example'] });
+
+    const inside = await register(registrationBody('someone@corp.example'));
+    const outside = await register(registrationBody('someone@guess.example'));
+
+    expect(inside.status).toBe(403);
+    expect(outside.status).toBe(403);
+    expect(outside.body).toEqual(inside.body);
+    // Negative: neither wrote a row.
+    expect(await User.countDocuments({})).toBe(0);
+  });
+
+  it('open mode: an address outside the allowlist costs the same bcrypt work as one that registers', async () => {
+    setRegistration({ mode: 'open', domains: ['example.org'] });
+    const hash = vi.spyOn(bcrypt, 'hash');
+
+    const refused = await register(registrationBody('outsider@example.com'));
+    const refusedHashes = hash.mock.calls.length;
+    hash.mockClear();
+    const admitted = await register(registrationBody('insider@example.org'));
+
+    expect(refused.status).toBe(201);
+    expect(admitted.status).toBe(201);
+    expect(refused.body).toEqual(admitted.body);
+    // Exactly the one hash a real registration makes: deleting the equalising hash
+    // makes the refusal measurably faster than an admission.
+    expect(refusedHashes).toBe(1);
+    expect(hash).toHaveBeenCalledTimes(1);
+  });
+
+  it('closed mode refuses before any bcrypt work, the same for every address', async () => {
+    setRegistration({ mode: 'closed' });
+    const hash = vi.spyOn(bcrypt, 'hash');
+
+    const res = await register(registrationBody('anyone@example.com'));
+
+    expect(res.status).toBe(403);
+    expect(hash).not.toHaveBeenCalled();
   });
 });
 
@@ -452,6 +499,33 @@ describe('POST /auth/invitations', () => {
     const over = await mint(inviter, 'one-too-many@example.com');
     expect(over.status).toBe(429);
     expect(await invitations().countDocuments({})).toBe(MAX_INVITATIONS_PER_INVITER_PER_DAY);
+  });
+});
+
+describe('the per-inviter daily cap counts from the primary (F-24)', () => {
+  it('reads the count it decides on from the primary, under the mint lock', async () => {
+    // Read then written under a lock; on a URI asking for `secondaryPreferred`, a
+    // lagging secondary would undercount a burst of mints and let it pass the cap.
+    const inviter = await createTestUser({ email: 'inviter@example.com' });
+    setRegistration({ mode: 'invite', inviters: ['inviter@example.com'] });
+    const counts: unknown[] = [];
+    const real = mongoose.mongo.Collection.prototype.countDocuments;
+    vi.spyOn(mongoose.mongo.Collection.prototype, 'countDocuments').mockImplementation(function (
+      this: mongoose.mongo.Collection,
+      ...args: Parameters<typeof real>
+    ) {
+      if (this.collectionName === 'invitations') {
+        const preference = (args[1] as { readPreference?: string | { mode?: string } } | undefined)
+          ?.readPreference;
+        counts.push(typeof preference === 'string' ? preference : preference?.mode);
+      }
+      return real.apply(this, args);
+    } as never);
+
+    const res = await mint(inviter, 'invitee@example.com');
+
+    expect(res.status).toBe(201);
+    expect(counts).toEqual(['primary']);
   });
 });
 

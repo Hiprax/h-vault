@@ -35,6 +35,7 @@ import {
   type StrengthSaveEntry,
 } from '../services/health/healthResultsStore';
 import { cn } from '../lib/utils';
+import { refreshInBackground } from '../lib/backgroundRefresh';
 
 // Health check categories
 interface HealthIssue {
@@ -372,7 +373,7 @@ export default function VaultHealthPage() {
   useEffect(() => {
     if (items.length === 0 && !loading && !initialFetchDone.current) {
       initialFetchDone.current = true;
-      void fetchItems();
+      refreshInBackground(fetchItems());
     }
   }, [items.length, loading, fetchItems]);
 

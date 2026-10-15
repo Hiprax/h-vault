@@ -10,6 +10,8 @@ import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
 import { useToast } from '../components/ui/Toast';
 import { useInlineDialog } from '../components/ui/Dialog';
 import { ErrorBoundary } from '../components/layout/ErrorBoundary';
+import { describeTransientFailure } from '../services/auth/sessionFailure';
+import { refreshInBackground } from '../lib/backgroundRefresh';
 
 export default function VaultPage() {
   const fetchItems = useVaultStore((s) => s.fetchItems);
@@ -34,7 +36,16 @@ export default function VaultPage() {
 
   // Fetch data on mount
   useEffect(() => {
-    void fetchItems().catch(() => toast({ title: 'Failed to load vault items', type: 'error' }));
+    // A refused or failed reload leaves the list on screen as it was (the store
+    // puts it back); the toast says why when the reason is a passing one.
+    void fetchItems().catch((error: unknown) => {
+      const why = describeTransientFailure(error);
+      toast({
+        title: 'Failed to load vault items',
+        type: 'error',
+        ...(why === null ? {} : { description: why }),
+      });
+    });
     void fetchFolders().catch(() => toast({ title: 'Failed to load folders', type: 'error' }));
     void fetchTrashItems().catch(() => {
       /* Trash is non-critical */
@@ -58,7 +69,7 @@ export default function VaultPage() {
   // Fetch trash items when switching to trash view
   useEffect(() => {
     if (showTrash) {
-      void fetchTrashItems();
+      refreshInBackground(fetchTrashItems());
     }
   }, [showTrash, fetchTrashItems]);
 
@@ -75,9 +86,14 @@ export default function VaultPage() {
   );
   useKeyboardShortcuts(vaultShortcuts);
 
+  // The re-read after a save is what refreshes the offline copy of the vault (it
+  // is written by a whole walk and nothing else). A refused or failed one leaves
+  // the list as it was, with the saved row in it.
   const handleFormSaved = useCallback(() => {
     setShowCreateDialog(false);
-    void fetchItems();
+    void fetchItems().catch(() => {
+      /* the store keeps the list; the next walk refreshes the offline copy */
+    });
   }, [fetchItems]);
 
   const handleFormCancel = useCallback(() => {

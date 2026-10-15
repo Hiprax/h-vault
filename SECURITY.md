@@ -212,10 +212,11 @@ security posture, not a disclaimer.
   and the server also trims an account on every hundredth such entry, so an account can sit above
   the cap by at most about an hour of its write ceilings (longer only on an instance so large that
   one pass over every account takes more than its ten-minute budget). A run of identical metadata-only edits (a
-  favourite toggled, a folder moved or reordered) by one browser, each within a minute of the last,
-  is recorded as one entry with a count; an edit that changes an item's or a folder's encrypted
-  contents always gets an entry of its own, and two browsers editing the same item never share
-  one. **Security** entries (sign-ins and sign-outs, password, 2FA, session and trusted-device
+  favourite toggled, a folder moved or reordered) from one address and user agent, each within a
+  minute of the last, is recorded as one entry with a count; an edit that changes an item's or a
+  folder's encrypted contents always gets an entry of its own, and edits from two different
+  addresses or user agents never share one (two browsers behind one address that send an identical
+  user-agent string can). **Security** entries (sign-ins and sign-outs, password, 2FA, session and trusted-device
   events, exports and imports, backup setup, download and restore, settings) are never trimmed and
   never merged, so flooding edits can push only older edits out of the log, never a record of how
   the account was accessed. The exceptions are the entries a stranger can cause, which are capped
@@ -601,14 +602,41 @@ A backup download, a backup mailed on demand, a vault export and the scheduled b
 whole vault (up to the 25 MB backup limit). They are admitted through **one budget per server
 process: two at a time, one per account**; a second request from an account that has one running
 is refused, and one past the process budget waits. The download and the export are **streamed**
-from the database with backpressure, so the server holds a row at a time rather than the whole
-file, the size limit is decided before the first byte, and a client that has not taken the file
+from the database with backpressure, so the server holds one small database batch (16 rows) at a
+time rather than the whole file, the size limit is decided before the first byte, and a client that has not taken the file
 within a deadline derived from its size (128 KiB/s plus 30 seconds) is cut off, so a client that
 stops reading cannot hold a slot for longer than that. What this does not bound: two accounts can
 still occupy both slots of a process for up to that deadline each, which delays other accounts'
 downloads without refusing them. A transfer that is cut off or fails is recorded in the audit log
 as not completed; part of the file may still have reached the client. The vault item and trash
-lists are streamed the same way and limited to 400 pages per account per 15 minutes.
+lists are streamed the same way and limited to 3,100 pages per account per 15 minutes: the app
+re-reads the whole vault each time its vault page opens, so that is one visit to the largest
+vault every fifteen seconds. The limit bounds how fast one account can make the server read and
+send whole pages, not how many it reads at once.
+
+### How much one account can store
+
+Every account's vault items and folders count against **one storage quota**
+(`VAULT_STORAGE_QUOTA_MB_PER_USER`, 512 MB by default), trashed ones included until they are
+purged; documents have their own. A change that would grow the vault past it is refused (400,
+"Storage limit reached"), and a change that does not grow it never is, however far over the
+quota the account is: deleting, purging, emptying the trash, shrinking an entry, rotating or
+re-sealing the vault key, and every read keep working. A backup restore that runs out of room
+restores what fits and reports the rest as `storage_limit`.
+
+The server keeps a running count per account and decides each growing write against it with one
+conditional update before the first row is written, so concurrent requests cannot together take
+an account past the quota. What this does not bound exactly:
+
+- **A rotation or re-seal is never refused**, so an account can end one rotation above its quota
+  by that rotation's own growth (at most one request body, 30 MB). It can then only shrink.
+- **The count can drift** when the server stops between writing a row and counting it, or when a
+  write's outcome is unknown (the count then keeps the reservation, which errs towards refusing
+  early). An hourly job recounts accounts that have been quiet for ten minutes from what the
+  database stores; until it runs, an account may be refused slightly early or admitted slightly
+  late.
+- **During a rolling upgrade**, a worker still running the previous release writes without
+  counting. The recount corrects those accounts once the upgrade has finished.
 
 ### Where mailed backups go
 
@@ -1424,10 +1452,14 @@ devices via clipboard sync. H-Vault reduces the exposure window but cannot elimi
   three downloaded tools are checked against SHA-256 values committed in the workflow, and
   `diff-cover` is installed from a hash-locked requirements file. Be precise about the limit:
   code that runs in the gauntlet job can still read what that job can read and make it fail
-  or pass, and three things it fetches are not pinned by a hash committed here: the Node
-  toolchain `actions/setup-node` downloads, the Playwright browsers, and the runner image
-  itself (`ubuntu-latest`). The npm dependency tree is pinned by the lockfile's integrity
-  hashes.
+  or pass, and these things it fetches are not pinned by a hash committed here: the runner
+  image itself (`ubuntu-latest`); the Node toolchain `actions/setup-node` downloads; the
+  Playwright browsers and the system packages `playwright install --with-deps` installs
+  through apt; the base images the image gate builds from, pulled by tag (`node:24-alpine3.23`,
+  `mongo:8.0`; the Nginx and Garage images are pinned by digest); the Trivy scanner image
+  (`aquasec/trivy:latest`) and the vulnerability database it fetches; and the MongoDB server
+  binary the test harness downloads, which is checked only against a checksum served from
+  the same host. The npm dependency tree is pinned by the lockfile's integrity hashes.
 
 ## Hardening your own deployment
 

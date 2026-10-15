@@ -74,6 +74,14 @@ async function call(
   return body === undefined ? req : req.send(body);
 }
 
+/** A search hash in the only shape the import schema accepts (64 lower-case hex). */
+const SEARCH_HASH = 'a'.repeat(64);
+
+/** An import insert: an item body plus the search hash every import row carries. */
+function importInsert(dataBytes: number): Record<string, unknown> {
+  return itemBody(dataBytes, { searchHash: SEARCH_HASH });
+}
+
 /** An item create body whose ciphertext is `dataBytes` characters long. */
 function itemBody(dataBytes: number, extra: Record<string, unknown> = {}): Record<string, unknown> {
   return sampleVaultItem({ encryptedData: 'd'.repeat(dataBytes), ...extra });
@@ -281,7 +289,12 @@ describe('the counter equals the stored bytes after every path that writes a vau
       { favorite: true },
       {
         passwordHistory: [
-          { encryptedPassword: 'old-password-ciphertext', iv: 'h-iv', tag: 'h-tag' },
+          {
+            encryptedPassword: 'old-password-ciphertext',
+            iv: 'h-iv',
+            tag: 'h-tag',
+            changedAt: '2026-10-01T12:00:00.000Z',
+          },
         ],
       },
     ]) {
@@ -327,8 +340,14 @@ describe('the counter equals the stored bytes after every path that writes a vau
     const c = await createItem(user, 700);
     expect((await call(user, 'delete', `/vault/items/${c}`)).status).toBe(200);
     expect((await call(user, 'delete', '/vault/items/trash/empty')).status).toBe(200);
-    await expectCounterExact(user);
-    expect(await VaultItem.countDocuments({ userId: user.id })).toBe(1);
+    // `b` went to the trash with its folder, and the empty-trash took it with `c`:
+    // no item is left. The child folder was moved up to the root when its parent
+    // went, so it is the one row the account still stores, and all it counts.
+    expect(await VaultItem.countDocuments({ userId: user.id })).toBe(0);
+    const folders = await Folder.find({ userId: user.id }).lean();
+    expect(folders.map((f) => String(f._id))).toEqual([String(child.body.data._id)]);
+    expect(folders[0]?.parentId ?? null).toBeNull();
+    expect(await expectCounterExact(user)).toBeGreaterThan(0);
   });
 
   it('import: inserts and overwrites', async () => {
@@ -340,7 +359,7 @@ describe('the counter equals the stored bytes after every path that writes a vau
       format: 'json',
       conflictStrategy: 'overwrite',
       operations: {
-        inserts: [itemBody(2_000), itemBody(10)],
+        inserts: [importInsert(2_000), importInsert(10)],
         updates: [
           {
             id: existing,
@@ -350,6 +369,7 @@ describe('the counter equals the stored bytes after every path that writes a vau
             encryptedData: 'o'.repeat(3_333),
             dataIv: 'o-data-iv',
             dataTag: 'o-data-tag',
+            searchHash: SEARCH_HASH,
           },
         ],
       },
@@ -368,10 +388,14 @@ describe('the counter equals the stored bytes after every path that writes a vau
 
     const res = await call(user, 'post', '/tools/import', {
       format: 'json',
-      operations: { inserts: [itemBody(1_000), itemBody(1_000), itemBody(1_000)], updates: [] },
+      operations: {
+        inserts: [importInsert(1_000), importInsert(1_000), importInsert(1_000)],
+        updates: [],
+      },
     });
 
     expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/storage limit/i);
     expect(await VaultItem.countDocuments({ userId: user.id })).toBe(1);
     expect(await vaultBytesCounter(user.id)).toBe(used);
   });
@@ -457,6 +481,49 @@ describe('the counter equals the stored bytes after every path that writes a vau
 
     expect(res.status).toBe(200);
     await expectCounterExact(user);
+
+    // The re-seal: the same key, rows rewritten in the bound format (the `v2:`
+    // markers lengthen the IVs, so the rows grow), proven by the stored wrapper.
+    const rotated = await mongoose.connection
+      .collection('users')
+      .findOne(
+        { _id: new mongoose.Types.ObjectId(user.id) },
+        { projection: { vaultKeyVersion: 1 } },
+      );
+    const resealed = await call(user, 'post', '/vault/items/bulk-reencrypt', {
+      authHash: user.rawPassword,
+      newEncryptedVaultKey: 'rotated-key',
+      newVaultKeyIv: 'rotated-iv',
+      newVaultKeyTag: 'rotated-tag',
+      reseal: true,
+      idempotencyKey: '7b1c5f0e-3d2a-4c8b-9e6f-1a2b3c4d5e6f',
+      vaultKeyVersion: rotated?.['vaultKeyVersion'] as number,
+      items: [
+        {
+          id: a,
+          encryptedName: 'resealed-name-that-is-longer-again',
+          nameIv: 'v2:resealed-name-iv',
+          nameTag: 'resealed-name-tag',
+          encryptedData: 's'.repeat(1_500),
+          dataIv: 'v2:resealed-data-iv',
+          dataTag: 'resealed-data-tag',
+        },
+      ],
+      folders: [
+        {
+          id: folderId,
+          encryptedName: 'resealed-folder-name',
+          nameIv: 'v2:resealed-folder-iv',
+          nameTag: 'resealed-folder-tag',
+        },
+      ],
+      documents: [],
+      vaultFieldFormat: 2,
+    });
+
+    expect(resealed.status).toBe(200);
+    expect((await VaultItem.findById(a).lean())?.encryptedData).toBe('s'.repeat(1_500));
+    await expectCounterExact(user);
   });
 
   it('a sequential rotation that fails part-way and is rolled back', async () => {
@@ -473,7 +540,10 @@ describe('the counter equals the stored bytes after every path that writes a vau
       const update = args[1] as { $set?: Record<string, unknown> } | undefined;
       if (update?.$set?.encryptedName === 'rotated-b') {
         writes += 1;
-        throw new Error('the database refused the write');
+        throw new mongoose.mongo.MongoServerError({
+          message: 'the database refused the write',
+          code: 121,
+        });
       }
       return original(...args);
     }) as never);

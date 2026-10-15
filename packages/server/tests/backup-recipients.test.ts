@@ -296,6 +296,7 @@ describe('PUT /backup/recipients requires the master-password proof (F-05)', () 
 
     const wrong = await putRecipients(user, ['stranger@evil.test'], 'not-the-master-password');
     expect(wrong.status).toBe(401);
+    expect(wrong.body.message).toBe('Current password is incorrect');
 
     expect(await storedRecipients(user.id)).toEqual(before);
     expect(transport.sent.map((m) => m.to)).not.toContain('stranger@evil.test');
@@ -507,6 +508,17 @@ describe('recipient confirmation (F-05)', () => {
 });
 
 describe('the scheduler sends only to confirmed recipients (F-05)', () => {
+  // The scheduler picks the accounts whose `scheduleHour` is the CURRENT UTC hour,
+  // read when its tick runs; these tests set that hour when they seed the account.
+  // A run straddling an hour boundary would seed one hour and tick in the next, so
+  // the wall clock is frozen for the block (the date only: timers stay real).
+  beforeEach(() => {
+    installTestClock();
+  });
+  afterEach(() => {
+    uninstallTestClock();
+  });
+
   async function runScheduledBackup(): Promise<void> {
     startBackupScheduler();
     const callback = cronCallbacks.list.at(-1)!;
@@ -1118,6 +1130,27 @@ describe('daily outbound mail budget (F-05)', () => {
     expect(await outbound(user.id)).toEqual({ day: utcDay(), count: 2 });
   });
 
+  it('a claim stamped with an EARLIER day than the stored one is refused, never a reset backwards', async () => {
+    // A confirmation run that started just before midnight still carries the old
+    // day when it claims; meanwhile a fresh claim has started the new day's count.
+    const user = await createTestUser();
+    const newDay = new Date(Date.UTC(2026, 9, 15, 0, 0, 1));
+    const oldDay = new Date(Date.UTC(2026, 9, 14, 23, 59, 50));
+    await seedCount(user.id, 10, '2026-10-15');
+
+    expect(await claimOutboundMail(user.id, 1, oldDay)).toBe(false);
+
+    // Nothing moved: the new day keeps its spend.
+    expect(await outbound(user.id)).toEqual({ day: '2026-10-15', count: 10 });
+    // Negative: a claim on the stored day still adds to it, and a LATER day resets.
+    expect(await claimOutboundMail(user.id, 2, newDay)).toBe(true);
+    expect(await outbound(user.id)).toEqual({ day: '2026-10-15', count: 12 });
+    expect(await claimOutboundMail(user.id, 1, new Date(Date.UTC(2026, 9, 16, 0, 0, 0)))).toBe(
+      true,
+    );
+    expect(await outbound(user.id)).toEqual({ day: '2026-10-16', count: 1 });
+  });
+
   it('forty concurrent claims of one message each: exactly thirty succeed', async () => {
     const user = await createTestUser();
 
@@ -1145,5 +1178,51 @@ describe('daily outbound mail budget (F-05)', () => {
       },
     });
     expect(owed).toBe(1);
+  });
+});
+
+describe('the reads that follow a recipient-list write come from the primary (F-05)', () => {
+  // On a URI asking for `secondaryPreferred`, a lagging secondary would hand the
+  // inline confirmation sender the OLD list (so the new addresses wait for the
+  // hourly job) and the reply the OLD list too, which the settings page then
+  // writes over the user's edit. Both reads must see the write they follow.
+  it('the inline sender and the reply read the list they just wrote from the primary', async () => {
+    const user = await createTestUser();
+    await setUpBackup(user);
+    const reads: { projection: string; mode: unknown }[] = [];
+    const real = mongoose.mongo.Collection.prototype.findOne;
+    vi.spyOn(mongoose.mongo.Collection.prototype, 'findOne').mockImplementation(function (
+      this: mongoose.mongo.Collection,
+      ...args: Parameters<typeof real>
+    ) {
+      if (this.collectionName === 'users') {
+        const options = args[1] as
+          { projection?: unknown; readPreference?: string | { mode?: string } } | undefined;
+        const preference = options?.readPreference;
+        reads.push({
+          projection: JSON.stringify(options?.projection ?? {}),
+          mode: typeof preference === 'string' ? preference : preference?.mode,
+        });
+      }
+      return real.apply(this, args);
+    } as never);
+
+    const res = await putRecipients(user, ['first@example.org']);
+
+    expect(res.status).toBe(200);
+    expect(confirmationMailsTo()).toEqual(['first@example.org']);
+    // The inline sender reads the whole account WITH the entries' nonces (every
+    // other default read of the account excludes them), and the reply reads the
+    // list alone.
+    const senderReads = reads.filter(
+      (read) =>
+        read.projection.includes('":0') && !read.projection.includes('backupRecipients.nonce'),
+    );
+    const replyReads = reads.filter(
+      (read) => read.projection === JSON.stringify({ 'settings.backup.backupRecipients': 1 }),
+    );
+    expect(senderReads.length).toBeGreaterThanOrEqual(1);
+    expect(replyReads).toHaveLength(1);
+    for (const read of [...senderReads, ...replyReads]) expect(read.mode).toBe('primary');
   });
 });

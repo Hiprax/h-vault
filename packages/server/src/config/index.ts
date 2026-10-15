@@ -118,17 +118,6 @@ function urlHostname(value: string): string | undefined {
 }
 
 /**
- * Whether an `S3_ENDPOINT` is acceptable for a PRODUCTION deployment. `https://`
- * always is. A plain `http://` one is accepted only for a host the traffic never
- * leaves (see `isLocalOrPrivateStorageHost`), which is what makes the in-stack
- * `http://hvault-s3:3900` work without asking an operator to terminate TLS
- * between two containers on an internal network.
- *
- * An unparseable value ABSTAINS rather than failing here: the field's own URL
- * check already reports it, and a second issue about schemes would only obscure
- * the first.
- */
-/**
  * A plain dotted host name: two or more labels of letters, digits and inner
  * hyphens, 63 characters a label, 253 in all. Checked label by label, with a flat
  * character class and the edge rules spelled out, rather than one pattern with a
@@ -141,7 +130,7 @@ function isPlainDomainName(domain: string): boolean {
     labels.length >= 2 &&
     labels.every(
       (label) =>
-        label.length >= 1 &&
+        // One character at least: the `+` of the class, which also refuses `..`.
         label.length <= 63 &&
         /^[a-z0-9-]+$/.test(label) &&
         !label.startsWith('-') &&
@@ -150,6 +139,17 @@ function isPlainDomainName(domain: string): boolean {
   );
 }
 
+/**
+ * Whether an `S3_ENDPOINT` is acceptable for a PRODUCTION deployment. `https://`
+ * always is. A plain `http://` one is accepted only for a host the traffic never
+ * leaves (see `isLocalOrPrivateStorageHost`), which is what makes the in-stack
+ * `http://hvault-s3:3900` work without asking an operator to terminate TLS
+ * between two containers on an internal network.
+ *
+ * An unparseable value ABSTAINS rather than failing here: the field's own URL
+ * check already reports it, and a second issue about schemes would only obscure
+ * the first.
+ */
 function isProductionStorageEndpoint(endpoint: string): boolean {
   if (/^https:\/\//i.test(endpoint)) return true;
   const hostname = urlHostname(endpoint);

@@ -822,6 +822,23 @@ describe('VaultPage - mount fetching', () => {
     expect(await screen.findByText('Failed to load vault items')).toBeInTheDocument();
   });
 
+  it('says why the items could not load when the reason is passing (a refused reload)', async () => {
+    const refused = Object.assign(new Error('Request failed with status code 429'), {
+      isAxiosError: true,
+      response: { status: 429, headers: { 'retry-after': '600' }, data: { message: 'Too many' } },
+    });
+    primeVaultStore({ fetchItems: vi.fn().mockRejectedValue(refused) });
+
+    await act(async () => {
+      renderPage(<VaultPage />);
+    });
+
+    expect(await screen.findByText('Failed to load vault items')).toBeInTheDocument();
+    expect(
+      screen.getByText('Too many attempts. Please try again in 10 minutes.'),
+    ).toBeInTheDocument();
+  });
+
   it('toasts when the folders fetch fails', async () => {
     primeVaultStore({ fetchFolders: vi.fn().mockRejectedValue(new Error('down')) });
 
@@ -937,6 +954,41 @@ describe('VaultPage - create-item dialog', () => {
 
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(fetchItems.mock.calls.length).toBe(fetchesBeforeSave + 1);
+  });
+
+  it('a refused re-read after a save keeps the list, raises no toast and rejects nothing unhandled', async () => {
+    // A PLAIN function, never a `vi.fn`: Vitest subscribes to every promise a
+    // mock returns, which would handle this rejection for the page. The mount
+    // load succeeds; the re-read after the save is refused.
+    let reads = 0;
+    const fetchItems = () => {
+      reads += 1;
+      return reads === 1
+        ? Promise.resolve()
+        : Promise.reject(new Error('Request failed with status code 429'));
+    };
+    primeVaultStore({ fetchItems });
+    const unhandled: unknown[] = [];
+    const listener = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', listener);
+    try {
+      await act(async () => {
+        renderPage(<VaultPage />);
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Create Item' }));
+      await act(async () => {
+        fireEvent.click(screen.getByText('Save Form'));
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    } finally {
+      process.off('unhandledRejection', listener);
+    }
+
+    expect(reads).toBe(2);
+    expect(unhandled).toEqual([]);
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.queryByText('Failed to load vault items')).not.toBeInTheDocument();
   });
 
   it('closes on Escape without re-fetching', async () => {

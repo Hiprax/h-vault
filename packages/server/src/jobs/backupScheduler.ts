@@ -10,6 +10,7 @@ import { APP_VERSION, maskEmail } from '@hvault/shared';
 import { acquireJobLock, releaseJobLock } from '../utils/jobLock.js';
 import { trackJob } from '../utils/jobTracker.js';
 import { estimateItemJsonSize, estimateFolderJsonSize } from '../utils/sizeEstimator.js';
+import { ROW_CURSOR_BATCH_SIZE, forEachRow } from '../utils/jsonStream.js';
 import { collectDocumentSummary, type DocumentSummary } from '../utils/documentSummary.js';
 import { acquireWithin, heavyResponseSemaphore } from '../utils/heavyResponseBudget.js';
 import { claimOutboundMail } from '../utils/outboundMailBudget.js';
@@ -60,6 +61,14 @@ interface BackupPayload {
  * downloads cannot stall the whole run past its 30-minute lock. A plain object so a
  * test can shorten it; nothing in production writes to it.
  */
+/** Thrown out of a size walk the moment the estimate passes the limit, to stop it. */
+class BackupTooLargeError extends Error {
+  constructor() {
+    super('Backup file exceeds maximum size limit');
+    this.name = 'BackupTooLargeError';
+  }
+}
+
 export const SCHEDULED_BACKUP_SLOT_POLICY = { waitMs: 5 * 60 * 1000 };
 
 type ScheduledUser = Parameters<typeof buildAndMailBackup>[0];
@@ -160,45 +169,49 @@ async function buildAndMailBackup(user: {
     // endpoint. The conservative field-length estimator (see
     // `utils/sizeEstimator.ts`) avoids per-iteration JSON.stringify in the hot
     // loop; the final payload is serialized once below.
-    const folderCursor = Folder.find({ userId }).select('-sourceRefId').lean().cursor();
-    for await (const folder of folderCursor) {
-      estimatedSize += estimateFolderJsonSize(folder as unknown as Record<string, unknown>);
-      if (estimatedSize > maxSizeBytes) {
-        logger.warn(`Backup for user ${userId} exceeds max size during folder streaming`);
-        await BackupLog.create({
-          userId,
-          status: 'failed',
-          errorMessage: 'Backup file exceeds maximum size limit',
-          sentTo: emails,
-          timestamp: new Date(),
-        });
-        return;
-      }
-      folders.push(folder);
-    }
-
-    const itemCursor = VaultItem.find({
-      userId,
-      deletedAt: { $exists: false },
-    })
-      .select('-sourceRefId')
-      .lean()
-      .cursor();
-
-    for await (const item of itemCursor) {
-      estimatedSize += estimateItemJsonSize(item as unknown as Record<string, unknown>);
-      if (estimatedSize > maxSizeBytes) {
-        logger.warn(`Backup for user ${userId} exceeds max size during item streaming`);
-        await BackupLog.create({
-          userId,
-          status: 'failed',
-          errorMessage: 'Backup file exceeds maximum size limit',
-          sentTo: emails,
-          timestamp: new Date(),
-        });
-        return;
-      }
-      items.push(item);
+    //
+    // Through `forEachRow`, which closes each cursor on EVERY exit: a Mongoose
+    // QueryCursor has no `return()`, so leaving a `for await` at the size limit
+    // used to leave the cursor, with its remaining batches, open on the server
+    // until its idle timeout, once per oversized account per run.
+    let walking: 'folder' | 'item' = 'folder';
+    try {
+      await forEachRow(
+        Folder.find({ userId })
+          .select('-sourceRefId')
+          .batchSize(ROW_CURSOR_BATCH_SIZE)
+          .lean()
+          .cursor(),
+        (folder) => {
+          estimatedSize += estimateFolderJsonSize(folder as unknown as Record<string, unknown>);
+          if (estimatedSize > maxSizeBytes) throw new BackupTooLargeError();
+          folders.push(folder);
+        },
+      );
+      walking = 'item';
+      await forEachRow(
+        VaultItem.find({ userId, deletedAt: { $exists: false } })
+          .select('-sourceRefId')
+          .batchSize(ROW_CURSOR_BATCH_SIZE)
+          .lean()
+          .cursor(),
+        (item) => {
+          estimatedSize += estimateItemJsonSize(item as unknown as Record<string, unknown>);
+          if (estimatedSize > maxSizeBytes) throw new BackupTooLargeError();
+          items.push(item);
+        },
+      );
+    } catch (error: unknown) {
+      if (!(error instanceof BackupTooLargeError)) throw error;
+      logger.warn(`Backup for user ${userId} exceeds max size during ${walking} streaming`);
+      await BackupLog.create({
+        userId,
+        status: 'failed',
+        errorMessage: 'Backup file exceeds maximum size limit',
+        sentTo: emails,
+        timestamp: new Date(),
+      });
+      return;
     }
 
     const backupData: BackupPayload = {

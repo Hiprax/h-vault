@@ -453,24 +453,30 @@ export const register = catchAsync(async (req: Request, res: Response): Promise<
     throw httpErrors.forbidden(REGISTRATION_CLOSED_MESSAGE);
   }
 
-  // An address outside the domain allowlist gets exactly what a registered
-  // address gets below: the generic 201 after the same bcrypt work, and no row
-  // and no mail. The allowlist is the operator's business; a refusal naming it
-  // would publish it one guess at a time.
-  if (!isAllowedRegistrationDomain(email)) {
-    await bcrypt.hash(authHash, config.BCRYPT_ROUNDS);
-    sendGenericRegistrationSuccess(res);
-    return;
-  }
-
-  // An invitation is checked, not spent, here: the address may turn out to be
-  // registered already, and that must cost the invitee nothing.
+  // In invite mode the invitation comes FIRST, before the domain allowlist: an
+  // invitation is only ever minted for an address inside the allowlist, so this
+  // loses nothing, and checking the domain first would answer an address outside
+  // the list with the generic 201 and one inside it with this 403, publishing the
+  // allowlist one guess at a time. The invitation is checked, not spent, here: the
+  // address may turn out to be registered already, and that must cost the invitee
+  // nothing.
   const invitationToken = config.REGISTRATION_MODE === 'invite' ? body.invitationToken : undefined;
   if (
     config.REGISTRATION_MODE === 'invite' &&
     (invitationToken === undefined || !(await invitationAdmits(invitationToken, email)))
   ) {
     throw httpErrors.forbidden(INVITATION_INVALID_MESSAGE);
+  }
+
+  // An address outside the domain allowlist gets exactly what a registered
+  // address gets below: the generic 201 after the same bcrypt work, and no row
+  // and no mail. The allowlist is the operator's business; a refusal naming it
+  // would publish it one guess at a time. (In invite mode only an invitation that
+  // predates a narrowing of the list gets this far, and it is not spent.)
+  if (!isAllowedRegistrationDomain(email)) {
+    await bcrypt.hash(authHash, config.BCRYPT_ROUNDS);
+    sendGenericRegistrationSuccess(res);
+    return;
   }
 
   const existingUser = await User.findOne({ email });
@@ -1993,6 +1999,9 @@ export const unlockAccount = catchAsync(async (req: Request, res: Response): Pro
   // an unauthenticated caller reached, and it is conditioned on the episode just
   // verified still being the stored one, so a second use of the same link that
   // raced the first discharges nothing and is refused like any spent link.
+  // Read BEFORE the link is spent: a failure here must leave the link usable.
+  const presentedProof = await findPresentedDeviceProof(req);
+
   if (!(await dischargeUnlockedEpisode(user._id, factor, episodeId))) {
     throw httpErrors.badRequest(ERROR_CODES.TOKEN_INVALID);
   }
@@ -2001,8 +2010,9 @@ export const unlockAccount = catchAsync(async (req: Request, res: Response): Pro
   // proof: a stranger can re-lock the account seconds after the link is used,
   // and without this the owner would be locked out again before they could sign in.
   // A browser that already holds a live proof for this account keeps it rather
-  // than trading a 30-day proof for a 10-minute one.
-  if (!provesAccount(await findPresentedDeviceProof(req), user._id)) {
+  // than trading a 30-day proof for a 10-minute one. Best effort: the link is
+  // spent by now, so nothing after this point may fail the unlock.
+  if (!provesAccount(presentedProof, user._id)) {
     await issueUnlockProof(res, user._id);
   }
 

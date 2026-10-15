@@ -37,6 +37,15 @@ export interface StreamOutcome {
 type Rows<T> = AsyncIterable<T> & { close?: () => unknown };
 
 /**
+ * Rows a database cursor that feeds a streamed response (or a job building one)
+ * asks the server for per round trip: about 8 MB of the largest vault rows. Left
+ * to the driver, the first batch is 101 rows and each later one up to 16 MiB, so a
+ * cursor over half-megabyte rows would hold ~50 MB before the first row is used,
+ * and an estimate pass that is about to refuse at 25 MB would read 90 MB first.
+ */
+export const ROW_CURSOR_BATCH_SIZE = 16;
+
+/**
  * Closes `rows` if it is a database cursor, and never throws.
  *
  * Load-bearing: a Mongoose `QueryCursor` is its own async iterator and has no
@@ -145,6 +154,7 @@ export async function sendJsonStream(
     });
     return { completed: false, bytes };
   } finally {
-    if (deadline !== undefined) clearTimeout(deadline);
+    // No deadline is left behind a finished stream (`clearTimeout(undefined)` is a no-op).
+    clearTimeout(deadline);
   }
 }

@@ -36,6 +36,7 @@ import { isStorageDegraded } from '../../stores/encryptedStorage';
 import { BrandLogo } from '../ui/BrandLogo';
 import { useConnectionStatus } from '../../hooks/useConnectionStatus';
 import type { OfflineCacheErrorType } from '../../services/offlineCache';
+import { refreshInBackground } from '../../lib/backgroundRefresh';
 
 interface NavItem {
   label: string;
@@ -256,8 +257,8 @@ export function AppLayout() {
 
   const handleResync = useCallback(() => {
     setDecryptionFailureCount(0);
-    void fetchItems();
-    void fetchFolders();
+    refreshInBackground(fetchItems());
+    refreshInBackground(fetchFolders());
   }, [fetchItems, fetchFolders]);
 
   // Re-check storage degraded flag when localStorage changes (e.g. from another tab)

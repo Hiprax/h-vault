@@ -162,8 +162,11 @@ async function eraseInBatches(userId: string): Promise<void> {
     let erased = 0;
     let stalled = false;
     for (;;) {
+      // From the PRIMARY: a lagging secondary (a URI asking for
+      // `secondaryPreferred`) would hand this batch the ids the last one already
+      // deleted, and two such batches in a row trip the stall guard below.
       const batch = await model.collection
-        .find({ userId: owner }, { projection: { _id: 1 } })
+        .find({ userId: owner }, { projection: { _id: 1 }, readPreference: 'primary' })
         .limit(CASCADE_BATCH_SIZE)
         .toArray();
       if (batch.length === 0) break;
@@ -203,8 +206,17 @@ async function eraseInBatches(userId: string): Promise<void> {
  * while the batches ran (a request authenticated before `deletionPending` was set
  * can still be in flight), plus the trusted devices, which are capped at a handful
  * and so never needed batching. Normally every one of these removes nothing.
+ *
+ * And every invitation that NAMES the erased address. An invitation belongs to its
+ * inviter, so the batches (by `userId`) never reach the one this account registered
+ * with, or one still open for it, and each carries the address in clear until it
+ * expires: an erasure that left them would not have erased the address.
  */
-async function sweepRemainingRows(userId: string, session?: mongoose.ClientSession): Promise<void> {
+async function sweepRemainingRows(
+  userId: string,
+  userEmail: string,
+  session?: mongoose.ClientSession,
+): Promise<void> {
   const options = session ? { session } : {};
   await AuditLog.deleteMany({ userId }, options);
   await VaultItem.deleteMany({ userId }, options);
@@ -216,6 +228,7 @@ async function sweepRemainingRows(userId: string, session?: mongoose.ClientSessi
   // The invitations this account minted (`userId` is the inviter). One it did not
   // spend dies with it: an erased account vouches for nobody.
   await Invitation.deleteMany({ userId }, options);
+  await Invitation.deleteMany({ email: userEmail.trim().toLowerCase() }, options);
   await revokeDeviceProofs(userId, options);
   await revokeTrustedDevices(userId, session);
 }
@@ -346,7 +359,7 @@ export async function cascadeDeleteTransactional(
     const txn = await mongoose.startSession();
     session = txn;
     await txn.withTransaction(async () => {
-      await sweepRemainingRows(userId, txn);
+      await sweepRemainingRows(userId, userEmail, txn);
       const removed = await User.findByIdAndDelete(userId, { session: txn });
       if (removed) {
         // Inside the same session, so the record commits or aborts together with
@@ -382,7 +395,7 @@ async function cascadeDeleteSequential(
 ): Promise<boolean> {
   try {
     await eraseInBatches(userId);
-    await sweepRemainingRows(userId);
+    await sweepRemainingRows(userId, userEmail);
     const removed = await User.findByIdAndDelete(userId);
     if (removed) {
       await createAuditLog(null, auditAction, deletionRecord(userId, userEmail), ip, userAgent);

@@ -97,3 +97,33 @@ describe('the HTTP listener address (HOST)', () => {
     }
   });
 });
+
+describe('the boot log names the address the kernel bound (F-23)', () => {
+  it('formats an IPv4, an IPv6, a pipe and a server not listening', async () => {
+    const { describeBoundAddress } = await import('../src/utils/listenAddress.js');
+    expect(describeBoundAddress({ address: '127.0.0.1', family: 'IPv4', port: 5000 })).toBe(
+      '127.0.0.1:5000',
+    );
+    expect(describeBoundAddress({ address: '::', family: 'IPv6', port: 5000 })).toBe('[::]:5000');
+    expect(describeBoundAddress('/tmp/hvault.sock')).toBe('/tmp/hvault.sock');
+    expect(describeBoundAddress(null)).toBe('no address (not listening)');
+  });
+
+  it('reads a real socket: listenOn with HOST=127.0.0.1 reports loopback, never every interface', async () => {
+    const { describeBoundAddress, listenOn } = await import('../src/utils/listenAddress.js');
+    const { createTimedServer } = await import('../src/utils/httpTimeouts.js');
+    const created = createTimedServer(express());
+    try {
+      await new Promise<void>((resolve, reject) => {
+        created.once('error', reject);
+        listenOn(created, { port: 0, host: '127.0.0.1' }, resolve);
+      });
+      const port = (created.address() as AddressInfo).port;
+      expect(describeBoundAddress(created.address())).toBe(`127.0.0.1:${String(port)}`);
+      // Negative: what an all-interfaces bind would have printed.
+      expect(describeBoundAddress(created.address())).not.toMatch(/^\[::\]|^0\.0\.0\.0/);
+    } finally {
+      await new Promise<void>((resolve) => created.close(() => resolve()));
+    }
+  });
+});

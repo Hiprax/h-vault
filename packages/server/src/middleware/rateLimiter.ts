@@ -920,16 +920,28 @@ export const folderWriteLimiter =
 export const VAULT_LIST_RATE_LIMIT_WINDOW_MS = FIFTEEN_MINUTES_MS;
 
 /**
- * Full walks of the largest vault one user may make in a window: the app loads
- * the vault and the trash on sign-in, on unlock, when it comes back online and
- * after a bulk action, and each is a walk of up to fifty pages.
+ * Full walks of the largest vault one user may make in a window, counted in walks
+ * of fifty pages. The app walks the whole vault, and the trash, every time the
+ * vault page mounts (and `/vault` and `/vault/:id` are sibling routes, so opening
+ * an item and coming back is a visit), as well as on sign-in, unlock, reconnect,
+ * an import, a rotation and the authenticator import's first load. A visit to the
+ * largest vault is at most 51 pages (50 of items and the trash's first: trashed
+ * rows count toward the same cap), and ordinary use must never meet the budget, so
+ * it allows one visit every fifteen seconds for the whole window: 60 visits of 51
+ * pages is 3,060, rounded up to whole walks of fifty, 62.
+ *
+ * (The first derivation, 8, assumed reloads only on sign-in, unlock, reconnect
+ * and bulk actions; the client's real triggers refused the eighth visit to a full
+ * vault, and the list the user was looking at emptied.)
  */
-export const VAULT_LIST_RELOAD_FACTOR = 8;
+export const VAULT_LIST_RELOAD_FACTOR = 62;
 
 /**
  * List pages one user may request per window: the pages a vault at
  * `MAX_ITEMS_PER_USER` takes at the largest page size, times
- * {@link VAULT_LIST_RELOAD_FACTOR} (50 x 8 = 400).
+ * {@link VAULT_LIST_RELOAD_FACTOR} (50 x 62 = 3,100, under four a second
+ * sustained). It bounds the rate a single account can make the server read and
+ * stream whole pages at, not their concurrency.
  */
 export const VAULT_LIST_RATE_LIMIT_MAX =
   Math.ceil(MAX_ITEMS_PER_USER / PAGINATION_DEFAULTS.MAX_LIMIT) * VAULT_LIST_RELOAD_FACTOR;

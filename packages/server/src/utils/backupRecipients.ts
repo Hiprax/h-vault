@@ -478,7 +478,12 @@ export async function sendDueConfirmations(
   userId: string,
   now: Date = new Date(),
 ): Promise<ConfirmationRun> {
-  const account = await User.findById(userId).select(`+${RECIPIENTS_PATH}.nonce`).lean();
+  // From the primary: this runs right after the list write it follows, and a
+  // lagging secondary would answer with the list as it was before it.
+  const account = await User.findById(userId)
+    .select(`+${RECIPIENTS_PATH}.nonce`)
+    .read('primary')
+    .lean();
   if (!account) return { sent: 0, pending: 0 };
   const due = recipientListOf(account).filter(
     (entry): entry is IBackupRecipientDoc & { nonce: string } =>

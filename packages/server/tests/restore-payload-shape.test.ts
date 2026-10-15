@@ -316,3 +316,48 @@ describe('F-14: a well-formed backup still restores in full', () => {
     expect(res.body.data).toMatchObject({ itemsRestored: 0, foldersRestored: 0 });
   });
 });
+
+describe('a row identity that is not a string of 24 hex digits is no identity (F-14)', () => {
+  // bson's `ObjectId.isValid` (and so `mongoose.isValidObjectId`) accepts an OBJECT
+  // whose `id` is 24 hex digits. `String()` of that object is "[object Object]",
+  // which the restore then handed to `new ObjectId`: a 500 inside the lock, and on
+  // `keep_both` after folders had already been written.
+  const HEX = '0123456789abcdef01234567';
+  const objectId = { id: HEX };
+
+  async function restoreWith(
+    strategy: 'skip' | 'overwrite' | 'keep_both',
+    data: Record<string, unknown>,
+  ): Promise<request.Response> {
+    const csrf = await getCsrf(agent);
+    return agent
+      .post(RESTORE)
+      .set('Authorization', authHeader(user.accessToken))
+      .set('x-csrf-token', csrf.token)
+      .set('Cookie', csrf.cookie)
+      .send({ conflictStrategy: strategy, data: JSON.stringify(data) });
+  }
+
+  for (const strategy of ['skip', 'overwrite', 'keep_both'] as const) {
+    it(`${strategy}: an object _id, parentId and folderId restore as rows with fresh ids, never a 500`, async () => {
+      const res = await restoreWith(strategy, {
+        folders: [{ ...sampleFolder(), _id: objectId, parentId: objectId }],
+        items: [{ ...sampleVaultItem(), _id: objectId, folderId: { _id: HEX } }],
+      });
+
+      expect(res.status).toBe(200);
+      expect(res.body.data).toMatchObject({ itemsRestored: 1, foldersRestored: 1 });
+      const folders = await Folder.find({ userId: user.id }).lean();
+      const items = await VaultItem.find({ userId: user.id }).lean();
+      expect(folders).toHaveLength(1);
+      expect(items).toHaveLength(1);
+      // Fresh ids, never the one the object carried, and no reference to it either.
+      expect(String(folders[0]!._id)).not.toBe(HEX);
+      expect(String(items[0]!._id)).not.toBe(HEX);
+      expect(folders[0]!.parentId).toBeUndefined();
+      expect(items[0]!.folderId).toBeUndefined();
+      // The restore completed and is on the record.
+      expect(await AuditLog.countDocuments({ userId: user.id, action: 'backup_restored' })).toBe(1);
+    });
+  }
+});

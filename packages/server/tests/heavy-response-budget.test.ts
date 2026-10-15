@@ -4,6 +4,7 @@
  * whole-vault document as a download and so must queue behind the same two slots.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { installTestClock, uninstallTestClock } from './clock.js';
 import crypto from 'node:crypto';
 
 vi.mock('node-cron', () => ({
@@ -23,10 +24,15 @@ import {
   MAX_IN_FLIGHT_HEAVY_RESPONSES,
   MIN_SUSTAINED_UPLOAD_BYTES_PER_SECOND,
 } from '@hvault/shared';
+import mongoose from 'mongoose';
+import { config } from '../src/config/index.js';
 import { User } from '../src/models/User.js';
+import { VaultItem } from '../src/models/VaultItem.js';
+import { sampleVaultItem } from './helpers.js';
 import { BackupLog } from '../src/models/BackupLog.js';
 import { SCHEDULED_BACKUP_SLOT_POLICY, startBackupScheduler } from '../src/jobs/backupScheduler.js';
 import { sendEmail } from '../src/utils/email.js';
+import { ROW_CURSOR_BATCH_SIZE } from '../src/utils/jsonStream.js';
 import { createSemaphore } from '../src/utils/partSemaphore.js';
 import {
   SEND_DEADLINE_POLICY,
@@ -35,8 +41,6 @@ import {
   heavyResponseUserQuota,
   sendDeadlineMs,
 } from '../src/utils/heavyResponseBudget.js';
-
-const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
 
 describe('the budget', () => {
   it('is two slots per process and one per account, the share strictly below the budget', () => {
@@ -94,6 +98,17 @@ describe('the send deadline', () => {
 });
 
 describe('the scheduled backup takes a heavy-response slot', () => {
+  // The scheduler picks the accounts whose `scheduleHour` is the CURRENT UTC hour,
+  // read when its tick runs; these tests set that hour when they seed the account.
+  // A run straddling an hour boundary would seed one hour and tick in the next, so
+  // the wall clock is frozen for the block (the date only: timers stay real).
+  beforeEach(() => {
+    installTestClock();
+  });
+  afterEach(() => {
+    uninstallTestClock();
+  });
+
   const held: (() => void)[] = [];
 
   beforeEach(() => {
@@ -129,6 +144,70 @@ describe('the scheduled backup takes a heavy-response slot', () => {
     });
   }
 
+  /** Cursors the server holds open right now, from its own counters. */
+  async function openCursors(): Promise<number> {
+    const status = (await mongoose.connection.db!.command({ serverStatus: 1 })) as {
+      metrics: { cursor: { open: { total: number } } };
+    };
+    return Number(status.metrics.cursor.open.total);
+  }
+
+  it('closes the database cursor when a backup is refused for size part-way through', async () => {
+    // More than one 16 MiB driver batch of rows, so leaving the loop early leaves
+    // a cursor with batches still to fetch (a walk that fits one batch is closed by
+    // the server itself and would prove nothing).
+    const user = await scheduledUser();
+    await VaultItem.insertMany(
+      Array.from({ length: 150 }, () => ({
+        userId: user._id,
+        ...sampleVaultItem({ encryptedData: 'e'.repeat(200_000) }),
+      })),
+    );
+    const mutable = config as unknown as Record<string, unknown>;
+    const saved = mutable.BACKUP_MAX_SIZE_MB;
+    mutable.BACKUP_MAX_SIZE_MB = 1;
+    try {
+      const baseline = await openCursors();
+
+      await schedulerTick()();
+
+      const log = await BackupLog.findOne({ userId: user._id }).lean();
+      expect(log?.status).toBe('failed');
+      expect(log?.errorMessage).toMatch(/maximum size/);
+      expect(sendEmail).not.toHaveBeenCalled();
+      expect(await openCursors()).toBe(baseline);
+    } finally {
+      mutable.BACKUP_MAX_SIZE_MB = saved;
+    }
+  }, 60_000);
+
+  it('asks the database for rows sixteen at a time, never the default first batch', async () => {
+    // The default first batch is 101 rows: at up to half a megabyte a row, ~50 MB
+    // held before the first is used. Every cursor the backup walks is asked for
+    // ROW_CURSOR_BATCH_SIZE.
+    const user = await scheduledUser();
+    await VaultItem.create({ userId: user._id, ...sampleVaultItem() });
+    const real = mongoose.mongo.Collection.prototype.find;
+    const batchSizes: { collection: string; batchSize: unknown }[] = [];
+    vi.spyOn(mongoose.mongo.Collection.prototype, 'find').mockImplementation(function (
+      this: mongoose.mongo.Collection,
+      ...args: Parameters<typeof real>
+    ) {
+      if (this.collectionName === 'vault_items' || this.collectionName === 'folders') {
+        batchSizes.push({ collection: this.collectionName, batchSize: args[1]?.batchSize });
+      }
+      return real.apply(this, args);
+    } as never);
+
+    await schedulerTick()();
+
+    expect(batchSizes).toEqual([
+      { collection: 'folders', batchSize: ROW_CURSOR_BATCH_SIZE },
+      { collection: 'vault_items', batchSize: ROW_CURSOR_BATCH_SIZE },
+    ]);
+    expect(ROW_CURSOR_BATCH_SIZE).toBe(16);
+  });
+
   function schedulerTick(): () => Promise<void> {
     const schedule = vi.mocked(cron.schedule);
     schedule.mockClear();
@@ -145,11 +224,13 @@ describe('the scheduled backup takes a heavy-response slot', () => {
     expect(heavyResponseSemaphore.available).toBe(0);
 
     const run = schedulerTick()();
-    await settle();
+    // Wait for the tick to queue on the semaphore, not for a guessed time.
+    await vi.waitFor(() => {
+      expect(heavyResponseSemaphore.waiting).toBe(1);
+    });
     // Nothing built, nothing mailed, nothing recorded while it waits.
     expect(sendEmail).not.toHaveBeenCalled();
     expect(await BackupLog.countDocuments({ userId: user._id })).toBe(0);
-    expect(heavyResponseSemaphore.waiting).toBe(1);
 
     held.shift()!();
     await run;

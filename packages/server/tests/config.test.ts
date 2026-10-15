@@ -890,6 +890,11 @@ describe('Server Config Validation', () => {
           ['example.org', 'corp.example.net'],
         ],
         ['a punycode domain', 'xn--bcher-kva.example', ['xn--bcher-kva.example']],
+        [
+          'one-character labels, the shortest a domain may carry',
+          'x.co,a.b.io',
+          ['x.co', 'a.b.io'],
+        ],
       ])('REGISTRATION_ALLOWED_DOMAINS with %s resolves to %j', async (_label, value, expected) => {
         const { config } = await loadConfigWithEnv({ REGISTRATION_ALLOWED_DOMAINS: value });
         expect(config.REGISTRATION_ALLOWED_DOMAINS).toEqual(expected);

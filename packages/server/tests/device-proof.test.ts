@@ -150,6 +150,18 @@ async function lockPassword(userId: string, until = new Date(Date.now() + LOCKOU
   );
 }
 
+/**
+ * The ONE answer an unproven sign-in gets during a password lockout, whether the
+ * password was right or wrong: anything else (a 403, a 500, a body that differs)
+ * is itself the oracle the lockout closes (F-03).
+ */
+function expectUniformRefusal(res: request.Response): void {
+  expect(res.status).toBe(401);
+  expect(res.body.message).toBe('Invalid email or password');
+  expect(res.body.data).toBeUndefined();
+  expect(String(res.headers['set-cookie'] ?? '')).not.toMatch(/refreshToken=/);
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
 });
@@ -301,7 +313,7 @@ describe('F-03 — a proven client is not braked by a password lockout', () => {
     await lockPassword(victim.id);
 
     const res = await postLogin(victim.email, victim.rawPassword, ownersProof.raw);
-    expect(res.status).not.toBe(200);
+    expectUniformRefusal(res);
     expect(res.body.data?.accessToken).toBeUndefined();
 
     const wrong = await postLogin(victim.email, 'wrong-auth-hash', ownersProof.raw);
@@ -382,7 +394,7 @@ describe('F-03 — a forged or expired proof is unproven and cleared', () => {
     await lockPassword(user.id);
 
     const res = await postLogin(user.email, user.rawPassword, 'f'.repeat(64));
-    expect(res.status).not.toBe(200);
+    expectUniformRefusal(res);
     expect(proofValue(res)).toBe('');
   });
 
@@ -392,7 +404,7 @@ describe('F-03 — a forged or expired proof is unproven and cleared', () => {
     await lockPassword(user.id);
 
     const res = await postLogin(user.email, user.rawPassword, stale.raw);
-    expect(res.status).not.toBe(200);
+    expectUniformRefusal(res);
     expect(proofValue(res)).toBe('');
   });
 });
@@ -485,7 +497,7 @@ describe('F-03 — the unlock link proves the browser that follows it', () => {
 
       // An unproven browser, even with the right password, is refused...
       const unproven = await postLogin(user.email, user.rawPassword);
-      expect(unproven.status).not.toBe(200);
+      expectUniformRefusal(unproven);
 
       // ...and the browser that followed the link is not.
       const proven = await postLogin(user.email, user.rawPassword, raw);
@@ -498,7 +510,7 @@ describe('F-03 — the unlock link proves the browser that follows it', () => {
       expect(rows[0]!.singleUse ?? false).toBe(false);
       expect(rows[0]!.tokenHash).not.toBe(hashToken(raw));
       const replay = await postLogin(user.email, user.rawPassword, raw);
-      expect(replay.status).not.toBe(200);
+      expectUniformRefusal(replay);
     },
     60_000,
   );
@@ -588,7 +600,7 @@ describe('F-03 — revocation', () => {
     expect(await proofs().findOne({ _id: mine.id })).toBeNull();
     await lockPassword(user.id);
     const copy = await postLogin(user.email, user.rawPassword, mine.raw);
-    expect(copy.status).not.toBe(200);
+    expectUniformRefusal(copy);
     // ...and the caller holds a fresh one, which is the only proof left.
     const fresh = proofValue(res);
     expect(fresh).toMatch(/^[0-9a-f]{64}$/);
@@ -709,7 +721,7 @@ describe('F-03 — proof handling edge cases', () => {
     expect(await proofs().findOne({ _id: single.id })).toBeNull();
 
     const again = await postLogin(user.email, user.rawPassword, single.raw);
-    expect(again.status).not.toBe(200);
+    expectUniformRefusal(again);
   });
 
   it('the unlock link leaves a browser that already holds a live proof with that proof', async () => {
@@ -834,9 +846,8 @@ describe('F-03 — a proof in use stays alive; a single-use proof is spent exact
       postLogin(user.email, user.rawPassword, single.raw),
       postLogin(user.email, user.rawPassword, single.raw),
     ]);
-    const statuses = results.map((r) => r.status).sort();
-    expect(statuses[0]).toBe(200);
-    expect(statuses[1]).not.toBe(200);
+    expect(results.filter((r) => r.status === 200)).toHaveLength(1);
+    expectUniformRefusal(results.find((r) => r.status !== 200)!);
   });
 
   it('one directive per response even when the clear was the only cookie queued before the mint', async () => {
@@ -980,5 +991,98 @@ describe('DeviceProof serialisation', () => {
     // And the strip is not achieved by emitting nothing: the fields a reader may see survive.
     expect(String(json.userId)).toBe(proof.userId.toString());
     expect(json.expiresAt).toEqual(proof.expiresAt);
+  });
+});
+
+describe('F-03 — handing out an unlock proof is best effort, never a failure of what it rides on', () => {
+  function unlockToken(userId: string, episodeId: string): string {
+    return jwt.sign(
+      { userId, purpose: 'account_unlock', stateHash: generateStateHash(episodeId) },
+      deriveTestPurposeKey('account_unlock'),
+      { algorithm: 'HS256', expiresIn: 3600 },
+    );
+  }
+
+  it('an unlock whose proof cannot be stored still unlocks, audits, and answers 200', async () => {
+    const user = await createTestUser({ emailVerified: true });
+    await lockPassword(user.id);
+    const create = vi
+      .spyOn(DeviceProof, 'create')
+      .mockImplementationOnce((() => Promise.reject(new Error('datastore unavailable'))) as never);
+
+    const agent = request(app);
+    const csrf = await getCsrf(agent);
+    const res = await agent
+      .post(`${API}/auth/unlock-account`)
+      .set('x-csrf-token', csrf.token)
+      .set('Cookie', csrf.cookie)
+      .send({ token: unlockToken(user.id, 'pw-episode') });
+
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(res.status).toBe(200);
+    // The link did its job: the lockout is gone and the unlock is on the record.
+    const stored = await User.findById(user.id).lean();
+    expect(stored!.lockoutUntil ?? null).toBeNull();
+    expect(stored!.failedLoginAttempts).toBe(0);
+    expect(await AuditLog.countDocuments({ userId: user.id, action: 'account_unlock' })).toBe(1);
+    // Negative: no proof was handed out, and none is stored.
+    expect(proofCookie(res)).toBeUndefined();
+    expect(await proofsOf(user.id)).toHaveLength(0);
+  });
+
+  it('log-out-everywhere whose replacement proof cannot be stored still revokes, suspends and audits', async () => {
+    const user = await createTestUser({ emailVerified: true });
+    const single = await seedProof(user.id, {
+      singleUse: true,
+      expiresAt: new Date(Date.now() + 5 * 60 * 1000),
+    });
+    await User.collection.updateOne(
+      { _id: new mongoose.Types.ObjectId(user.id) },
+      {
+        $set: {
+          'settings.backup.backupRecipients': [
+            {
+              email: 'third@example.org',
+              state: 'confirmed',
+              confirmedAt: new Date(),
+              approvedAt: new Date(),
+              confirmationDue: false,
+              confirmationSentAt: null,
+              confirmationAttempts: 0,
+              nonce: 'a'.repeat(64),
+            },
+          ],
+          'settings.backup.recipientsRevision': 1,
+        },
+      },
+    );
+    const create = vi
+      .spyOn(DeviceProof, 'create')
+      .mockImplementationOnce((() => Promise.reject(new Error('datastore unavailable'))) as never);
+
+    const agent = request(app);
+    const csrf = await getCsrf(agent, `refreshToken=${user.refreshToken}`);
+    const res = await agent
+      .post(`${API}/auth/logout-all`)
+      .set('Authorization', authHeader(user.accessToken))
+      .set('x-csrf-token', csrf.token)
+      .set(
+        'Cookie',
+        [csrf.cookie, `refreshToken=${user.refreshToken}`, `${COOKIE}=${single.raw}`].join('; '),
+      );
+
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(res.status).toBe(200);
+    // Everything log-out-everywhere exists for still happened.
+    expect(await proofs().findOne({ _id: single.id })).toBeNull();
+    const stored = await User.collection.findOne({ _id: new mongoose.Types.ObjectId(user.id) });
+    const recipients = (
+      stored as unknown as { settings: { backup: { backupRecipients: { state: string }[] } } }
+    ).settings.backup.backupRecipients;
+    expect(recipients.map((r) => r.state)).toEqual(['suspended']);
+    expect(await AuditLog.countDocuments({ userId: user.id, action: 'session_revoke' })).toBe(1);
+    // Negative: no replacement proof exists, and none was sent.
+    expect(await proofsOf(user.id)).toHaveLength(0);
+    expect(proofValue(res) ?? '').toBe('');
   });
 });

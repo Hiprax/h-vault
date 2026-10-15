@@ -126,6 +126,7 @@ import type {
   PreviousPassword,
   ResolvableImportItem,
 } from '../services/import';
+import { refreshInBackground } from '../lib/backgroundRefresh';
 
 // ---------------------------------------------------------------------------
 // CSV helpers
@@ -1628,7 +1629,7 @@ export default function SettingsPage() {
           ...(sentBatches > 0 ? { description: retryAdvice } : {}),
           type: 'error',
         });
-        if (inserted > 0 || updated > 0) void useVaultStore.getState().fetchItems();
+        if (inserted > 0 || updated > 0) refreshInBackground(useVaultStore.getState().fetchItems());
         return;
       }
 
@@ -1659,7 +1660,7 @@ export default function SettingsPage() {
         ...(skipReasons.length > 0 ? { description: skipReasons.join('\n') } : {}),
         type: skippedInvalid > 0 ? 'warning' : 'success',
       });
-      if (inserted > 0 || updated > 0) void useVaultStore.getState().fetchItems();
+      if (inserted > 0 || updated > 0) refreshInBackground(useVaultStore.getState().fetchItems());
       setShowImport(false);
       setImportData('');
     } catch (err) {

@@ -5,6 +5,7 @@ import mongoose from 'mongoose';
 import { config } from '../config/index.js';
 import { getStorageHealth } from '../utils/storageHealth.js';
 import { proxyMisconfigSuspected } from '../utils/deploymentChecks.js';
+import { vaultStorageSnapshot } from '../utils/vaultQuota.js';
 
 // ── Handlers ─────────────────────────────────────────────────────────
 
@@ -60,6 +61,13 @@ export const getMetrics = catchAsync((req: Request, res: Response): void => {
       // mode would advertise an instance whose rate limiters are off.
       mode: config.NODE_ENV,
       proxy: { misconfigSuspected: proxyMisconfigSuspected() },
+      // What the vault byte quota counts across every account whose counter is
+      // installed (`null` until the first background read lands). A snapshot,
+      // refreshed in the background when a request finds it more than five
+      // minutes old (`measuredAt` says when it was taken): reading it never waits
+      // for the database, so this endpoint answers the same while the database is
+      // slow or down.
+      vaultStorage: vaultStorageSnapshot(),
     },
   });
 });

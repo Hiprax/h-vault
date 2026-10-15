@@ -174,7 +174,13 @@ export const RESOURCE_BUDGETS = {
     rssGrowthMb: 220,
   },
   restoreVolume: {
-    /** Observed 17.4-21.1 s for 10,000 inserted rows. Ceiling at ~3.5x. */
+    /**
+     * Observed 17.4-21.1 s for 10,000 inserted rows. Ceiling at ~3.5x. Re-measured
+     * 2026-10-14 once every restored row went through the vault byte quota (a
+     * reservation, the write and a settle, three round trips a row instead of one):
+     * 26.1 s in the gate's own run, still inside the ceiling at ~2.9x. The noise
+     * band below is the earlier five-run measurement and has not been re-taken.
+     */
     durationMs: 75_000,
     /** Observed 111.4-143.5 MB for a 26 MB body. Ceiling at ~1.8x. */
     rssGrowthMb: 260,

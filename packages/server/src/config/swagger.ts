@@ -443,8 +443,20 @@ const bulkCountResponse = (
 const RESEAL_LOCK_BUSY =
   ' The same status, with no `data`, also answers a request that arrives while another change re-sealing this account under its vault key holds the account (a vault-key rotation, an import, a backup restore, a document completion or a master-password change): wait for it to finish and retry.';
 
+/**
+ * The vault byte quota (F-24), said once for every write that can grow the vault.
+ * Appended to the operation descriptions: the 400 itself is the shared
+ * `ValidationError` response, whose shape the quota refusal shares.
+ */
+const VAULT_QUOTA_NOTE =
+  'A write that would grow the vault past the account storage quota (`VAULT_STORAGE_QUOTA_MB_PER_USER`, counting the items and folders the account stores, trashed ones included until they are purged) is refused with 400 and the message "Storage limit reached: delete items or empty the trash to make room, then try again. ...". A write that does not grow the vault is never refused for the quota.';
+
+/** The answer to an update that lost its row to other writers on every attempt. */
+const ROW_CHANGED_CONFLICT =
+  'The same status, carrying no `data`, also answers an update whose row other requests kept changing while it was being saved (three attempts); reload and retry.';
+
 /** The list budget both vault list routes share, quoted from its constant. */
-const VAULT_LIST_BUDGET = `Rate limited: 400 req/user per 15 min, one budget shared by this route and the other vault list route. A page is sent as it is read from the database, a row at a time; its rows, their order and \`pagination\` are exactly what the query returns.`;
+const VAULT_LIST_BUDGET = `Rate limited: 3,100 req/user per 15 min, one budget shared by this route and the other vault list route (one full read of the largest vault every fifteen seconds). A page is sent as it is read from the database, in batches of 16 rows; its rows, their order and \`pagination\` are exactly what the query returns.`;
 
 /**
  * The admission every heavy response shares (download, trigger, export), and the
@@ -1090,6 +1102,18 @@ export const swaggerSpec: JsonObject = {
             type: 'boolean',
             description:
               'True when this account may mint invitations (POST /auth/invitations): the server registers by invitation and the account is listed in REGISTRATION_INVITERS.',
+          },
+          vaultBytes: {
+            type: 'integer',
+            nullable: true,
+            description:
+              'Bytes the storage quota counts for this account: every vault item and folder it stores, trashed ones included until they are purged. Null until the counter is installed (by the first write that touches the vault, the hourly recount, or the startup migration).',
+          },
+          vaultQuotaBytes: {
+            type: 'integer',
+            minimum: 0,
+            description:
+              'The storage quota in bytes (VAULT_STORAGE_QUOTA_MB_PER_USER). A write that would take vaultBytes past it is refused with 400; a write that does not grow the vault never is.',
           },
           settings: { $ref: '#/components/schemas/UserSettings' },
           createdAt: { type: 'string', format: 'date-time' },
@@ -2642,7 +2666,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Health'],
         summary: 'Health check',
         description:
-          'Returns server health status and database connectivity, with the same fields in every mode: no version, no uptime and nothing that tells a non-production instance apart (those are on the token-gated /metrics).',
+          'Returns server health status and database connectivity, with the same body fields in every mode: no version, no uptime and no mode (those are on the token-gated /metrics). Only the body is uniform: outside production the rate limiter is off, so the response carries no RateLimit-* headers there.',
         responses: {
           200: jsonEnvelope('Server is healthy', { $ref: '#/components/schemas/HealthResponse' }),
           429: { $ref: '#/components/responses/RateLimited' },
@@ -2668,7 +2692,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Health'],
         summary: 'Operator metrics',
         description:
-          'Process uptime, memory, database connection state, the object-storage gauge from the boot preflight, the mode the process runs in (a non-production mode has every rate limiter off; never reported on /health) and whether proxied requests have arrived that the server does not trust (TRUST_PROXY unset or 0 behind a proxy). Mounted only when METRICS_TOKEN is configured: without it the path does not exist and answers 404. Rate limited: 60 req/IP per minute, counted in memory per process.',
+          'Process uptime, memory, database connection state, the object-storage gauge from the boot preflight, the mode the process runs in (a non-production mode has every rate limiter off; never reported on /health), whether proxied requests have arrived that the server does not trust (TRUST_PROXY unset or 0 behind a proxy), and the total the vault storage quota counts across accounts. Mounted only when METRICS_TOKEN is configured: without it the path does not exist and answers 404. Rate limited: 60 req/IP per minute, counted in memory per process.',
         security: [{ metricsToken: [] }],
         responses: {
           200: jsonEnvelope('Metrics', {
@@ -2701,6 +2725,17 @@ export const swaggerSpec: JsonObject = {
                     description:
                       'True once a production server with TRUST_PROXY unset or 0 has received X-Forwarded-For from a loopback or private address (logged once as well).',
                   },
+                },
+              },
+              vaultStorage: {
+                type: 'object',
+                nullable: true,
+                description:
+                  'What the vault storage quota counts across every account whose counter is installed, from a snapshot this endpoint refreshes in the background, without waiting for it, when it is more than five minutes old (null until the first refresh has landed; `measuredAt` says when it was taken).',
+                properties: {
+                  accounts: { type: 'integer', minimum: 0 },
+                  totalBytes: { type: 'integer' },
+                  measuredAt: { type: 'string', format: 'date-time' },
                 },
               },
             },
@@ -2899,7 +2934,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Auth'],
         summary: 'Logout all other sessions',
         description:
-          'Revokes all refresh tokens except the current session, every trusted device, and every `__hv_device` proof except the one this browser presented. Suspends every backup recipient other than the account address until the owner saves the list again (PUT /backup/recipients).',
+          'Revokes all refresh tokens except the current session, every trusted device, and every `__hv_device` proof, including the one this browser presented; a browser that presented a live proof for the account is given a fresh one in its place (single-use for single-use). Suspends every backup recipient other than the account address until the owner saves the list again (PUT /backup/recipients).',
         security: [{ bearerAuth: [], csrfToken: [] }],
         responses: {
           200: successResponse('All other sessions revoked'),
@@ -3056,7 +3091,7 @@ export const swaggerSpec: JsonObject = {
         operationId: 'createVaultItem',
         tags: ['Vault'],
         summary: 'Create vault item',
-        description: 'Creates a new encrypted vault item. ' + ITEM_WRITE_BUDGET,
+        description: `Creates a new encrypted vault item. ${VAULT_QUOTA_NOTE} ${ITEM_WRITE_BUDGET}`,
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: jsonRequestBody('CreateVaultItemRequest'),
         responses: {
@@ -3213,7 +3248,7 @@ export const swaggerSpec: JsonObject = {
         operationId: 'updateVaultItem',
         tags: ['Vault'],
         summary: 'Update vault item',
-        description: 'Updates an existing vault item. ' + ITEM_WRITE_BUDGET,
+        description: `Updates an existing vault item. ${VAULT_QUOTA_NOTE} ${ITEM_WRITE_BUDGET}`,
         security: [{ bearerAuth: [], csrfToken: [] }],
         parameters: [ID_PATH_PARAM],
         requestBody: jsonRequestBody('UpdateVaultItemRequest'),
@@ -3224,7 +3259,7 @@ export const swaggerSpec: JsonObject = {
           404: { $ref: '#/components/responses/NotFound' },
           400: { $ref: '#/components/responses/ValidationError' },
           409: staleVaultKeyConflict(
-            'The same status, carrying no `data`, is also how a vault-key rotation that is currently in progress is reported; that one is retried unchanged once it finishes.',
+            `The same status, carrying no \`data\`, is also how a vault-key rotation that is currently in progress is reported; that one is retried unchanged once it finishes. ${ROW_CHANGED_CONFLICT}`,
           ),
         },
       },
@@ -3311,7 +3346,7 @@ export const swaggerSpec: JsonObject = {
         operationId: 'createFolder',
         tags: ['Folders'],
         summary: 'Create folder',
-        description: 'Creates a new folder for organizing vault items. ' + FOLDER_WRITE_BUDGET,
+        description: `Creates a new folder for organizing vault items. ${VAULT_QUOTA_NOTE} ${FOLDER_WRITE_BUDGET}`,
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: jsonRequestBody('CreateFolderRequest'),
         responses: {
@@ -3332,7 +3367,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Folders'],
         summary: 'Update folder',
         description:
-          'Updates folder properties. Validates against circular parent references. ' +
+          `Updates folder properties. Validates against circular parent references. ${VAULT_QUOTA_NOTE} ` +
           FOLDER_WRITE_BUDGET,
         security: [{ bearerAuth: [], csrfToken: [] }],
         parameters: [ID_PATH_PARAM],
@@ -3346,7 +3381,7 @@ export const swaggerSpec: JsonObject = {
           429: { $ref: '#/components/responses/RateLimited' },
           404: { $ref: '#/components/responses/NotFound' },
           409: staleVaultKeyConflict(
-            'The same status, carrying no `data`, also reports a vault-key rotation currently in progress, a folder whose name already exists on this account, and a re-parent that lost a race with a concurrent move.',
+            `The same status, carrying no \`data\`, also reports a vault-key rotation currently in progress, a folder whose name already exists on this account, and a re-parent that lost a race with a concurrent move. ${ROW_CHANGED_CONFLICT}`,
           ),
         },
       },
@@ -3379,7 +3414,7 @@ export const swaggerSpec: JsonObject = {
         operationId: 'reorderFolder',
         tags: ['Folders'],
         summary: 'Reorder folder',
-        description: 'Updates the sort order of a folder. ' + FOLDER_WRITE_BUDGET,
+        description: `Updates the sort order of a folder. ${VAULT_QUOTA_NOTE} ${FOLDER_WRITE_BUDGET}`,
         security: [{ bearerAuth: [], csrfToken: [] }],
         parameters: [ID_PATH_PARAM],
         requestBody: jsonRequestBody('ReorderFolderRequest'),
@@ -3388,6 +3423,10 @@ export const swaggerSpec: JsonObject = {
           401: { $ref: '#/components/responses/Unauthorized' },
           429: { $ref: '#/components/responses/RateLimited' },
           404: { $ref: '#/components/responses/NotFound' },
+          400: { $ref: '#/components/responses/ValidationError' },
+          409: errorResponse(
+            'The folder was changed by other requests on every attempt while this one was saving it (three attempts); reload and retry.',
+          ),
         },
       },
     },
@@ -3879,7 +3918,9 @@ export const swaggerSpec: JsonObject = {
         tags: ['Tools'],
         summary: 'Import vault items',
         description:
-          'Executes already-decided import operations. The client parses the source export (Bitwarden, LastPass, KeePass, Chrome, Firefox, 1Password, generic CSV, or a native H-Vault export), resolves conflicts against its own decrypted vault, and encrypts every item locally before calling this endpoint; the server never sees plaintext, never parses the source format, and performs no matching of its own. Identity is computed in the browser from decrypted content — a login matches on its site and username, every other type on its exact content — and is neither transmitted nor stored, so `conflictStrategy` arrives already applied. The server validates ownership, field lengths and the per-account item cap, then applies exactly the `inserts` and `updates` it was given, under a per-user lock and (where the topology supports it) one transaction. Max 10,000 operations per request (large imports are split into several sequential requests by the client, which cannot change the outcome). Rate limited by `importLimiter`: 60 req/user per 15 min.',
+          'Executes already-decided import operations. The client parses the source export (Bitwarden, LastPass, KeePass, Chrome, Firefox, 1Password, generic CSV, or a native H-Vault export), resolves conflicts against its own decrypted vault, and encrypts every item locally before calling this endpoint; the server never sees plaintext, never parses the source format, and performs no matching of its own. Identity is computed in the browser from decrypted content — a login matches on its site and username, every other type on its exact content — and is neither transmitted nor stored, so `conflictStrategy` arrives already applied. The server validates ownership, field lengths and the per-account item cap, then applies exactly the `inserts` and `updates` it was given, under a per-user lock and (where the topology supports it) one transaction. Max 10,000 operations per request (large imports are split into several sequential requests by the client, which cannot change the outcome). The storage quota is checked for the request as a whole, before any row is written: ' +
+          VAULT_QUOTA_NOTE +
+          ' Rate limited by `importLimiter`: 60 req/user per 15 min.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: jsonRequestBody('ImportRequest'),
         responses: {
@@ -4134,7 +4175,7 @@ export const swaggerSpec: JsonObject = {
                         itemSkipReasons: {
                           type: 'array',
                           description:
-                            'One entry per item not stored as requested: `itemId` and a machine-readable `reason` such as `conflict_skipped`, `invalid_item_type` or `missing_encryption_fields`.',
+                            'One entry per item not stored as requested: `itemId` and a machine-readable `reason` such as `conflict_skipped`, `invalid_item_type`, `missing_encryption_fields`, or `storage_limit` (no room left in the account storage quota; the rest of the restore goes on).',
                           items: {
                             type: 'object',
                             properties: { itemId: { type: 'string' }, reason: { type: 'string' } },
@@ -4143,7 +4184,7 @@ export const swaggerSpec: JsonObject = {
                         folderSkipReasons: {
                           type: 'array',
                           description:
-                            'One entry per folder not stored as requested: `folderId` and a machine-readable `reason` such as `conflict_skipped`.',
+                            'One entry per folder not stored as requested: `folderId` and a machine-readable `reason` such as `conflict_skipped`, or `storage_limit` (no room left in the account storage quota; when the folder in the backup matched one the account already has, overwrite or keep both, its items are restored into that folder, and only a folder that would have been new leaves them unfiled).',
                           items: {
                             type: 'object',
                             properties: {

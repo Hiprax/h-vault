@@ -352,6 +352,14 @@ export interface IUserProfile {
    * "no"); the minting endpoint decides it again.
    */
   canInvite?: boolean;
+  /**
+   * The bytes this account's vault items and folders occupy, trashed ones
+   * included, as the storage quota counts them; `null` until the counter has been
+   * installed (an account that has not written since the quota arrived).
+   */
+  vaultBytes?: number | null;
+  /** The storage quota in bytes (`VAULT_STORAGE_QUOTA_MB_PER_USER`). */
+  vaultQuotaBytes?: number;
   settings: IUserSettings;
   createdAt: string;
   updatedAt: string;
@@ -481,13 +489,17 @@ export interface IItemSkipReason {
    *   aborting the whole restore. Note: `_id` duplicate-key collisions no longer
    *   occur here — non-owned items are inserted with a fresh server-minted `_id`,
    *   so a backup's foreign/duplicate `_id` can never collide.
+   * - `storage_limit` — storing the item would take the account past its vault
+   *   storage quota (`VAULT_STORAGE_QUOTA_MB_PER_USER`). The rest of the restore
+   *   goes on: a later row may fit, or shrink an existing one.
    */
   reason:
     | 'invalid_item_type'
     | 'missing_encryption_fields'
     | 'conflict_skipped'
     | 'trashed_auto_restored'
-    | 'invalid_item_data';
+    | 'invalid_item_data'
+    | 'storage_limit';
 }
 
 export interface IFolderSkipReason {
@@ -504,8 +516,13 @@ export interface IFolderSkipReason {
    *   backup's foreign/duplicate `_id` never collides; a residual `(userId,
    *   searchHash)` collision is resolved by retrying without the hash, so E11000
    *   only reaches this skip path in a rare concurrent-write race.
+   * - `storage_limit` — storing the folder would take the account past its vault
+   *   storage quota. When the backup's folder matched one the account already has
+   *   (an overwrite, or the duplicate a keep-both would have added), the items the
+   *   backup filed in it are restored into that existing folder; only a folder
+   *   that would have been new leaves them unfiled.
    */
-  reason: 'conflict_skipped' | 'invalid_folder_data';
+  reason: 'conflict_skipped' | 'invalid_folder_data' | 'storage_limit';
 }
 
 export interface IRestoreBackupResponse {

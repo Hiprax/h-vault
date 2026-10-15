@@ -4,6 +4,19 @@ import { MAX_ENCRYPTED_NAME_LENGTH, MAX_SORT_ORDER } from '../constants/index.js
 
 // NOTE: Folder nesting depth (MAX_FOLDER_NESTING_DEPTH) is enforced server-side
 // via $graphLookup aggregation because it requires traversing the database.
+/**
+ * A folder's position among its siblings. `-0` passes `int()` and `min(0)`, but the
+ * driver stores it as a double (8 bytes) where every other position is an int32 (4),
+ * so it is normalised to `0`: a position must not change a row's stored size, or
+ * the vault byte quota's per-write measure and the database's own would disagree.
+ */
+const sortOrderSchema = z
+  .number()
+  .int()
+  .min(0)
+  .max(MAX_SORT_ORDER)
+  .transform((position) => position + 0);
+
 export const createFolderSchema = z.object({
   encryptedName: z.string().min(1).max(MAX_ENCRYPTED_NAME_LENGTH),
   nameIv: z.string().min(1).max(24),
@@ -25,7 +38,7 @@ export const createFolderSchema = z.object({
     .string()
     .regex(/^#[0-9a-fA-F]{6}$/, 'Color must be a valid hex color code (e.g. #ff0000)')
     .optional(),
-  sortOrder: z.number().int().min(0).max(MAX_SORT_ORDER).default(0),
+  sortOrder: sortOrderSchema.default(0),
   // The nonce the new folder's id is derived from, so `encryptedName` can be bound
   // to that id before the folder exists. See `rowIdNonceSchema`.
   idNonce: rowIdNonceSchema.optional(),
@@ -56,7 +69,7 @@ export const updateFolderSchema = z
       .string()
       .regex(/^#[0-9a-fA-F]{6}$/, 'Color must be a valid hex color code (e.g. #ff0000)')
       .optional(),
-    sortOrder: z.number().int().min(0).max(MAX_SORT_ORDER).optional(),
+    sortOrder: sortOrderSchema.optional(),
     // The vault-key generation any ciphertext in this update was sealed under.
     // See `optionalVaultKeyVersionSchema`.
     vaultKeyVersion: optionalVaultKeyVersionSchema,
@@ -76,5 +89,5 @@ export const deleteFolderQuerySchema = z.object({
 });
 
 export const reorderFolderSchema = z.object({
-  sortOrder: z.number().int().min(0).max(MAX_SORT_ORDER),
+  sortOrder: sortOrderSchema,
 });

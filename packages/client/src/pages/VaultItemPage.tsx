@@ -21,8 +21,13 @@ export default function VaultItemPage() {
   useEffect(() => {
     if (items.length === 0 && !loading && !initialFetchDone.current) {
       initialFetchDone.current = true;
-      void fetchItems();
-      void fetchTrashItems();
+      // A refused or failed load leaves the page showing what it has.
+      void fetchItems().catch(() => {
+        /* the list stays as it was; the next walk retries */
+      });
+      void fetchTrashItems().catch(() => {
+        /* the trash stays as it was; the next walk retries */
+      });
     }
   }, [items.length, loading, fetchItems, fetchTrashItems]);
 
@@ -62,9 +67,14 @@ export default function VaultItemPage() {
 
   if (!item) return null;
 
+  // The re-read after a save refreshes the offline copy of the vault (written by a
+  // whole walk and nothing else). A refused or failed one leaves the list as it
+  // was, with this row's edit applied.
   const handleFormSaved = () => {
     setEditing(false);
-    void fetchItems();
+    void fetchItems().catch(() => {
+      /* the store keeps the list; the next walk refreshes the offline copy */
+    });
   };
 
   // Don't allow editing trashed items, and never hand an UNDECODABLE item to the

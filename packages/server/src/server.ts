@@ -17,7 +17,7 @@ import { runMigrations } from './utils/migrations.js';
 import { getRunningJobs } from './utils/jobTracker.js';
 import { createGracefulShutdown } from './utils/gracefulShutdown.js';
 import { createTimedServer } from './utils/httpTimeouts.js';
-import { listenOn } from './utils/listenAddress.js';
+import { describeBoundAddress, listenOn } from './utils/listenAddress.js';
 import { reportDeploymentMode, reportTlsVerificationOverride } from './utils/deploymentChecks.js';
 import { runStoragePreflight } from './utils/storageHealth.js';
 import { verifyEmailTransportAtBoot } from './utils/email.js';
@@ -84,8 +84,10 @@ async function startServer(): Promise<void> {
     const server = createTimedServer(app);
 
     listenOn(server, { port: config.PORT, host: config.HOST }, () => {
+      // The address the kernel bound, not the configured one: the smoke gate reads
+      // this line to prove the emitted entry point really passes `HOST`.
       logger.info(
-        `${config.APP_NAME} server listening on ${config.HOST}:${String(config.PORT)} in ${config.NODE_ENV} mode`,
+        `${config.APP_NAME} server listening on ${describeBoundAddress(server.address())} in ${config.NODE_ENV} mode`,
       );
 
       // Signal PM2 that the process is ready to accept connections (requires wait_ready: true)

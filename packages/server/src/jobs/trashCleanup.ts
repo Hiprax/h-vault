@@ -7,6 +7,12 @@ import { Document } from '../models/Document.js';
 import { TRASH_AUTO_PURGE_DAYS } from '@hvault/shared';
 import { acquireJobLock, releaseJobLock } from '../utils/jobLock.js';
 import { trackJob } from '../utils/jobTracker.js';
+import {
+  deleteCountedItems,
+  reserveVaultWrite,
+  settleVaultWrite,
+  type VaultWriteReservation,
+} from '../utils/vaultQuota.js';
 import { recordJobAuditEntries } from '../services/auditService.js';
 import { getStorage } from '../services/storage/index.js';
 import { createStorageBreaker } from '../utils/storageBreaker.js';
@@ -175,6 +181,34 @@ async function purgeTrashedDocuments(
   return { purged, failed: breaker.failures, gaveUp: breaker.isRefusing() };
 }
 
+/**
+ * Purges one account's expired trash rows from a batch, through the vault byte
+ * quota (F-24): touch first, then row by row with the trash predicate RE-STATED
+ * (F-29: a row restored since the batch was read is neither deleted nor counted),
+ * and the bytes that went settled in a `finally`, so a failure part-way still
+ * subtracts exactly the rows it removed. A row whose account no longer exists
+ * (being erased) is purged without accounting: there is no counter to keep.
+ */
+async function purgeAccountItems(
+  userId: string,
+  ids: mongoose.Types.ObjectId[],
+  cutoffDate: Date,
+): Promise<{ deleted: number; bytes: number }> {
+  const tally = { deleted: 0, bytes: 0 };
+  let reservation: VaultWriteReservation | null = null;
+  try {
+    reservation = await reserveVaultWrite(userId, { bytes: 0 });
+  } catch (error: unknown) {
+    if ((error as { statusCode?: unknown }).statusCode !== 404) throw error;
+  }
+  try {
+    await deleteCountedItems(userId, { deletedAt: { $lte: cutoffDate } }, tally, ids);
+  } finally {
+    if (reservation) await settleVaultWrite(reservation, -tally.bytes);
+  }
+  return tally;
+}
+
 export function startTrashCleanupJob(): ScheduledTask {
   // Run daily at 2:00 AM UTC
   const task = cron.schedule(
@@ -226,14 +260,14 @@ export function startTrashCleanupJob(): ScheduledTask {
             deletedCount = 0;
             const purgedByUser = new Map<string, number>();
             for (const [userId, userItems] of itemsByUser) {
-              const result = await VaultItem.deleteMany({
-                _id: { $in: userItems.map((i) => i._id) },
+              const tally = await purgeAccountItems(
                 userId,
-                deletedAt: { $lte: cutoffDate },
-              });
-              deletedCount += result.deletedCount;
-              if (result.deletedCount > 0) {
-                purgedByUser.set(userId, result.deletedCount);
+                userItems.map((i) => i._id),
+                cutoffDate,
+              );
+              deletedCount += tally.deleted;
+              if (tally.deleted > 0) {
+                purgedByUser.set(userId, tally.deleted);
               }
             }
             totalDeleted += deletedCount;

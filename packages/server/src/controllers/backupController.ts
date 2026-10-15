@@ -29,9 +29,20 @@ import {
   vaultKeyVersionOf,
 } from '../utils/controllerHelpers.js';
 import { carriesBoundField } from '../utils/vaultFieldFormat.js';
+import {
+  VaultQuotaExceededError,
+  createCountedRow,
+  updateCountedRow,
+} from '../utils/vaultQuota.js';
 import { estimateItemJsonSize, estimateFolderJsonSize } from '../utils/sizeEstimator.js';
 import { collectDocumentSummary, type DocumentSummary } from '../utils/documentSummary.js';
-import { closingMembers, forEachRow, jsonArrayOf, sendJsonStream } from '../utils/jsonStream.js';
+import {
+  ROW_CURSOR_BATCH_SIZE,
+  closingMembers,
+  forEachRow,
+  jsonArrayOf,
+  sendJsonStream,
+} from '../utils/jsonStream.js';
 import { sendDeadlineMs } from '../utils/heavyResponseBudget.js';
 import { hasCycle } from '../utils/folderGraph.js';
 import { claimOutboundMail } from '../utils/outboundMailBudget.js';
@@ -130,6 +141,19 @@ const SEARCH_HASH_RE = /^[a-f0-9]{64}$/;
  * supplies the concrete model (VaultItem or Folder). The `(userId, sourceRefId)`
  * partial index backs its provenance lookup.
  */
+/**
+ * The backup's spelling of a row id, when it is one: a STRING of 24 hex digits.
+ *
+ * `mongoose.isValidObjectId` is not this test. It defers to bson's
+ * `ObjectId.isValid`, which also accepts an OBJECT whose `id` is 24 hex digits,
+ * and `String()` of that object is "[object Object]", which `new ObjectId` then
+ * refuses: a 500 inside the restore's lock, after a `keep_both` restore had already
+ * written its folders. A backup is JSON, so a real id is always a string.
+ */
+function backupRowId(value: unknown): string | undefined {
+  return typeof value === 'string' && mongoose.isObjectIdOrHexString(value) ? value : undefined;
+}
+
 async function countNetNewRestoreRows(
   backupRows: Record<string, unknown>[],
   conflictStrategy: RestoreBackupInput['conflictStrategy'],
@@ -142,8 +166,9 @@ async function countNetNewRestoreRows(
   const candidateIds: string[] = [];
   let netNew = 0;
   for (const row of backupRows) {
-    if (mongoose.isValidObjectId(row._id)) {
-      candidateIds.push(String(row._id));
+    const id = backupRowId(row._id);
+    if (id !== undefined) {
+      candidateIds.push(id);
     } else {
       netNew++; // no valid _id → a fresh id is minted → always net-new
     }
@@ -159,10 +184,11 @@ async function countNetNewRestoreRows(
 
 /** The rows a backup carries: every folder, and every live (untrashed) item. */
 const backupFolderRows = (userId: string) =>
-  Folder.find({ userId }).select('-sourceRefId').lean().cursor();
+  Folder.find({ userId }).select('-sourceRefId').batchSize(ROW_CURSOR_BATCH_SIZE).lean().cursor();
 const backupItemRows = (userId: string) =>
   VaultItem.find({ userId, deletedAt: { $exists: false } })
     .select('-sourceRefId')
+    .batchSize(ROW_CURSOR_BATCH_SIZE)
     .lean()
     .cursor();
 
@@ -563,7 +589,12 @@ export const updateBackupRecipients = catchAsync(
       confirmationsSent: confirmations?.sent ?? 'in progress',
     });
 
-    const stored = await User.findById(userId).select('settings.backup.backupRecipients').lean();
+    // From the primary: the reply must show the list this request just wrote (the
+    // settings page replaces the user's edit with it), not a lagging secondary's.
+    const stored = await User.findById(userId)
+      .select('settings.backup.backupRecipients')
+      .read('primary')
+      .lean();
     const storedList = stored?.settings.backup.backupRecipients ?? [];
     const recipients = publicRecipients(storedList);
     res.status(200).json({
@@ -877,16 +908,12 @@ export const downloadBackup = catchAsync(async (req: Request, res: Response): Pr
   // An object rather than a `let`: the flag is set inside `record`, which the
   // compiler cannot see running before the check below.
   const recording = { done: false };
+  // The audit row FIRST (`createAuditLog` never throws), then the history row in
+  // its own try: this runs inside the stream, just before the last byte, so a
+  // history write that throws would destroy a file already all but delivered, and
+  // with `done` set the interrupted-download fallback below would skip both rows.
   const record = async (completed: boolean, fileSizeBytes: number): Promise<void> => {
     recording.done = true;
-    await BackupLog.create({
-      userId,
-      status: completed ? 'success' : 'failed',
-      fileSizeBytes,
-      itemCount: tally.itemCount,
-      sentTo: ['download'],
-      ...(completed ? {} : { errorMessage: 'The download ended before the whole file was sent' }),
-    });
     await createAuditLog(
       userId,
       'backup_download',
@@ -894,6 +921,21 @@ export const downloadBackup = catchAsync(async (req: Request, res: Response): Pr
       downloadCtx.ip,
       downloadCtx.userAgent,
     );
+    try {
+      await BackupLog.create({
+        userId,
+        status: completed ? 'success' : 'failed',
+        fileSizeBytes,
+        itemCount: tally.itemCount,
+        sentTo: ['download'],
+        ...(completed ? {} : { errorMessage: 'The download ended before the whole file was sent' }),
+      });
+    } catch (err: unknown) {
+      logger.error('Could not write a backup download to the backup history', {
+        userId,
+        error: errorMessage(err),
+      });
+    }
   };
 
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -917,16 +959,9 @@ export const downloadBackup = catchAsync(async (req: Request, res: Response): Pr
     { deadlineMs: sendDeadlineMs(estimate), label: 'Backup download' },
   );
 
-  if (!outcome.completed && !recording.done) {
-    try {
-      await record(false, outcome.bytes);
-    } catch (err: unknown) {
-      logger.error('Could not record an interrupted backup download', {
-        userId,
-        error: errorMessage(err),
-      });
-    }
-  }
+  // `record` cannot throw: the audit write swallows its own failures and the
+  // history write sits in its own try (see `record` above).
+  if (!outcome.completed && !recording.done) await record(false, outcome.bytes);
 });
 
 export const getBackupHistory = catchAsync(async (req: Request, res: Response): Promise<void> => {
@@ -1293,9 +1328,7 @@ async function restoreUnderRotationLock(
 
     for (const folder of backupFolders) {
       const rawId = folder._id;
-      const folderId = mongoose.isValidObjectId(rawId)
-        ? String(rawId)
-        : new mongoose.Types.ObjectId().toString();
+      const folderId = backupRowId(rawId) ?? new mongoose.Types.ObjectId().toString();
       // Resolve the row this backup folder maps onto, in precedence order:
       //   1. owned by `_id` (the strongest identity — the user's own live row);
       //   2. else a prior-restored row matched by `(userId, sourceRefId)`.
@@ -1314,6 +1347,11 @@ async function restoreUnderRotationLock(
           : undefined;
 
       const sanitizedFolder = pickAllowedFields(folder, ALLOWED_FOLDER_FIELDS);
+      // A position of -0 is stored as a double where every other is an int32; it
+      // is 0 (the folder schemas normalise it the same way for every other write).
+      if (typeof sanitizedFolder.sortOrder === 'number') {
+        sanitizedFolder.sortOrder = sanitizedFolder.sortOrder + 0;
+      }
 
       // Drop a malformed searchHash up front so it can never trip the model's
       // `match` validator (a ValidationError here would otherwise abort the whole
@@ -1339,7 +1377,7 @@ async function restoreUnderRotationLock(
       // post-loop cleanup below.
       if (
         sanitizedFolder.parentId !== undefined &&
-        !mongoose.isValidObjectId(sanitizedFolder.parentId)
+        backupRowId(sanitizedFolder.parentId) === undefined
       ) {
         sanitizedFolder.parentId = undefined;
       }
@@ -1352,6 +1390,9 @@ async function restoreUnderRotationLock(
       // even the retry couldn't resolve — and skips just that folder as
       // `invalid_folder_data`, mirroring the item loop. Anything else (a
       // transient DB failure) still propagates and fails the request.
+      // Set when the matched folder was deleted by another request while this
+      // restore ran: it is gone, so nothing may be filed under it any more.
+      let matchedFolderGone = false;
       try {
         if (targetFolderId !== undefined) {
           // `targetFolderId` (narrowed to string) is the real `_id` of the matched
@@ -1373,13 +1414,16 @@ async function restoreUnderRotationLock(
             // searchHash) index → E11000. Mirror the keep_both / fresh-insert
             // siblings: retry the overwrite with searchHash stripped so the rest of
             // the folder data is still applied rather than 500-ing the restore.
+            // Through the byte quota (F-24): pinned on the row it measured, and
+            // refused (skipped as `storage_limit`) when the growth does not fit.
+            let overwritten: Record<string, unknown> | null;
             try {
-              await Folder.findOneAndUpdate(
-                { _id: matchedFolderId, userId },
-                { $set: { ...sanitizedFolder, userId } },
-                { runValidators: true },
-              );
-              foldersRestored++;
+              overwritten = await updateCountedRow({
+                kind: 'folder',
+                userId,
+                id: matchedFolderId,
+                update: { $set: { ...sanitizedFolder, userId } },
+              });
             } catch (err: unknown) {
               if (
                 err instanceof Error &&
@@ -1387,20 +1431,26 @@ async function restoreUnderRotationLock(
                 (err as { code?: number }).code === 11000
               ) {
                 const { searchHash: _ovwHash, ...folderWithoutHash } = sanitizedFolder;
-                await Folder.findOneAndUpdate(
-                  { _id: matchedFolderId, userId },
-                  { $set: { ...folderWithoutHash, userId }, $unset: { searchHash: 1 } },
-                  { runValidators: true },
-                );
-                foldersRestored++;
+                overwritten = await updateCountedRow({
+                  kind: 'folder',
+                  userId,
+                  id: matchedFolderId,
+                  update: { $set: { ...folderWithoutHash, userId }, $unset: { searchHash: 1 } },
+                });
               } else {
                 throw err;
               }
             }
-            // The overwrite writes `parentId` from the raw backup row (a backup
-            // ref id), so this row now needs the post-loop remap too — record it.
-            folderIdMap.set(folderId, matchedFolderId);
-            continue;
+            if (overwritten) {
+              foldersRestored++;
+              // The overwrite writes `parentId` from the raw backup row (a backup
+              // ref id), so this row now needs the post-loop remap too — record it.
+              folderIdMap.set(folderId, matchedFolderId);
+              continue;
+            }
+            // The matched folder was deleted by another request while this restore
+            // ran: the backup's folder comes back as a new one, created below.
+            matchedFolderGone = true;
           }
           // keep_both: create a new folder with a new _id and record the mapping.
           // Duplication is keep_both's contract, so this fires even for a
@@ -1412,11 +1462,10 @@ async function restoreUnderRotationLock(
           // Stamp `sourceRefId = folderId` so a later restore recognizes this row.
           const { searchHash: _dupSearchHash, ...folderWithoutHash } = sanitizedFolder;
           try {
-            const newFolder = await Folder.create({
-              ...folderWithoutHash,
-              userId,
-              sourceRefId: folderId,
-            });
+            const duplicate = { ...folderWithoutHash, userId, sourceRefId: folderId };
+            const newFolder = await createCountedRow('folder', userId, duplicate, () =>
+              Folder.create(duplicate),
+            );
             folderIdMap.set(folderId, String(newFolder._id));
             foldersRestored++;
           } catch (err: unknown) {
@@ -1449,11 +1498,10 @@ async function restoreUnderRotationLock(
           // unique index on this path is the partial (userId, searchHash). Catch
           // that E11000 and retry without searchHash rather than failing.
           try {
-            const newFolder = await Folder.create({
-              ...sanitizedFolder,
-              userId,
-              sourceRefId: folderId,
-            });
+            const fresh = { ...sanitizedFolder, userId, sourceRefId: folderId };
+            const newFolder = await createCountedRow('folder', userId, fresh, () =>
+              Folder.create(fresh),
+            );
             folderIdMap.set(folderId, String(newFolder._id));
             foldersRestored++;
           } catch (err: unknown) {
@@ -1463,11 +1511,10 @@ async function restoreUnderRotationLock(
               (err as { code?: number }).code === 11000
             ) {
               const { searchHash: _siblingHash, ...folderWithoutHash } = sanitizedFolder;
-              const retryFolder = await Folder.create({
-                ...folderWithoutHash,
-                userId,
-                sourceRefId: folderId,
-              });
+              const retry = { ...folderWithoutHash, userId, sourceRefId: folderId };
+              const retryFolder = await createCountedRow('folder', userId, retry, () =>
+                Folder.create(retry),
+              );
               folderIdMap.set(folderId, String(retryFolder._id));
               foldersRestored++;
             } else {
@@ -1476,6 +1523,19 @@ async function restoreUnderRotationLock(
           }
         }
       } catch (err: unknown) {
+        if (err instanceof VaultQuotaExceededError) {
+          // No room in the account's storage quota for this folder. When the backup's
+          // folder matched one the account already has (an overwrite, or the
+          // duplicate a keep-both would have added), that folder is still mapped,
+          // so the rows that name it are filed there; only a folder that would have
+          // been new leaves them unfiled, as does one that was deleted meanwhile.
+          if (targetFolderId !== undefined && !matchedFolderGone) {
+            folderIdMap.set(folderId, targetFolderId);
+          }
+          foldersSkipped++;
+          folderSkipReasons.push({ folderId, reason: 'storage_limit' });
+          continue;
+        }
         const isDataError =
           err instanceof Error && (err.name === 'ValidationError' || err.name === 'CastError');
         const isDuplicateKey =
@@ -1665,9 +1725,7 @@ async function restoreUnderRotationLock(
       }
 
       const rawId = item._id;
-      const itemId = mongoose.isValidObjectId(rawId)
-        ? String(rawId)
-        : new mongoose.Types.ObjectId().toString();
+      const itemId = backupRowId(rawId) ?? new mongoose.Types.ObjectId().toString();
       // Resolve the row this backup item maps onto, owned-by-`_id` first, then a
       // prior-restored row by `(userId, sourceRefId)`. When matched, the conflict
       // strategy is applied against the matched row's real `_id` (equal to `itemId`
@@ -1679,6 +1737,16 @@ async function restoreUnderRotationLock(
       const isTrashed = existingItem?.deletedAt != null;
 
       const sanitizedItem = pickAllowedFields(item, ALLOWED_ITEM_FIELDS);
+
+      // A folder reference that is not a string id is no reference: Mongoose would
+      // cast an object such as `{"_id": "<24 hex>"}` to that id, filing the item
+      // under a folder nothing below validated.
+      if (
+        sanitizedItem.folderId !== undefined &&
+        backupRowId(sanitizedItem.folderId) === undefined
+      ) {
+        sanitizedItem.folderId = undefined;
+      }
 
       // Remap folderId if a new folder was created during keep_both
       if (typeof sanitizedItem.folderId === 'string' && folderIdMap.has(sanitizedItem.folderId)) {
@@ -1719,6 +1787,9 @@ async function restoreUnderRotationLock(
       // tampered/legacy backup) are swallowed as a skip; any other error
       // (e.g. a transient DB failure) still propagates and fails the request.
       try {
+        // Set when the matched row was permanently deleted by another request
+        // while this restore ran: the backup row then comes back as a new one.
+        let matchedRowGone = false;
         if (existingItem) {
           // The real `_id` of the matched row — owned by backup id, or a
           // prior-restored row keyed by sourceRefId.
@@ -1729,35 +1800,44 @@ async function restoreUnderRotationLock(
             // override as a skip reason so the client can warn the user that
             // their `skip`/`keep_both` selection did not apply to trashed
             // entries.
-            await VaultItem.findOneAndUpdate(
-              { _id: matchedItemId, userId },
-              { $set: { ...sanitizedItem, userId }, $unset: { deletedAt: 1 } },
-              { runValidators: true },
-            );
-            itemsRestored++;
-            itemSkipReasons.push({ itemId, reason: 'trashed_auto_restored' });
-            continue;
-          }
-          if (conflictStrategy === 'skip') {
+            const restored = await updateCountedRow({
+              kind: 'item',
+              userId,
+              id: matchedItemId,
+              update: { $set: { ...sanitizedItem, userId }, $unset: { deletedAt: 1 } },
+            });
+            if (restored) {
+              itemsRestored++;
+              itemSkipReasons.push({ itemId, reason: 'trashed_auto_restored' });
+              continue;
+            }
+            matchedRowGone = true;
+          } else if (conflictStrategy === 'skip') {
             itemsSkipped++;
             itemSkipReasons.push({ itemId, reason: 'conflict_skipped' });
             continue;
-          }
-          if (conflictStrategy === 'overwrite') {
-            await VaultItem.findOneAndUpdate(
-              { _id: matchedItemId, userId },
-              { $set: { ...sanitizedItem, userId } },
-              { runValidators: true },
-            );
+          } else if (conflictStrategy === 'overwrite') {
+            const overwritten = await updateCountedRow({
+              kind: 'item',
+              userId,
+              id: matchedItemId,
+              update: { $set: { ...sanitizedItem, userId } },
+            });
+            if (overwritten) {
+              itemsRestored++;
+              continue;
+            }
+            matchedRowGone = true;
+          } else {
+            // keep_both: create a new item with a new _id. Duplication is its
+            // contract, so this fires even for a sourceRefId match. Stamp
+            // `sourceRefId = itemId` so a later restore recognizes this row.
+            const duplicate = { ...sanitizedItem, userId, sourceRefId: itemId };
+            await createCountedRow('item', userId, duplicate, () => VaultItem.create(duplicate));
             itemsRestored++;
-            continue;
           }
-          // keep_both: create a new item with a new _id. Duplication is its
-          // contract, so this fires even for a sourceRefId match. Stamp
-          // `sourceRefId = itemId` so a later restore recognizes this row.
-          await VaultItem.create({ ...sanitizedItem, userId, sourceRefId: itemId });
-          itemsRestored++;
-        } else {
+        }
+        if (!existingItem || matchedRowGone) {
           // NEW to this user: an item deleted since the backup, or a foreign _id
           // from a cross-account backup. Mint a fresh _id (omit `_id`) — never
           // reuse the backup's globally-unique _id, which may belong to another
@@ -1766,10 +1846,18 @@ async function restoreUnderRotationLock(
           // Stamp `sourceRefId = itemId` (the backup ref id) so a REPEAT restore of
           // the same backup recognizes this row by `(userId, sourceRefId)` instead
           // of duplicating it.
-          await VaultItem.create({ ...sanitizedItem, userId, sourceRefId: itemId });
+          const fresh = { ...sanitizedItem, userId, sourceRefId: itemId };
+          await createCountedRow('item', userId, fresh, () => VaultItem.create(fresh));
           itemsRestored++;
         }
       } catch (err: unknown) {
+        if (err instanceof VaultQuotaExceededError) {
+          // No room in the account's storage quota for this row. The rest of the
+          // restore goes on: a later row may fit, or shrink one already stored.
+          itemsSkipped++;
+          itemSkipReasons.push({ itemId, reason: 'storage_limit' });
+          continue;
+        }
         // Persistence-layer data-quality rejections are skipped per-item:
         //   • ValidationError — a failed model validator (over-length field, etc.)
         //   • CastError — an un-castable field (e.g. a malformed passwordHistory

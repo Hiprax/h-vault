@@ -29,7 +29,8 @@ import {
   heavyResponseSemaphore,
   heavyResponseUserQuota,
 } from '../src/utils/heavyResponseBudget.js';
-import { createTestUser, sampleVaultItem, type TestUser } from './helpers.js';
+import request from 'supertest';
+import { authHeader, createTestUser, getCsrf, sampleVaultItem, type TestUser } from './helpers.js';
 
 let server: http.Server;
 let port: number;
@@ -227,11 +228,40 @@ describe('a failure after the first byte', () => {
     // Truncated, and nothing glued on: no error envelope, no closing brace.
     expect(text).not.toContain('"success":false');
     expect(text).not.toContain('"metadata"');
+    // Both, eventually: the audit row is written before the history row, and the
+    // slot comes back only once the handler has settled after both.
     await vi.waitFor(async () => {
       const audit = await AuditLog.findOne({ userId: user.id, action: 'backup_download' }).lean();
       expect(audit?.metadata).toMatchObject({ completed: false });
+      expect(heavyResponseSemaphore.available).toBe(heavyResponseSemaphore.permits);
     });
-    expect(heavyResponseSemaphore.available).toBe(heavyResponseSemaphore.permits);
+  });
+
+  it('ends an export mid-file and records it as not completed', async () => {
+    const user = await backupUser(3, 100);
+    failTheStreamPass();
+    const agent = request.agent(app);
+    const csrf = await getCsrf(agent);
+
+    const res = await agent
+      .post('/api/v1/tools/export')
+      .set('Authorization', authHeader(user.accessToken))
+      .set('Cookie', csrf.cookie)
+      .set('x-csrf-token', csrf.token)
+      .send({ authHash: user.rawPassword })
+      .then(
+        (response) => response,
+        (error: unknown) => error,
+      );
+
+    // Cut off part-way: the connection ends without a complete body.
+    expect(res).toBeInstanceOf(Error);
+    await vi.waitFor(async () => {
+      const audit = await AuditLog.findOne({ userId: user.id, action: 'export' }).lean();
+      expect(audit?.metadata).toMatchObject({ completed: false });
+      expect(heavyResponseSemaphore.available).toBe(heavyResponseSemaphore.permits);
+    });
+    expect(await AuditLog.countDocuments({ userId: user.id, action: 'export' })).toBe(1);
   });
 
   it('destroys a list page mid-page and appends nothing to it', async () => {
@@ -261,5 +291,30 @@ describe('a failure after the first byte', () => {
     expect(text).toContain('first-row');
     expect(text).not.toContain('"success":false');
     expect(text).not.toContain('"pagination"');
+  });
+});
+
+describe('the download record (F-25)', () => {
+  it('a history row that cannot be written at the end of the file truncates nothing and loses no audit row', async () => {
+    const user = await backupUser(3, 100);
+    const create = vi
+      .spyOn(BackupLog, 'create')
+      .mockImplementationOnce((() =>
+        Promise.reject(new Error('the primary stepped down'))) as never);
+
+    const client = rawGet('/api/v1/backup/download', user.accessToken, { read: true });
+    await client.closed;
+
+    expect(create).toHaveBeenCalledTimes(1);
+    // The whole file was delivered: the closing members are there.
+    const text = client.text();
+    expect(text).toMatch(/^HTTP\/1\.1 200/);
+    expect(text).toContain('"metadata":{"itemCount":3,"folderCount":0}');
+    // The download is on the audit record, as a completed one...
+    const audit = await AuditLog.findOne({ userId: user.id, action: 'backup_download' }).lean();
+    expect(audit?.metadata).toMatchObject({ completed: true, itemCount: 3 });
+    // ...and the history row that failed was not written twice or as a failure.
+    expect(await BackupLog.countDocuments({ userId: user.id })).toBe(0);
+    expect(heavyResponseSemaphore.available).toBe(heavyResponseSemaphore.permits);
   });
 });

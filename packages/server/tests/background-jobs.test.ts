@@ -1,4 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { installTestClock, uninstallTestClock } from './clock.js';
 import mongoose from 'mongoose';
 import crypto from 'node:crypto';
 import { User } from '../src/models/User.js';
@@ -233,6 +234,17 @@ beforeEach(() => {
 // ─── Backup Scheduler ────────────────────────────────────────────────────────
 
 describe('backupScheduler', () => {
+  // The scheduler picks the accounts whose `scheduleHour` is the CURRENT UTC hour,
+  // read when its tick runs; these tests set that hour when they seed the account.
+  // A run straddling an hour boundary would seed one hour and tick in the next, so
+  // the wall clock is frozen for the block (the date only: timers stay real).
+  beforeEach(() => {
+    installTestClock();
+  });
+  afterEach(() => {
+    uninstallTestClock();
+  });
+
   it('should register cron job with hourly schedule and UTC timezone', () => {
     startBackupScheduler();
 
