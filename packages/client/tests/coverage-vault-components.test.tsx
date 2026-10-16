@@ -503,6 +503,8 @@ describe('VaultList — bulk move', () => {
 
   it('moves the selection into the chosen folder and reports it by name', async () => {
     selectFirstAndOpenMoveMenu();
+    const fetchItems = vi.mocked(useVaultStore.getState().fetchItems);
+    const readsBefore = fetchItems.mock.calls.length;
 
     fireEvent.click(screen.getByRole('menuitem', { name: 'Work' }));
 
@@ -512,6 +514,10 @@ describe('VaultList — bulk move', () => {
     expect(mockToast).toHaveBeenCalledWith(
       expect.objectContaining({ title: 'Items moved to Work', type: 'success' }),
     );
+    // The list is re-read once, so the moved rows show their new folder.
+    await waitFor(() => {
+      expect(fetchItems.mock.calls.length).toBe(readsBefore + 1);
+    });
   });
 
   it('moves the selection to the vault root when "No folder" is chosen', async () => {
@@ -530,6 +536,8 @@ describe('VaultList — bulk move', () => {
   it('surfaces an error toast and keeps the selection when the move request fails', async () => {
     mockBulkMoveApi.mockRejectedValueOnce(new Error('network'));
     selectFirstAndOpenMoveMenu();
+    const fetchItems = vi.mocked(useVaultStore.getState().fetchItems);
+    const readsBefore = fetchItems.mock.calls.length;
 
     fireEvent.click(screen.getByRole('menuitem', { name: 'Work' }));
 
@@ -540,6 +548,8 @@ describe('VaultList — bulk move', () => {
     });
     // The selection must survive a failure so the user can retry.
     expect(screen.getByText('1 selected')).toBeInTheDocument();
+    // Nothing moved, so nothing is re-read.
+    expect(fetchItems.mock.calls.length).toBe(readsBefore);
   });
 
   it('surfaces an error toast when the move-to-root request fails', async () => {

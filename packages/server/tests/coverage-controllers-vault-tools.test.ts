@@ -269,8 +269,10 @@ describe('vault + tools controller edge branches', () => {
           changedAt: new Date('2026-01-01T00:00:00.000Z'),
         },
       ];
-      // item1 HAS a passwordHistory (restored by `$set`); item2 has none (the
-      // rollback's `$unset` branch). The rotation payload still carries a
+      // item1 HAS a passwordHistory (restored by `$set`); item2 has none, and the
+      // rotation hands it one, so the rollback's `$unset` branch must take that
+      // off again rather than leave a history sealed under a key nothing adopted.
+      // The rotation payload still carries a
       // `searchHash`, as an older client's does, and none is ever stored (F-12;
       // this test used to pin the rollback restoring and removing that hash).
       const item1 = await seedItem(user.id, {
@@ -325,7 +327,17 @@ describe('vault + tools controller edge branches', () => {
                 },
               ],
             },
-            rotationItem(String(item2._id), 2),
+            {
+              ...rotationItem(String(item2._id), 2),
+              passwordHistory: [
+                {
+                  encryptedPassword: 'rotated-history-cipher-2',
+                  iv: 'new-hiv-2',
+                  tag: 'new-htag-2',
+                  changedAt: new Date().toISOString(),
+                },
+              ],
+            },
             rotationItem(String(item3._id), 3),
           ],
           folders: [],

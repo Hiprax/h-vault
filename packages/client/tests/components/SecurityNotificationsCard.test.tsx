@@ -187,6 +187,34 @@ describe('SecurityNotificationsCard', () => {
     expect(updateSettingsApi).not.toHaveBeenCalled();
   });
 
+  it('cancelling takes the last refusal away with it, and the prompt reopens empty', async () => {
+    vi.mocked(updateNotificationPreferencesApi).mockRejectedValue(
+      refusal(401, 'Current password is incorrect'),
+    );
+    render(<SecurityNotificationsCard email={EMAIL} initial={allOn()} />);
+
+    fireEvent.click(switchFor(/^Master password reset/));
+    fireEvent.change(screen.getByLabelText(/Your master password, to turn off/), {
+      target: { value: 'wrong' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Turn off' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Current password is incorrect');
+
+    fireEvent.change(screen.getByLabelText(/Your master password, to turn off/), {
+      target: { value: 'half-typed' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    // The refusal belonged to the attempt just abandoned: it goes with it.
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(switchFor(/^Master password reset/)).toBeChecked();
+    fireEvent.click(switchFor(/^Master password reset/));
+
+    expect(screen.getByLabelText(/Your master password, to turn off/)).toHaveValue('');
+    expect(screen.queryByRole('alert')).toBeNull();
+    // Only the one refused attempt was ever sent.
+    expect(updateNotificationPreferencesApi).toHaveBeenCalledTimes(1);
+  });
+
   it('shows the refusal of a settings save and keeps the switch where it was', async () => {
     vi.mocked(updateSettingsApi).mockRejectedValue(refusal(400, 'Something was refused'));
     render(<SecurityNotificationsCard email={EMAIL} initial={allOn()} />);

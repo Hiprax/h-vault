@@ -1,9 +1,9 @@
 {
   "version": 1,
   "recordedAt": "2026-10-16",
-  "commit": "c40ccf5",
+  "commit": "183495e",
   "tests": {
-    "count": 13442
+    "count": 13448
   },
   "coverage": {
     "diff": 100
@@ -51,7 +51,7 @@
         ]
       },
       "tests": {
-        "count": 1531
+        "count": 1532
       }
     },
     "packages/server": {
@@ -194,13 +194,13 @@
         ]
       },
       "tests": {
-        "count": 5903
+        "count": 5904
       }
     },
     "packages/client": {
       "coverage": {
         "line": 99.32,
-        "branch": 94.16,
+        "branch": 94.18,
         "function": 99.01,
         "linesTotal": 11231,
         "branchesTotal": 8037,
@@ -418,7 +418,7 @@
         ]
       },
       "tests": {
-        "count": 5772
+        "count": 5776
       }
     },
     "e2e": {
@@ -657,7 +657,7 @@
       "spectral": 1
     }
   },
-  "reason": "Phase 16 security-gates: registers audit:secrets:gitleaks and audit:deps:osv as tier-1 gates (tasks 44 -> 46), seeds their findings at the values measured by the green npm run ci of 2026-10-16 (gitleaks.unignored 0, osv.vulnerabilities 0 unaccepted, osv.accepted 1 = SUP-0070, braces 3.0.3 with no fixed release), and banks the 32 new server tests",
+  "reason": "Phase 17 verification: six tests that kill the mutation-diff survivors triaged in security-evidence.md (tests 13442->13448; client branch coverage 94.16->94.18)",
   "bundle": {
     "budgetKb": {
       "VaultItemForm": 230,

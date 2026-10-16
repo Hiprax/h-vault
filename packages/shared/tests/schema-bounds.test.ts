@@ -56,6 +56,7 @@ import {
   backupSetupSchema,
   backupChangePasswordSchema,
   restoreBackupSchema,
+  updateNotificationPreferencesSchema,
   verify2faSchema,
 } from '../src/schemas/user.js';
 import {
@@ -250,6 +251,21 @@ describe('bounds hold at the limit and refuse one past it', () => {
       name: 'registerSchema.authHash max 100',
       at: () => accepts(registerSchema, { ...validRegister, authHash: chars(100) }),
       past: () => accepts(registerSchema, { ...validRegister, authHash: chars(101) }),
+    },
+    {
+      // The master-password proof that turning a critical security email off
+      // requires (F-26): a bound that moved would refuse every real proof.
+      name: 'updateNotificationPreferencesSchema.authHash max 100',
+      at: () =>
+        accepts(updateNotificationPreferencesSchema, {
+          authHash: chars(100),
+          notifications: { password_reset: false },
+        }),
+      past: () =>
+        accepts(updateNotificationPreferencesSchema, {
+          authHash: chars(101),
+          notifications: { password_reset: false },
+        }),
     },
     {
       name: 'registerSchema.encryptedVaultKey max 200',

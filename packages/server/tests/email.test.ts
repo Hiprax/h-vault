@@ -694,6 +694,12 @@ describe('Email utility', () => {
       expect(html).toContain('Do not reset your master password to get back in.');
       expect(html).toContain('A reset erases everything');
       expect(html).toContain('this link is the way back in');
+      // What a lockout leaves alone, stated whole: the owner's sessions and a
+      // recently signed-in browser keep working while strangers keep guessing.
+      expect(html).toContain(
+        'Sessions you already have are not affected, and neither, usually, is a browser that ' +
+          'signed in recently.',
+      );
       // The old promise ("will also automatically unlock after 30 minutes") is
       // no longer true while guessing continues, so it must not be made.
       expect(html).not.toContain('automatically unlock after 30 minutes');

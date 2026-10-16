@@ -346,6 +346,22 @@ describe('I-01: the challenges collection', () => {
     // Negative: the token id is the only unique key; many challenges per account.
     expect(byKey({ userId: 1 })?.unique).not.toBe(true);
   });
+
+  it('refuses to store a challenge without its token id, and writes no row', async () => {
+    // A row with no `jti` is one no token can name, and every row without one
+    // would collide on the unique index as `null`: the model refuses it outright.
+    const userId = new mongoose.Types.ObjectId();
+    const expiresAt = new Date(Date.now() + TWO_FACTOR_CHALLENGE_SECONDS * 1000);
+
+    await expect(Challenge.create({ userId, expiresAt })).rejects.toMatchObject({
+      name: 'ValidationError',
+      errors: { jti: expect.objectContaining({ kind: 'required' }) },
+    });
+    expect(await Challenge.countDocuments({ userId })).toBe(0);
+    // The same row WITH its id is stored, so the refusal is about the id alone.
+    await Challenge.create({ jti: 'a-token-id', userId, expiresAt });
+    expect(await Challenge.countDocuments({ userId })).toBe(1);
+  });
 });
 
 describe('I-10: the code shape selects the branch', () => {

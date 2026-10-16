@@ -639,6 +639,70 @@ describe('SettingsPage import flow', () => {
     );
   });
 
+  /**
+   * Whether the vault list was read again AFTER the import's summary was raised:
+   * the refresh that makes the imported rows appear. Judged by the global call
+   * order of the two mocks, so the reads the import itself made while resolving
+   * against the vault never count.
+   */
+  function vaultReadAfterSummary(): boolean {
+    const index = mockToast.mock.calls.findIndex(([arg]) =>
+      (arg as { title: string }).title.startsWith('Imported'),
+    );
+    const raisedAt = mockToast.mock.invocationCallOrder[index] ?? Number.POSITIVE_INFINITY;
+    return mockListItemsApi.mock.invocationCallOrder.some((order) => order > raisedAt);
+  }
+
+  it('re-reads the vault once an import has inserted rows, so they appear', async () => {
+    mockImportVaultApi.mockImplementation(acceptImport({ insertedCount: 1, updatedCount: 0 }));
+    await renderSettings();
+    startFirefoxImport(['url,username,password', 'https://gitlab.com,newuser,s3cret'].join('\n'));
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Import' }));
+    });
+
+    expect((await importSummary())?.title).toBe('Imported 1 items');
+    expect(lastImportBody().operations.updates).toEqual([]);
+    await waitFor(() => expect(vaultReadAfterSummary()).toBe(true));
+  });
+
+  it('re-reads the vault once an import has only updated rows, so the changes appear', async () => {
+    mockImportVaultApi.mockImplementation(acceptImport({ insertedCount: 0, updatedCount: 1 }));
+    await renderSettings();
+    startFirefoxImport(['url,username,password', 'https://github.com,octocat,newer'].join('\n'));
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Import' }));
+    });
+    await waitFor(() => screen.getByText('Confirm import changes'));
+    await act(async () => {
+      fireEvent.click(screen.getByText('Apply Changes'));
+    });
+
+    expect((await importSummary())?.title).toBe('Imported 0 items, 1 updated (1 rows)');
+    expect(lastImportBody().operations.inserts).toEqual([]);
+    await waitFor(() => expect(vaultReadAfterSummary()).toBe(true));
+  });
+
+  it('does not re-read the vault when an import changed nothing', async () => {
+    await renderSettings();
+    // The one row is the item the vault already holds, and `skip` never updates.
+    startFirefoxImport(
+      ['url,username,password', 'https://github.com,octocat,newer'].join('\n'),
+      'skip',
+    );
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Import' }));
+    });
+
+    expect((await importSummary())?.title).toBe('Imported 0 items, 1 duplicates skipped (1 rows)');
+    await settleImportFlow();
+    await act(async () => {});
+    expect(vaultReadAfterSummary()).toBe(false);
+  });
+
   it('carries a native export’s password history, tags and folder back onto the item', async () => {
     // Re-importing your own H-Vault export must not quietly strip the item down
     // to its ciphertext. `packages/shared/src/schemas/user.ts` states the

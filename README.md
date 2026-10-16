@@ -2539,7 +2539,8 @@ name prints no step line at all, so a run with `mutation` skipped goes straight 
 **Distinguishing slow from stuck** needs one number: how long the gate named on the
 last step line is expected to take. These are the longest, measured on one `verify:full`
 of the whole branch (`mutation-diff` on the `npm run ci` above, which is what it is expected to
-cost inside `verify:full` too); everything else in the run finishes within about half a minute.
+cost inside `verify:full` too), except `deploy` and `resource`, re-measured on their own on
+2026-10-16; everything else in the run finishes within about half a minute.
 
 | Gate               | Measured | Its own deadline, if it has one                                                         |
 | ------------------ | -------- | --------------------------------------------------------------------------------------- |
@@ -2552,8 +2553,8 @@ cost inside `verify:full` too); everything else in the run finishes within about
 | `sast`             | 5m 41s   | none                                                                                    |
 | `test`             | 5m 01s   | none                                                                                    |
 | `type-check`       | 1m 24s   | none                                                                                    |
-| `deploy`           | 2m 18s   | 120 s per health wait                                                                   |
-| `resource`         | 1m 04s   | 15 min                                                                                  |
+| `deploy`           | 2m 38s   | 120 s per health wait                                                                   |
+| `resource`         | 1m 32s   | 15 min                                                                                  |
 | `a11y`             | 1m 12s   | none                                                                                    |
 | `lint`             | 50s      | none                                                                                    |
 | `fuzz`             | 39s      | 5 min per leg                                                                           |
