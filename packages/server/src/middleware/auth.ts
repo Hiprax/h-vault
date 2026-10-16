@@ -6,6 +6,7 @@ import { httpErrors } from '@hiprax/errors';
 import { createModuleLogger, errorMessage } from '../utils/logger.js';
 import { config } from '../config/index.js';
 import { User } from '../models/User.js';
+import { SESSION_INVALID_MESSAGE } from '../constants/index.js';
 import { evaluateAccountStatus } from '../utils/accountStatus.js';
 
 const logger = createModuleLogger('auth-middleware');
@@ -157,7 +158,7 @@ export function authenticate(req: Request, res: Response, next: NextFunction): v
           const message =
             info && typeof info === 'object' && 'message' in info
               ? (info as { message: string }).message
-              : 'Invalid or expired token';
+              : SESSION_INVALID_MESSAGE;
 
           next(httpErrors.unauthorized(message));
           return;

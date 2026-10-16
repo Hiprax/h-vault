@@ -244,23 +244,27 @@ describe('assertVaultKeyVersion', () => {
   });
 
   describe('an id with no account behind it', () => {
-    // The guard is a guard, not an existence check: Passport has already proved
-    // the account exists on every authenticated request, and the write that
-    // follows carries its own `_id` filter. So a missing row answers with
-    // `vaultKeyVersionOf`'s documented value for an absent generation — the same
-    // answer `assertVaultNotRotating` gives a missing user — rather than
-    // inventing a 404 that no route can reach.
+    // A dead session, not generation 0 (I-08). Passport proves the account exists
+    // only at the start of a request, so a request that authenticated a moment
+    // before an erasure reaches this guard for an account that is gone; reading
+    // that as generation 0 let the write that followed store a row for nobody.
+    // `tenant-write-missing-user.test.ts` pins the same answer over the wire.
     const ABSENT_ID = '507f1f77bcf86cd799439011';
 
-    it('resolves to generation 0 rather than throwing', async () => {
-      await expect(assertVaultKeyVersion(ABSENT_ID, undefined)).resolves.toBe(0);
-      await expect(assertVaultKeyVersion(ABSENT_ID, 0)).resolves.toBe(0);
+    it('answers 401 whatever generation is claimed, never resolving to 0', async () => {
+      for (const supplied of [undefined, 0, 1]) {
+        await expect(assertVaultKeyVersion(ABSENT_ID, supplied)).rejects.toMatchObject({
+          statusCode: 401,
+        });
+      }
     });
 
-    it('refuses a claimed generation above 0, and writes nothing', async () => {
+    it('refuses without writing anything', async () => {
       const before = await User.countDocuments({});
 
-      await expect(assertVaultKeyVersion(ABSENT_ID, 1)).rejects.toBeInstanceOf(StaleVaultKeyError);
+      await expect(assertVaultKeyVersion(ABSENT_ID, 1)).rejects.not.toBeInstanceOf(
+        StaleVaultKeyError,
+      );
 
       // No upsert, no row invented by the read.
       expect(await User.countDocuments({})).toBe(before);

@@ -127,14 +127,26 @@ export function documentChunkCountFor(plaintextBytes: number, chunkPlaintextByte
  * the framing would be applied to one of them and the disagreement would surface as
  * a document that uploaded and will not open.
  *
- * Stated in this direction rather than as `ciphertextBytes = plaintextBytes + …`
- * because that is the direction both callers need: the object's length is what the
- * storage engine reports, and the file's length is what has to be derived from it.
- * The forward conversion has no caller yet; `utils/documentObjects.ts` records where
- * it should live when one appears.
+ * Stated in this direction because that is the direction both callers need: the
+ * object's length is what the storage engine reports, and the file's length is what
+ * has to be derived from it. The forward conversion is
+ * {@link documentCiphertextBytesFor}, written beside it so the two stay one identity.
  */
 export function documentPlaintextBytesFor(ciphertextBytes: number, chunkCount: number): number {
   return ciphertextBytes - DOCUMENT_TAG_BYTES * chunkCount;
+}
+
+/**
+ * `ciphertextBytes = plaintextBytes + DOCUMENT_TAG_BYTES * chunkCount`: the same
+ * identity as {@link documentPlaintextBytesFor}, in the forward direction.
+ *
+ * Its caller is the part handler, which holds only what init DECLARED (the file's
+ * plaintext length and its segment count) and must know the exact size of the
+ * object those numbers frame, so that it can hold every part, the final one
+ * included, to its exact size before a byte reaches the storage engine.
+ */
+export function documentCiphertextBytesFor(plaintextBytes: number, chunkCount: number): number {
+  return plaintextBytes + DOCUMENT_TAG_BYTES * chunkCount;
 }
 
 /**

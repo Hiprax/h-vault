@@ -34,6 +34,7 @@ import {
   generateStateHash,
   getCsrf as getCsrfBase,
   JWT_PURPOSE_SECRET,
+  signTwoFactorChallenge,
 } from './helpers.js';
 import type { TestUser } from './helpers.js';
 import { advanceClockBy, installTestClock, uninstallTestClock, withTestClock } from './clock.js';
@@ -514,11 +515,7 @@ describe('Task 3.2: Reduced TOTP validation window', () => {
       $set: { twoFactorEnabled: true, twoFactorSecret: encryptedSecret },
     });
     const { csrfToken, csrfCookie } = await getCsrf(agent);
-    const tempToken = jwt.sign(
-      { userId: user.id, purpose: '2fa_temp' },
-      deriveTestPurposeKey('2fa_temp'),
-      { expiresIn: '5m' },
-    );
+    const tempToken = await signTwoFactorChallenge({ userId: user.id, purpose: '2fa_temp' });
     const totp = new TOTP({ algorithm: 'SHA1', digits: 6, period: 30, secret: secretObj });
     return { totp, tempToken, csrfToken, csrfCookie };
   };
@@ -601,11 +598,7 @@ describe('Task 3.3: TOTP replay protection', () => {
     });
 
     const { csrfToken, csrfCookie } = await getCsrf(agent);
-    const tempToken = jwt.sign(
-      { userId: user.id, purpose: '2fa_temp' },
-      deriveTestPurposeKey('2fa_temp'),
-      { expiresIn: '5m' },
-    );
+    const tempToken = await signTwoFactorChallenge({ userId: user.id, purpose: '2fa_temp' });
 
     const totp = new TOTP({
       algorithm: 'SHA1',
@@ -642,11 +635,7 @@ describe('Task 3.3: TOTP replay protection', () => {
     });
 
     const { csrfToken, csrfCookie } = await getCsrf(agent);
-    const tempToken = jwt.sign(
-      { userId: user.id, purpose: '2fa_temp' },
-      deriveTestPurposeKey('2fa_temp'),
-      { expiresIn: '5m' },
-    );
+    const tempToken = await signTwoFactorChallenge({ userId: user.id, purpose: '2fa_temp' });
 
     const totp = new TOTP({
       algorithm: 'SHA1',
@@ -700,11 +689,7 @@ describe('Task 3.3: TOTP replay protection', () => {
     });
 
     const { csrfToken, csrfCookie } = await getCsrf(agent);
-    const tempToken = jwt.sign(
-      { userId: user.id, purpose: '2fa_temp' },
-      deriveTestPurposeKey('2fa_temp'),
-      { expiresIn: '5m' },
-    );
+    const tempToken = await signTwoFactorChallenge({ userId: user.id, purpose: '2fa_temp' });
 
     const res = await agent
       .post('/api/v1/auth/login/2fa')

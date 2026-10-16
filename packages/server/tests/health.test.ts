@@ -252,6 +252,48 @@ describe('Metrics controller', () => {
     }
   });
 
+  it('compares SHA-256 digests of both tokens, so no comparison depends on either length (I-13)', async () => {
+    const { config } = await import('../src/config/index.js');
+    const { errorMiddleware } = await import('@hiprax/errors');
+
+    const originalToken = config.METRICS_TOKEN;
+    (config as Record<string, unknown>).METRICS_TOKEN = VALID_METRICS_TOKEN;
+    const timingSpy = vi.spyOn(crypto, 'timingSafeEqual');
+    const sha256 = (value: string): Buffer => crypto.createHash('sha256').update(value).digest();
+
+    try {
+      const metricsApp = express();
+      metricsApp.get('/metrics', getMetrics);
+      metricsApp.use(errorMiddleware);
+
+      const presented = ['short', `${VALID_METRICS_TOKEN}-and-then-a-good-deal-longer`];
+      for (const token of presented) {
+        const res = await request(metricsApp).get('/metrics').set('x-metrics-token', token);
+        expect(res.status).toBe(403);
+      }
+      const right = await request(metricsApp)
+        .get('/metrics')
+        .set('x-metrics-token', VALID_METRICS_TOKEN);
+      expect(right.status).toBe(200);
+
+      // One comparison per request, each of two 32-byte digests: the expected
+      // token's and the presented one's, never the tokens themselves padded to the
+      // longer of the two.
+      expect(timingSpy).toHaveBeenCalledTimes(3);
+      const calls = timingSpy.mock.calls as unknown as [Buffer, Buffer][];
+      for (const [index, token] of [...presented, VALID_METRICS_TOKEN].entries()) {
+        const [a, b] = calls[index]!;
+        expect(a.length).toBe(32);
+        expect(b.length).toBe(32);
+        expect(Buffer.compare(a, sha256(VALID_METRICS_TOKEN))).toBe(0);
+        expect(Buffer.compare(b, sha256(token))).toBe(0);
+      }
+    } finally {
+      timingSpy.mockRestore();
+      (config as Record<string, unknown>).METRICS_TOKEN = originalToken;
+    }
+  });
+
   it('should reject a non-string (array) x-metrics-token header via the typeof guard', async () => {
     // A DUPLICATED header surfaces as `string[]` in Node. The HTTP path can't
     // deliver that here (Node coalesces most repeated request headers into a

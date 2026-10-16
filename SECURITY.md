@@ -188,6 +188,19 @@ security posture, not a disclaimer.
   because a second-factor lockout never refuses a session refresh either. Its own link unlocks
   the second factor only.
 
+  **A proven password buys one sign-in.** For an account with 2FA, a correct password is answered
+  with a challenge that lives five minutes, and each sign-in gets its own. The first exchange of
+  a challenge that presents a correct code consumes it. Presented again afterwards, the spent
+  challenge is refused before its code is even read, so nothing is counted and no code is spent.
+  Of two exchanges sent at once on the same challenge, both can pass that check and have their
+  codes checked, but only one can consume the challenge; the other is refused before its code is consumed, so it spends no backup
+  code (a wrong code sent in that race is counted like any other). One correct password
+  therefore yields one session, never several, whoever holds the challenge. Using one challenge
+  does not cancel another that was never used; that one still works until it expires. A wrong
+  code does not consume a challenge, so a typo costs nothing but the retry. A six-digit code is
+  checked only as an authenticator code and anything else only as a backup code, so a wrong
+  authenticator code costs the server no backup-code hashing.
+
   This matters more here than it would elsewhere, because resetting the master password mints a
   new vault key, so "just reset it" is not a recovery path but total data loss; the sign-in page,
   the forgot-password page and the lockout mail all point at the unlock link instead. The
@@ -1577,8 +1590,9 @@ devices via clipboard sync. H-Vault reduces the exposure window but cannot elimi
   or pass, and these things it fetches are not pinned by a hash committed here: the runner
   image itself (`ubuntu-latest`); the Node toolchain `actions/setup-node` downloads; the
   Playwright browsers and the system packages `playwright install --with-deps` installs
-  through apt; the base images the image gate builds from, pulled by tag (`node:24-alpine3.23`,
-  `mongo:8.0`; the Nginx and Garage images are pinned by digest); the Trivy scanner image
+  through apt; the Alpine packages `apk upgrade` pulls into the images the image gate builds
+  (their base images, `node:24-alpine3.23`, `mongo:8.0`, Nginx and Garage, are all pinned by
+  digest, and the development stack's database names the same digest); the Trivy scanner image
   (`aquasec/trivy:latest`) and the vulnerability database it fetches; and the MongoDB server
   binary the test harness downloads, which is checked only against a checksum served from
   the same host. The npm dependency tree is pinned by the lockfile's integrity hashes.
@@ -1632,7 +1646,8 @@ down and covered by the deployment drill rather than by a unit test:
   management in front of it, so the app container is the only thing that can reach it. Do not
   publish it "for tooling"; use `docker compose exec` instead.
 - **Its image is pinned by digest.** It is the one image in the stack this repository does not
-  build, and a tag is a mutable pointer.
+  build, and a tag is a mutable pointer (the base images the others are built from are pinned the
+  same way).
 - **Its bucket credentials rotate as a pair.** Measured against the pinned engine: changing
   the secret alone makes the service exit 1 and refuse to start rather than adopt the new
   value, which under a restart policy is a crash loop. Change the access key id and the secret

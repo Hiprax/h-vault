@@ -21,6 +21,7 @@ import {
   JWT_SECRET,
   JWT_PURPOSE_SECRET,
   type CsrfPair,
+  signTwoFactorChallenge,
 } from './helpers.js';
 
 const API = '/api/v1';
@@ -865,11 +866,12 @@ describe('Auth API', () => {
     it('should reject a temp token with wrong purpose', async () => {
       const testUser = await createTestUser();
 
-      const wrongPurposeToken = jwt.sign(
-        { userId: testUser.id, purpose: 'email_verification' },
-        JWT_PURPOSE_SECRET,
-        { expiresIn: '5m' },
-      );
+      // Signed with the 2FA key and backed by a live challenge, so the purpose
+      // claim is the only thing wrong with it.
+      const wrongPurposeToken = await signTwoFactorChallenge({
+        userId: testUser.id,
+        purpose: 'email_verification',
+      });
 
       const res = await withCsrf(
         agent.post(`${API}/auth/login/2fa`).send({
@@ -886,9 +888,8 @@ describe('Auth API', () => {
     it('should reject a temp token with missing purpose field', async () => {
       const testUser = await createTestUser();
 
-      const noPurposeToken = jwt.sign({ userId: testUser.id }, JWT_PURPOSE_SECRET, {
-        expiresIn: '5m',
-      });
+      // Signed with the 2FA key and backed by a live challenge: only the purpose is missing.
+      const noPurposeToken = await signTwoFactorChallenge({ userId: testUser.id });
 
       const res = await withCsrf(
         agent.post(`${API}/auth/login/2fa`).send({
@@ -928,11 +929,7 @@ describe('Auth API', () => {
       });
 
       // Create a valid temp token
-      const tempToken = jwt.sign(
-        { userId: testUser.id, purpose: '2fa_temp' },
-        deriveTestPurposeKey('2fa_temp'),
-        { expiresIn: '5m' },
-      );
+      const tempToken = await signTwoFactorChallenge({ userId: testUser.id, purpose: '2fa_temp' });
 
       const res = await withCsrf(
         agent.post(`${API}/auth/login/2fa`).send({
@@ -969,11 +966,7 @@ describe('Auth API', () => {
       });
 
       // Create a valid temp token
-      const tempToken = jwt.sign(
-        { userId: testUser.id, purpose: '2fa_temp' },
-        deriveTestPurposeKey('2fa_temp'),
-        { expiresIn: '5m' },
-      );
+      const tempToken = await signTwoFactorChallenge({ userId: testUser.id, purpose: '2fa_temp' });
 
       // Generate a valid TOTP code
       const totp = new TOTP({
@@ -1022,11 +1015,7 @@ describe('Auth API', () => {
         },
       });
 
-      const tempToken = jwt.sign(
-        { userId: testUser.id, purpose: '2fa_temp' },
-        deriveTestPurposeKey('2fa_temp'),
-        { expiresIn: '5m' },
-      );
+      const tempToken = await signTwoFactorChallenge({ userId: testUser.id, purpose: '2fa_temp' });
       const code = new TOTP({
         algorithm: 'SHA1',
         digits: 6,
@@ -1064,11 +1053,7 @@ describe('Auth API', () => {
         },
       });
 
-      const tempToken = jwt.sign(
-        { userId: testUser.id, purpose: '2fa_temp' },
-        deriveTestPurposeKey('2fa_temp'),
-        { expiresIn: '5m' },
-      );
+      const tempToken = await signTwoFactorChallenge({ userId: testUser.id, purpose: '2fa_temp' });
 
       const totp = new TOTP({
         algorithm: 'SHA1',
@@ -1248,11 +1233,11 @@ describe('Auth API', () => {
       const secret = await enable2fa(testUser.id);
       const userObjId = new mongoose.Types.ObjectId(testUser.id);
 
-      const tempToken = jwt.sign(
-        { userId: testUser.id, purpose: '2fa_temp', rememberMe: true },
-        deriveTestPurposeKey('2fa_temp'),
-        { expiresIn: '5m' },
-      );
+      const tempToken = await signTwoFactorChallenge({
+        userId: testUser.id,
+        purpose: '2fa_temp',
+        rememberMe: true,
+      });
       const code = await totpFor(secret);
 
       const res = await withCsrf(
@@ -1292,11 +1277,7 @@ describe('Auth API', () => {
       const secret = await enable2fa(testUser.id);
       const userObjId = new mongoose.Types.ObjectId(testUser.id);
 
-      const tempToken = jwt.sign(
-        { userId: testUser.id, purpose: '2fa_temp' },
-        deriveTestPurposeKey('2fa_temp'),
-        { expiresIn: '5m' },
-      );
+      const tempToken = await signTwoFactorChallenge({ userId: testUser.id, purpose: '2fa_temp' });
       const code = await totpFor(secret);
 
       const res = await withCsrf(
@@ -1321,11 +1302,11 @@ describe('Auth API', () => {
       const userObjId = new mongoose.Types.ObjectId(testUser.id);
 
       // Token says NOT remembered; the attacker adds rememberMe:true to the body.
-      const tempToken = jwt.sign(
-        { userId: testUser.id, purpose: '2fa_temp', rememberMe: false },
-        deriveTestPurposeKey('2fa_temp'),
-        { expiresIn: '5m' },
-      );
+      const tempToken = await signTwoFactorChallenge({
+        userId: testUser.id,
+        purpose: '2fa_temp',
+        rememberMe: false,
+      });
       const code = await totpFor(secret);
 
       const res = await withCsrf(
@@ -1357,11 +1338,11 @@ describe('Auth API', () => {
       }));
       await TrustedDevice.collection.insertMany(seeds);
 
-      const tempToken = jwt.sign(
-        { userId: testUser.id, purpose: '2fa_temp', rememberMe: true },
-        deriveTestPurposeKey('2fa_temp'),
-        { expiresIn: '5m' },
-      );
+      const tempToken = await signTwoFactorChallenge({
+        userId: testUser.id,
+        purpose: '2fa_temp',
+        rememberMe: true,
+      });
       const code = await totpFor(secret);
 
       const res = await withCsrf(
@@ -2305,11 +2286,7 @@ describe('Auth API', () => {
       });
 
       // Create a valid temp token
-      const tempToken = jwt.sign(
-        { userId: testUser.id, purpose: '2fa_temp' },
-        deriveTestPurposeKey('2fa_temp'),
-        { expiresIn: '5m' },
-      );
+      const tempToken = await signTwoFactorChallenge({ userId: testUser.id, purpose: '2fa_temp' });
 
       // Use backup code instead of TOTP
       const res = await withCsrf(
@@ -2354,11 +2331,7 @@ describe('Auth API', () => {
         },
       });
 
-      const tempToken = jwt.sign(
-        { userId: testUser.id, purpose: '2fa_temp' },
-        deriveTestPurposeKey('2fa_temp'),
-        { expiresIn: '5m' },
-      );
+      const tempToken = await signTwoFactorChallenge({ userId: testUser.id, purpose: '2fa_temp' });
 
       const res = await withCsrf(
         agent.post(`${API}/auth/login/2fa`).send({
@@ -2684,11 +2657,7 @@ describe('Auth API', () => {
         },
       });
 
-      const tempToken = jwt.sign(
-        { userId: testUser.id, purpose: '2fa_temp' },
-        deriveTestPurposeKey('2fa_temp'),
-        { expiresIn: '5m' },
-      );
+      const tempToken = await signTwoFactorChallenge({ userId: testUser.id, purpose: '2fa_temp' });
 
       const totp = new TOTP({
         algorithm: 'SHA1',

@@ -27,7 +27,14 @@
 # Node (v24.18.0) and is unaffected; `node:24-alpine3.22`/`3.21` are older Node lines.
 # This is the same Node runtime, still musl/Alpine — every apk/undici/Trivy note below
 # holds. Revisit when the Alpine 3.24+ musl regression is resolved upstream.
-FROM node:24-alpine3.23 AS base
+#
+# Pinned by DIGEST as well as by tag: a tag is a mutable pointer the publisher can
+# move onto different bytes, and the digest is what Docker enforces. It is the
+# multi-platform index digest, read from the registry on 2026-10-15 (both
+# `docker buildx imagetools inspect` and the registry's Docker-Content-Digest
+# header agreed); move it deliberately, by reading the new one the same way.
+# `apk upgrade` below still pulls current Alpine fixes into every build.
+FROM node:24-alpine3.23@sha256:e44c87c7dd212720eb00469aeac89504ca2be77b8f0d6dbffb30665d5fcc59e1 AS base
 WORKDIR /app
 # Patch the base image's OS packages before anything is built on top of them, for
 # the same reason and by the same means as the `web` stage below.

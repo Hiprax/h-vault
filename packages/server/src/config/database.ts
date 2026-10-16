@@ -18,6 +18,7 @@ import '../models/RefreshToken.js';
 import '../models/TrustedDevice.js';
 import '../models/DeviceProof.js';
 import '../models/Invitation.js';
+import '../models/Challenge.js';
 import '../models/AuditLog.js';
 import '../models/BackupLog.js';
 import '../models/JobLock.js';

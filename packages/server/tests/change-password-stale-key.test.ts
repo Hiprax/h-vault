@@ -606,7 +606,7 @@ function defineChangePasswordGuardCases(expectTransactions: boolean): void {
       const query = realFindById(id);
       const realSelect = query.select.bind(query);
       query.select = ((fields: string) =>
-        fields === 'vaultKeyVersion'
+        fields === 'vaultKeyVersion deletionPending'
           ? { lean: () => Promise.reject(new Error('datastore unavailable')) }
           : realSelect(fields)) as never;
       return query;

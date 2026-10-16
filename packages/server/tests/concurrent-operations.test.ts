@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import request from 'supertest';
-import jwt from 'jsonwebtoken';
 import app from '../src/app.js';
 import { VaultItem } from '../src/models/VaultItem.js';
 import { Folder } from '../src/models/Folder.js';
@@ -12,9 +11,9 @@ import {
   authHeader,
   sampleVaultItem,
   sampleFolder,
-  deriveTestPurposeKey,
   getCsrf,
   type TestUser,
+  signTwoFactorChallenge,
 } from './helpers.js';
 
 // ---------------------------------------------------------------------------
@@ -331,16 +330,8 @@ describe('Concurrent Operations', () => {
       });
 
       // Create temp tokens for 2FA
-      const tempToken1 = jwt.sign(
-        { userId: testUser.id, purpose: '2fa_temp' },
-        deriveTestPurposeKey('2fa_temp'),
-        { expiresIn: '5m' },
-      );
-      const tempToken2 = jwt.sign(
-        { userId: testUser.id, purpose: '2fa_temp' },
-        deriveTestPurposeKey('2fa_temp'),
-        { expiresIn: '5m' },
-      );
+      const tempToken1 = await signTwoFactorChallenge({ userId: testUser.id, purpose: '2fa_temp' });
+      const tempToken2 = await signTwoFactorChallenge({ userId: testUser.id, purpose: '2fa_temp' });
 
       // Fire two concurrent 2FA requests with the same backup code
       const [result1, result2] = await Promise.all([

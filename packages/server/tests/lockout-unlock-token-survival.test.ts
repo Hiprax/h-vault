@@ -94,8 +94,8 @@ import {
   createTestUser,
   generateStateHash,
   getCsrf,
-  deriveTestPurposeKey,
   type TestUser,
+  signTwoFactorChallenge,
 } from './helpers.js';
 
 const API = '/api/v1';
@@ -343,11 +343,7 @@ describe('lockout recovery — the emailed unlock link survives a re-lock', () =
       },
     });
 
-    const tempToken = jwt.sign(
-      { userId: twoFa.id, purpose: '2fa_temp' },
-      deriveTestPurposeKey('2fa_temp'),
-      { expiresIn: '5m' },
-    );
+    const tempToken = await signTwoFactorChallenge({ userId: twoFa.id, purpose: '2fa_temp' });
     const real = Number(
       new TOTP({ algorithm: 'SHA1', digits: 6, period: 30, secret: secretObj }).generate(),
     );

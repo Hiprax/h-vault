@@ -7,6 +7,7 @@ import { JobLock } from '../models/JobLock.js';
 import { acquireJobLock, releaseJobLock } from './jobLock.js';
 import { createModuleLogger } from './logger.js';
 import { createAuditLog } from '../services/auditService.js';
+import { SESSION_INVALID_MESSAGE } from '../constants/index.js';
 
 const logger = createModuleLogger('controller-helpers');
 
@@ -185,9 +186,34 @@ export function buildFolderAwareUpdate(update: Record<string, unknown>): Record<
  * than assumed here.
  */
 export async function assertVaultNotRotating(userId: string): Promise<void> {
-  const user = await User.findById(userId).select('rotationInProgress').lean();
-  if (user?.rotationInProgress === true) {
+  const user = await User.findById(userId).select('rotationInProgress deletionPending').lean();
+  assertTenantRowLive(user);
+  if (user.rotationInProgress) {
     throw httpErrors.conflict('Vault key rotation is in progress. Please wait and retry.');
+  }
+}
+
+/**
+ * Refuses a tenant write whose account is gone or being erased, as a dead session.
+ *
+ * Passport proves the account exists on every authenticated request, but only at
+ * the START of it: a request that passed that check a moment before the account
+ * was erased is still in flight, and both guards that read the account first
+ * ({@link assertVaultNotRotating}, {@link assertVaultKeyVersion}) used to read a
+ * missing row as "not rotating" and "generation 0", so the write went ahead and
+ * stored a row for an account that no longer existed (I-08). `deletionPending`,
+ * the erasure's own first write, is refused the same way: Passport refuses it at
+ * the door, and every row written after it is one the erasure must catch.
+ *
+ * It narrows the read, so a caller past it holds a row. It is a READ like the
+ * guards it serves, not a lock: an erasure that starts after it is caught by the
+ * erasure's own final sweep of the rows written meanwhile.
+ */
+function assertTenantRowLive<T extends { deletionPending?: boolean | undefined }>(
+  user: T | null,
+): asserts user is T {
+  if (user === null || user.deletionPending === true) {
+    throw httpErrors.unauthorized(SESSION_INVALID_MESSAGE);
   }
 }
 
@@ -688,16 +714,17 @@ export class StaleVaultKeyError extends ErrorHandler {
  * handing back the real number lets a confused client recover instead of
  * wedging.
  *
+ * ## An account that is gone is a dead session
+ *
+ * A `userId` with no row, or one marked `deletionPending`, is refused with 401,
+ * exactly as {@link assertVaultNotRotating} refuses it and as Passport refuses a
+ * dead session (`assertTenantRowLive`). It used to read as generation 0, which let
+ * a request that authenticated a moment before an erasure write for an account
+ * that no longer existed (I-08).
+ *
  * ## What it deliberately does NOT do
  *
- * It is a guard, not an existence check. A `userId` with no row yields 0 —
- * `vaultKeyVersionOf`'s documented answer for an absent value, and the same
- * answer {@link assertVaultNotRotating} gives (`user?.rotationInProgress`
- * passes for a missing user). Passport has already proved the account exists
- * and is verified on every authenticated request, and the write that follows
- * carries its own `_id` filter, so there is nothing here for a 404 to protect.
- *
- * It also does not make the check atomic with the write. The returned number is
+ * It does not make the check atomic with the write. The returned number is
  * what a caller puts in the write's own filter, via
  * {@link vaultKeyVersionFilter} — `User.updateOne({ _id, vaultKeyVersion:`
  * `vaultKeyVersionFilter(resolved) }, …)` — so that a rotation committing
@@ -716,7 +743,8 @@ export async function assertVaultKeyVersion(
   userId: string,
   supplied: number | undefined,
 ): Promise<number> {
-  const user = await User.findById(userId).select('vaultKeyVersion').lean();
+  const user = await User.findById(userId).select('vaultKeyVersion deletionPending').lean();
+  assertTenantRowLive(user);
   const current = vaultKeyVersionOf(user);
 
   if (supplied === undefined) {

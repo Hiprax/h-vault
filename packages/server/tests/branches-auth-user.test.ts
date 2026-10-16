@@ -89,6 +89,7 @@ import {
   deriveTestPurposeKey,
   seedItem,
   type TestUser,
+  signTwoFactorChallenge,
 } from './helpers.js';
 import { useReplicaSetConnection } from './mongoHarness.js';
 
@@ -152,10 +153,8 @@ async function create2faUser(rawBackupCodes: string[] = []): Promise<{
 }
 
 /** A device-unbound 2FA temp token (as issued when the login carried no device). */
-function makeTempToken(userId: string): string {
-  return jwt.sign({ userId, purpose: '2fa_temp' }, deriveTestPurposeKey('2fa_temp'), {
-    expiresIn: '5m',
-  });
+async function makeTempToken(userId: string): Promise<string> {
+  return signTwoFactorChallenge({ userId, purpose: '2fa_temp' });
 }
 
 function totpFor(secretObj: Secret): TOTP {
@@ -220,7 +219,7 @@ describe('authController — login2fa record-integrity guards', () => {
     // A corrupted / half-migrated record: the flag survives, the secret does not.
     await User.findByIdAndUpdate(user.id, { $unset: { twoFactorSecret: 1 } });
 
-    const res = await post2fa(agent, makeTempToken(user.id), '123456');
+    const res = await post2fa(agent, await makeTempToken(user.id), '123456');
 
     expect(res.status).toBe(400);
     expect(res.body.message).toBe('TWO_FA_NOT_ENABLED');
@@ -235,7 +234,7 @@ describe('authController — login2fa record-integrity guards', () => {
     // skipped entirely rather than throwing on an empty array.
     const { user, secretObj } = await create2faUser([]);
 
-    const res = await post2fa(agent, makeTempToken(user.id), definitelyWrongCode(secretObj));
+    const res = await post2fa(agent, await makeTempToken(user.id), definitelyWrongCode(secretObj));
 
     expect(res.status).toBe(401);
     expect(res.body.message).toBe('TWO_FA_INVALID');
@@ -259,8 +258,8 @@ describe('authController — a backup code is consumed exactly once under a conc
     const { user } = await create2faUser([rawCode]);
 
     const [a, b] = await Promise.all([
-      post2fa(request.agent(app), makeTempToken(user.id), rawCode),
-      post2fa(request.agent(app), makeTempToken(user.id), rawCode),
+      post2fa(request.agent(app), await makeTempToken(user.id), rawCode),
+      post2fa(request.agent(app), await makeTempToken(user.id), rawCode),
     ]);
 
     const statuses = [a.status, b.status].sort((x, y) => x - y);
@@ -371,7 +370,11 @@ describe('authController — at most one new unlock link per lock episode', () =
       $set: { secondFactorLockout: { failedAttempts: 9 } },
     });
 
-    const res = await post2fa(agent, makeTempToken(twoFaUser.id), definitelyWrongCode(secretObj));
+    const res = await post2fa(
+      agent,
+      await makeTempToken(twoFaUser.id),
+      definitelyWrongCode(secretObj),
+    );
 
     expect(res.status).toBe(401);
     expect(mockedSecondFactorEmail).toHaveBeenCalledTimes(1);
@@ -411,7 +414,11 @@ describe('authController — at most one new unlock link per lock episode', () =
       { algorithm: 'HS256', expiresIn: '1h' },
     );
 
-    const res = await post2fa(agent, makeTempToken(twoFaUser.id), definitelyWrongCode(secretObj));
+    const res = await post2fa(
+      agent,
+      await makeTempToken(twoFaUser.id),
+      definitelyWrongCode(secretObj),
+    );
 
     expect(res.status).toBe(401);
     expect(res.body.message).toBe('TWO_FA_INVALID');
@@ -496,7 +503,7 @@ describe('authController — an account mid-erasure cannot sign in', () => {
     // and spending it would complete exactly the sign-in the refusal exists to
     // prevent.
     const { user: twoFaUser, secretObj } = await create2faUser([]);
-    const tempToken = makeTempToken(twoFaUser.id);
+    const tempToken = await makeTempToken(twoFaUser.id);
     await User.findByIdAndUpdate(twoFaUser.id, { $set: { deletionPending: true } });
 
     const res = await post2fa(agent, tempToken, totpFor(secretObj).generate());

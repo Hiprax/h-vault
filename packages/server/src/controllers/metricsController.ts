@@ -16,16 +16,13 @@ export const getMetrics = catchAsync((req: Request, res: Response): void => {
     if (typeof provided !== 'string') {
       throw httpErrors.forbidden('Invalid or missing metrics token');
     }
-    const expected = Buffer.from(config.METRICS_TOKEN, 'utf8');
-    const received = Buffer.from(provided, 'utf8');
-    const maxLen = Math.max(expected.length, received.length);
-    const a = Buffer.alloc(maxLen);
-    const b = Buffer.alloc(maxLen);
-    expected.copy(a);
-    received.copy(b);
-    const lengthMatch = expected.length === received.length;
-    const contentMatch = crypto.timingSafeEqual(a, b);
-    if (!lengthMatch || !contentMatch) {
+    // Compared as SHA-256 digests (I-13): both sides are always 32 bytes, so the
+    // constant-time comparison never depends on either token's length. Padding
+    // both to the longer one, as this used to, made the work depend on the
+    // presented length. Equal digests mean equal tokens.
+    const expected = crypto.createHash('sha256').update(config.METRICS_TOKEN, 'utf8').digest();
+    const received = crypto.createHash('sha256').update(provided, 'utf8').digest();
+    if (!crypto.timingSafeEqual(expected, received)) {
       throw httpErrors.forbidden('Invalid or missing metrics token');
     }
   }

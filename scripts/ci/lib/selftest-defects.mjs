@@ -310,8 +310,8 @@ export const DEFECTS = {
     mutate: {
       'packages/server/src/controllers/documentController.ts': (text) =>
         text.replace(
-          '  if (!isFinalPart && partBytes !== DOCUMENT_CIPHERTEXT_CHUNK_BYTES) {',
-          '  if (!isFinalPart && partBytes > DOCUMENT_CIPHERTEXT_CHUNK_BYTES) {',
+          '  if (partBytes !== requiredBytes) {',
+          '  if (isFinalPart ? partBytes !== requiredBytes : partBytes > requiredBytes) {',
         ),
     },
     // The rendered assertion, which only a FAILING run can produce, AND the name

@@ -915,7 +915,7 @@ describe('the two backup writes that also seal the vault key', () => {
     // guard resolves generation 0, THEN the increment commits, THEN the write
     // filters on 0 and must miss.
     //
-    // Fired ONCE. The refusal's own diagnosis re-reads the same projection to
+    // Fired ONCE. The refusal's own diagnosis re-reads the generation to
     // report the current number, and a second increment there would make it say
     // 2 for a rotation that happened once.
     let raced = false;
@@ -925,7 +925,7 @@ describe('the two backup writes that also seal the vault key', () => {
       const realSelect = query.select.bind(query);
       query.select = ((fields: string) => {
         const selected = realSelect(fields) as unknown as { lean: () => Promise<unknown> };
-        if (fields !== 'vaultKeyVersion' || raced) return selected;
+        if (fields !== 'vaultKeyVersion deletionPending' || raced) return selected;
         raced = true;
         const realLean = selected.lean.bind(selected);
         return {

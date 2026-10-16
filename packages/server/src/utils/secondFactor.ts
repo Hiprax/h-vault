@@ -81,6 +81,18 @@ export type SecondFactorVerdict =
 const TOTP_PERIOD_SECONDS = 30;
 
 /**
+ * The shape of a TOTP code: six digits, exactly what the authenticator shows.
+ *
+ * The verifier checks a code as the ONE kind its shape can be (I-10). A six-digit
+ * string is never a backup code (those are sixteen hexadecimal characters, and
+ * have been since the first release), so it is checked as a TOTP code only and a
+ * wrong one costs no bcrypt compare; anything else can never equal a six-digit
+ * TOTP code, so it is checked as a backup code only and the TOTP secret is not
+ * even decrypted. No code that could match before is refused now.
+ */
+const TOTP_CODE_PATTERN = /^\d{6}$/;
+
+/**
  * Finds which stored backup code `code` is, or -1.
  *
  * Always compares against EVERY stored hash, so the response time does not say
@@ -130,9 +142,10 @@ export async function verifySecondFactor(
   }
 
   const secretCiphertext = enrolment ? user.pendingTwoFactorSecret : user.twoFactorSecret;
+  const totpShaped = TOTP_CODE_PATTERN.test(code);
   let verdict: SecondFactorVerdict | null = null;
 
-  if (secretCiphertext) {
+  if (totpShaped && secretCiphertext) {
     const secret = cryptoManager.decryptTextSync(secretCiphertext, twoFactorEncryptionKey);
     const totp = new TOTP({
       algorithm: 'SHA1',
@@ -171,7 +184,7 @@ export async function verifySecondFactor(
   }
 
   const storedCodes = user.backupCodes ?? [];
-  if (verdict === null && acceptBackupCodes && storedCodes.length > 0) {
+  if (!totpShaped && acceptBackupCodes && storedCodes.length > 0) {
     const index = await findMatchingBackupCodeIndex(code, storedCodes);
     const matched = storedCodes[index];
     if (matched !== undefined) {

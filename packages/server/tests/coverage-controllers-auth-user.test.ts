@@ -23,6 +23,7 @@ import {
   generateStateHash,
   type CsrfPair,
   type TestUser,
+  signTwoFactorChallenge,
 } from './helpers.js';
 
 // nodemailer is mocked so the email-utility section can drive a real transporter
@@ -240,11 +241,8 @@ describe('authController — JWT purpose claim is validated independently of the
     const twoFaUser = await createTestUser({ emailVerified: true });
     const secret = await enableTwoFactor(twoFaUser.id);
 
-    const token = jwt.sign(
-      { userId: twoFaUser.id, purpose: 'account_unlock' },
-      deriveTestPurposeKey('2fa_temp'),
-      { algorithm: 'HS256', expiresIn: '5m' },
-    );
+    // A live challenge behind it, so the purpose claim is what is refused.
+    const token = await signTwoFactorChallenge({ userId: twoFaUser.id, purpose: 'account_unlock' });
 
     const res = await withCsrf(
       agent
@@ -271,11 +269,9 @@ describe('authController — token subject must still exist', () => {
   });
 
   it('rejects a 2FA temp token for a deleted user with TOKEN_INVALID', async () => {
-    const tempToken = jwt.sign(
-      { userId: ghostId, purpose: '2fa_temp' },
-      deriveTestPurposeKey('2fa_temp'),
-      { algorithm: 'HS256', expiresIn: '5m' },
-    );
+    // A live challenge for the ghost id, so the refusal under test is the missing
+    // user and not the missing challenge.
+    const tempToken = await signTwoFactorChallenge({ userId: ghostId, purpose: '2fa_temp' });
 
     const res = await withCsrf(
       agent.post(`${API}/auth/login/2fa`).send({ tempToken, code: '123456' }),

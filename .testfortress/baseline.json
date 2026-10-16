@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "recordedAt": "2026-10-15",
-  "commit": "6d75e67",
+  "recordedAt": "2026-10-16",
+  "commit": "558c168",
   "tests": {
-    "count": 13381
+    "count": 13410
   },
   "coverage": {
     "diff": 100
@@ -30,7 +30,7 @@
         "line": 100,
         "branch": 99.09,
         "function": 100,
-        "linesTotal": 820,
+        "linesTotal": 821,
         "branchesTotal": 439,
         "filesMeasured": [
           "src/constants/index.ts",
@@ -51,16 +51,16 @@
         ]
       },
       "tests": {
-        "count": 1529
+        "count": 1531
       }
     },
     "packages/server": {
       "coverage": {
         "line": 99.39,
-        "branch": 94.76,
+        "branch": 94.77,
         "function": 98.97,
-        "linesTotal": 6575,
-        "branchesTotal": 3628,
+        "linesTotal": 6597,
+        "branchesTotal": 3636,
         "filesMeasured": [
           "src/app.ts",
           "src/cli/invite.ts",
@@ -113,6 +113,7 @@
           "src/middleware/validateObjectId.ts",
           "src/models/AuditLog.ts",
           "src/models/BackupLog.ts",
+          "src/models/Challenge.ts",
           "src/models/DeviceProof.ts",
           "src/models/Document.ts",
           "src/models/DocumentUpload.ts",
@@ -185,6 +186,7 @@
           "src/utils/transactionSupport.ts",
           "src/utils/trustedDevices.ts",
           "src/utils/ttlIndexReconcile.ts",
+          "src/utils/twoFactorChallenge.ts",
           "src/utils/unverifiedAccounts.ts",
           "src/utils/updateCheck.ts",
           "src/utils/vaultFieldFormat.ts",
@@ -192,7 +194,7 @@
         ]
       },
       "tests": {
-        "count": 5838
+        "count": 5871
       }
     },
     "packages/client": {
@@ -200,7 +202,7 @@
         "line": 99.32,
         "branch": 94.16,
         "function": 99.01,
-        "linesTotal": 11245,
+        "linesTotal": 11231,
         "branchesTotal": 8037,
         "filesMeasured": [
           "src/App.tsx",
@@ -416,7 +418,7 @@
         ]
       },
       "tests": {
-        "count": 5778
+        "count": 5772
       }
     },
     "e2e": {
@@ -650,7 +652,7 @@
       "spectral": 1
     }
   },
-  "reason": "Phase 14 (account-lifecycle, F-21/F-26): npm run ci #3 green 31/31; bank the measured improvements (new reaper, notification and preference suites, coverage totals)",
+  "reason": "Phase 15 hardening-informational (I-01, I-10, I-17, I-08, I-13, I-14, I-05): npm run ci green on the final tree; banks the new tests (two-factor challenge, tenant-write, I-17, I-13, I-05), the server coverage growth and the newly measured files (models/Challenge.ts, utils/twoFactorChallenge.ts). The client linesTotal/tests.count reduction was recorded separately as SUP-0065.",
   "bundle": {
     "budgetKb": {
       "VaultItemForm": 230,

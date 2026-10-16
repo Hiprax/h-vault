@@ -14,7 +14,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import request from 'supertest';
 import mongoose from 'mongoose';
-import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import { TOTP, Secret } from 'otpauth';
 import { CryptoManager } from '@hiprax/crypto';
@@ -26,9 +25,9 @@ import { hashToken } from '../src/utils/token.js';
 import {
   createTestUser,
   authHeader,
-  deriveTestPurposeKey,
   getCsrf,
   type TestUser,
+  signTwoFactorChallenge,
 } from './helpers.js';
 
 const API = '/api/v1';
@@ -59,10 +58,13 @@ async function create2faUser(rawCodes: string[] = []): Promise<{
   return { user, secretObj };
 }
 
-function makeTempToken(userId: string, options: { deviceHash?: string } = {}): string {
-  const payload: Record<string, unknown> = { userId, purpose: '2fa_temp' };
+async function makeTempToken(
+  userId: string,
+  options: { deviceHash?: string } = {},
+): Promise<string> {
+  const payload: { userId: string } & Record<string, unknown> = { userId, purpose: '2fa_temp' };
   if (options.deviceHash !== undefined) payload['deviceHash'] = options.deviceHash;
-  return jwt.sign(payload, deriveTestPurposeKey('2fa_temp'), { expiresIn: '5m' });
+  return signTwoFactorChallenge(payload);
 }
 
 describe('Phase 6 — 2FA Negative Paths', () => {
@@ -242,7 +244,7 @@ describe('Phase 6 — 2FA Negative Paths', () => {
       ];
 
       for (const guess of wrongGuesses) {
-        const tempToken = makeTempToken(user.id);
+        const tempToken = await makeTempToken(user.id);
         const { token: csrfToken, cookie: csrfCookie } = await getCsrf(agent);
         const res = await agent
           .post(`${API}/auth/login/2fa`)
@@ -278,7 +280,7 @@ describe('Phase 6 — 2FA Negative Paths', () => {
       const totp = new TOTP({ algorithm: 'SHA1', digits: 6, period: 30, secret: secretObj });
       const validCode = totp.generate();
 
-      const tempToken = makeTempToken(user.id);
+      const tempToken = await makeTempToken(user.id);
       const { token: csrfToken, cookie: csrfCookie } = await getCsrf(agent);
       const res = await agent
         .post(`${API}/auth/login/2fa`)
@@ -305,7 +307,7 @@ describe('Phase 6 — 2FA Negative Paths', () => {
       const user = await createTestUser({ emailVerified: true });
       // 2FA is NOT enabled for this user
 
-      const tempToken = makeTempToken(user.id);
+      const tempToken = await makeTempToken(user.id);
       const { token: csrfToken, cookie: csrfCookie } = await getCsrf(agent);
       const res = await agent
         .post(`${API}/auth/login/2fa`)

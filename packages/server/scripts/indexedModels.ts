@@ -19,6 +19,7 @@ import { RefreshToken } from '../src/models/RefreshToken.js';
 import { TrustedDevice } from '../src/models/TrustedDevice.js';
 import { DeviceProof } from '../src/models/DeviceProof.js';
 import { Invitation } from '../src/models/Invitation.js';
+import { Challenge } from '../src/models/Challenge.js';
 import { AuditLog } from '../src/models/AuditLog.js';
 import { BackupLog } from '../src/models/BackupLog.js';
 import { JobLock } from '../src/models/JobLock.js';
@@ -36,6 +37,7 @@ export const indexedModels = [
   { name: 'TrustedDevice', model: TrustedDevice },
   { name: 'DeviceProof', model: DeviceProof },
   { name: 'Invitation', model: Invitation },
+  { name: 'Challenge', model: Challenge },
   { name: 'AuditLog', model: AuditLog },
   { name: 'BackupLog', model: BackupLog },
   { name: 'JobLock', model: JobLock },

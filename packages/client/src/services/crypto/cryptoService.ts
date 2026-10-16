@@ -40,7 +40,6 @@ const AES_KEY_BITS = 256;
 const IV_BYTES = 12;
 const TAG_BYTES = 16;
 const VAULT_KEY_BYTES = 32;
-const BACKUP_CODE_BYTES = 8;
 
 export class CryptoService {
   private readonly subtle: SubtleCrypto;
@@ -725,8 +724,10 @@ export class CryptoService {
   // Backup Subkey Derivation (HKDF)
   //
   // NIST SP 800-108 best practice: derive separate subkeys from a single root
-  // key per cryptographic purpose (HMAC vs AES-GCM) so that an attack against
-  // one primitive cannot leverage the same key bytes against the other. We
+  // key per cryptographic purpose, so that an attack against one primitive
+  // cannot leverage the same key bytes against another. The backup HMAC is the
+  // one purpose that derives a subkey today; the wrapped vault key still uses
+  // the raw BWK, which already-stored backups require. We
   // use HKDF-SHA256 with a fixed `info` string per purpose; the empty salt is
   // RFC 5869 compliant when the input keying material is already pseudorandom
   // (BWK is generated via `getRandomValues`).
@@ -739,8 +740,6 @@ export class CryptoService {
 
   /** HKDF info label for the backup HMAC subkey (formatVersion >= 2). */
   static readonly BACKUP_HMAC_INFO = 'hvault-backup-hmac-v1';
-  /** HKDF info label for the backup AES-GCM encryption subkey (formatVersion >= 2). */
-  static readonly BACKUP_ENC_INFO = 'hvault-backup-enc-v1';
 
   /**
    * Derive a 256-bit subkey from raw key material via HKDF-SHA256.
@@ -838,49 +837,6 @@ export class CryptoService {
       ['verify'],
     );
     return this.subtle.verify('HMAC', legacyHmacKey, hmacBytes, message);
-  }
-
-  /**
-   * Derive a dedicated AES-GCM subkey from BWK via HKDF for use when encrypting
-   * backup payload components (formatVersion >= 2). Exposed so future call
-   * sites can opt into key separation without breaking already-stored
-   * legacy ciphertexts (e.g. the server-stored `bwkEncryptedVaultKey` was
-   * produced with raw BWK and must continue to decrypt with raw BWK).
-   */
-  async deriveBackupEncSubkey(bwk: ArrayBuffer): Promise<CryptoKey> {
-    const raw = await this.hkdfDeriveSubkey(bwk, CryptoService.BACKUP_ENC_INFO);
-    try {
-      return await this.subtle.importKey(
-        'raw',
-        raw,
-        { name: 'AES-GCM', length: AES_KEY_BITS },
-        false,
-        ['encrypt', 'decrypt'],
-      );
-    } finally {
-      this.clearKey(raw);
-    }
-  }
-
-  // ---------------------------------------------------------------------------
-  // Backup Codes
-  // ---------------------------------------------------------------------------
-
-  /**
-   * Generate an array of cryptographically random hex backup codes.
-   * Each code is 16 hex characters (8 bytes / 64 bits of entropy).
-   */
-  generateBackupCodes(count: number): string[] {
-    const codes: string[] = [];
-    for (let i = 0; i < count; i++) {
-      const bytes = new Uint8Array(BACKUP_CODE_BYTES);
-      globalThis.crypto.getRandomValues(bytes);
-      const hex = Array.from(bytes)
-        .map((b) => b.toString(16).padStart(2, '0'))
-        .join('');
-      codes.push(hex);
-    }
-    return codes;
   }
 }
 

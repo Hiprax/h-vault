@@ -26,7 +26,6 @@ vi.mock('../src/utils/email.js', async (importOriginal) => {
 });
 
 import request from 'supertest';
-import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import crypto from 'node:crypto';
 import { TOTP, Secret } from 'otpauth';
@@ -38,7 +37,7 @@ import {
   sendVerificationEmail,
   type EmailResult,
 } from '../src/utils/email.js';
-import { createTestUser, deriveTestPurposeKey, getCsrf, type TestUser } from './helpers.js';
+import { createTestUser, getCsrf, type TestUser, signTwoFactorChallenge } from './helpers.js';
 
 const API = '/api/v1';
 const BCRYPT_ROUNDS = 4;
@@ -87,10 +86,8 @@ async function create2faUser(
   return { user, secretObj };
 }
 
-function makeTempToken(userId: string): string {
-  return jwt.sign({ userId, purpose: '2fa_temp' }, deriveTestPurposeKey('2fa_temp'), {
-    expiresIn: '5m',
-  });
+async function makeTempToken(userId: string): Promise<string> {
+  return signTwoFactorChallenge({ userId, purpose: '2fa_temp' });
 }
 
 describe('Phase 4 — Auth anti-enumeration & 2FA hardening', () => {
@@ -263,7 +260,7 @@ describe('Phase 4 — Auth anti-enumeration & 2FA hardening', () => {
 
       // 10 invalid codes (16-char alphanumeric — passes schema, fails verify).
       for (let i = 0; i < 10; i++) {
-        const tempToken = makeTempToken(user.id);
+        const tempToken = await makeTempToken(user.id);
         const { token, cookie } = await getCsrf(agent);
         const res = await agent
           .post(`${API}/auth/login/2fa`)
@@ -283,7 +280,7 @@ describe('Phase 4 — Auth anti-enumeration & 2FA hardening', () => {
 
       // A further attempt (even with a fresh, valid temp token) is now blocked
       // by the lockout check before the code is ever evaluated.
-      const tempToken = makeTempToken(user.id);
+      const tempToken = await makeTempToken(user.id);
       const { token, cookie } = await getCsrf(agent);
       const blocked = await agent
         .post(`${API}/auth/login/2fa`)
@@ -298,7 +295,7 @@ describe('Phase 4 — Auth anti-enumeration & 2FA hardening', () => {
     it("increments the second factor's own counter, never the password's, on a single wrong 2FA code", async () => {
       const { user } = await create2faUser(['realbackupcode02']);
 
-      const tempToken = makeTempToken(user.id);
+      const tempToken = await makeTempToken(user.id);
       const { token, cookie } = await getCsrf(agent);
       const res = await agent
         .post(`${API}/auth/login/2fa`)
@@ -326,7 +323,7 @@ describe('Phase 4 — Auth anti-enumeration & 2FA hardening', () => {
       const totp = new TOTP({ algorithm: 'SHA1', digits: 6, period: 30, secret: secretObj });
       const validCode = totp.generate();
 
-      const tempToken = makeTempToken(user.id);
+      const tempToken = await makeTempToken(user.id);
       const { token, cookie } = await getCsrf(agent);
       const res = await agent
         .post(`${API}/auth/login/2fa`)

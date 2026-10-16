@@ -218,7 +218,9 @@ async function initTransfer(declaredChunkCount: number): Promise<string> {
   const declaredPlaintextBytes =
     declaredChunkCount === 1
       ? 1_024
-      : (declaredChunkCount - 1) * DOCUMENT_PLAINTEXT_CHUNK_BYTES + 1;
+      : // The last segment carries 48 plaintext bytes, so the final part is exactly
+        // the 64 bytes the drill below sends: every part is held to the declaration.
+        (declaredChunkCount - 1) * DOCUMENT_PLAINTEXT_CHUNK_BYTES + (64 - DOCUMENT_TAG_BYTES);
   const response = await post('/api/v1/documents/uploads', {
     ...WRAPPED_DEK,
     ...FRAMING,
@@ -289,8 +291,9 @@ describe('a crash during a part upload', () => {
     const control = buildObjectKey(user.id, new Types.ObjectId().toHexString());
     await storage.putObject(control, Buffer.alloc(16, 0x41));
     // The FINAL part of the transfer, which is the only one the framing rules let
-    // be short — so the drill costs sixty-four bytes instead of eight mebibytes,
-    // and the request still travels as a real `application/octet-stream` body.
+    // be short (the transfer declared exactly the 48 plaintext bytes it seals) — so
+    // the drill costs sixty-four bytes instead of eight mebibytes, and the request
+    // still travels as a real `application/octet-stream` body.
     const part = pattern(64, 9);
 
     const outcome = await runCrashProbe({

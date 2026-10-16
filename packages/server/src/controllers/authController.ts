@@ -63,6 +63,11 @@ import {
 } from '../utils/lockout.js';
 import { verifySecondFactor } from '../utils/secondFactor.js';
 import {
+  consumeTwoFactorChallenge,
+  isChallengeOpen,
+  issueTwoFactorChallenge,
+} from '../utils/twoFactorChallenge.js';
+import {
   INVITATION_INVALID_MESSAGE,
   REGISTRATION_CLOSED_MESSAGE,
   claimInvitation,
@@ -186,6 +191,12 @@ interface JwtTempPayload {
   // trusting a client-supplied field. Optional so a temp token minted before
   // this field existed (or by a non-remembered login) is read as false.
   rememberMe?: boolean;
+  // The challenge row the token names (`utils/twoFactorChallenge.ts`). Optional in
+  // the type because a token minted before challenges existed has none, and
+  // `login2fa` refuses exactly that token.
+  jti?: string;
+  iat?: number;
+  exp?: number;
 }
 
 /**
@@ -1028,6 +1039,10 @@ export const login = catchAsync(async (req: Request, res: Response): Promise<voi
       );
     }
 
+    // The token names a single-use challenge row (`jti`) and expires with it, so
+    // the first exchange that presents a correct code is the only one that ever
+    // completes; see `utils/twoFactorChallenge.ts`.
+    const challenge = await issueTwoFactorChallenge(user._id);
     const tempToken = jwt.sign(
       {
         userId: user._id.toString(),
@@ -1036,9 +1051,10 @@ export const login = catchAsync(async (req: Request, res: Response): Promise<voi
         // Carry "remember me" into the SIGNED token so the 2FA step honours it
         // from the verified payload, never from a forgeable request body.
         rememberMe,
+        ...challenge,
       } satisfies JwtTempPayload,
       derivePurposeKey(config.JWT_REFRESH_SECRET, '2fa_temp'),
-      { algorithm: 'HS256', expiresIn: '5m' },
+      { algorithm: 'HS256' },
     );
 
     res.status(200).json({
@@ -1097,6 +1113,17 @@ export const login2fa = catchAsync(async (req: Request, res: Response): Promise<
       logger.warn('2FA device mismatch detected', { userId: payload.userId });
       throw httpErrors.unauthorized(ERROR_CODES.TOKEN_INVALID);
     }
+  }
+
+  // The token must name a challenge that can still complete a sign-in: one that
+  // exists for THIS account, unexpired and not yet consumed. Asked before the code
+  // is read, so a spent token costs nothing (no code check, no count on the second
+  // factor, no bcrypt) and is refused like any other dead token. A token without a
+  // `jti` predates challenges and is refused the same way: honouring it would
+  // reopen the reuse this closes for the rest of its five minutes.
+  const challengeId = payload.jti;
+  if (typeof challengeId !== 'string' || !(await isChallengeOpen(challengeId, payload.userId))) {
+    throw httpErrors.unauthorized(ERROR_CODES.TOKEN_INVALID);
   }
 
   const user = await User.findById(payload.userId).select(
@@ -1163,6 +1190,16 @@ export const login2fa = catchAsync(async (req: Request, res: Response): Promise<
     await applyProgressiveDelay(verdict.attempts);
 
     throw httpErrors.unauthorized(ERROR_CODES.TWO_FA_INVALID);
+  }
+
+  // The challenge is consumed FIRST, by one compare-and-set: of two exchanges
+  // racing on the same token, exactly one gets past this line, and the other is
+  // refused while its code is still unspent (a backup code is a recovery
+  // credential; a refused exchange must not burn one). A challenge consumed here
+  // whose code then turns out to be spent elsewhere costs the user one fresh
+  // sign-in, never a second session.
+  if (!(await consumeTwoFactorChallenge(challengeId, payload.userId))) {
+    throw httpErrors.unauthorized(ERROR_CODES.TOKEN_INVALID);
   }
 
   // Consume the code, atomically, BEFORE any token is issued: a TOTP step is

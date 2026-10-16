@@ -12,6 +12,7 @@ import { Document } from '../models/Document.js';
 import { DocumentUpload } from '../models/DocumentUpload.js';
 import { DeviceProof } from '../models/DeviceProof.js';
 import { Invitation } from '../models/Invitation.js';
+import { Challenge } from '../models/Challenge.js';
 import { createAuditLog } from '../services/auditService.js';
 import { getStorage } from '../services/storage/index.js';
 import { userObjectPrefix } from './documentObjects.js';
@@ -128,8 +129,10 @@ const CASCADE_BATCH_SIZE = 1_000;
  * final step: the audit log (up to its caps, plus a year of security rows), the
  * vault's items and folders, both document collections, the refresh tokens (a
  * spent token stays behind as a reuse-detection tombstone for seven days, one per
- * refresh), the backup log (a year of it), the device proofs and the invitations
- * the account minted.
+ * refresh), the backup log (a year of it), the device proofs, the invitations
+ * the account minted and its second-factor challenges (one per proven password,
+ * each gone five minutes later by TTL, but nothing stops many sign-ins inside
+ * those five minutes).
  *
  * Nothing here is implicit: a collection that is neither here nor in
  * {@link sweepRemainingRows} is never erased, whatever else the application does
@@ -145,6 +148,7 @@ const BATCHED_TENANT_MODELS = [
   BackupLog,
   DeviceProof,
   Invitation,
+  Challenge,
 ] as const;
 
 /**
@@ -233,6 +237,8 @@ async function sweepRemainingRows(
   // spend dies with it: an erased account vouches for nobody.
   await Invitation.deleteMany({ userId }, options);
   await Invitation.deleteMany({ email: userEmail.trim().toLowerCase() }, options);
+  // A challenge minted by a sign-in that proved the password while the batches ran.
+  await Challenge.deleteMany({ userId }, options);
   await revokeDeviceProofs(userId, options);
   await revokeTrustedDevices(userId, session);
 }

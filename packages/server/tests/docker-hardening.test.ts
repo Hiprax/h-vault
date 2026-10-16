@@ -928,7 +928,7 @@ describe('Docker deployment', () => {
       // 8.0 is supported to 2029-10-31; 7.0 runs out on 2027-08-31. A password
       // manager's datastore should not be the thing that drops out of security
       // support first.
-      expect(mongoDockerfile).toMatch(/^FROM mongo:8\.0$/m);
+      expect(mongoDockerfile).toMatch(/^FROM mongo:8\.0@sha256:[0-9a-f]{64}$/m);
       expect(db?.image).toMatch(/^hvault-db:8\.\d+$/);
     });
 
@@ -1715,6 +1715,63 @@ describe('Docker deployment', () => {
     });
   });
 
+  describe('pulled base images (I-05)', () => {
+    /** Every Dockerfile under docker/, by name. */
+    const dockerfiles = readdirSync(path.join(repoRoot, 'docker'))
+      .filter((name) => name === 'Dockerfile' || name.endsWith('.Dockerfile'))
+      .map((name) => ({
+        name,
+        text: readFileSync(path.join(repoRoot, 'docker', name), 'utf-8'),
+      }));
+
+    /** The image each `FROM` names, past `--platform` flags, with stage aliases excluded. */
+    function pulledReferences(text: string): string[] {
+      const stages = new Set(
+        [...text.matchAll(/^FROM\s+\S+(?:\s+\S+)*?\s+AS\s+(\S+)\s*$/gim)].map((m) => m[1]!),
+      );
+      return [...text.matchAll(/^FROM\s+(?:--\S+\s+)*(\S+)/gim)]
+        .map((m) => m[1]!)
+        .filter((reference) => !stages.has(reference));
+    }
+
+    it('pins every image a Dockerfile builds FROM by digest as well as by tag', () => {
+      // A tag is a mutable pointer: the publisher can move `node:24-alpine3.23` or
+      // `mongo:8.0` onto different bytes at any time and nothing in a build would
+      // notice. The digest is what pins the bytes; the tag is kept for the human.
+      // Digests are read from the registry, never invented, and moving one is a
+      // deliberate edit reviewed like any dependency bump.
+      const references = dockerfiles.flatMap(({ name, text }) =>
+        pulledReferences(text).map((reference) => ({ name, reference })),
+      );
+      // The build images this repository pulls: node, mongo, garage and nginx.
+      expect(references.map(({ reference }) => reference.split(':')[0]).sort()).toEqual([
+        'dxflrs/garage',
+        'mongo',
+        'nginxinc/nginx-unprivileged',
+        'node',
+      ]);
+      const unpinned = references.filter(
+        ({ reference }) => !/^[\w./-]+:[\w.-]+@sha256:[0-9a-f]{64}$/.test(reference),
+      );
+      expect(unpinned).toEqual([]);
+    });
+
+    it('runs the very MongoDB image production builds on in the development stack', () => {
+      // The same rule the two compose files hold for the storage engine: a
+      // behaviour difference between dev and prod must never be a database
+      // difference, so the dev stack names the production base image, digest and all.
+      const devCompose = parse(
+        readFileSync(path.join(repoRoot, 'docker-compose.dev.yml'), 'utf-8'),
+      ) as { services: Record<string, { image?: string }> };
+      const productionBase = pulledReferences(mongoDockerfile)[0];
+      expect(productionBase).toMatch(/^mongo:8\.0@sha256:[0-9a-f]{64}$/);
+      const devImages = Object.values(devCompose.services)
+        .map((service) => service.image ?? '')
+        .filter((image) => image.startsWith('mongo:'));
+      expect(devImages).toEqual([productionBase]);
+    });
+  });
+
   describe('image build', () => {
     it('builds the app and the Nginx bundle from ONE client build stage', () => {
       // The app serves the index.html that references the content-hashed assets Nginx
@@ -2184,8 +2241,8 @@ describe('Docker deployment', () => {
       const baseLine = /^FROM (node:24-alpine[^\s]*) AS base$/m.exec(dockerfile);
       expect(baseLine).not.toBeNull();
       // An explicit Alpine minor suffix (e.g. `node:24-alpine3.23`), never the bare
-      // floating `node:24-alpine`.
-      expect(baseLine?.[1]).toMatch(/^node:24-alpine\d+\.\d+$/);
+      // floating `node:24-alpine`, followed by the digest that pins its bytes (I-05).
+      expect(baseLine?.[1]).toMatch(/^node:24-alpine\d+\.\d+@sha256:[0-9a-f]{64}$/);
     });
 
     it('removes npm from the app runtime, which executes node directly', () => {

@@ -7,7 +7,6 @@
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import request from 'supertest';
-import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import { TOTP, Secret } from 'otpauth';
 import { CryptoManager } from '@hiprax/crypto';
@@ -18,8 +17,8 @@ import { findMatchingBackupCodeIndex } from '../src/utils/secondFactor.js';
 import {
   createTestUser,
   authHeader,
-  deriveTestPurposeKey,
   getCsrf as getCsrfBase,
+  signTwoFactorChallenge,
 } from './helpers.js';
 
 async function getCsrf(agent: request.Agent): Promise<{ csrfToken: string; csrfCookie: string }> {
@@ -52,11 +51,7 @@ async function create2faUser(rawCodes: string[]) {
     },
   });
 
-  const tempToken = jwt.sign(
-    { userId: user.id, purpose: '2fa_temp' },
-    deriveTestPurposeKey('2fa_temp'),
-    { expiresIn: '5m' },
-  );
+  const tempToken = await signTwoFactorChallenge({ userId: user.id, purpose: '2fa_temp' });
 
   return { user, tempToken, rawCodes, secretObj };
 }
@@ -122,11 +117,7 @@ describe('2FA Backup Code Consumption', () => {
       expect(res1.status).toBe(200);
 
       // Create a new temp token for second attempt
-      const tempToken2 = jwt.sign(
-        { userId: user.id, purpose: '2fa_temp' },
-        deriveTestPurposeKey('2fa_temp'),
-        { expiresIn: '5m' },
-      );
+      const tempToken2 = await signTwoFactorChallenge({ userId: user.id, purpose: '2fa_temp' });
 
       // Second use of the same code — fails
       const { csrfToken: csrf2, csrfCookie: cookie2 } = await getCsrf(agent);
@@ -148,11 +139,7 @@ describe('2FA Backup Code Consumption', () => {
 
       // Use each code in sequence
       for (const code of rawCodes) {
-        const tempToken = jwt.sign(
-          { userId: user.id, purpose: '2fa_temp' },
-          deriveTestPurposeKey('2fa_temp'),
-          { expiresIn: '5m' },
-        );
+        const tempToken = await signTwoFactorChallenge({ userId: user.id, purpose: '2fa_temp' });
 
         const { csrfToken, csrfCookie } = await getCsrf(agent);
         const res = await agent
@@ -171,11 +158,7 @@ describe('2FA Backup Code Consumption', () => {
       // User with no backup codes
       const { user } = await create2faUser([]);
 
-      const tempToken = jwt.sign(
-        { userId: user.id, purpose: '2fa_temp' },
-        deriveTestPurposeKey('2fa_temp'),
-        { expiresIn: '5m' },
-      );
+      const tempToken = await signTwoFactorChallenge({ userId: user.id, purpose: '2fa_temp' });
 
       const { csrfToken, csrfCookie } = await getCsrf(agent);
       const res = await agent
@@ -218,11 +201,7 @@ describe('2FA Backup Code Consumption', () => {
       expect(newCodes.length).toBeGreaterThan(0);
 
       // Old code should no longer work
-      const tempToken = jwt.sign(
-        { userId: user.id, purpose: '2fa_temp' },
-        deriveTestPurposeKey('2fa_temp'),
-        { expiresIn: '5m' },
-      );
+      const tempToken = await signTwoFactorChallenge({ userId: user.id, purpose: '2fa_temp' });
 
       const { csrfToken: csrf2, csrfCookie: cookie2 } = await getCsrf(agent);
       const loginRes = await agent
@@ -257,11 +236,7 @@ describe('2FA Backup Code Consumption', () => {
       const newCodes: string[] = regenRes.body.data.backupCodes;
 
       // Login with first new backup code
-      const tempToken = jwt.sign(
-        { userId: user.id, purpose: '2fa_temp' },
-        deriveTestPurposeKey('2fa_temp'),
-        { expiresIn: '5m' },
-      );
+      const tempToken = await signTwoFactorChallenge({ userId: user.id, purpose: '2fa_temp' });
 
       const { csrfToken: csrf2, csrfCookie: cookie2 } = await getCsrf(agent);
       const loginRes = await agent
@@ -283,16 +258,8 @@ describe('2FA Backup Code Consumption', () => {
       const { user } = await create2faUser(rawCodes);
 
       // Create two temp tokens
-      const tempToken1 = jwt.sign(
-        { userId: user.id, purpose: '2fa_temp' },
-        deriveTestPurposeKey('2fa_temp'),
-        { expiresIn: '5m' },
-      );
-      const tempToken2 = jwt.sign(
-        { userId: user.id, purpose: '2fa_temp' },
-        deriveTestPurposeKey('2fa_temp'),
-        { expiresIn: '5m' },
-      );
+      const tempToken1 = await signTwoFactorChallenge({ userId: user.id, purpose: '2fa_temp' });
+      const tempToken2 = await signTwoFactorChallenge({ userId: user.id, purpose: '2fa_temp' });
 
       const { csrfToken: csrf1, csrfCookie: cookie1 } = await getCsrf(agent);
       const { csrfToken: csrf2, csrfCookie: cookie2 } = await getCsrf(agent);
@@ -433,11 +400,7 @@ describe('2FA Backup Code Consumption', () => {
       });
       const totpCode = totp.generate();
 
-      const tempToken = jwt.sign(
-        { userId: user.id, purpose: '2fa_temp' },
-        deriveTestPurposeKey('2fa_temp'),
-        { expiresIn: '5m' },
-      );
+      const tempToken = await signTwoFactorChallenge({ userId: user.id, purpose: '2fa_temp' });
 
       const { csrfToken, csrfCookie } = await getCsrf(agent);
       const res = await agent
@@ -454,26 +417,20 @@ describe('2FA Backup Code Consumption', () => {
       expect(afterUser!.lastTotpTimestamp).toBeGreaterThan(1000);
     });
 
-    it('should try backup codes only AFTER TOTP validation fails (a valid TOTP never touches them)', async () => {
+    it('never runs the backup-code branch for a six-digit code (a valid TOTP never touches them)', async () => {
       // A user with BOTH a TOTP secret and backup codes. Submitting a VALID TOTP
       // must be accepted via the TOTP path WITHOUT the backup-code branch running
-      // at all. The previous version of this test submitted a backup code (never a
-      // valid TOTP), so it could not distinguish the ordering it names — it
-      // succeeded identically whether backup codes were tried before or after
-      // TOTP. Here we assert bcrypt.compare (used ONLY to match backup codes) is
-      // never invoked, which fails if the `!isValid` guard on the backup branch is
-      // removed and backup matching runs unconditionally.
+      // at all: the verifier picks the branch by the code's shape (I-10), and a
+      // six-digit code is checked as a TOTP code only. bcrypt.compare (used ONLY to
+      // match backup codes) must never be invoked; it would be if the shape rule
+      // were removed and backup matching ran for every code.
       const backupCodes = ['abc123def4567890', 'fed321cba0987654'];
       const { user, secretObj } = await create2faUser(backupCodes);
 
       const totp = new TOTP({ algorithm: 'SHA1', digits: 6, period: 30, secret: secretObj });
       const totpCode = totp.generate();
 
-      const tempToken = jwt.sign(
-        { userId: user.id, purpose: '2fa_temp' },
-        deriveTestPurposeKey('2fa_temp'),
-        { expiresIn: '5m' },
-      );
+      const tempToken = await signTwoFactorChallenge({ userId: user.id, purpose: '2fa_temp' });
 
       const compareSpy = vi.spyOn(bcrypt, 'compare');
       const { csrfToken, csrfCookie } = await getCsrf(agent);
