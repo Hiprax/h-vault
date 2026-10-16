@@ -258,6 +258,71 @@ describe('README documentation sync', () => {
       expect(wrong).toEqual([]);
     });
 
+    /**
+     * The gate COUNT, as opposed to the gate list above. Four sentences and one
+     * table in three documents state how many gates a tier runs, and none of them was pinned:
+     * the phase that registered `gitleaks` and `osv` found the push tier still
+     * described as thirty-one gates in CONTRIBUTING.md and SECURITY.md and the
+     * self-test as thirty-nine cases. Every number is derived from the runner's
+     * listing, and every sentence must still be found, so rewording one away
+     * fails here rather than passing vacuously.
+     */
+    it('states how many gates each tier runs, everywhere a document counts them', () => {
+      const fast = listed.filter((gate) => gate.tier === 0).length;
+      const push = listed.filter((gate) => gate.tier <= 1).length;
+      const all = listed.length;
+      expect(fast).toBeGreaterThan(0);
+      expect(push).toBeGreaterThan(fast);
+      expect(all).toBeGreaterThan(push);
+
+      const contributing = readFileSync(path.resolve(repoRoot, 'CONTRIBUTING.md'), 'utf-8');
+      const security = readFileSync(path.resolve(repoRoot, 'SECURITY.md'), 'utf-8');
+      const sites: { text: string; pattern: RegExp; expected: number; what: string }[] = [
+        {
+          text: contributing,
+          pattern: /The `pre-push` hook runs the entire\npipeline locally — ([a-z-]+) gates/,
+          expected: push,
+          what: 'CONTRIBUTING’s push-tier count',
+        },
+        {
+          text: security,
+          pattern: /through the `pre-push` hook — ([a-z-]+) gates,/,
+          expected: push,
+          what: 'SECURITY’s push-tier count',
+        },
+        {
+          // One self-test case per registered task, and every gate is one task.
+          text: readme,
+          pattern: /one case per registered task,\n([a-z-]+) of them/,
+          expected: all,
+          what: 'the README’s self-test case count',
+        },
+        {
+          text: readme,
+          pattern: /Three failures out of ([a-z-]+) gates/,
+          expected: all,
+          what: 'the README’s re-run paragraph',
+        },
+      ];
+      for (const site of sites) {
+        const match = site.pattern.exec(site.text);
+        expect(match, `${site.what}: the sentence is gone`).not.toBeNull();
+        expect(NUMBER_WORDS[site.expected], `no word for ${String(site.expected)}`).toBeDefined();
+        expect(match![1], site.what).toBe(NUMBER_WORDS[site.expected]);
+      }
+
+      // The remote-machine table counts in digits.
+      for (const [command, expected] of [
+        ['npm run verify:fast', fast],
+        ['npm run ci', push],
+        ['npm run verify:full', all],
+      ] as const) {
+        const row = new RegExp(`^\\|\\s*\`${command}\`\\s*\\|\\s*(\\d+)\\s*\\|`, 'm').exec(readme);
+        expect(row, `README remote table row for ${command}`).not.toBeNull();
+        expect(Number(row![1]), `README remote table: ${command}`).toBe(expected);
+      }
+    });
+
     it('counts the release tier correctly in the prose under the table', () => {
       // The paragraph names the T2 gates in words. Both the count and the names
       // are checked, because a count alone is satisfied by swapping one for

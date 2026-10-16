@@ -187,6 +187,13 @@ import {
 // The one parser for an LCOV document, shared with `coverage-check.mjs` — see
 // `fromLcov` below. `pct` comes with it for the same reason.
 import { parseLcov, pct } from './lib/lcov.mjs';
+// The two scanner gates' own report parsers, for the reason `parseLcov` is
+// shared: two readers of one artifact is the intended shape, two PARSERS of it
+// would eventually disagree about what "a finding" is. Both scripts guard their
+// entry point, so importing them runs no scan. Both are strict: a report of the
+// wrong shape throws, and the field is then UNMEASURED rather than zero.
+import { parseGitleaksSarif } from './gitleaks-gate.mjs';
+import { classifyFindings, parseOsvReport, readAcceptances, utcToday } from './osv-gate.mjs';
 
 const ROOT = process.cwd();
 const TF = join(ROOT, '.testfortress');
@@ -296,6 +303,19 @@ const DIRECTION = {
   // (landmarks, `main`, `h1`, heading order) had been paid down to zero, and
   // not before: a gate moves up only, from a measured value. `minor` findings
   // are still recorded in `a11y.json` and deliberately NOT ratcheted.
+  // The two security scanners' findings, held at zero. The gates already fail
+  // on any finding; ratcheting the counts as well is what makes a deleted or
+  // demoted scanner visible here, where its field turns UNMEASURED, and what
+  // makes an allowlist that grew show up as a number that moved. There is no
+  // denominator field: a scan that read nothing is refused by the gate itself
+  // and, below, by the extractor.
+  'gitleaks.unignored': 'lower',
+  // UNACCEPTED advisories, classified by the osv gate's own functions against
+  // the same ledger, so the two cannot disagree; the gate holds it at zero.
+  // `osv.accepted` beside it is lower-is-better too, so a SECOND acceptance is a
+  // regression here, not only a new ledger entry.
+  'osv.vulnerabilities': 'lower',
+  'osv.accepted': 'lower',
   'a11y.critical': 'lower',
   'a11y.serious': 'lower',
   'a11y.moderate': 'lower',
@@ -828,6 +848,8 @@ function collect() {
       base === 'config.sarif' ||
       base === 'openapi-compat.json' ||
       base === 'a11y.json' ||
+      base === 'gitleaks.sarif' ||
+      base === 'osv.json' ||
       // EXACT names, never a substring. `test:flake` and `test:dst` both leave
       // `junit-flake-<pkg>.xml` behind — undeclared artifacts this gate does not
       // read — and a substring match made them KNOWN, so the freshness rule
@@ -902,6 +924,34 @@ function collect() {
       if (typeof j.violations?.serious === 'number') got['a11y.serious'] = j.violations.serious;
       if (typeof j.violations?.moderate === 'number') got['a11y.moderate'] = j.violations.moderate;
       if (typeof j.viewsScanned === 'number') got['a11y.viewsScanned'] = j.viewsScanned;
+    } else if (base === 'gitleaks.sarif') {
+      // Unignored findings over the whole history: gitleaks has already applied
+      // `.gitleaksignore`, so every result in the report is one nothing excused.
+      try {
+        got['gitleaks.unignored'] = parseGitleaksSarif(j).length;
+      } catch {
+        /* not gitleaks' shape: unmeasured, never zero */
+      }
+    } else if (base === 'osv.json') {
+      // One per advisory per package, the unit the gate prints, split by the
+      // gate's own classifier against the same ledger: an entry the gate would
+      // refuse accepts nothing here either. A report that read no package at
+      // all is a scan of nothing, so it supplies no field; neither does a ledger
+      // this cannot read.
+      try {
+        const report = parseOsvReport(j);
+        const ledgerPath = join(TF, 'suppressions.json');
+        const { acceptances } = existsSync(ledgerPath)
+          ? readAcceptances(JSON.parse(readFileSync(ledgerPath, 'utf8')), utcToday())
+          : { acceptances: [] };
+        if (report.packages > 0) {
+          const verdict = classifyFindings(report.vulnerabilities, acceptances);
+          got['osv.vulnerabilities'] = verdict.unaccepted.length;
+          got['osv.accepted'] = verdict.accepted.length;
+        }
+      } catch {
+        /* not osv-scanner's shape, or an unreadable ledger: unmeasured, never zero */
+      }
     } else if (base === 'coverage.json') {
       // ONLY the patch-coverage number. The per-package percentages, the
       // denominators and the measured file set are read from the LCOV documents

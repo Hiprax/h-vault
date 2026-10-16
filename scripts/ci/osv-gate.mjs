@@ -10,7 +10,8 @@
  * included, because a compromised build or test dependency runs on the same
  * machine that holds the release credentials.
  *
- * Exit codes: 0 = scanned, no vulnerability · 1 = at least one vulnerability ·
+ * Exit codes: 0 = scanned, no unaccepted vulnerability (see (f)) · 1 = at least one
+ * unaccepted vulnerability, or an acceptance this gate refuses ·
  * 2 = could not run. Never 78: `sast` is the ONLY gate allowed to report itself
  * skipped (`local-pipeline.test.ts`, `gate-surface.test.ts`), so an absent
  * scanner is "could not run", which fails the pipeline rather than passing it.
@@ -41,8 +42,8 @@
  *     accepted advisory outside the suppression ledger, where no expiry, owner
  *     or reviewer applies. `--config` with an empty file overrides the discovery
  *     (measured: exit 1 again), so no file in the tree can quiet this gate. An
- *     advisory that genuinely has to be accepted is a `VULN-ACCEPT` ledger entry
- *     and a change to this gate, reviewed as one.
+ *     advisory that genuinely has to be accepted is a `VULN-ACCEPT` ledger entry,
+ *     which this gate re-validates itself — see (f).
  *
  *  c. `--all-packages` IS WHAT MAKES THE PACKAGE COUNT A MEASUREMENT. Without it
  *     a clean report lists no packages at all, so "0 vulnerabilities across N
@@ -57,6 +58,38 @@
  *     recurse into (measured: "0 dirs visited, 1 inodes visited"), and a flag
  *     that reads as "scan the tree" when it does not would mislead a reviewer.
  *     The workspaces share the one root lockfile.
+ *
+ *  f. AN ADVISORY WITH NO FIXED RELEASE IS ACCEPTED, NEVER IGNORED, and only
+ *     through `.testfortress/suppressions.json`. An entry counts only when it is
+ *     rule `VULN-ACCEPT`, kind `vulnerability-acceptance`, file
+ *     `package-lock.json`, symbol EXACTLY `<advisory id> <name>@<version>` (no
+ *     alias, range or wildcard), a positive integer `maxHits`, a reason, a
+ *     non-empty `approvedBy`, `created` not after today, today not after
+ *     `expires`, and `expires` at most thirty days out. The integrity scan only
+ *     holds marker-less rules to its ninety-day cap and exempts them from its
+ *     staleness and unused-capacity checks, so this gate does all of it again,
+ *     and runs alone under `--only` and in the self-test as well:
+ *       - an entry that breaks any of those rules is RED (exit 1), named, even
+ *         when the scan found nothing it could have matched;
+ *       - an entry whose id is missing or names more than one ledger entry
+ *         accepts nothing and is red, because every verdict below is keyed
+ *         by id; a date the calendar does not have (`2099-13-01`) is refused
+ *         like any other malformed date;
+ *       - matching is equality on the report's own id, package name and
+ *         version, and an entry that would excuse more findings than its
+ *         `maxHits`, or fewer, is red: unused capacity is room to excuse a
+ *         finding nobody reviewed;
+ *       - an entry that excuses NOTHING in a completed scan is red: a fix
+ *         shipped, the package left the tree, or the advisory was re-keyed, and
+ *         the acceptance must be pruned rather than left to excuse a future one;
+ *       - the report is never rewritten: `osv.json` keeps the accepted finding,
+ *         and the summary names every acceptance and its expiry;
+ *       - the exit code still comes from the RAW report and the tool's exit:
+ *         osv-scanner exits 1 whenever it found anything, so "every finding
+ *         accepted" is green only with exit 1, and "nothing found" only with 0.
+ *     `audit:ratchet:full` classifies the same report through the same
+ *     functions, so the gate and the ratchet cannot disagree about what was
+ *     accepted.
  */
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -68,6 +101,7 @@ import { color, note, symbol } from './lib/ui.mjs';
 
 export const REPORT_NAME = 'osv.json';
 const LOCKFILE = 'package-lock.json';
+const LEDGER = '.testfortress/suppressions.json';
 /** Generous for one lockfile (measured 2.7 s end to end); a hung fetch must end as "could not run". */
 const SCAN_TIMEOUT_MS = 5 * 60_000;
 const INSTALL_HINT =
@@ -88,6 +122,192 @@ export class OsvReportError extends Error {
     super(message);
     this.name = 'OsvReportError';
   }
+}
+
+/** Thrown when the suppression ledger does not have the shape this gate can read. */
+export class OsvLedgerError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'OsvLedgerError';
+  }
+}
+
+/** What a ledger entry must be to accept an advisory; see decision (f). */
+export const VULN_ACCEPT = Object.freeze({
+  rule: 'VULN-ACCEPT',
+  kind: 'vulnerability-acceptance',
+  file: LOCKFILE,
+  maxDays: 30,
+});
+
+const DATE = /^\d{4}-\d{2}-\d{2}$/;
+/**
+ * A date the calendar has. The shape alone admits `2099-13-01`, which compares
+ * as a string after every real date and makes the day arithmetic NaN, so the
+ * thirty-day cap (`NaN > 30`) would never refuse it.
+ */
+const isCalendarDate = (value) => {
+  if (typeof value !== 'string' || !DATE.test(value)) return false;
+  const time = Date.parse(`${value}T00:00:00Z`);
+  return !Number.isNaN(time) && new Date(time).toISOString().slice(0, 10) === value;
+};
+/**
+ * `<advisory id> <name>@<version>`: one space, a name that may be scoped
+ * (`@scope/pkg`), and a version made of the characters a published npm version
+ * uses — so no range, wildcard or second token can stand in for one.
+ */
+const SYMBOL =
+  /^([A-Za-z0-9][A-Za-z0-9._:-]*) ((?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*)@([0-9A-Za-z][0-9A-Za-z.+-]*)$/;
+
+/** `YYYY-MM-DD` in UTC, the calendar the ledger's dates are written in. */
+export const utcToday = () => new Date().toISOString().slice(0, 10);
+const daysFrom = (from, to) => (Date.parse(to) - Date.parse(from)) / 86_400_000;
+
+/**
+ * An acceptance symbol, or `null` when it is not exactly
+ * `<advisory id> <name>@<version>`.
+ *
+ * @param {unknown} symbol
+ * @returns {{ id: string, name: string, version: string } | null}
+ */
+export function parseAcceptanceSymbol(symbol) {
+  if (typeof symbol !== 'string') return null;
+  const match = SYMBOL.exec(symbol);
+  if (!match) return null;
+  return { id: match[1], name: match[2], version: match[3] };
+}
+
+/**
+ * The ledger's `VULN-ACCEPT` entries, split into the ones that accept an
+ * advisory today and the ones this gate refuses (each refusal is red). Every
+ * other rule in the ledger is ignored. Strict on the ledger's own shape: one
+ * this function cannot read throws, and is never "nothing accepted".
+ *
+ * @param {unknown} ledger the parsed `.testfortress/suppressions.json`
+ * @param {string} today `YYYY-MM-DD`
+ * @returns {{ acceptances: { entryId: string, id: string, name: string, version: string, maxHits: number, expires: string }[], problems: { entryId: string, reason: string }[] }}
+ */
+export function readAcceptances(ledger, today) {
+  if (!isObject(ledger) || !Array.isArray(ledger.entries)) {
+    throw new OsvLedgerError(`${LEDGER} has no \`entries\` array`);
+  }
+  const acceptances = [];
+  const problems = [];
+  // Every id in the ledger, not only the acceptances': the verdict keys dead and
+  // over- or under-used entries by id, so a shared one would let a live entry
+  // hide a dead one.
+  const idUses = new Map();
+  for (const entry of ledger.entries) {
+    if (isObject(entry) && typeof entry.id === 'string') {
+      idUses.set(entry.id, (idUses.get(entry.id) ?? 0) + 1);
+    }
+  }
+  for (const entry of ledger.entries) {
+    if (!isObject(entry) || entry.rule !== VULN_ACCEPT.rule) continue;
+    const entryId = typeof entry.id === 'string' && entry.id !== '' ? entry.id : '(no id)';
+    const refuse = (reason) => problems.push({ entryId, reason });
+    const target = parseAcceptanceSymbol(entry.symbol);
+    if (typeof entry.id !== 'string' || entry.id === '' || idUses.get(entry.id) !== 1) {
+      refuse(
+        `id ${entryId} must name exactly one ledger entry, and it names more than one entry or none`,
+      );
+    } else if (entry.kind !== VULN_ACCEPT.kind) {
+      refuse(`kind must be "${VULN_ACCEPT.kind}"`);
+    } else if (entry.file !== VULN_ACCEPT.file) {
+      refuse(`file must be "${VULN_ACCEPT.file}", the only file this gate reads`);
+    } else if (target === null) {
+      refuse('symbol must be exactly "<advisory id> <name>@<version>"');
+    } else if (!Number.isInteger(entry.maxHits) || entry.maxHits < 1) {
+      refuse('maxHits must be a positive integer');
+    } else if (typeof entry.reason !== 'string' || entry.reason.trim() === '') {
+      refuse('reason is empty');
+    } else if (
+      !Array.isArray(entry.approvedBy) ||
+      entry.approvedBy.length === 0 ||
+      !entry.approvedBy.every((who) => typeof who === 'string' && who.trim() !== '')
+    ) {
+      refuse('approvedBy must name the reviewer(s) who accepted it');
+    } else if (!isCalendarDate(entry.created) || entry.created > today) {
+      refuse(
+        `created "${String(entry.created)}" must be a YYYY-MM-DD calendar date no later than ${today}`,
+      );
+    } else if (!isCalendarDate(entry.expires)) {
+      refuse(`expires "${String(entry.expires)}" must be a YYYY-MM-DD calendar date`);
+    } else if (entry.expires < today) {
+      refuse(
+        `expired ${entry.expires}; re-check the advisory and the registry, then renew or remove it`,
+      );
+    } else if (daysFrom(today, entry.expires) > VULN_ACCEPT.maxDays) {
+      refuse(
+        `expires ${entry.expires}, more than ${String(VULN_ACCEPT.maxDays)} days from today; an acceptance is re-reviewed at least monthly`,
+      );
+    } else {
+      acceptances.push({ entryId, ...target, maxHits: entry.maxHits, expires: entry.expires });
+    }
+  }
+  return { acceptances, problems };
+}
+
+/**
+ * Splits the report's findings into accepted and unaccepted, and names each
+ * acceptance that excused nothing (`dead`) or more than its capacity
+ * (`overused`). Matching is equality on id, package name and version.
+ *
+ * @param {{ package: string, version: string, id: string, summary: string }[]} vulnerabilities
+ * @param {{ entryId: string, id: string, name: string, version: string, maxHits: number, expires: string }[]} acceptances
+ */
+export function classifyFindings(vulnerabilities, acceptances) {
+  const accepted = [];
+  const unaccepted = [];
+  const hits = new Map(acceptances.map((acceptance) => [acceptance.entryId, 0]));
+  for (const finding of vulnerabilities) {
+    const acceptance = acceptances.find(
+      (candidate) =>
+        candidate.id === finding.id &&
+        candidate.name === finding.package &&
+        candidate.version === finding.version,
+    );
+    if (acceptance === undefined) {
+      unaccepted.push(finding);
+      continue;
+    }
+    hits.set(acceptance.entryId, (hits.get(acceptance.entryId) ?? 0) + 1);
+    accepted.push({ finding, entryId: acceptance.entryId, expires: acceptance.expires });
+  }
+  const dead = acceptances.filter((a) => hits.get(a.entryId) === 0).map((a) => a.entryId);
+  const usage = (a) => ({ entryId: a.entryId, hits: hits.get(a.entryId) ?? 0, maxHits: a.maxHits });
+  const overused = acceptances.filter((a) => (hits.get(a.entryId) ?? 0) > a.maxHits).map(usage);
+  // Capacity it did not use is capacity ready to excuse a finding nobody
+  // reviewed; zero hits is `dead`, reported on its own.
+  const underused = acceptances
+    .filter((a) => {
+      const used = hits.get(a.entryId) ?? 0;
+      return used > 0 && used < a.maxHits;
+    })
+    .map(usage);
+  return { accepted, unaccepted, dead, overused, underused };
+}
+
+/**
+ * The gate's exit code once acceptances are taken into account; see decision
+ * (f). With no acceptance in play it answers exactly as `exitCodeFor` does.
+ *
+ * @param {number} toolExit
+ * @param {{ packages: number, vulnerabilities: unknown[] } | null} report
+ * @param {ReturnType<typeof classifyFindings>} verdict
+ * @param {{ entryId: string, reason: string }[]} problems
+ * @returns {0 | 1 | 2}
+ */
+export function acceptanceExitCode(toolExit, report, verdict, problems) {
+  if (problems.length > 0) return 1;
+  if (report === null) return 2;
+  if (verdict.unaccepted.length > 0) return 1;
+  if (verdict.overused.length > 0) return 1;
+  if (report.packages === 0) return 2;
+  const expected = verdict.accepted.length > 0 ? OSV_EXIT.VULNERABLE : OSV_EXIT.CLEAN;
+  if (toolExit !== expected) return 2;
+  if (verdict.dead.length > 0 || verdict.underused.length > 0) return 1;
+  return 0;
 }
 
 const isObject = (value) => typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -179,6 +399,32 @@ export function summarizeReport(report) {
   );
 }
 
+/**
+ * The count line once acceptances are taken into account. With none in play it
+ * is `summarizeReport`'s line, unchanged; with any, it can never read as a bare
+ * "0 vulnerabilities".
+ *
+ * @param {{ packages: number, vulnerabilities: unknown[] }} report
+ * @param {ReturnType<typeof classifyFindings>} verdict
+ */
+export function summarizeVerdict(report, verdict) {
+  if (verdict.accepted.length === 0) return summarizeReport(report);
+  const open = verdict.unaccepted.length;
+  const packages = report.packages;
+  const entries = [...new Set(verdict.accepted.map((accepted) => accepted.entryId))].join(', ');
+  return (
+    `${open.toLocaleString('en-US')} unaccepted ${open === 1 ? 'vulnerability' : 'vulnerabilities'} ` +
+    `and ${verdict.accepted.length.toLocaleString('en-US')} accepted (${entries}) across ` +
+    `${packages.toLocaleString('en-US')} ${packages === 1 ? 'package' : 'packages'}`
+  );
+}
+
+/** One line per accepted finding, never in an unaccepted finding's shape. */
+export function formatAccepted(accepted) {
+  const { finding } = accepted;
+  return `accepted  ${finding.package}@${finding.version}  ${finding.id}  (${accepted.entryId}, until ${accepted.expires})`;
+}
+
 /** One line per finding: `package@version  id  summary`. */
 export function formatFinding(finding) {
   const summary = finding.summary ? `  ${finding.summary}` : '';
@@ -196,6 +442,23 @@ async function main() {
   }
   if (existsSync(path.join(repoRoot, 'osv-scanner.toml'))) {
     note('osv-scanner.toml is present and deliberately NOT honoured (see decision (b))');
+  }
+
+  // The acceptances are read BEFORE the scan, so a ledger this gate cannot read
+  // is "could not run" without a scan whose verdict nobody could interpret.
+  let acceptances = [];
+  let problems = [];
+  const ledgerPath = path.join(repoRoot, LEDGER);
+  if (existsSync(ledgerPath)) {
+    try {
+      ({ acceptances, problems } = readAcceptances(
+        JSON.parse(readFileSync(ledgerPath, 'utf8')),
+        utcToday(),
+      ));
+    } catch (error) {
+      console.error(color.red(`${symbol.fail} osv: could not read ${LEDGER}: ${error.message}`));
+      return 2;
+    }
   }
 
   ensureReportDir();
@@ -240,11 +503,41 @@ async function main() {
     }
   }
 
-  const code = exitCodeFor(toolExit, parsed);
-  if (parsed) {
-    for (const finding of parsed.vulnerabilities) console.error(`  ${formatFinding(finding)}`);
+  const verdict = classifyFindings(parsed?.vulnerabilities ?? [], acceptances);
+  const code = acceptanceExitCode(toolExit, parsed, verdict, problems);
+  for (const problem of problems) {
+    console.error(
+      color.red(
+        `${symbol.fail} ${LEDGER} ${problem.entryId} cannot accept anything: ${problem.reason}`,
+      ),
+    );
   }
-  const counted = parsed ? summarizeReport(parsed) : 'no readable report';
+  for (const finding of verdict.unaccepted) console.error(`  ${formatFinding(finding)}`);
+  for (const accepted of verdict.accepted) note(formatAccepted(accepted));
+  for (const overused of verdict.overused) {
+    console.error(
+      color.red(
+        `${symbol.fail} ${overused.entryId} would excuse ${String(overused.hits)} findings; its maxHits is ${String(overused.maxHits)}`,
+      ),
+    );
+  }
+  if (parsed && code !== 2) {
+    for (const underused of verdict.underused) {
+      console.error(
+        color.red(
+          `${symbol.fail} ${underused.entryId} excuses ${String(underused.hits)} finding(s) of its maxHits ${String(underused.maxHits)}; lower maxHits to what it excuses`,
+        ),
+      );
+    }
+    for (const entryId of verdict.dead) {
+      console.error(
+        color.red(
+          `${symbol.fail} ${entryId} accepts an advisory this scan no longer reports; remove it from ${LEDGER}`,
+        ),
+      );
+    }
+  }
+  const counted = parsed ? summarizeVerdict(parsed, verdict) : 'no readable report';
   if (code === 0) {
     console.log(color.green(`${symbol.pass} osv: ${counted}`));
   } else if (code === 1) {

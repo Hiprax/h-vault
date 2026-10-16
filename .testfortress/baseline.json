@@ -1,9 +1,9 @@
 {
   "version": 1,
   "recordedAt": "2026-10-16",
-  "commit": "558c168",
+  "commit": "c40ccf5",
   "tests": {
-    "count": 13410
+    "count": 13442
   },
   "coverage": {
     "diff": 100
@@ -21,8 +21,8 @@
     "moderate": 0
   },
   "suppressions": {
-    "count": 27,
-    "totalHits": 37
+    "count": 32,
+    "totalHits": 42
   },
   "packages": {
     "packages/shared": {
@@ -194,7 +194,7 @@
         ]
       },
       "tests": {
-        "count": 5871
+        "count": 5903
       }
     },
     "packages/client": {
@@ -431,6 +431,7 @@
     "audit:bundle",
     "audit:config",
     "audit:deps",
+    "audit:deps:osv",
     "audit:image",
     "audit:integrity",
     "audit:licenses",
@@ -440,6 +441,7 @@
     "audit:sast",
     "audit:secrets",
     "audit:secrets:full",
+    "audit:secrets:gitleaks",
     "build",
     "ci:local",
     "coverage:check",
@@ -476,7 +478,7 @@
   "integrity": {
     "excludeHash": "4cb96b90dcc7465c",
     "gateFilesHash": "81179afcb986fb6a",
-    "selfHash": "de6171a5d0f4f327",
+    "selfHash": "93ea9d76a32047e9",
     "gitignoreHash": "4e1745f829ab8da3"
   },
   "meta": {
@@ -538,6 +540,7 @@
       "flake.e2eExecutions",
       "flake.failures",
       "flake.runs",
+      "gitleaks.unignored",
       "integrity.excludeHash",
       "integrity.gateFilesHash",
       "integrity.gitignoreHash",
@@ -553,6 +556,8 @@
       "openapi.snapshotHash",
       "openapi.snapshotOperations",
       "openapi.snapshotPaths",
+      "osv.accepted",
+      "osv.vulnerabilities",
       "packages.e2e.tests.count",
       "packages.packages/client.coverage.branch",
       "packages.packages/client.coverage.branchesTotal",
@@ -652,7 +657,7 @@
       "spectral": 1
     }
   },
-  "reason": "Phase 15 hardening-informational (I-01, I-10, I-17, I-08, I-13, I-14, I-05): npm run ci green on the final tree; banks the new tests (two-factor challenge, tenant-write, I-17, I-13, I-05), the server coverage growth and the newly measured files (models/Challenge.ts, utils/twoFactorChallenge.ts). The client linesTotal/tests.count reduction was recorded separately as SUP-0065.",
+  "reason": "Phase 16 security-gates: registers audit:secrets:gitleaks and audit:deps:osv as tier-1 gates (tasks 44 -> 46), seeds their findings at the values measured by the green npm run ci of 2026-10-16 (gitleaks.unignored 0, osv.vulnerabilities 0 unaccepted, osv.accepted 1 = SUP-0070, braces 3.0.3 with no fixed release), and banks the 32 new server tests",
   "bundle": {
     "budgetKb": {
       "VaultItemForm": 230,
@@ -762,5 +767,12 @@
       "shared": 200
     },
     "floor": 85
+  },
+  "gitleaks": {
+    "unignored": 0
+  },
+  "osv": {
+    "accepted": 1,
+    "vulnerabilities": 0
   }
 }

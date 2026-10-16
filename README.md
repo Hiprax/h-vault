@@ -1684,8 +1684,10 @@ measurement you can check rather than a claim from the day it was written. They 
 | `snapshot`         | T1   | The three export formats against their verified goldens, and the export/import round trip                                                                                                                                                                                                                                                                                                                                      | _new_                      |
 | `smoke`            | T1   | Boots the **built artifact** in production mode and completes one vault journey against it                                                                                                                                                                                                                                                                                                                                     | _new_                      |
 | `audit`            | T1   | `npm audit --audit-level=moderate --omit=dev`                                                                                                                                                                                                                                                                                                                                                                                  | `ci` job                   |
+| `osv`              | T1   | `osv-scanner` over **every package in `package-lock.json`**, dev tooling included, against the OSV advisory database: any vulnerability of any severity fails unless a dated, reviewed `VULN-ACCEPT` ledger entry names its exact advisory and version, no `osv-scanner.toml` is honoured, and a scan that read no package is could-not-run (about 2.5 s)                                                                      | _new_                      |
 | `licenses`         | T1   | Every production dependency against the committed licence allowlist; any copyleft fails                                                                                                                                                                                                                                                                                                                                        | _new_                      |
 | `secrets-full`     | T1   | The working tree **plus every blob in git history** scanned for credential patterns                                                                                                                                                                                                                                                                                                                                            | _new_                      |
+| `gitleaks`         | T1   | gitleaks' provider-specific rule corpus over **every commit in git history**; its only allowlist is `.gitleaksignore`, one commit-pinned fingerprint per line and one ledger entry per fingerprint (about 2.5 s)                                                                                                                                                                                                               | _new_                      |
 | `deadcode`         | T1   | `knip` (unused files, exports, types, dependencies) + `jscpd` duplication against a committed ceiling                                                                                                                                                                                                                                                                                                                          | _new_                      |
 | `config`           | T1   | `actionlint` on the workflow, `hadolint` on the three Dockerfiles, `spectral` on the generated OpenAPI document                                                                                                                                                                                                                                                                                                                | _new_                      |
 | `openapi`          | T1   | `oasdiff` against the committed contract snapshot: a breaking API change fails unless the version's MAJOR component was raised in the same commit                                                                                                                                                                                                                                                                              | _new_                      |
@@ -1950,13 +1952,15 @@ Measured on the reference machine, from the reports each run leaves behind. The 
 green `npm run ci` of this whole branch on 2026-09-25, after `mutation-diff` began visiting test
 files killer-first. The `verify:full` row comes from one run of it on 2026-09-24, and that run exited 1:
 `flake` failed 4 of its 10 shuffled runs on test-isolation defects fixed the same day, and
-`mutation-diff` was stopped by the flat guard this change replaced, at 74m 02s:
+`mutation-diff` was stopped by the flat guard this change replaced, at 74m 02s. Both runs predate
+the two security scanners, `gitleaks` and `osv`, which joined the push tier later at about 2.5 s
+each; the Gates column counts them:
 
 | Command               | Gates | Measured                            | What dominates it                                                                                                                                                                                                                                                                                                                              |
 | --------------------- | ----- | ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `npm run verify:fast` | 7     | **1m 18s idle, 1m 19s-2m 44s busy** | ESLint at 39.6 s idle and up to 1m 20s busy, Prettier at 21.8 s idle and up to 47 s busy; the type check is 13 to 32 s with build info                                                                                                                                                                                                         |
-| `npm run ci`          | 31    | **49m 22s** of T0+T1 gate time      | `mutation-diff` at 21m 00s over a 104-file branch diff (63 to 67 minutes before; the killer-first file order alone made it 30m 26s, the one-location sample and four static survivors now killed did the rest), then Playwright at ~10.5 min and CodeQL at ~6 min, against a 12-minute design budget; 12m 01s for the other twenty-eight gates |
-| `npm run verify:full` | 39    | **232m 00s** without `mutation`     | `flake` at 112m 22s, then `mutation-diff`; `mutation` itself has no honest estimate (see below)                                                                                                                                                                                                                                                |
+| `npm run ci`          | 33    | **49m 22s** of T0+T1 gate time      | `mutation-diff` at 21m 00s over a 104-file branch diff (63 to 67 minutes before; the killer-first file order alone made it 30m 26s, the one-location sample and four static survivors now killed did the rest), then Playwright at ~10.5 min and CodeQL at ~6 min, against a 12-minute design budget; 12m 01s for the other twenty-eight gates |
+| `npm run verify:full` | 41    | **232m 00s** without `mutation`     | `flake` at 112m 22s, then `mutation-diff`; `mutation` itself has no honest estimate (see below)                                                                                                                                                                                                                                                |
 
 **The fast tier fits its own budget on a machine doing nothing else, and not
 otherwise. The table is the honest number rather than the target.** T0's design
@@ -2052,7 +2056,7 @@ guaranteed sample is one code location's mutants, never the whole block nested u
 Two commands are **not registered gates**, so `verify:full` does not run them, and both are worth
 knowing about before you plan the day. `npm run verify:selftest` proves every gate can still fail,
 by planting one defect per gate into a temporary copy of the tree: one case per registered task,
-thirty-nine of them, each running that gate's real command until it fails for the declared reason.
+forty-one of them, each running that gate's real command until it fails for the declared reason.
 `npm run ci:local` is the clean room, and it is not a quick extra: its body **is** `verify:full`,
 run inside a fresh worktree after its own `npm ci`, so it costs a whole second run plus an install.
 Run either separately, and budget for it separately.
@@ -2144,21 +2148,30 @@ npx playwright install --with-deps chromium firefox
 > `/usr/local/bin`; a version manager's path is specific to the installed version and
 > the symlink dangles the next time it changes.
 
-**Four binaries on `PATH`, pinned to the versions the release workflow installs.**
+**Six binaries on `PATH`, pinned to the versions the release workflow installs.**
 Pin them rather than taking the newest: several gates ratchet counts that a different
 scanner version reports differently, which reads as a regression no code caused.
 
-| Tool         | Version | Gate it feeds | Install                                                                                                             |
-| ------------ | ------- | ------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `actionlint` | 1.7.12  | `config`      | [release archive](https://github.com/rhysd/actionlint/releases)                                                     |
-| `hadolint`   | 2.14.0  | `config`      | [release binary](https://github.com/hadolint/hadolint/releases)                                                     |
-| `oasdiff`    | 1.28.0  | `openapi`     | [release archive](https://github.com/oasdiff/oasdiff/releases)                                                      |
-| `diff-cover` | 10.4.1  | `coverage`    | hash-locked `scripts/ci/requirements-diff-cover.txt` (see CONTRIBUTING.md), or `uv tool install diff-cover==10.4.1` |
+| Tool          | Version | Gate it feeds | Install                                                                                                             |
+| ------------- | ------- | ------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `actionlint`  | 1.7.12  | `config`      | [release archive](https://github.com/rhysd/actionlint/releases)                                                     |
+| `hadolint`    | 2.14.0  | `config`      | [release binary](https://github.com/hadolint/hadolint/releases)                                                     |
+| `oasdiff`     | 1.28.0  | `openapi`     | [release archive](https://github.com/oasdiff/oasdiff/releases)                                                      |
+| `diff-cover`  | 10.4.1  | `coverage`    | hash-locked `scripts/ci/requirements-diff-cover.txt` (see CONTRIBUTING.md), or `uv tool install diff-cover==10.4.1` |
+| `gitleaks`    | 8.30.1  | `gitleaks`    | [release archive](https://github.com/gitleaks/gitleaks/releases)                                                    |
+| `osv-scanner` | 2.4.0   | `osv`         | [release binary](https://github.com/google/osv-scanner/releases)                                                    |
 
-`~/.local/bin` is enough for all four; none of them needs root. If you append that
+`~/.local/bin` is enough for all six; none of them needs root. If you append that
 directory to `PATH` in a shell profile, **start the run from a fresh login shell**:
 launched from the shell that appended the line without re-reading it, the tools are
-invisible and the run collects four "could not run" verdicts several minutes in.
+invisible and the run collects six "could not run" verdicts several minutes in.
+
+The two security scanners are push-tier gates and **neither has a fallback**: an absent
+`gitleaks` or `osv-scanner` is exit 2, "could not run", never a skip and never a pass. Each
+also needs something from the machine beyond the binary. `gitleaks` reads the whole
+history, so a shallow clone is "could not run" too (`git fetch --unshallow` first).
+`osv-scanner` asks the OSV database about every package in the lockfile, so the box needs
+outbound HTTPS to `api.osv.dev`; a failed fetch is "could not run", never a clean result.
 
 **Then check what you actually installed, because a drifted tool is invisible.** Those
 versions are the ones `.github/workflows/release.yml` installs, and nothing in the
@@ -2171,6 +2184,8 @@ actionlint -version                # 1.7.12
 hadolint --version                 # Haskell Dockerfile Linter 2.14.0
 oasdiff --version                  # oasdiff version 1.28.0
 diff-cover --version               # diff-cover 10.4.1
+gitleaks version                   # 8.30.1
+osv-scanner --version              # osv-scanner version: 2.4.0
 ```
 
 For the record, the durations published in this section were measured on a machine
@@ -2353,7 +2368,8 @@ cat > ~/hvault-preflight.sh <<'EOF'
 #!/bin/sh
 for probe in "node --version" "npm --version" "docker version" \
              "actionlint -version" "hadolint --version" \
-             "oasdiff --version" "diff-cover --version"; do
+             "oasdiff --version" "diff-cover --version" \
+             "gitleaks version" "osv-scanner --version"; do
   if $probe >/dev/null 2>&1; then echo "  ok       $probe"
   else echo "  MISSING  $probe"; fi
 done
@@ -2806,7 +2822,7 @@ The merged floor is seeded only by a run in which all three legs complete.
 
 ### Re-running only what failed
 
-Three failures out of thirty-nine gates should not cost another day. The runner takes an
+Three failures out of forty-one gates should not cost another day. The runner takes an
 explicit gate list, and it **overrides the tier filter** rather than intersecting with
 it, so a release-tier gate can be re-run on its own:
 
@@ -3064,7 +3080,7 @@ verbatim; a release whose section is missing or empty fails rather than publishi
 **Least privilege, and pinned tools.** Only the second job can write to the repository: the
 gauntlet job, which installs every dependency and runs third-party code, gets a read-only token and
 does not keep it in its checkout. Every action is pinned to a full commit SHA, every tool the
-workflow downloads itself (`actionlint`, `hadolint`, `oasdiff`) is checked against a SHA-256
+workflow downloads itself (`actionlint`, `hadolint`, `oasdiff`, `gitleaks`, `osv-scanner`) is checked against a SHA-256
 committed in the workflow, `diff-cover` comes from a hash-locked requirements file, and the npm
 tree is pinned by the lockfile's integrity hashes. Moving any of those pins is a deliberate edit;
 CONTRIBUTING.md, "Refreshing the release workflow's pins", is the procedure. Some things the

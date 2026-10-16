@@ -46,12 +46,13 @@ jobs:
   # T0 and T1 tiers — so there is one definition of "verified" and this job
   # cannot drift into checking less than the hook does.
   #
-  # The four host binaries below are gate PREREQUISITES: `local-ci.mjs` declares
-  # them per gate and reports a missing one as "could not run" (exit 2) rather
-  # than as a pass, so leaving any of them out would turn this job red instead of
-  # quietly shrinking it. CodeQL is deliberately not installed: `sast` is the one
-  # gate allowed to report itself SKIPPED, and it falls back to the ESLint
-  # security baseline that `lint` already enforces.
+  # The six host binaries below are gate PREREQUISITES (actionlint, hadolint,
+  # oasdiff, the two security scanners gitleaks and osv-scanner, and diff-cover):
+  # `local-ci.mjs` declares them per gate and reports a missing one as "could not
+  # run" (exit 2) rather than as a pass, so leaving any of them out would turn
+  # this job red instead of quietly shrinking it. CodeQL is deliberately not
+  # installed: `sast` is the one gate allowed to report itself SKIPPED, and it
+  # falls back to the ESLint security baseline that `lint` already enforces.
   # ---------------------------------------------------------------------------
   verify:
     name: Verify (the full local gauntlet)
@@ -91,6 +92,8 @@ jobs:
           ACTIONLINT_VERSION: 1.7.12
           HADOLINT_VERSION: 2.14.0
           OASDIFF_VERSION: 1.28.0
+          GITLEAKS_VERSION: 8.30.1
+          OSV_SCANNER_VERSION: 2.4.0
         run: |
           set -euo pipefail
           mkdir -p "$HOME/.local/bin"
@@ -114,6 +117,18 @@ jobs:
           # https://github.com/oasdiff/oasdiff/releases/download/v1.28.0/checksums.txt
           echo "e0ef076f2cf953d922addc04be9c3851cf3ec18f7678d2b94d44cea23dca51b5  oasdiff_${OASDIFF_VERSION}_linux_amd64.tar.gz" | sha256sum --check --strict -
           tar xzf "oasdiff_${OASDIFF_VERSION}_linux_amd64.tar.gz" -C "$HOME/.local/bin" oasdiff
+
+          curl -fsSL -o "gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          # https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_checksums.txt
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | sha256sum --check --strict -
+          tar xzf "gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" -C "$HOME/.local/bin" gitleaks
+
+          curl -fsSL -o osv-scanner_linux_amd64 \
+            "https://github.com/google/osv-scanner/releases/download/v${OSV_SCANNER_VERSION}/osv-scanner_linux_amd64"
+          # https://github.com/google/osv-scanner/releases/download/v2.4.0/osv-scanner_SHA256SUMS
+          echo "15314940c10d26af9c6649f150b8a47c1262e8fc7e17b1d1029b0e479e8ed8a0  osv-scanner_linux_amd64" | sha256sum --check --strict -
+          install -m 0755 osv-scanner_linux_amd64 "$HOME/.local/bin/osv-scanner"
 
       # From a committed, hash-locked requirements file that pins diff-cover AND
       # every package it imports (scripts/ci/requirements-diff-cover.txt,

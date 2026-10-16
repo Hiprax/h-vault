@@ -202,6 +202,23 @@ const PREREQUISITES = {
     ok: () => hasExe('diff-cover'),
     fix: 'install diff-cover 10.4.1, the version release.yml pins — uv tool install diff-cover==10.4.1 (or a venv from scripts/ci/requirements-diff-cover.txt, see CONTRIBUTING.md)',
   },
+  // The two security scanners. Declared, never probed inside the gate alone and
+  // never skippable: a secret scan or an advisory scan that quietly passed
+  // because its scanner was absent would report "nothing found" having looked at
+  // nothing, so a missing one is "could not run" (exit 2), exactly like the
+  // linters above. Each hint names the version the release workflow installs,
+  // because a different scanner version reports a different set of findings and
+  // the counts are ratcheted.
+  gitleaks: {
+    label: 'the gitleaks binary',
+    ok: () => hasExe('gitleaks', ['version']),
+    fix: 'install gitleaks 8.30.1, the version release.yml pins — https://github.com/gitleaks/gitleaks/releases (gitleaks_8.30.1_linux_x64.tar.gz)',
+  },
+  'osv-scanner': {
+    label: 'the osv-scanner binary',
+    ok: () => hasExe('osv-scanner', ['--version']),
+    fix: 'install osv-scanner 2.4.0, the version release.yml pins — https://github.com/google/osv-scanner/releases (osv-scanner_linux_amd64)',
+  },
   'build:shared': {
     label: 'a built @hvault/shared (packages/shared/dist)',
     ok: () => {
@@ -611,6 +628,19 @@ const GATES = [
     run: (options) => runNpm(['run', 'audit:prod'], options),
   },
   {
+    id: 'osv',
+    task: 'audit:deps:osv',
+    tier: 1,
+    // Beside `audit` and not instead of it: that gate reads npm's own feed for
+    // the PRODUCTION tree, this one reads OSV for every package in the lockfile,
+    // dev tooling included, because a compromised build or test dependency runs
+    // on the machine that holds the release credentials.
+    title: 'Dependency vulnerabilities (osv-scanner, lockfile)',
+    ci: 'new — no advisory feed beyond npm audit ever read the lockfile',
+    requires: ['osv-scanner'],
+    run: (options) => runExe(process.execPath, ['scripts/ci/osv-gate.mjs'], options),
+  },
+  {
     id: 'licenses',
     task: 'audit:licenses',
     tier: 1,
@@ -634,6 +664,19 @@ const GATES = [
         ['scripts/ci/secret-scan.mjs', '--all', '--history', '--report'],
         options,
       ),
+  },
+  {
+    id: 'gitleaks',
+    task: 'audit:secrets:gitleaks',
+    tier: 1,
+    // The same history, read by a different rule set: `secrets-full` runs this
+    // project's own eleven patterns, this gate gitleaks' corpus of several
+    // hundred provider-specific rules. Its allowlist is `.gitleaksignore`, one
+    // commit-pinned fingerprint per line, each line a ledgered suppression.
+    title: 'Secret scan (gitleaks, full git history)',
+    ci: "new — no provider-specific secret rule set ever read this repository's history",
+    requires: ['gitleaks'],
+    run: (options) => runExe(process.execPath, ['scripts/ci/gitleaks-gate.mjs'], options),
   },
   {
     id: 'deadcode',
@@ -981,6 +1024,22 @@ if (unknown.length > 0) {
   ]);
 }
 
+// Every name a gate `requires` must be a prerequisite this runner can probe.
+// Checked before anything else, including the listing below, because an
+// undeclared name used to surface only when that gate was reached, as a
+// TypeError rather than as "could not run" — the one way a missing tool could
+// be reported as something it is not.
+const undeclaredPrerequisites = GATES.flatMap((gate) =>
+  (gate.requires ?? [])
+    .filter((name) => !Object.hasOwn(PREREQUISITES, name))
+    .map((name) => `${gate.id} requires "${name}"`),
+);
+if (undeclaredPrerequisites.length > 0) {
+  fatal([
+    `${symbol.fail} prerequisite(s) no PREREQUISITES entry can probe: ${undeclaredPrerequisites.join(', ')}`,
+  ]);
+}
+
 // `--list --json` reports the runner's OWN gate table and reads no manifest.
 // That independence is the point: it is the other half of the drift check, so
 // whatever compares the two — a person, a test — is comparing two sources and
@@ -997,6 +1056,13 @@ if (flag('list') && asJson) {
         canSkip: gate.canSkip === true,
         dependsOn: gate.dependsOn ?? [],
         requires: gate.requires ?? [],
+        // Each name resolved against the table above, so a reader of the
+        // listing sees what will be checked and how to satisfy it.
+        prerequisites: (gate.requires ?? []).map((name) => ({
+          name,
+          label: PREREQUISITES[name].label,
+          fix: PREREQUISITES[name].fix,
+        })),
         log: gate.log ?? `${gate.id}.log`,
       })),
       null,

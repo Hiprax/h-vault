@@ -81,11 +81,12 @@ WSL2 / Docker claim dynamic ranges); list them with
 ## The pipeline runs on your machine, not on a runner
 
 There is **no CI workflow that tests your code**. The `pre-push` hook runs the entire
-pipeline locally — thirty-one gates including the full test suite, the export-format
+pipeline locally — thirty-three gates including the full test suite, the export-format
 goldens, patch coverage on the lines you changed, a smoke run of the built artifact, a
 browser rendering every document preview under that artifact's own headers, the
 browser bundle's size budgets, the storage port against a real object-storage engine in a
-container, container builds with Trivy scanning, and a static-analysis
+container, container builds with Trivy scanning, two security scanners (gitleaks over every
+commit in the history, osv-scanner over every package in the lockfile), and a static-analysis
 pass (CodeQL where its CLI is installed, otherwise Semgrep CE or OpenGrep, with the gate
 naming the engine that answered) — and refuses the push if any of them fail. A
 commit pushed without one of the escape hatches below has passed every T0 and T1 gate, and the
@@ -198,9 +199,9 @@ will tell you so if you forget.
 
 Run `npm run ci` before you open a pull request.
 
-### Thirteen gates whose failure asks for something specific
+### Fifteen gates whose failure asks for something specific
 
-Most gates tell you what to fix. These thirteen are worth reading before you meet them,
+Most gates tell you what to fix. These fifteen are worth reading before you meet them,
 because the obvious way past each of them is the wrong one.
 
 - **`coverage`** holds each package to the line, branch and function coverage already
@@ -333,6 +334,29 @@ because the obvious way past each of them is the wrong one.
   history is already compromised: it is in every clone and every fork, and no later commit
   takes it back. **Rotate the credential first.** Rewriting history is optional cleanup
   afterwards, never the fix.
+- **`gitleaks`** reads the same history with gitleaks' own rule set, several hundred
+  provider-specific patterns, so a real finding is answered the same way: rotate first. A
+  finding that is genuinely a test fixture is allowlisted in exactly one way: its
+  commit-pinned fingerprint (`<commit>:<file>:<rule>:<line>`, which the gate prints) on its
+  own line in `.gitleaksignore`, plus one entry in `.testfortress/suppressions.json`
+  (rule `IGNORE-FILE-GITLEAKS`, the fingerprint as its symbol) saying what the line is.
+  An inline `gitleaks:allow` comment, a `.gitleaks.toml`, a fingerprint without its commit
+  and a `GITLEAKS_CONFIG` variable are all refused or ignored, because each would excuse a
+  line nobody reviewed. Do not quote the flagged value in the ledger's `reason`: once
+  committed, that text is a new finding. Describe it instead (its first four characters and
+  its length). It needs `gitleaks` on your `PATH` and a full clone; without either the gate
+  reports **could not run**.
+- **`osv`** asks the OSV database about every package in `package-lock.json`, development
+  tooling included, and fails on any advisory of any severity. **Upgrade the package**, or
+  the dependency that pulls it in, until the version leaves the lockfile; an
+  `osv-scanner.toml` is deliberately not honoured. Only an advisory with **no fixed
+  release** may be accepted, and only by a `VULN-ACCEPT` entry in
+  `.testfortress/suppressions.json` whose symbol is exactly `<advisory id> <name>@<version>`,
+  with a reviewer and an expiry at most thirty days out. The gate re-checks every one of
+  those itself and goes red on an entry that no longer excuses anything, so an acceptance is
+  re-read monthly and removed the day a fix ships. It needs `osv-scanner` on your `PATH`
+  and network access to the OSV database; without either the gate reports **could not
+  run**.
 
 ### Escape hatches
 

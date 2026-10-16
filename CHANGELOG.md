@@ -72,6 +72,7 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ### Security
 
+- **Two more security scanners now gate every push and every release.** `npm run ci`, and the release workflow's verification job, now run gitleaks over every commit in the history and osv-scanner over every package in `package-lock.json`, development tooling included. An absent scanner stops the run as "could not run" instead of letting it pass, so contributors need `gitleaks` 8.30.1 and `osv-scanner` 2.4.0 on `PATH` (the release workflow installs both, checksum-verified). A known test-fixture value is allowlisted only by a commit-pinned fingerprint with its own ledger entry. An advisory with no fixed release is accepted only by a reviewed ledger entry that expires within thirty days; one is in place today, for `braces` 3.0.3, reachable only through a development-only linter.
 - A two-factor code accepted when turning 2FA off or deleting the account is now consumed, so it can no longer be used a second time at the sign-in step within the same 30 seconds, and every place a code is checked counts wrong codes toward the lockout.
 - Stopped storing an unbounded, attacker-supplied string as a rate-limit key: an oversized e-mail on the sign-in route is refused by validation, and the only rate-limit key stored for it is the caller's address.
 - The record kept of a deleted account no longer holds its email address in clear: new records store it masked, and existing records are rewritten to the masked form when the server first starts on this version.

@@ -297,6 +297,48 @@ describe('the doctrine fixtures', () => {
     expect(result.exitCode).toBe(1);
   });
 
+  it('6b: fails on a date the calendar does not have, which would otherwise dodge every date check', () => {
+    // `2099-13-01` has the YYYY-MM-DD shape, compares as a string after every
+    // real date, and makes the day arithmetic NaN, so the age cap (NaN > cap)
+    // never fired: the entry was honoured for seventy-three years.
+    for (const [created, expires] of [
+      [inDays(-1), '2099-13-01'],
+      [inDays(-1), '2026-11-99'],
+      ['2026-02-30', inDays(30)],
+    ] as const) {
+      const result = scan(CLEAN, {
+        ledger: {
+          entries: [
+            entry({
+              id: 'SUP-0001',
+              rule: 'KNOWN-GAP',
+              kind: 'known-gap',
+              created,
+              expires,
+            }),
+          ],
+        },
+      });
+      expect(kinds(result), `${created} -> ${expires}`).toContain('LEDGER-BAD-DATE');
+      expect(result.exitCode).toBe(1);
+    }
+    // The control: real dates in the same entry, including the last day of a
+    // month and a leap day, are NOT flagged as bad dates.
+    for (const [created, expires] of [
+      ['2024-02-29', inDays(30)],
+      [inDays(-1), inDays(30)],
+    ] as const) {
+      const result = scan(CLEAN, {
+        ledger: {
+          entries: [
+            entry({ id: 'SUP-0001', rule: 'KNOWN-GAP', kind: 'known-gap', created, expires }),
+          ],
+        },
+      });
+      expect(kinds(result), `${created} -> ${expires}`).not.toContain('LEDGER-BAD-DATE');
+    }
+  });
+
   it('7: fails on a neutered gate in package.json EVEN WITH a ledger entry for it', () => {
     const result = scan(
       {

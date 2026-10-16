@@ -288,11 +288,25 @@
       "gate": "0 production advisories at moderate or above",
       "report": "deps.log"
     },
+    "audit:deps:osv": {
+      "cmd": "node scripts/ci/osv-gate.mjs",
+      "tier": 1,
+      "gate": "0 unaccepted vulnerabilities of any severity across every package in package-lock.json, dev tooling included, read from the OSV database with no osv-scanner.toml honoured; an advisory with no fixed release is accepted only by a VULN-ACCEPT ledger entry the gate itself re-validates (exact advisory id and name@version, a reviewer, at most 30 days to expiry), an entry that excuses nothing is red, and a scan that read no package, or whose advisory fetch failed, is could-not-run, never clean",
+      "report": "osv.json",
+      "requires": ["osv-scanner"]
+    },
     "audit:secrets:full": {
       "cmd": "npm run audit:secrets:full",
       "tier": 1,
       "gate": "0 findings across the working tree AND every blob in git history",
       "report": "secrets-full.json"
+    },
+    "audit:secrets:gitleaks": {
+      "cmd": "node scripts/ci/gitleaks-gate.mjs",
+      "tier": 1,
+      "gate": "0 unignored gitleaks findings over every commit reachable from any ref, read with git's own diff filters off; every .gitleaksignore line is a commit-pinned fingerprint with a live ledger entry, and no .gitleaks.toml, inline allow comment or global fingerprint is accepted",
+      "report": "gitleaks.sarif",
+      "requires": ["gitleaks"]
     },
     "deadcode": {
       "cmd": "npm run deadcode",

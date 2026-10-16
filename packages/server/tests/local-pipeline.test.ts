@@ -15,7 +15,7 @@
  *      a release workflow that re-mints an existing tag fails the push with the
  *      exact red X this whole change exists to remove.
  */
-import { describe, it, expect } from 'vitest';
+import { afterAll, describe, it, expect } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import {
   copyFileSync,
@@ -43,7 +43,15 @@ import { evaluateDenominator } from '../../../scripts/ci/lib/scan-denominator.mj
 import { extractRelease } from '../../../scripts/ci/changelog-extract.mjs';
 import {
   OSV_EXIT,
+  OsvLedgerError,
   OsvReportError,
+  VULN_ACCEPT,
+  acceptanceExitCode,
+  classifyFindings,
+  formatAccepted,
+  parseAcceptanceSymbol,
+  readAcceptances,
+  summarizeVerdict,
   exitCodeFor as osvExitCodeFor,
   formatFinding as formatOsvFinding,
   parseOsvReport,
@@ -217,12 +225,36 @@ describe('release workflow', () => {
   it('installs every gate prerequisite, so no gate can report "could not run"', () => {
     // `local-ci.mjs` declares host binaries per gate and reports a missing one
     // as exit 2 rather than as a pass. A prerequisite left uninstalled here does
-    // not silently shrink the job — it turns it red — but naming them keeps the
-    // two lists together, since the failure would otherwise be diagnosed on a
-    // runner rather than here.
-    const install = (release.jobs['verify']?.steps ?? []).map((step) => step.run ?? '').join('\n');
-    for (const binary of ['actionlint', 'hadolint', 'oasdiff', 'diff-cover']) {
-      expect(install, `prerequisite ${binary}`).toContain(binary);
+    // not silently shrink the job — it turns it red — but checking it here moves
+    // the diagnosis from a runner, minutes into a hosted run, to this file.
+    //
+    // DERIVED from the runner's own listing rather than written out: the list
+    // this replaced named four binaries, so registering a gate that requires a
+    // fifth passed here and failed only on the hosted runner. What the runner
+    // provides itself (a daemon the image ships, the builds its own gates
+    // produce) is the one thing excluded, by name.
+    const RUNNER_PROVIDED = new Set(['docker', 'build:shared', 'build:server', 'build:client']);
+    const binaries = [...new Set(listedGates().flatMap((gate) => gate.requires))]
+      .filter((name) => !RUNNER_PROVIDED.has(name))
+      .sort();
+    // Non-vacuous, and a record of what the derivation found today.
+    expect(binaries).toEqual([
+      'actionlint',
+      'diff-cover',
+      'gitleaks',
+      'hadolint',
+      'oasdiff',
+      'osv-scanner',
+    ]);
+    // INSTALLED onto PATH, not merely mentioned: a name in a comment or an echo
+    // satisfies a substring check while nothing lands where the gate looks.
+    const commands = (release.jobs['verify']?.steps ?? [])
+      .flatMap((step) => shellCommands(step.run ?? ''))
+      .join('\n');
+    for (const binary of binaries) {
+      expect(commands, `prerequisite ${binary} installed into $HOME/.local/bin`).toMatch(
+        new RegExp(`"\\$HOME/\\.local/bin(?:/|"\\s+)${binary.replace(/[-.]/g, '\\$&')}(?:"|\\s|$)`),
+      );
     }
   });
 
@@ -436,8 +468,9 @@ describe('release workflow supply chain (F-01): nothing it runs can change under
         downloads.push(unquote(target ?? ''));
       });
     }
-    // Non-vacuous: the three binaries this job has always fetched are among them.
-    for (const tool of ['actionlint', 'hadolint', 'oasdiff']) {
+    // Non-vacuous: every binary this job fetches itself is among them, the two
+    // security scanners included.
+    for (const tool of ['actionlint', 'hadolint', 'oasdiff', 'gitleaks', 'osv-scanner']) {
       expect(
         downloads.some((file) => file.startsWith(tool)),
         `${tool} is downloaded and checked`,
@@ -505,19 +538,54 @@ describe('release workflow supply chain (F-01): nothing it runs can change under
       actionlint: String(install?.env?.['ACTIONLINT_VERSION']),
       hadolint: String(install?.env?.['HADOLINT_VERSION']),
       oasdiff: String(install?.env?.['OASDIFF_VERSION']),
+      gitleaks: String(install?.env?.['GITLEAKS_VERSION']),
+      'osv-scanner': String(install?.env?.['OSV_SCANNER_VERSION']),
       'diff-cover': diffCoverVersion,
     };
+    for (const [tool, version] of Object.entries(pinned)) {
+      expect(version, `${tool} is pinned in the workflow`).toMatch(/^\d+\.\d+\.\d+$/);
+    }
+    const escaped = (version: string): string => version.replaceAll('.', '\\.');
 
     const readme = read('README.md');
+    // The rows are read from the prerequisites table itself: a tool can share
+    // its name with a gate (`gitleaks` is both), and the gate table, which comes
+    // first, would otherwise answer with a tier.
+    const prerequisitesAt = readme.indexOf(
+      'binaries on `PATH`, pinned to the versions the release workflow installs.',
+    );
+    expect(prerequisitesAt, 'the README prerequisites paragraph').toBeGreaterThan(-1);
+    const prerequisites = readme.slice(prerequisitesAt);
     for (const [tool, version] of Object.entries(pinned)) {
-      const row = new RegExp(`^\\| \`${tool}\`\\s*\\|\\s*([^|\\s]+)\\s*\\|`, 'm').exec(readme);
+      const row = new RegExp(`^\\| \`${tool}\`\\s*\\|\\s*([^|\\s]+)\\s*\\|`, 'm').exec(
+        prerequisites,
+      );
       expect(row?.[1], `README prerequisites row for ${tool}`).toBe(version);
     }
-    expect(readme).toMatch(
-      new RegExp(
-        `diff-cover --version\\s+# diff-cover ${diffCoverVersion.replaceAll('.', '\\.')}\\n`,
-      ),
+    // The version-check block: each line is the command and the answer it gives
+    // at the pin, so a reader compares their own output against it.
+    for (const [command, answer] of [
+      ['diff-cover --version', `diff-cover ${escaped(diffCoverVersion)}`],
+      ['gitleaks version', escaped(pinned['gitleaks'] ?? '')],
+      ['osv-scanner --version', `osv-scanner version: ${escaped(pinned['osv-scanner'] ?? '')}`],
+    ] as const) {
+      expect(readme, `README version check for ${command}`).toMatch(
+        new RegExp(`${command}\\s+# ${answer}\\n`),
+      );
+    }
+
+    // The runner's own install hint for each scanner, which is what a contributor
+    // reads when the gate reports "could not run", names the same pin.
+    const fixes = new Map(
+      listedGates()
+        .flatMap((gate) => gate.prerequisites)
+        .map((prerequisite) => [prerequisite.name, prerequisite.fix]),
     );
+    for (const tool of ['gitleaks', 'osv-scanner']) {
+      expect(fixes.get(tool), `local-ci.mjs install hint for ${tool}`).toContain(
+        `${tool} ${pinned[tool] ?? ''}`,
+      );
+    }
 
     const spellings = [
       readme,
@@ -1534,5 +1602,357 @@ describe('gitleaks gate: only commit-pinned fingerprints, and a finding is never
         }
       }
     }
+  });
+});
+
+/**
+ * The two scanners are tier-1 gates that DECLARE their binary rather than
+ * skipping without it: `sast` is the only gate allowed to report itself
+ * SKIPPED, so an absent `gitleaks` or `osv-scanner` must be exit 2, "could not
+ * run", which fails the pipeline. The runner checks the declared prerequisite
+ * before it starts the gate; this is the gate's OWN answer when it is started
+ * directly (`npm run audit:secrets:gitleaks`, the self-test, a clean room), on
+ * a PATH that holds nothing at all.
+ */
+describe('an absent scanner is "could not run", never a pass or a skip', () => {
+  const emptyPath = mkdtempSync(path.join(tmpdir(), 'hv-no-scanner-'));
+  afterAll(() => {
+    rmSync(emptyPath, { recursive: true, force: true });
+  });
+
+  it.each([
+    ['gitleaks', 'gitleaks-gate.mjs', 'GITLEAKS_VERSION', 'gitleaks.sarif'],
+    ['osv-scanner', 'osv-gate.mjs', 'OSV_SCANNER_VERSION', 'osv.json'],
+  ])(
+    '%s: exit 2 with the pinned install hint, and no report touched',
+    (tool, script, versionKey, reportName) => {
+      const report = path.join(repoRoot, '.testfortress', 'reports', reportName);
+      const before = existsSync(report) ? readFileSync(report) : null;
+      const run = spawnSync(process.execPath, [path.join(repoRoot, 'scripts', 'ci', script)], {
+        cwd: repoRoot,
+        encoding: 'utf-8',
+        env: { ...process.env, PATH: emptyPath },
+      });
+      expect(run.status).toBe(2);
+      expect(run.status).not.toBe(SKIP_EXIT);
+      expect(run.stderr).toContain(`${tool} is not installed`);
+      // The hint names the version the release workflow installs, so a
+      // contributor who follows it gets the scanner the ratchet was recorded with.
+      const pinned = release.jobs['verify']?.steps.find(
+        (step) => step.env?.[versionKey] !== undefined,
+      )?.env?.[versionKey];
+      expect(pinned, `${versionKey} in release.yml`).toBeDefined();
+      expect(run.stderr).toContain(`v${String(pinned)}`);
+      // Nothing that reads as a verdict about the subject.
+      expect(run.stdout).not.toMatch(/✔|unignored findings in the history|across/);
+      // The gate stopped before it deleted or wrote its report.
+      expect(existsSync(report) ? readFileSync(report) : null).toEqual(before);
+    },
+  );
+});
+
+/** One gate as `local-ci.mjs --list --json` reports it. */
+interface ListedGate {
+  id: string;
+  task: string;
+  tier: number;
+  canSkip: boolean;
+  requires: string[];
+  prerequisites: { name: string; label: string; fix: string }[];
+}
+
+let listing: ListedGate[] | undefined;
+/** The runner's own gate table, asked for rather than parsed out of its source. */
+function listedGates(): ListedGate[] {
+  listing ??= JSON.parse(
+    spawnSync(
+      process.execPath,
+      [path.join(repoRoot, 'scripts', 'ci', 'local-ci.mjs'), '--list', '--json'],
+      {
+        encoding: 'utf-8',
+      },
+    ).stdout,
+  ) as ListedGate[];
+  return listing;
+}
+
+/**
+ * An advisory with no fixed release can only be ACCEPTED, never ignored, and
+ * only through a ledger entry the osv gate itself re-validates: rule
+ * `VULN-ACCEPT`, the exact advisory id and `name@version`, a reviewer, and an
+ * expiry at most thirty days out. The integrity scan exempts marker-less rules
+ * from its staleness and unused-capacity checks, so a dead or lapsed acceptance
+ * is caught here or nowhere. The two recordings are real osv-scanner 2.4.0
+ * output for throwaway lockfiles (braces 3.0.3 alone, and with minimist 1.2.5),
+ * with only `source.path` rewritten.
+ */
+describe('osv gate: an advisory is accepted only by a strict, dated, reviewed ledger entry', () => {
+  const TODAY = '2026-10-16';
+  const fixture = (name: string): ReturnType<typeof parseOsvReport> =>
+    parseOsvReport(read('packages', 'server', 'tests', 'fixtures', name));
+  const braces = fixture('osv-report-accepted.json');
+  const mixed = fixture('osv-report-mixed.json');
+  const entry = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
+    id: 'SUP-9001',
+    rule: 'VULN-ACCEPT',
+    kind: 'vulnerability-acceptance',
+    file: 'package-lock.json',
+    symbol: 'GHSA-vfj7-8cjw-p6xm braces@3.0.3',
+    maxHits: 1,
+    reason: 'dev-only, no fixed release',
+    owner: 'maintainer',
+    created: '2026-10-16',
+    expires: '2026-11-15',
+    approvedBy: ['judge:readonly'],
+    ...overrides,
+  });
+  const ledgerOf = (...entries: Record<string, unknown>[]): unknown => ({
+    version: 1,
+    policy: {},
+    entries: [{ id: 'SUP-0001', rule: 'KNOWN-GAP', kind: 'known-gap' }, ...entries],
+  });
+
+  it('reads the recordings as the advisories the acceptance names', () => {
+    expect(braces.packages).toBe(1);
+    expect(braces.vulnerabilities.map((v) => [v.package, v.version, v.id])).toEqual([
+      ['braces', '3.0.3', 'GHSA-vfj7-8cjw-p6xm'],
+    ]);
+    expect(mixed.vulnerabilities.map((v) => [v.package, v.version, v.id])).toEqual([
+      ['braces', '3.0.3', 'GHSA-vfj7-8cjw-p6xm'],
+      ['minimist', '1.2.5', 'GHSA-xvch-5gv4-984h'],
+    ]);
+  });
+
+  it('parses a symbol only in the exact `<id> <name>@<version>` shape, scoped names included', () => {
+    expect(parseAcceptanceSymbol('GHSA-vfj7-8cjw-p6xm braces@3.0.3')).toEqual({
+      id: 'GHSA-vfj7-8cjw-p6xm',
+      name: 'braces',
+      version: '3.0.3',
+    });
+    expect(parseAcceptanceSymbol('GHSA-aaaa-bbbb-cccc @scope/pkg@1.0.0-beta.1')).toEqual({
+      id: 'GHSA-aaaa-bbbb-cccc',
+      name: '@scope/pkg',
+      version: '1.0.0-beta.1',
+    });
+    for (const loose of [
+      'GHSA-vfj7-8cjw-p6xm braces',
+      'GHSA-vfj7-8cjw-p6xm braces@',
+      'GHSA-vfj7-8cjw-p6xm braces@^3.0.0',
+      'GHSA-vfj7-8cjw-p6xm  braces@3.0.3',
+      'braces@3.0.3',
+      'GHSA-vfj7-8cjw-p6xm braces@3.0.3 extra',
+      'GHSA-vfj7-8cjw-p6xm braces@3.0.*',
+      '',
+    ]) {
+      expect(parseAcceptanceSymbol(loose), JSON.stringify(loose)).toBeNull();
+    }
+  });
+
+  it('accepts the one valid entry and ignores every other rule in the ledger', () => {
+    const { acceptances, problems } = readAcceptances(ledgerOf(entry()), TODAY);
+    expect(problems).toEqual([]);
+    expect(acceptances).toEqual([
+      {
+        entryId: 'SUP-9001',
+        id: 'GHSA-vfj7-8cjw-p6xm',
+        name: 'braces',
+        version: '3.0.3',
+        maxHits: 1,
+        expires: '2026-11-15',
+      },
+    ]);
+    expect(VULN_ACCEPT.maxDays).toBe(30);
+  });
+
+  it('refuses, by entry id and reason, every entry that is not exactly a reviewed, current acceptance', () => {
+    const cases: [Record<string, unknown>, RegExp][] = [
+      [{ kind: 'known-gap' }, /kind/],
+      [{ file: 'packages/server/package.json' }, /file/],
+      [{ symbol: 'braces@3.0.3' }, /symbol/],
+      [{ symbol: undefined }, /symbol/],
+      [{ maxHits: 0 }, /maxHits/],
+      [{ maxHits: 1.5 }, /maxHits/],
+      [{ approvedBy: [] }, /approvedBy/],
+      [{ approvedBy: [''] }, /approvedBy/],
+      [{ approvedBy: undefined }, /approvedBy/],
+      [{ reason: '' }, /reason/],
+      [{ created: '2026-10-17' }, /created/],
+      [{ created: '16/10/2026' }, /created/],
+      // The day after expiry.
+      [{ expires: '2026-10-15' }, /expired/],
+      // Thirty-one days out is one day past the cap.
+      [{ expires: '2026-11-16' }, /30 days/],
+      [{ expires: 'never' }, /expires/],
+      // Dates the calendar does not have: each has the shape, and each made the
+      // day arithmetic NaN, which no cap comparison is ever true of.
+      [{ expires: '2099-13-01' }, /expires/],
+      [{ expires: '2026-11-99' }, /expires/],
+      [{ created: '2026-02-30' }, /created/],
+    ];
+    for (const [overrides, reason] of cases) {
+      const { acceptances, problems } = readAcceptances(ledgerOf(entry(overrides)), TODAY);
+      expect(acceptances, JSON.stringify(overrides)).toEqual([]);
+      expect(problems, JSON.stringify(overrides)).toHaveLength(1);
+      expect(problems[0]!.entryId).toBe('SUP-9001');
+      expect(problems[0]!.reason, JSON.stringify(overrides)).toMatch(reason);
+    }
+    // The boundaries themselves are inside: expiring today, and exactly 30 days out.
+    for (const expires of ['2026-10-16', '2026-11-15']) {
+      expect(readAcceptances(ledgerOf(entry({ expires })), TODAY).problems).toEqual([]);
+    }
+  });
+
+  it('refuses a ledger it cannot read rather than reading it as "nothing accepted"', () => {
+    for (const ledger of [null, 'text', [], { entries: {} }, { version: 1 }]) {
+      expect(() => readAcceptances(ledger, TODAY), JSON.stringify(ledger)).toThrow(OsvLedgerError);
+    }
+  });
+
+  it('matches on the exact id, name and version, never an alias, another version or another package', () => {
+    for (const symbol of [
+      'GHSA-vfj7-8cjw-p6xm braces@3.0.2',
+      'CVE-2026-93687 braces@3.0.3',
+      'GHSA-vfj7-8cjw-p6xx braces@3.0.3',
+      'GHSA-vfj7-8cjw-p6xm brace@3.0.3',
+    ]) {
+      const { acceptances } = readAcceptances(ledgerOf(entry({ symbol })), TODAY);
+      const verdict = classifyFindings(braces.vulnerabilities, acceptances);
+      expect(verdict.accepted, symbol).toEqual([]);
+      expect(
+        verdict.unaccepted.map((v) => v.package),
+        symbol,
+      ).toEqual(['braces']);
+      expect(verdict.dead, symbol).toEqual(['SUP-9001']);
+      expect(acceptanceExitCode(OSV_EXIT.VULNERABLE, braces, verdict, []), symbol).toBe(1);
+    }
+  });
+
+  it('is green when every finding is accepted and the tool said so, and only then', () => {
+    const { acceptances } = readAcceptances(ledgerOf(entry()), TODAY);
+    const verdict = classifyFindings(braces.vulnerabilities, acceptances);
+    expect(verdict.unaccepted).toEqual([]);
+    expect(verdict.accepted.map((a) => [a.entryId, a.finding.package, a.expires])).toEqual([
+      ['SUP-9001', 'braces', '2026-11-15'],
+    ]);
+    expect(verdict.dead).toEqual([]);
+    expect(acceptanceExitCode(OSV_EXIT.VULNERABLE, braces, verdict, [])).toBe(0);
+    // osv-scanner exits 1 whenever it found anything, accepted or not: any other
+    // exit with findings in the report is a scan that did not complete.
+    for (const toolExit of [0, 2, 124, 127, 128]) {
+      expect(acceptanceExitCode(toolExit, braces, verdict, []), String(toolExit)).toBe(2);
+    }
+    expect(summarizeVerdict(braces, verdict)).toBe(
+      '0 unaccepted vulnerabilities and 1 accepted (SUP-9001) across 1 package',
+    );
+    const [accepted] = verdict.accepted;
+    expect(formatAccepted(accepted!)).toBe(
+      'accepted  braces@3.0.3  GHSA-vfj7-8cjw-p6xm  (SUP-9001, until 2026-11-15)',
+    );
+    // Never the line shape an unaccepted finding is printed in.
+    expect(formatAccepted(accepted!)).not.toMatch(/^braces@3\.0\.3 {2}GHSA/);
+  });
+
+  it('stays red for the unaccepted finding beside an accepted one', () => {
+    const { acceptances } = readAcceptances(ledgerOf(entry()), TODAY);
+    const verdict = classifyFindings(mixed.vulnerabilities, acceptances);
+    expect(verdict.accepted.map((a) => a.finding.package)).toEqual(['braces']);
+    expect(verdict.unaccepted.map((v) => v.package)).toEqual(['minimist']);
+    for (const toolExit of [0, 1, 2, 127]) {
+      expect(acceptanceExitCode(toolExit, mixed, verdict, []), String(toolExit)).toBe(1);
+    }
+    expect(summarizeVerdict(mixed, verdict)).toBe(
+      '1 unaccepted vulnerability and 1 accepted (SUP-9001) across 2 packages',
+    );
+  });
+
+  it('fails on an entry that excuses nothing, but only once the scan completed', () => {
+    const { acceptances } = readAcceptances(ledgerOf(entry()), TODAY);
+    const clean = parseOsvReport(
+      read('packages', 'server', 'tests', 'fixtures', 'osv-report-clean.json'),
+    );
+    const verdict = classifyFindings(clean.vulnerabilities, acceptances);
+    expect(verdict.dead).toEqual(['SUP-9001']);
+    // The good outcome (a fix shipped, the package left the tree), and still a
+    // red gate: an acceptance with nothing to accept must be pruned.
+    expect(acceptanceExitCode(OSV_EXIT.CLEAN, clean, verdict, [])).toBe(1);
+    // A scan that did not complete says nothing about whether it is dead.
+    expect(acceptanceExitCode(OSV_EXIT.GENERAL_ERROR, clean, verdict, [])).toBe(2);
+    expect(acceptanceExitCode(OSV_EXIT.CLEAN, null, verdict, [])).toBe(2);
+    expect(
+      acceptanceExitCode(OSV_EXIT.CLEAN, { packages: 0, vulnerabilities: [] }, verdict, []),
+    ).toBe(2);
+  });
+
+  it('fails on unused capacity and on a reused entry id, once the scan completed', () => {
+    // The integrity scan skips its unused-capacity and staleness checks for
+    // marker-less rules, so an acceptance sized for more than it excuses would
+    // otherwise stand ready to excuse a second finding nobody reviewed.
+    const roomy = readAcceptances(ledgerOf(entry({ maxHits: 2 })), TODAY);
+    const verdict = classifyFindings(braces.vulnerabilities, roomy.acceptances);
+    expect(verdict.underused).toEqual([{ entryId: 'SUP-9001', hits: 1, maxHits: 2 }]);
+    expect(acceptanceExitCode(OSV_EXIT.VULNERABLE, braces, verdict, [])).toBe(1);
+    expect(acceptanceExitCode(OSV_EXIT.GENERAL_ERROR, braces, verdict, [])).toBe(2);
+    // Two entries sharing an id would let the live one hide the dead one, so
+    // NEITHER accepts anything: each is refused by that id.
+    const twins = readAcceptances(
+      ledgerOf(entry(), entry({ symbol: 'GHSA-xvch-5gv4-984h minimist@1.2.5' })),
+      TODAY,
+    );
+    expect(twins.acceptances).toEqual([]);
+    expect(twins.problems).toEqual([
+      { entryId: 'SUP-9001', reason: expect.stringMatching(/exactly one ledger entry/) },
+      { entryId: 'SUP-9001', reason: expect.stringMatching(/exactly one ledger entry/) },
+    ]);
+    // An entry with no id at all cannot be named in a verdict, so it accepts nothing.
+    const anonymous = readAcceptances(ledgerOf(entry({ id: undefined })), TODAY);
+    expect(anonymous.acceptances).toEqual([]);
+    expect(anonymous.problems).toEqual([
+      { entryId: '(no id)', reason: expect.stringMatching(/exactly one ledger entry/) },
+    ]);
+    // Any entry in the ledger counts, not only another acceptance.
+    const clash = readAcceptances(ledgerOf(entry({ id: 'SUP-0001' })), TODAY);
+    expect(clash.acceptances).toEqual([]);
+    expect(clash.problems.map((p) => p.entryId)).toEqual(['SUP-0001']);
+  });
+
+  it('fails when one entry would excuse more findings than its capacity', () => {
+    const twice = {
+      packages: 2,
+      vulnerabilities: [braces.vulnerabilities[0]!, braces.vulnerabilities[0]!],
+    };
+    const { acceptances } = readAcceptances(ledgerOf(entry()), TODAY);
+    const verdict = classifyFindings(twice.vulnerabilities, acceptances);
+    expect(verdict.overused).toEqual([{ entryId: 'SUP-9001', hits: 2, maxHits: 1 }]);
+    expect(acceptanceExitCode(OSV_EXIT.VULNERABLE, twice, verdict, [])).toBe(1);
+  });
+
+  it('fails on an invalid entry even when the scan is clean and the entry matches nothing', () => {
+    const { acceptances, problems } = readAcceptances(ledgerOf(entry({ approvedBy: [] })), TODAY);
+    const clean = parseOsvReport(
+      read('packages', 'server', 'tests', 'fixtures', 'osv-report-clean.json'),
+    );
+    const verdict = classifyFindings(clean.vulnerabilities, acceptances);
+    expect(acceptanceExitCode(OSV_EXIT.CLEAN, clean, verdict, problems)).toBe(1);
+    expect(acceptanceExitCode(OSV_EXIT.CLEAN, null, verdict, problems)).toBe(1);
+  });
+
+  it('with no acceptance at all, decides exactly as the unaccepting verdict always did', () => {
+    const none = classifyFindings([], []);
+    const clean = parseOsvReport(
+      read('packages', 'server', 'tests', 'fixtures', 'osv-report-clean.json'),
+    );
+    const vulnerable = parseOsvReport(
+      read('packages', 'server', 'tests', 'fixtures', 'osv-report-vulnerable.json'),
+    );
+    for (const toolExit of [0, 1, 2, 78, 124, 127, 128, 255]) {
+      for (const report of [clean, vulnerable, null, { packages: 0, vulnerabilities: [] }]) {
+        const verdict = classifyFindings(report?.vulnerabilities ?? [], []);
+        expect(acceptanceExitCode(toolExit, report, verdict, [])).toBe(
+          osvExitCodeFor(toolExit, report),
+        );
+        expect(acceptanceExitCode(toolExit, report, verdict, [])).not.toBe(SKIP_EXIT);
+      }
+    }
+    expect(none).toEqual({ accepted: [], unaccepted: [], dead: [], overused: [], underused: [] });
   });
 });

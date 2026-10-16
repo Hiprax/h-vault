@@ -1533,12 +1533,18 @@ devices via clipboard sync. H-Vault reduces the exposure window but cannot elimi
 
 ## Security practices in this repository
 
-- Every push runs `npm run ci` locally through the `pre-push` hook — thirty-one gates,
-  including a dependency audit at moderate and above over the production tree, ESLint with
-  `eslint-plugin-security`, static analysis (CodeQL where the CLI is installed, otherwise
-  Semgrep CE or OpenGrep, and the gate reports which engine answered), container builds
-  scanned with Trivy (zero fixable CRITICAL/HIGH), a secret scan over every tracked file
-  **and every blob in git history**, the cross-user authorization matrix over the whole
+- Every push runs `npm run ci` locally through the `pre-push` hook — thirty-three gates,
+  including a dependency audit at moderate and above over the production tree, an OSV
+  advisory scan (osv-scanner) over every package in the lockfile, development tooling
+  included (one advisory with no fixed release, in a dependency of a development-only linter
+  that never ships and is only ever handed a file path the pipeline writes itself, is
+  accepted through a reviewed ledger entry that expires within thirty days and fails the
+  scan once it no longer matches), ESLint with `eslint-plugin-security`, static analysis (CodeQL where the CLI is
+  installed, otherwise Semgrep CE or OpenGrep, and the gate reports which engine answered),
+  container builds scanned with Trivy (zero fixable CRITICAL/HIGH), a secret scan over every
+  tracked file **and every blob in git history**, gitleaks' provider-specific rule set over
+  every commit (each allowlisted fixture pinned to one commit and recorded in the
+  suppression ledger), the cross-user authorization matrix over the whole
   route table, a conformance run of the storage port against the real object-storage engine
   in a container, and a redaction suite that asserts no request value, audit row or
   production error body carries a secret. Eight further gates form the release tier, run on
@@ -1553,8 +1559,11 @@ devices via clipboard sync. H-Vault reduces the exposure window but cannot elimi
   only against `.testfortress/baseline.json`; and `npm run verify:selftest` plants one
   defect per registered gate and requires each to go red for a reason its own report
   attributes to that defect. A gate whose prerequisite is missing on the machine — an
-  absent CodeQL CLI, a stopped Docker daemon — is reported BLOCKED and counted separately,
-  never as proven.
+  absent CodeQL CLI, a stopped Docker daemon, an absent gitleaks or osv-scanner — is
+  reported BLOCKED and counted separately, never as proven. In the pipeline itself an
+  absent scanner is "could not run" (exit 2), which fails the push; only the static-analysis
+  gate may report itself skipped, and only when neither CodeQL nor its fallback engine is
+  installed.
 - Every container sets `no-new-privileges` and drops all Linux capabilities, and every
   one but the database runs on a read-only root filesystem; the application, Nginx and
   bootstrap images run as a numeric non-root user. The object storage engine runs as root inside

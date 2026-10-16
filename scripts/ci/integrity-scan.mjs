@@ -663,6 +663,16 @@ const fail = (msg) => {
 const posix = (p) => p.split(sep).join('/');
 const today = () => new Date().toISOString().slice(0, 10);
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+/**
+ * A date the calendar has, not merely one in its shape. `2099-13-01` passes
+ * DATE_RE, compares as a string after every real date and makes the day
+ * arithmetic NaN, so no age cap (`NaN > cap`) would ever fire on it.
+ */
+const isCalendarDate = (s) => {
+  if (typeof s !== 'string' || !DATE_RE.test(s)) return false;
+  const time = Date.parse(`${s}T00:00:00Z`);
+  return !Number.isNaN(time) && new Date(time).toISOString().slice(0, 10) === s;
+};
 const daysBetween = (a, b) => (Date.parse(b) - Date.parse(a)) / 86_400_000;
 const sha = (s) => createHash('sha256').update(s).digest('hex').slice(0, 16);
 
@@ -1059,16 +1069,22 @@ for (const e of entries) {
       `maxHits=${e.maxHits} exceeds policy.maxHitsPerEntry=${policy.maxHitsPerEntry}; split it into individually justified entries`,
     );
   }
-  if (!DATE_RE.test(e.created ?? '')) {
-    flag('LEDGER-BAD-DATE', `created "${e.created ?? '(missing)'}" is not YYYY-MM-DD`);
+  if (!isCalendarDate(e.created)) {
+    flag(
+      'LEDGER-BAD-DATE',
+      `created "${e.created ?? '(missing)'}" is not a YYYY-MM-DD calendar date`,
+    );
   } else if (e.created > today()) {
     flag('LEDGER-FUTURE-DATED', `created "${e.created}" is in the future`);
   }
 
-  if (!DATE_RE.test(e.expires ?? '')) {
-    flag('LEDGER-BAD-DATE', `expires "${e.expires ?? '(missing)'}" is not YYYY-MM-DD`);
+  if (!isCalendarDate(e.expires)) {
+    flag(
+      'LEDGER-BAD-DATE',
+      `expires "${e.expires ?? '(missing)'}" is not a YYYY-MM-DD calendar date`,
+    );
   } else {
-    if (DATE_RE.test(e.created ?? '') && e.expires < e.created) {
+    if (isCalendarDate(e.created) && e.expires < e.created) {
       flag('LEDGER-BAD-DATE', `expires ${e.expires} precedes created ${e.created}`);
     }
     if (e.expires < today()) flag('LEDGER-EXPIRED', `expired ${e.expires}; re-justify or remove`);
