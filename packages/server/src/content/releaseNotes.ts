@@ -2,6 +2,105 @@ import type { ReleaseNote } from '@hvault/shared';
 
 export const RELEASE_NOTES: readonly ReleaseNote[] = [
   {
+    version: '0.16.0',
+    date: '2026-10-17',
+    title: 'Safer sign-in, confirmed backup recipients and security emails',
+    summary:
+      'This release hardens H-Vault throughout. A lockout no longer gives away a correct password or pauses your open sessions, mailed backups go only to addresses that confirmed, you are emailed about important security events, and each vault now has a storage limit. Several ways a stolen session or a crafted request could do harm are closed.',
+    highlights: [
+      {
+        icon: 'shield',
+        title: 'Lockouts that give nothing away and keep your sessions working',
+        body: 'While your account is locked after wrong passwords, a correct password from an unknown browser gets the same answer as a wrong one, so it gives nothing away. A browser you signed in from recently can still sign in, sessions already open keep working, and the password and two-factor steps now lock separately.',
+      },
+      {
+        icon: 'bell',
+        title: 'Emails when something important happens',
+        body: 'You are emailed when your password is changed or reset, two-factor sign-in is turned on or off, a copied session is detected, your backup recipients change, or your correct password is entered from an unknown browser during a lockout. No security email carries a link. Settings, Security emails chooses which arrive.',
+      },
+      {
+        icon: 'mail',
+        title: 'Backups go only to addresses that confirmed',
+        body: 'Changing where backups are mailed now needs your master password, and every address other than your own must follow a confirmation link before it receives one. A password change, a reset or logging out everywhere pauses them until you save the list again, and addresses saved before this update wait for that too.',
+      },
+      {
+        icon: 'server',
+        title: 'Control who may register',
+        body: 'REGISTRATION_MODE can close registration or admit only invited addresses, and REGISTRATION_ALLOWED_DOMAINS limits it to your own email domains. Registration stays open by default, with a warning at every production start. Invitations come from the invite command or from accounts listed in REGISTRATION_INVITERS.',
+        audience: 'administrators',
+      },
+    ],
+    changes: [
+      {
+        kind: 'added',
+        text: 'Each vault now has a storage limit, 512 MB by default. Deleting, emptying the trash and every read are never refused for it, so an account over its limit can make room, and a restore that runs out of room restores what fits and reports what it skipped.',
+      },
+      {
+        kind: 'added',
+        text: 'When the server admits only invited addresses, accounts the administrator names can create a one-time invitation link under Settings, Invite someone, with their master password. The link is shown once and never emailed.',
+      },
+      {
+        kind: 'changed',
+        text: 'An account whose email address is not verified within 7 days (by default) is deleted, so an address registered by mistake or by someone else is freed for its owner. An account holding any vault data is never deleted this way.',
+      },
+      {
+        kind: 'changed',
+        text: 'Breach checks are now budgeted per account. When the budget runs out, the Vault Health page waits up to 15 minutes to carry on, and reports passwords it still could not check as not checked.',
+      },
+      {
+        kind: 'security',
+        text: 'A correct master password now buys one sign-in, never several. The two-factor step of a sign-in completes only once, and a password change, a reset or logging out everywhere cancels every sign-in waiting at that step.',
+      },
+      {
+        kind: 'security',
+        text: 'A two-factor code used to turn two-factor sign-in off or to delete the account can no longer be used again to sign in, and wrong codes now count toward the two-factor lockout wherever a code is checked, except when setting up a new authenticator.',
+      },
+      {
+        kind: 'security',
+        text: 'The code in verification, password reset and unlock links no longer reaches server logs. Links mailed before this update still work for now, though opening one still logs its code.',
+      },
+      {
+        kind: 'security',
+        text: 'A stolen session the server detects is now recorded in the audit log as Stolen Session Detected, and the owner is emailed about it.',
+      },
+      {
+        kind: 'security',
+        text: 'The server no longer stores a keyed fingerprint of each entry name, which let anyone holding the database see which of your entries share a name.',
+      },
+      {
+        kind: 'security',
+        text: 'A resumed document upload now checks that the parts of the file it already read have not changed, and stops with a message if they have.',
+      },
+      {
+        kind: 'fixed',
+        text: 'Deleting a folder and moving its items now shows them in the parent folder at once, and the nightly trash purge no longer deletes an item restored from the trash while it runs.',
+      },
+      {
+        kind: 'fixed',
+        text: 'A restore that overwrote an entry deleted for good at the same moment now restores it as a new entry instead of storing nothing.',
+      },
+      {
+        kind: 'fixed',
+        text: 'A vault or trash holding 9,801 to 10,000 entries no longer shows a warning that entries may be missing.',
+      },
+      {
+        kind: 'changed',
+        text: 'Outgoing email now requires TLS 1.2 or later with a verified certificate. A relay whose SMTP_HOST is a loopback IP such as 127.0.0.1 is exempt, but localhost is not. Set SMTP_REQUIRE_TLS to false only for a plaintext relay you control, and SMTP_TLS_CA for a relay whose certificate comes from a private CA.',
+        audience: 'administrators',
+      },
+      {
+        kind: 'changed',
+        text: 'Outside Docker the server now listens on 127.0.0.1 only; set HOST to listen elsewhere. PM2 and bare-metal deployments must run create-indexes after upgrading, and the first start runs database migrations that can take a while on a large database.',
+        audience: 'administrators',
+      },
+      {
+        kind: 'security',
+        text: 'In the Docker stack, the index-building step no longer receives the application secrets, the base images are pinned by digest and the database healthcheck no longer puts the password on a command line. By default, production keeps at most 12 MB of log files.',
+        audience: 'administrators',
+      },
+    ],
+  },
+  {
     version: '0.15.0',
     date: '2026-09-28',
     title: 'See what changed after every update',

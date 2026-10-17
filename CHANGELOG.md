@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-10-17
+
 ### Added
 
 - **`HOST`: the address the server listens on**, `127.0.0.1` by default (an IP address only; the Docker stack sets `0.0.0.0` inside its containers).
@@ -961,7 +963,8 @@ First public release.
 - Progressive Web App with offline read access via IndexedDB, dark/light/system themes, keyboard shortcuts, virtualized lists and WAI-ARIA-conformant components.
 - Local CI pipeline (`npm run ci`) running eleven gates — including container builds with Trivy scanning and CodeQL — from the `pre-push` hook.
 
-[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/Hiprax/h-vault/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/Hiprax/h-vault/compare/v0.14.1...v0.15.0
 [0.14.1]: https://github.com/Hiprax/h-vault/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/Hiprax/h-vault/compare/v0.13.0...v0.14.0
