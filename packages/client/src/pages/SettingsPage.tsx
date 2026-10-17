@@ -842,6 +842,18 @@ export default function SettingsPage() {
   // MAX_IMPORT_FILE_SIZE_BYTES (8 MiB), and re-tokenizing it on every render —
   // every keystroke, every mapping dropdown change — blocks the main thread.
   const [csvRowCount, setCsvRowCount] = useState(0);
+  // Whether the CSV state above holds a parse. It is reset only when it does:
+  // setting state, even to an equal value, renders the page again, and a render
+  // after the one that finished an import lands after the import is over.
+  const csvParsedRef = useRef(false);
+  const clearCsvParse = useCallback(() => {
+    if (!csvParsedRef.current) return;
+    csvParsedRef.current = false;
+    setCsvHeaders([]);
+    setCsvMapping({});
+    setCsvPreview([]);
+    setCsvRowCount(0);
+  }, []);
 
   // Vault key rotation state
   const [rotatingVaultKey, setRotatingVaultKey] = useState(false);
@@ -893,13 +905,11 @@ export default function SettingsPage() {
         else mapping[header] = '';
       }
       setCsvMapping(mapping);
+      csvParsedRef.current = true;
     } else {
-      setCsvHeaders([]);
-      setCsvMapping({});
-      setCsvPreview([]);
-      setCsvRowCount(0);
+      clearCsvParse();
     }
-  }, [importFormat, importData]);
+  }, [importFormat, importData, clearCsvParse]);
 
   // Load profile on mount
   useEffect(() => {
@@ -1658,6 +1668,9 @@ export default function SettingsPage() {
       if (inserted > 0 || updated > 0) refreshInBackground(useVaultStore.getState().fetchItems());
       setShowImport(false);
       setImportData('');
+      // In the same batch as the line above, so the render that drops the
+      // Importing label is the import's last one, whatever the format.
+      clearCsvParse();
     } catch (err) {
       const msg =
         err instanceof ImportParseError
@@ -1668,7 +1681,15 @@ export default function SettingsPage() {
       setImporting(false);
       setImportProgress(null);
     }
-  }, [importData, importFormat, csvMapping, conflictStrategy, requestImportConfirmation, toast]);
+  }, [
+    importData,
+    importFormat,
+    csvMapping,
+    conflictStrategy,
+    requestImportConfirmation,
+    toast,
+    clearCsvParse,
+  ]);
 
   // Vault key rotation — two-phase approach for atomicity
   const handleRotateVaultKey = useCallback(async () => {

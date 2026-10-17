@@ -591,6 +591,125 @@ describe('SettingsPage import flow', () => {
     }
   });
 
+  it('renders nothing more once the Importing label has cleared, so no update lands after a test stops waiting', async () => {
+    // `settleImportFlow` treats the label's disappearance as the end of the import.
+    // Clearing the pasted text after a finished import used to re-run the CSV
+    // preview effect, which reset four values that were already empty: three as
+    // new empty arrays and objects, which React never treats as unchanged, and an
+    // equal 0, which it does not skip right after a render either. That committed
+    // one more render. React runs that effect on its own scheduler: on a slow machine it
+    // fired after the wait had ended, outside act(), and failed the release
+    // workflow's run of this file. Counted here from React's own commit callback,
+    // so the verdict does not depend on which side of the wait the effect lands.
+    mockImportVaultApi.mockImplementation(acceptImport({ insertedCount: 1, updatedCount: 0 }));
+    let sawImporting = false;
+    let commitsAfterLabelCleared = -1;
+    const onRender: React.ProfilerOnRenderCallback = () => {
+      if (screen.queryByText(/^Importing/) !== null) {
+        sawImporting = true;
+        return;
+      }
+      if (sawImporting) commitsAfterLabelCleared += 1;
+    };
+    const { default: SettingsPage } = await import('../src/pages/SettingsPage');
+    await act(async () => {
+      render(
+        <React.Profiler id="settings" onRender={onRender}>
+          <MemoryRouter>
+            <SettingsPage />
+          </MemoryRouter>
+        </React.Profiler>,
+      );
+    });
+    await waitFor(() => expect(screen.getByText('Settings')).toBeInTheDocument());
+    startFirefoxImport(FIREFOX_CSV, 'skip');
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Import' }));
+    });
+    await importSummary();
+    await settleImportFlow();
+    // Whatever the finished import left scheduled runs now, inside act().
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+
+    expect(sawImporting).toBe(true);
+    // The commit that removed the label is the import's last one.
+    expect(commitsAfterLabelCleared).toBe(0);
+    expect(screen.queryByPlaceholderText('Paste exported data here...')).toBeNull();
+  });
+
+  it('renders nothing more once the Importing label has cleared after a generic CSV import', async () => {
+    // The column mapping is reset after a generic CSV import, and that reset
+    // belongs to the import's last render, inside the wait that ends the flow.
+    mockImportVaultApi.mockImplementation(acceptImport({ insertedCount: 1, updatedCount: 0 }));
+    let sawImporting = false;
+    let commitsAfterLabelCleared = -1;
+    const onRender: React.ProfilerOnRenderCallback = () => {
+      if (screen.queryByText(/^Importing/) !== null) {
+        sawImporting = true;
+        return;
+      }
+      if (sawImporting) commitsAfterLabelCleared += 1;
+    };
+    const { default: SettingsPage } = await import('../src/pages/SettingsPage');
+    await act(async () => {
+      render(
+        <React.Profiler id="settings" onRender={onRender}>
+          <MemoryRouter>
+            <SettingsPage />
+          </MemoryRouter>
+        </React.Profiler>,
+      );
+    });
+    await waitFor(() => expect(screen.getByText('Settings')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('Import Vault'));
+    fireEvent.change(screen.getByDisplayValue('H-Vault (.enc / JSON)'), {
+      target: { value: 'csv' },
+    });
+    fireEvent.change(screen.getByPlaceholderText('Paste exported data here...'), {
+      target: { value: 'Title,Website\nNew site,https://new.example' },
+    });
+    await waitFor(() => expect(screen.getByText('Map CSV Columns')).toBeInTheDocument());
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Import' }));
+    });
+    await importSummary();
+    await settleImportFlow();
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+
+    expect(sawImporting).toBe(true);
+    expect(commitsAfterLabelCleared).toBe(0);
+    // Reopened, the panel shows nothing of the imported file.
+    fireEvent.click(screen.getByText('Import Vault'));
+    expect(screen.queryByText('Map CSV Columns')).toBeNull();
+  });
+
+  it('clears the CSV column mapping when the pasted CSV is removed', async () => {
+    // The other side of the guard above: a parse that was shown is still reset.
+    await renderSettings();
+    fireEvent.click(screen.getByText('Import Vault'));
+    fireEvent.change(screen.getByDisplayValue('H-Vault (.enc / JSON)'), {
+      target: { value: 'csv' },
+    });
+    const textarea = screen.getByPlaceholderText('Paste exported data here...');
+    fireEvent.change(textarea, { target: { value: 'Name,Secret\na,1\nb,2' } });
+    await waitFor(() => expect(screen.getByText('Preview (2 of 2 rows)')).toBeInTheDocument());
+
+    fireEvent.change(textarea, { target: { value: '' } });
+
+    await waitFor(() => expect(screen.queryByText('Map CSV Columns')).toBeNull());
+    expect(screen.queryByText(/^Preview \(/)).toBeNull();
+    // Pasting again parses afresh rather than showing the earlier file.
+    fireEvent.change(textarea, { target: { value: 'Title\nx' } });
+    await waitFor(() => expect(screen.getByText('Preview (1 of 1 rows)')).toBeInTheDocument());
+    expect(screen.queryByText('Secret')).toBeNull();
+  });
+
   it('overwrites the matched item in place and keeps its previous password', async () => {
     await renderSettings();
     startFirefoxImport();

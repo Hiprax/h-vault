@@ -774,6 +774,32 @@
       "created": "2026-10-16",
       "expires": "2027-01-14",
       "approvedBy": ["judge:readonly"]
+    },
+    {
+      "id": "SUP-0072",
+      "rule": "EQUIV-MUTANT",
+      "kind": "known-gap",
+      "file": "packages/client/src/pages/SettingsPage.tsx",
+      "symbol": "clearCsvParse's setCsvMapping({}), setCsvPreview([]) and setCsvRowCount(0)",
+      "maxHits": 3,
+      "reason": "Three survivors of the 0.16.0 release fix (the import's last render no longer schedules a CSV preview reset): after a reset they leave the column mapping or the row count holding the previous parse, or the preview holding one placeholder row. None of the three is ever shown or used without parsed headers: the 'Map CSV Columns' block, and the preview and row count inside it, render only while csvHeaders is non-empty; handleImport returns at once on empty text and checks the mapping only for a generic CSV import, and of the parsers it passes the mapping to, only the generic CSV one reads it (services/import/index.ts); a generic CSV import's non-empty text has already been re-parsed by the preview effect; and every parse replaces all four values wholesale. setCsvHeaders([]) is the reset that gates them; it carries one mutant (Stryker drops the statement-removal mutant there because the empty array already carries one), and two tests in tests/settings-import-flow.test.tsx kill it: 'clears the CSV column mapping when the pasted CSV is removed', and the reopened-panel check of the generic CSV commit-count test. The three resets are kept so that no part of a parse outlives its text: the preview rows hold the imported file's plaintext, passwords included. Removal condition: this entry goes away if the mapping, the preview or the row count is ever shown or used without headers, at which point each mutant becomes a missing assertion.",
+      "owner": "maintainer",
+      "created": "2026-10-17",
+      "expires": "2027-01-15",
+      "approvedBy": ["maintainer"]
+    },
+    {
+      "id": "SUP-0073",
+      "rule": "EQUIV-MUTANT",
+      "kind": "known-gap",
+      "file": "packages/client/src/pages/SettingsPage.tsx",
+      "symbol": "csvParsedRef's initial false and clearCsvParse's empty useCallback dependency list",
+      "maxHits": 2,
+      "reason": "Two survivors of the same fix. (1) useRef(false) becoming useRef(true): the preview effect's first run at mount then lowers the flag and resets CSV state that is already empty, once, right after mounting and before any input; from then on both versions behave identically. It renders nothing different and sends or stores nothing, but it does add one commit at mount, which a commit count could see; the commit-count tests start counting only once an import is under way, and pinning the mount's commit count would also pin every unrelated update made while the page mounts. (2) The useCallback dependency list [] becoming a one-element constant list: neither list ever changes, so clearCsvParse keeps one identity for the page's lifetime either way, and every effect and callback that depends on it behaves identically; no test can tell them apart. What IS asserted: the flag being raised by a parse and lowered by a reset, the early return, and the reset itself, each killed by at least one of the two commit-count tests and the column-mapping test in tests/settings-import-flow.test.tsx. Removal condition: (1) goes away if a test ever counts the mount's commits; (2) goes away if clearCsvParse gains a dependency.",
+      "owner": "maintainer",
+      "created": "2026-10-17",
+      "expires": "2027-01-15",
+      "approvedBy": ["maintainer"]
     }
   ]
 }
