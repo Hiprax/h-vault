@@ -1,9 +1,9 @@
 {
   "version": 1,
   "recordedAt": "2026-10-17",
-  "commit": "d6c02b1",
+  "commit": "977fddc",
   "tests": {
-    "count": 13454
+    "count": 13458
   },
   "coverage": {
     "diff": 100
@@ -194,7 +194,7 @@
         ]
       },
       "tests": {
-        "count": 5910
+        "count": 5914
       }
     },
     "packages/client": {
@@ -657,7 +657,7 @@
       "spectral": 1
     }
   },
-  "reason": "Phase 18 docs: six new swagger contract tests (CSRF 403 with a forged-registration control, health 503, row-limit text, profile wrapped key and withheld secrets, download media type, breach 5XX) raise test counts and server coverage",
+  "reason": "Phase 19 final sweep: four tests pinning migration v4's handling of a list the owner saved before the migration reached the account (incl. the read-to-write race) and the exact budget refusal texts",
   "bundle": {
     "budgetKb": {
       "VaultItemForm": 230,

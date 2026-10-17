@@ -261,12 +261,19 @@ describe('the scheduler at the edges', () => {
     uninstallTestClock();
   });
 
-  it('records daily_mail_budget and mails nothing when the budget is spent', async () => {
+  it.each([
+    { case: 'the budget is spent', used: 30, recipients: ['one@example.org'] },
+    {
+      case: 'the rest of the day cannot cover every recipient',
+      used: 29,
+      recipients: ['one@example.org', 'two@example.org'],
+    },
+  ])('records daily_mail_budget and mails nothing when $case', async ({ used, recipients }) => {
     const user = await backupUser();
-    await seedConfirmedRecipients(user.id, ['one@example.org']);
+    await seedConfirmedRecipients(user.id, recipients);
     await User.updateOne(
       { _id: user.id },
-      { $set: { outboundMail: { day: utcDay(), count: 30 } } },
+      { $set: { outboundMail: { day: utcDay(), count: used } } },
     );
 
     await runScheduledBackup();
@@ -274,7 +281,9 @@ describe('the scheduler at the edges', () => {
     expect(transport.sent).toEqual([]);
     const log = await BackupLog.findOne({ userId: user.id }).lean();
     expect(log!.status).toBe('failed');
-    expect(log!.errorMessage).toMatch(/daily backup email limit/i);
+    expect(log!.errorMessage).toBe(
+      'Sending to every confirmed recipient would have gone over the daily backup email limit',
+    );
     const audit = await AuditLog.find({ userId: user.id, action: 'backup_failed' }).lean();
     expect(audit.map((row) => row.metadata)).toEqual([{ reason: 'daily_mail_budget' }]);
   });

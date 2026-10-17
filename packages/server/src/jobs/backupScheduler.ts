@@ -289,7 +289,9 @@ async function buildAndMailBackup(user: {
     // The day's outbound budget, for every recipient at once, before the first send
     // (not claimed with email off: nothing would be sent).
     if (isEmailConfigured() && !(await claimOutboundMail(userId, emails.length))) {
-      logger.info(`Backup for user ${userId} not sent: the daily email limit is reached`);
+      logger.info(
+        `Backup for user ${userId} not sent: its recipients would go over the daily email limit`,
+      );
       await recordUndeliverable(userId, 'daily_mail_budget');
       return;
     }

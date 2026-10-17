@@ -853,6 +853,7 @@ of addresses it goes to is guarded like a credential:
 - **Addresses from before this control wait for you.** Recipients stored by an earlier version are
   carried over unconfirmed and are NOT emailed: a recipient's click proves the recipient agrees,
   never that you put the address there, so nothing is sent to them until you save the list again.
+  A list you already saved on this version is kept as you saved it, and the old addresses are dropped.
 
 What this does not protect against:
 

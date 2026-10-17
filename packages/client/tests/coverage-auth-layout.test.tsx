@@ -60,6 +60,14 @@ vi.mock('../src/stores/vaultStore', () => ({
   useVaultStore: vi.fn(),
 }));
 
+// These suites test the shell, not its release notes: the status read stays
+// pending, as on a slow network, so the release-notes host never settles after a
+// test's synchronous assertions, outside act(...).
+vi.mock('../src/services/api/releaseStatusApi', async (importActual) => ({
+  ...(await importActual<typeof import('../src/services/api/releaseStatusApi')>()),
+  getReleaseStatusApi: () => new Promise<never>(() => {}),
+}));
+
 vi.mock('../src/services/api/client', () => ({
   api: { post: vi.fn(), get: vi.fn(), put: vi.fn(), delete: vi.fn() },
   // Refreshing is now one exported helper (it owns the cross-tab lock, the

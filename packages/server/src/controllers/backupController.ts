@@ -848,7 +848,7 @@ export const triggerBackup = catchAsync(async (req: Request, res: Response): Pro
     throw httpErrors.conflict(
       outcome.undeliverable === 'no_confirmed_recipient'
         ? 'No backup recipient is confirmed, so nothing was sent. Review the recipients in Backup settings.'
-        : `The daily backup email limit (${String(MAX_BACKUP_MAILS_PER_USER_PER_DAY)} per account) is reached. Nothing was sent; try again tomorrow.`,
+        : `Sending this backup to every confirmed recipient would go over the daily backup email limit (${String(MAX_BACKUP_MAILS_PER_USER_PER_DAY)} per account). Nothing was sent; try again tomorrow.`,
     );
   }
   const responseData = outcome.sent;

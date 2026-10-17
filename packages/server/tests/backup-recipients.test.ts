@@ -1067,6 +1067,102 @@ describe('migration v4 edge cases (F-05)', () => {
     expect(transport.sent).toEqual([]);
   });
 
+  it('leaves a list its owner saved before the migration reached the account: an emptied list stays empty and the old field goes', async () => {
+    const { runMigrations } = await import('../src/utils/migrations.js');
+    const user = await createTestUser();
+    await setUpBackup(user);
+    await User.collection.updateOne(
+      { email: user.email },
+      { $set: { 'settings.backup.backupEmails': ['old-a@example.org', 'old-b@example.org'] } },
+    );
+    // The owner empties the list on a worker that lost the migration lock, while
+    // the one holding it has not reached this account yet.
+    expect((await putRecipients(user, [])).status).toBe(200);
+
+    await runMigrations();
+
+    const raw = await User.collection.findOne({ email: user.email });
+    const backup = (raw!['settings'] as { backup: Record<string, unknown> }).backup;
+    expect(backup['backupRecipients']).toEqual([]);
+    expect(backup['recipientsRevision']).toBe(1);
+    expect(backup['backupEmails']).toBeUndefined();
+    transport.sent.length = 0;
+    expect((await trigger(user)).status).toBe(200);
+    expect(backupMailsTo()).toEqual([user.email]);
+  });
+
+  it('leaves a list its owner empties AFTER the migration read the account but before its write lands', async () => {
+    const { runMigrations } = await import('../src/utils/migrations.js');
+    const user = await createTestUser();
+    await setUpBackup(user);
+    await User.collection.updateOne(
+      { email: user.email },
+      { $set: { 'settings.backup.backupEmails': ['old-a@example.org', 'old-b@example.org'] } },
+    );
+    // The owner's save lands inside the window between the conversion's read of
+    // the account and the batch write that converts it: only that write's own
+    // filter can still see that the owner saved a list.
+    const realBulkWrite = mongoose.mongo.Collection.prototype.bulkWrite;
+    let savedInsideTheWindow = 0;
+    const spy = vi
+      .spyOn(mongoose.mongo.Collection.prototype, 'bulkWrite')
+      .mockImplementation(async function (
+        this: mongoose.mongo.Collection,
+        ...args: Parameters<typeof realBulkWrite>
+      ) {
+        const [operations] = args;
+        const converts = operations.some(
+          (op) =>
+            'updateOne' in op &&
+            '$set' in op.updateOne.update &&
+            'settings.backup.backupRecipients' in (op.updateOne.update.$set ?? {}),
+        );
+        if (this.collectionName === 'users' && converts && savedInsideTheWindow === 0) {
+          savedInsideTheWindow += 1;
+          expect((await putRecipients(user, [])).status).toBe(200);
+        }
+        return realBulkWrite.apply(this, args);
+      } as never);
+    try {
+      await runMigrations();
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(savedInsideTheWindow).toBe(1);
+    const raw = await User.collection.findOne({ email: user.email });
+    const backup = (raw!['settings'] as { backup: Record<string, unknown> }).backup;
+    expect(backup['backupRecipients']).toEqual([]);
+    expect(backup['recipientsRevision']).toBe(1);
+    expect(backup['backupEmails']).toBeUndefined();
+  });
+
+  it('still converts an empty list nobody saved, beside an old list', async () => {
+    const { runMigrations } = await import('../src/utils/migrations.js');
+    const user = await createTestUser();
+    await User.collection.updateOne(
+      { email: user.email },
+      {
+        $set: {
+          'settings.backup.backupRecipients': [],
+          'settings.backup.backupEmails': ['legacy@example.org'],
+        },
+      },
+    );
+
+    await runMigrations();
+
+    const recipients = await storedRecipients(user.id);
+    expect(recipients.map((r) => [r.email, r.state, r.approvedAt])).toEqual([
+      ['legacy@example.org', 'pending', null],
+    ]);
+    const raw = await User.collection.findOne({ email: user.email });
+    const backup = (raw!['settings'] as { backup: Record<string, unknown> }).backup;
+    expect(backup['backupEmails']).toBeUndefined();
+    expect(backup['recipientsRevision']).toBe(1);
+    expect(transport.sent).toEqual([]);
+  });
+
   it('a list saved before the migration ran on another worker reads as "none confirmed", never as "no list"', async () => {
     const user = await createTestUser();
     await setUpBackup(user);
@@ -1123,14 +1219,16 @@ describe('daily outbound mail budget (F-05)', () => {
     expect(await outbound(user.id)).toEqual({ day: utcDay(), count: 30 });
   });
 
-  it('refuses the 31st with a 409 naming the budget, and sends nothing', async () => {
+  it('refuses a run the rest of the day cannot cover (one left, two recipients) with a 409 saying so, and sends nothing', async () => {
     const user = await twoConfirmed();
     await seedCount(user.id, 29);
 
     const res = await trigger(user);
 
     expect(res.status).toBe(409);
-    expect(res.body.message).toMatch(/limit/i);
+    expect(res.body.message).toBe(
+      'Sending this backup to every confirmed recipient would go over the daily backup email limit (30 per account). Nothing was sent; try again tomorrow.',
+    );
     expect(transport.sent).toEqual([]);
     expect(await outbound(user.id)).toEqual({ day: utcDay(), count: 29 });
   });
@@ -1205,23 +1303,30 @@ describe('the reads that follow a recipient-list write come from the primary (F-
     await setUpBackup(user);
     const reads: { projection: string; mode: unknown }[] = [];
     const real = mongoose.mongo.Collection.prototype.findOne;
-    vi.spyOn(mongoose.mongo.Collection.prototype, 'findOne').mockImplementation(function (
-      this: mongoose.mongo.Collection,
-      ...args: Parameters<typeof real>
-    ) {
-      if (this.collectionName === 'users') {
-        const options = args[1] as
-          { projection?: unknown; readPreference?: string | { mode?: string } } | undefined;
-        const preference = options?.readPreference;
-        reads.push({
-          projection: JSON.stringify(options?.projection ?? {}),
-          mode: typeof preference === 'string' ? preference : preference?.mode,
-        });
-      }
-      return real.apply(this, args);
-    } as never);
+    const spy = vi
+      .spyOn(mongoose.mongo.Collection.prototype, 'findOne')
+      .mockImplementation(function (
+        this: mongoose.mongo.Collection,
+        ...args: Parameters<typeof real>
+      ) {
+        if (this.collectionName === 'users') {
+          const options = args[1] as
+            { projection?: unknown; readPreference?: string | { mode?: string } } | undefined;
+          const preference = options?.readPreference;
+          reads.push({
+            projection: JSON.stringify(options?.projection ?? {}),
+            mode: typeof preference === 'string' ? preference : preference?.mode,
+          });
+        }
+        return real.apply(this, args);
+      } as never);
 
-    const res = await putRecipients(user, ['first@example.org']);
+    let res: Awaited<ReturnType<typeof putRecipients>>;
+    try {
+      res = await putRecipients(user, ['first@example.org']);
+    } finally {
+      spy.mockRestore();
+    }
 
     expect(res.status).toBe(200);
     expect(confirmationMailsTo()).toEqual(['first@example.org']);

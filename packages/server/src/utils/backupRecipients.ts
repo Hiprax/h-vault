@@ -626,7 +626,8 @@ export type UndeliverableReason = 'no_confirmed_recipient' | 'daily_mail_budget'
 
 const UNDELIVERABLE_TEXT: Record<UndeliverableReason, string> = {
   no_confirmed_recipient: 'No confirmed backup recipient',
-  daily_mail_budget: 'The daily backup email limit was reached',
+  daily_mail_budget:
+    'Sending to every confirmed recipient would have gone over the daily backup email limit',
 };
 
 /**

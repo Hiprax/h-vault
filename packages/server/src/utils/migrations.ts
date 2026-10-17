@@ -328,9 +328,14 @@ async function migrateBackupRecipients(): Promise<void> {
       throw error;
     }
   }
-  // No recipient list yet, or an EMPTY one (a hydrated save of the new schema
-  // cannot write one, but nothing else guarantees it), beside an old list.
+  // No recipient list yet, or an EMPTY one nobody chose (a hydrated save of the new
+  // schema cannot write one, but nothing else guarantees it), beside an old list.
+  // Never a list the OWNER saved: every save bumps `recipientsRevision` (absent =
+  // never saved), and a worker that lost the migration lock serves requests while
+  // this runs, so an owner can empty the list before this reaches the account.
+  // Converting it then would bring back the addresses they had just removed.
   const noRecipients = {
+    'settings.backup.recipientsRevision': { $exists: false },
     $or: [
       { 'settings.backup.backupRecipients': { $exists: false } },
       { 'settings.backup.backupRecipients': { $size: 0 } },
@@ -405,10 +410,11 @@ async function migrateBackupRecipients(): Promise<void> {
     converted += (await users.bulkWrite(batch, { ordered: false })).modifiedCount;
   }
   // Every other account carries only the old schema's EMPTY default (`[]`) and
-  // perhaps a stale single `backupEmail` nothing ever read: nothing to convert, so
-  // both just go. An account with no list keeps mailing its own verified address,
-  // as it always did. A non-empty old list is kept only on an account it has not
-  // been converted for yet (a batch that failed), so the next run still finds it.
+  // perhaps a stale single `backupEmail` nothing ever read, or a list its owner
+  // has saved since: nothing to convert, so both just go. An account with no list
+  // keeps mailing its own verified address, as it always did. A non-empty old list
+  // is kept only on an account it has not been converted for yet (a batch that
+  // failed), so the next run still finds it.
   const cleared = await users.updateMany(
     {
       $and: [
@@ -422,6 +428,7 @@ async function migrateBackupRecipients(): Promise<void> {
           $or: [
             { 'settings.backup.backupEmails.0': { $exists: false } },
             { 'settings.backup.backupRecipients.0': { $exists: true } },
+            { 'settings.backup.recipientsRevision': { $exists: true } },
           ],
         },
       ],

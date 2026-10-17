@@ -563,7 +563,7 @@ export default function BackupSettingsPage() {
       }
     } catch (err: unknown) {
       // A 4xx is shown as the server wrote it: "no recipient has confirmed yet" and
-      // "the daily email limit is reached" each name what to do next.
+      // "this backup would go over the daily email limit" each name what to do next.
       toast({
         title: 'Failed to trigger backup',
         description: getApiErrorMessage(err, 'An unexpected error occurred. Please try again.'),

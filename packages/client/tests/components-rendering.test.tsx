@@ -121,6 +121,14 @@ vi.mock('../src/services/offlineCache', async (importOriginal) => ({
   },
 }));
 
+// These suites test the shell, not its release notes: the status read stays
+// pending, as on a slow network, so the release-notes host never settles after a
+// test's synchronous assertions, outside act(...).
+vi.mock('../src/services/api/releaseStatusApi', async (importActual) => ({
+  ...(await importActual<typeof import('../src/services/api/releaseStatusApi')>()),
+  getReleaseStatusApi: () => new Promise<never>(() => {}),
+}));
+
 vi.mock('../src/services/api/client', () => ({
   clearCsrfToken: vi.fn(),
   api: {

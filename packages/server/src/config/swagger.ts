@@ -4171,7 +4171,7 @@ export const swaggerSpec: JsonObject = {
           400: errorResponse('Backup encryption has not been set up yet.'),
           404: { $ref: '#/components/responses/NotFound' },
           409: errorResponse(
-            'A backup is already in progress for this account, or this account already has a backup download, a mailed backup or an export in progress (no `data`); or nothing was sent because no recipient has confirmed yet (the run is recorded as failed and the account address is told, at most once until the recipients change or a backup is delivered, within the daily limit), or because the daily limit of 30 backup emails is reached.',
+            'A backup is already in progress for this account, or this account already has a backup download, a mailed backup or an export in progress (no `data`); or nothing was sent because no recipient has confirmed yet (the run is recorded as failed and the account address is told, at most once until the recipients change or a backup is delivered, within the daily limit), or because sending to every confirmed recipient would go over the daily limit of 30 backup emails (a run is claimed whole, never part-sent).',
           ),
           413: errorResponse('The backup would exceed BACKUP_MAX_SIZE_MB. Nothing is sent.'),
           200: successResponse('Backup triggered'),
