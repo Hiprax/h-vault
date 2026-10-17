@@ -324,11 +324,13 @@ async function lockFactor(
  * counter reaches {@link MAX_LOGIN_ATTEMPTS}, and returns the counter.
  *
  * The increment is capped: it matches only a counter below the threshold, so a
- * counter never grows past MAX however long guessing continues. A counter left
- * AT the threshold by a lockout that expired unserved (nobody presented the
- * right credential after the deadline) re-locks on the next failure, which is
- * the brake working: a served lockout is discharged only by a correct
- * credential at that factor's own step.
+ * counter never grows past MAX however long guessing continues. For the
+ * password, a counter left AT the threshold by a lockout that expired unserved
+ * (nobody presented the right credential after the deadline) re-locks on the
+ * next failure, which is the brake working. A served lockout is discharged at that factor's own step:
+ * the password's only by a correct password, the second factor's by the next
+ * code check (the master password is already proven there), before the code
+ * is read.
  *
  * Called only for a factor that is NOT locked: a locked password answers
  * unproven clients through {@link extendPasswordLockout}, and a locked second

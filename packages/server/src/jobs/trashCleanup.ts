@@ -26,7 +26,8 @@ const TRASH_CLEANUP_LOCK_TTL_MS = 15 * 60 * 1000; // 15 minutes
  *
  * ## A document is a row beside an object, so this is not the item loop
  *
- * The item loop above is one `deleteMany` per user per batch. A document also owns
+ * The item loop deletes each user's batch row by row through `deleteCountedItems`,
+ * keeping the account's counters in step. A document also owns
  * a stored object, and the row holds the only wrapped copy of the key that
  * decrypts it, so each row is the same three ordered steps `purgeDocument`
  * performs for a user-initiated purge: mark `purgePending`, delete the OBJECT,
@@ -134,7 +135,7 @@ async function purgeTrashedDocuments(
         await storage.deleteObject(row.objectKey);
         breaker.recordSuccess();
         // `userId` in the delete filter as well as `_id`, the same
-        // defense-in-depth the item loop applies to its own `deleteMany`. No
+        // defense-in-depth the item loop applies to its own deletes. No
         // `deletedAt` here: the claim above already won the row, and re-testing a
         // predicate that this loop is now the sole owner of would only add a way
         // to leave a marked row behind.

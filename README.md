@@ -77,7 +77,7 @@ stack that publishes exactly one loopback port, and a test suite that gates ever
 |                                   |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Two-factor authentication**     | TOTP with bcrypt-hashed backup codes, regeneration, replay protection, and brute-force throttling on the 2FA step itself — a temp token can't be used for unlimited guessing, and it is single-use: one correct password buys one sign-in.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| **Session management**            | Refresh-token rotation with reuse detection and family revocation, recorded in the audit log as a stolen session with the revoked browser's address and user agent. Access tokens are invalidated the instant a password changes. An unverified or pending-deletion account cannot mint new ones; a lockout never touches a session that already exists. `MAX_SESSIONS` (50) is an enforced per-device cap: a new sign-in evicts your oldest _live_ session, never a reuse-detection record.                                                                                                                                                                                                                                                                                                                                                |
+| **Session management**            | Refresh-token rotation with reuse detection and family revocation, recorded in the audit log as a stolen session with the revoked browser's address and user agent. Access tokens are invalidated the instant a password changes. An unverified or pending-deletion account cannot mint new ones; a lockout never touches a session that already exists. `MAX_SESSIONS` (50) is an enforced per-account cap: a new sign-in evicts your oldest _live_ session, never a reuse-detection record.                                                                                                                                                                                                                                                                                                                                               |
 | **Remember me / trusted devices** | Opt-in per login. A remembered session lasts 30 days across a browser restart, and on a 2FA account the device may skip the _2FA step_ — never the master password, which is still typed on every unlock. Trust is granted only against a TOTP code: completing the 2FA step with a single-use _backup code_ signs you in and still gives you the 30-day session, but registers no device, because a recovery credential is kept where the authenticator app is not. Trust is a server-side record (only a SHA-256 of an opaque token, revocable centrally), checked strictly _after_ the password succeeds, rotated on use, and dropped on password change/reset, 2FA enable/disable, backup-code regeneration, "log out everywhere", stolen-token reuse detection, and account deletion. Manage or revoke devices from the Sessions page. |
 | **No enumeration oracles**        | Registration, login, lockout, password reset and verification-resend are all built so that response body _and_ response time are identical whether or not the account exists.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | **Account lockout**               | Per factor: 10 wrong passwords lock new sign-ins for 30 minutes, renewed while the guessing goes on, and 10 wrong codes lock the 2FA step. A locked sign-in answers a right and a wrong password identically, so it never confirms a guess; existing sessions are never locked out, and a browser holding a live device proof (left by a completed sign-in on this version, kept for 30 days of use) signs in normally. Progressive delays and an unlock email that also proves the browser that follows it.                                                                                                                                                                                                                                                                                                                                |
@@ -762,8 +762,8 @@ bundle's one-year lifetime, from `hvault-pm2.locations.conf`) at
 - **One exposed surface.** Only Nginx publishes a port, on `127.0.0.1`. Neither MongoDB nor the
   object storage has a published port; both sit on an internal network with no route to the
   internet, so the storage engine's S3 API — which authenticates with a static key pair and has
-  none of the app's rate limiting, CSRF or session handling in front of it — is unreachable from
-  anywhere but the app container.
+  none of the app's rate limiting, CSRF or session handling in front of it — is reachable only
+  from the containers on that internal network, and only the app holds its key pair.
 - **Security headers stay intact.** Nginx serves the content-hashed `/assets/*` straight from disk
   (immutable caching, gzip, `nosniff`), but every **HTML document** is proxied to Express, which
   owns its CSP: helmet's, with a per-request nonce, `X-Frame-Options` and `Referrer-Policy`, for the
@@ -973,7 +973,8 @@ npm run create-indexes -w packages/server   # nothing does this for you here
 pm2 start ecosystem.config.cjs --env production
 ```
 
-512 MB memory restart limit, structured logs in `logs/`, cluster mode. Background jobs take
+Two workers in cluster mode, each restarted past 768 MB (the limit is per worker, sized for one
+worker's full 64 MB breach-range cache plus its ordinary heap), structured logs in `logs/`. Background jobs take
 distributed MongoDB locks, so they never double-run across instances. Startup migrations run before
 the server listens: upgrading to a version with a new one (the one that bounds the audit log builds
 its two new page indexes, then drops the two they replace) can make that first start take as long
@@ -1049,7 +1050,8 @@ and the boundary above still holds: documents are not in H-Vault's own backups.
       server to be able to create an account (`open` is the default, and the log says so at every boot)
 - [ ] `REGISTRATION_ALLOWED_DOMAINS` lists your domains, if accounts should only come from them
 
-**Email** — required for verification, password reset, account unlock and backups
+**Email** — required for verification, password reset, account unlock, backups and backup-recipient
+confirmations, security notices and update notices
 
 - [ ] `EMAIL_PROVIDER` set, and either all three SMTP fields or both Gmail fields configured
       (a partial configuration is a startup error in production)
@@ -1102,7 +1104,7 @@ start** rather than run misconfigured.
 | `SMTP_SECURE`                        | No       | auto                               | Auto-detected from the port (`true` for 465)                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `SMTP_REQUIRE_TLS`                   | No       | empty                              | Must the connection be encrypted (STARTTLS)? Empty: yes, unless `SMTP_HOST` is a loopback IP address (`127.0.0.1`, `::1`; a name, even `localhost`, is resolved through DNS and is not exempt). `true`: yes, for every relay. `false`: no, ONLY for a plaintext relay you control. A relay that cannot satisfy it gets no mail and is reported at startup                                                                                      |
 | `SMTP_TLS_CA`                        | No       | —                                  | PEM of the CA that issued the relay certificate, for a private CA: one or more certificates on one double-quoted line with `\n` line breaks (`.env.example` shows a one-line conversion). Setting it REPLACES the public roots for SMTP; unset, the public roots are used. Always verified, TLS 1.2 or later; not used with Gmail                                                                                                              |
-| `SMTP_FROM`                          | No       | —                                  | Unset, the From address is derived: `APP_NAME <noreply@SMTP_HOST>`, or `APP_NAME <noreply@hvault.local>`                                                                                                                                                                                                                                                                                                                                       |
+| `SMTP_FROM`                          | No       | —                                  | Unset, the From address is derived: `APP_NAME <GMAIL_USERNAME>` for Gmail, else `APP_NAME <noreply@SMTP_HOST>`, else `APP_NAME <noreply@hvault.local>`                                                                                                                                                                                                                                                                                         |
 | `GMAIL_USERNAME` / `PASSWORD`        | No       | —                                  | Both or neither. Use an [App Password](https://myaccount.google.com/apppasswords)                                                                                                                                                                                                                                                                                                                                                              |
 | `BACKUP_MAX_SIZE_MB`                 | No       | `25`                               | 1–100                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `BACKUP_RETENTION_DAYS`              | No       | `30`                               | 1–365                                                                                                                                                                                                                                                                                                                                                                                                                                          |
@@ -1123,7 +1125,7 @@ start** rather than run misconfigured.
 | `REGISTRATION_ALLOWED_DOMAINS`       | No       | — (any domain)                     | Comma-separated e-mail domains an address must belong to, matched exactly (a subdomain is a different domain). An address outside the list is answered exactly as a registered one is, and nothing is created or mailed                                                                                                                                                                                                                        |
 | `REGISTRATION_INVITERS`              | No       | (unset)                            | Up to 10 comma-separated account e-mails that may mint invitations in Settings while `REGISTRATION_MODE=invite`, with their master password, at most 10 a day each. The operator's `invite` command needs no listing                                                                                                                                                                                                                           |
 | `VAULT_STORAGE_QUOTA_MB_PER_USER`    | No       | `512`                              | 1–1048576. The bytes one account's vault items and folders may occupy, trashed ones included until they are purged. A change that would cross it is refused with 400; deleting, purging and key rotation never are. Documents have their own quota                                                                                                                                                                                             |
-| `UNVERIFIED_ACCOUNT_TTL_DAYS`        | No       | `7`                                | 1–365. Days an account whose address was never verified is kept; the token cleanup job (every 6 hours) then erases it, unless it owns vault, folder or document data                                                                                                                                                                                                                                                                           |
+| `UNVERIFIED_ACCOUNT_TTL_DAYS`        | No       | `7`                                | 1–365. Days an account whose address was never verified is kept; the token cleanup job (every 6 hours) then erases it, unless it owns vault, folder, document or in-progress upload data                                                                                                                                                                                                                                                       |
 | `LOG_DIRECTORY`                      | No       | `<cwd>/logs`                       | Where the rotating log files go. Relative values resolve against the process's working directory; a blank value is treated as unset. No file transports under `NODE_ENV=test`                                                                                                                                                                                                                                                                  |
 | `LOG_MODULE_FILES`                   | No       | off in production, on elsewhere    | `true` or `false`: whether each module also writes a rotating file of its own beside the one global file. Every file is bounded by count (a new one every 4 MB or day, at most 3 kept: 12 MB for the global file per server process). The Docker stack pins it to `false` in the app, whose log directory is a 64 MB tmpfs; the index bootstrap is given no such key (it loads no logger), and its 16 MB log tmpfs fits the production default |
 | `BREACH_CACHE_TTL_DAYS`              | No       | `30`                               | 1–365. Freshness window for on-demand HIBP breach-range cache entries. An on-demand entry is deleted after four windows (until then it is the fallback when HIBP is unreachable), and at most 20,000 are kept, oldest removed first; seed-imported entries are exempt from both. Run `create-indexes` after changing it                                                                                                                        |
@@ -1191,8 +1193,9 @@ start** rather than run misconfigured.
 
 ## API reference
 
-Every endpoint is under `/api/v1` (except the Swagger UI at `/api/docs`). The vault, folder, user,
-tools, backup and releases routes all require a Bearer JWT, as do five `/auth` routes — `lock`, `logout`,
+Every endpoint is under `/api/v1` (except the Swagger UI at `/api/docs`). The vault, document, folder, user,
+tools, backup (except `POST /backup/recipients/confirm`, which is public and carries its own token)
+and releases routes all require a Bearer JWT, as do five `/auth` routes — `lock`, `logout`,
 `logout-all`, `invitations` and `verify-unlock`. The rest of `/auth`, plus health, config and the CSRF token, are
 public; metrics is gated by a header token rather than a JWT. The **Auth** column below is
 authoritative. Every `/api/v1` response the application sends, errors included, carries
@@ -1228,8 +1231,8 @@ such header (a probe, a scraper, `curl`) is unaffected.
 
 | Method | Endpoint                      | Description                                                                                                 |
 | ------ | ----------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| GET    | `/vault/items`                | List (paginated; filter by type, folder, favorite; max 200)                                                 |
-| GET    | `/vault/items/trash`          | List soft-deleted items                                                                                     |
+| GET    | `/vault/items`                | List (paginated, max 200; filter by type, folder, favorite or `trash`; sortable)                            |
+| GET    | `/vault/items/trash`          | List soft-deleted items (paginated, max 200; newest deletion first by default; sortable)                    |
 | GET    | `/vault/items/:id`            | Fetch one item                                                                                              |
 | POST   | `/vault/items`                | Create                                                                                                      |
 | PUT    | `/vault/items/:id`            | Update (encrypted payload, or metadata only)                                                                |
@@ -1331,21 +1334,21 @@ Treat it as a nudge for your own users, not as a control at the API boundary.
 <details>
 <summary><b>Tools and backup</b> — <code>/api/v1/tools</code>, <code>/api/v1/backup</code></summary>
 
-| Method | Endpoint                             | Description                                            |
-| ------ | ------------------------------------ | ------------------------------------------------------ |
-| POST   | `/tools/check-password-breach`       | HaveIBeenPwned k-anonymity check (5-char hash prefix)  |
-| POST   | `/tools/check-password-breach/batch` | Batched HaveIBeenPwned check (many 5-char prefixes)    |
-| POST   | `/tools/export`                      | Encrypted JSON export (master password required)       |
-| POST   | `/tools/import`                      | Execute already-resolved import operations (see below) |
-| POST   | `/backup/setup`                      | Configure backup encryption (master password required) |
-| PUT    | `/backup/settings`                   | Schedule and on/off switch                             |
-| PUT    | `/backup/recipients`                 | Replace the recipients (master password required)      |
-| POST   | `/backup/recipients/confirm`         | A recipient confirms its address (public, token)       |
-| POST   | `/backup/trigger`                    | Create a backup and email it                           |
-| GET    | `/backup/download`                   | Download an encrypted backup file                      |
-| GET    | `/backup/history`                    | Backup history (paginated)                             |
-| PUT    | `/backup/change-password`            | Change the backup password                             |
-| POST   | `/backup/restore`                    | Restore from an encrypted backup                       |
+| Method | Endpoint                             | Description                                                                                           |
+| ------ | ------------------------------------ | ----------------------------------------------------------------------------------------------------- |
+| POST   | `/tools/check-password-breach`       | HaveIBeenPwned k-anonymity check (5-char hash prefix)                                                 |
+| POST   | `/tools/check-password-breach/batch` | Batched HaveIBeenPwned check (many 5-char prefixes)                                                   |
+| POST   | `/tools/export`                      | Encrypted JSON export (master password required)                                                      |
+| POST   | `/tools/import`                      | Execute already-resolved import operations (see below)                                                |
+| POST   | `/backup/setup`                      | Configure backup encryption (master password required)                                                |
+| PUT    | `/backup/settings`                   | Schedule and on/off switch (a `backupEmails` field is refused with 400; use `PUT /backup/recipients`) |
+| PUT    | `/backup/recipients`                 | Replace the recipients (master password required)                                                     |
+| POST   | `/backup/recipients/confirm`         | A recipient confirms its address (public, token)                                                      |
+| POST   | `/backup/trigger`                    | Create a backup and email it                                                                          |
+| GET    | `/backup/download`                   | Download an encrypted backup file                                                                     |
+| GET    | `/backup/history`                    | Backup history (paginated)                                                                            |
+| PUT    | `/backup/change-password`            | Change the backup password                                                                            |
+| POST   | `/backup/restore`                    | Restore from an encrypted backup                                                                      |
 
 `POST /tools/import` takes `{ format, conflictStrategy, operations: { inserts, updates } }`, plus
 an optional `vaultKeyVersion` and an `idNonce` on each insert, and answers
@@ -1371,14 +1374,14 @@ the current vault and send only what is left.
 <details>
 <summary><b>Public and operational</b></summary>
 
-| Method | Endpoint             | Auth  | Description                                                                                                              |
-| ------ | -------------------- | ----- | ------------------------------------------------------------------------------------------------------------------------ |
-| GET    | `/api/v1/csrf-token` | No    | Fetch a CSRF token for state-changing requests                                                                           |
-| GET    | `/api/v1/config`     | No    | Public config (the File Encryption size guardrail and the document-store limits)                                         |
-| GET    | `/api/v1/health`     | No    | Health check: status and database connectivity, the same fields in every mode (no uptime, no version)                    |
-| GET    | `/api/v1/metrics`    | Token | Server metrics (uptime, memory, database, object storage) — `x-metrics-token` header; 404s unless `METRICS_TOKEN` is set |
-| GET    | `/api/docs`          | No    | Swagger UI (dev/test, or `ENABLE_SWAGGER=true`)                                                                          |
-| GET    | `/api/v1/docs.json`  | No    | The OpenAPI 3.0.3 document                                                                                               |
+| Method | Endpoint             | Auth  | Description                                                                                                                                                                                    |
+| ------ | -------------------- | ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| GET    | `/api/v1/csrf-token` | No    | Fetch a CSRF token for state-changing requests                                                                                                                                                 |
+| GET    | `/api/v1/config`     | No    | Public config (the File Encryption size guardrail and the document-store limits)                                                                                                               |
+| GET    | `/api/v1/health`     | No    | Health check: status and database connectivity, the same fields in every mode (no uptime, no version)                                                                                          |
+| GET    | `/api/v1/metrics`    | Token | Server metrics (uptime, memory, database, object storage, deployment mode, proxy-misconfiguration flag, vault storage snapshot) — `x-metrics-token` header; 404s unless `METRICS_TOKEN` is set |
+| GET    | `/api/docs`          | No    | Swagger UI (dev/test, or `ENABLE_SWAGGER=true`)                                                                                                                                                |
+| GET    | `/api/v1/docs.json`  | No    | The OpenAPI 3.0.3 document                                                                                                                                                                     |
 
 </details>
 
@@ -1413,7 +1416,7 @@ Twenty tiers, all but the two diagnostic ones backed by MongoDB so they hold acr
 cluster. IP-keyed limiters collapse an IPv6 address to its `/64` prefix, so rotating the source
 address inside one allocation does not buy an attacker a fresh bucket.
 
-Three rules govern where a limiter goes, and all three were learned the hard way:
+Four rules govern where a limiter goes, and all four were learned the hard way:
 
 - **A budget for credential attempts is never shared with session maintenance.** The auth tier counts
   what a person deliberately submits — a password, or a request for an email link. Token refresh and
@@ -1449,14 +1452,14 @@ Three rules govern where a limiter goes, and all three were learned the hard way
 | Token verify     | 20 / IP       | 15 min | verify-email, reset-password, unlock-account, 2FA login, backup recipient confirmation                                                                                                                                                                                                                                                                                                           |
 | Refresh          | 200 / IP      | 15 min | token refresh — keyed by IP alone (the one identity an unauthenticated caller cannot forge), so it is shared by everyone behind one egress address; sized for ~60 open tabs                                                                                                                                                                                                                      |
 | Unlock           | 5 / user      | 5 min  | vault unlock verification                                                                                                                                                                                                                                                                                                                                                                        |
-| Password verify  | 5 / user      | 15 min | every re-authentication: change password, 2FA setup/disable/regenerate, delete account, export, vault key rotation, backup setup/restore/change-password/recipients, security email preferences                                                                                                                                                                                                  |
+| Password verify  | 5 / user      | 15 min | every re-authentication: change password, 2FA setup/disable/regenerate, delete account, export, vault key rotation, backup setup/restore/change-password/recipients, security email preferences, invitation minting                                                                                                                                                                              |
 | Breach check     | 30 / user     | 15 min | HaveIBeenPwned lookups (single prefix)                                                                                                                                                                                                                                                                                                                                                           |
 | Breach batch     | 300 / user    | 15 min | batched HaveIBeenPwned lookups — sized to cover a full-vault scan (many prefixes per request) without a partial result                                                                                                                                                                                                                                                                           |
-| General auth     | 60 / user     | 1 min  | profile, settings, sessions, trusted devices, audit log, folder list, document list, document trash, document usage, one document's metadata, backup settings and history, the four release routes, lock, logout, logout-all                                                                                                                                                                     |
+| General auth     | 60 / user     | 1 min  | profile, settings, sessions, trusted devices, audit log, folder list, document list, document trash, document usage, one document's metadata, the transfers in progress and one transfer, renaming, moving or favouriting a document, trashing, restoring and permanently deleting one document, backup settings and history, the four release routes, lock, logout, logout-all                  |
 | Heavy Ops        | 10 / user     | 15 min | empty trash (vault and documents), bulk delete, bulk move, export, backup trigger, backup download; keyed by account, so two people behind one address never share it                                                                                                                                                                                                                            |
 | Import           | 60 / user     | 15 min | vault import — a dedicated, larger budget because a big migration is sent as several encrypted batches                                                                                                                                                                                                                                                                                           |
 | Vault item write | 20,000 / user | 15 min | creating, editing, trashing, restoring and permanently deleting a vault item. Derived: two passes over the most items an account may hold, because the app sends one request per item for a bulk tag or a trash purge, and a smaller budget would stop one part-way through                                                                                                                      |
-| Folder write     | 1,000 / user  | 15 min | creating, renaming, deleting and re-sorting a folder. Derived the same way: two drags that re-sort every folder an account may hold                                                                                                                                                                                                                                                              |
+| Folder write     | 1,000 / user  | 15 min | creating, renaming or re-parenting, deleting and re-sorting a folder. Derived the same way: two drags that re-sort every folder an account may hold                                                                                                                                                                                                                                              |
 | Vault list       | 3,100 / user  | 15 min | listing vault items and the trash, one page (up to 200 rows) per request. Derived: the fifty pages the largest vault takes at 200 a page, 62 times over: the app re-reads the whole vault, and the first page of the trash, every time the vault page opens, so this allows one visit to the largest vault every fifteen seconds for the whole window. Not the general tier, which logout shares |
 | 2FA setup        | 20 / user     | 15 min | confirming the code that finishes 2FA setup                                                                                                                                                                                                                                                                                                                                                      |
 | Document upload  | 120 / user    | 15 min | opening, completing and cancelling a document transfer — three requests per document whatever its size                                                                                                                                                                                                                                                                                           |
@@ -1531,7 +1534,8 @@ h-vault/
 │   │   │   │                    #   body sanitising, upload and 30 MB request admission
 │   │   │   ├── models/          #   User, VaultItem, Folder, Document, DocumentUpload,
 │   │   │   │                    #   RefreshToken, TrustedDevice, AuditLog, BackupLog,
-│   │   │   │                    #   JobLock, Migration, PwnedRangeCache, UpdateCheckState
+│   │   │   │                    #   JobLock, Migration, PwnedRangeCache, UpdateCheckState,
+│   │   │   │                    #   Invitation, Challenge, DeviceProof
 │   │   │   ├── routes/          #   Express routers
 │   │   │   ├── services/        #   auditService
 │   │   │   ├── jobs/            #   backup scheduler, token cleanup, trash purge, document GC, release check,
@@ -1557,7 +1561,7 @@ h-vault/
 │       │   │   ├── tools/       #   FileEncryptPanel, FileDecryptPanel
 │       │   │   └── ui/          #   Button, Card, Input, Dialog, Toast, Tabs, Badge…
 │       │   ├── sandbox/         #   the isolated viewer: renderers, decode/sniff, format-and-repair, QR scan
-│       │   ├── pages/           #   21 route pages, all lazy-loaded
+│       │   ├── pages/           #   22 route pages, all lazy-loaded
 │       │   ├── hooks/           #   useAutoLock, useClipboardGuard, useClipboardCountdown,
 │       │   │                    #   useKeyboardShortcuts, useUserSettings,
 │       │   │                    #   useConnectionStatus, useFavicon
@@ -1602,14 +1606,14 @@ npm run test:e2e                # Playwright
 
 | Suite      | Files | What it covers                                                                                                                                                                                                                                                                                                                                                                             |
 | ---------- | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Server** | 255   | Supertest against an in-memory MongoDB: auth, refresh reuse detection, vault and folder CRUD, cycle and depth guards, 2FA, backup/restore atomicity and cross-account restore, import/export, cross-user isolation, concurrent operations, rate limiters, background jobs, CSRF, config validation, and the Docker/pipeline invariants                                                     |
-| **Client** | 204   | jsdom: crypto round-trips (IV uniqueness, tamper detection), stores, hooks, Axios interceptors, offline cache, accessibility, entropy metering, the import parsers + identity/conflict resolution + client-side import encryption, and the file-encryption tool against the **real** crypto library                                                                                        |
+| **Server** | 261   | Supertest against an in-memory MongoDB: auth, refresh reuse detection, vault and folder CRUD, cycle and depth guards, 2FA, backup/restore atomicity and cross-account restore, import/export, cross-user isolation, concurrent operations, rate limiters, background jobs, CSRF, config validation, and the Docker/pipeline invariants                                                     |
+| **Client** | 206   | jsdom: crypto round-trips (IV uniqueness, tamper detection), stores, hooks, Axios interceptors, offline cache, accessibility, entropy metering, the import parsers + identity/conflict resolution + client-side import encryption, and the file-encryption tool against the **real** crypto library                                                                                        |
 | **Shared** | 21    | Schemas, constants, utilities, barrel exports                                                                                                                                                                                                                                                                                                                                              |
 | **E2E**    | 25    | Playwright, Chromium over all of it plus a Firefox leg over the clipboard and auto-lock specs: full auth, vault, folder, 2FA, import/export, backup/restore, lock/unlock, address-field and file-encryption journeys, plus the encrypted document store — upload, byte-exact download, the format-and-repair review, trash/restore/purge, a quota refusal — and the isolated preview frame |
 
 **Files** counts every test file each suite owns on disk, which is not the same as the number the
 command above runs: the server's default Vitest config excludes `tests/resource/**` and
-`tests/storage/**`, so `npm run test -w packages/server` collects fewer than the 255 on disk and
+`tests/storage/**`, so `npm run test -w packages/server` collects fewer than the 261 on disk and
 those two directories run under their own gates (`test:resource`, `test:storage`). The number of
 test _cases_ is a third figure again, and it is ratcheted rather than written down here —
 `.testfortress/baseline.json`'s `tests.count` is a floor fed from the JUnit reports, and it only
@@ -1728,7 +1732,8 @@ npm run ci:local                # a temporary worktree at HEAD + `npm ci` + veri
 platform, a tool cache that no longer matches the pinned version, a file mode inherited from the
 checkout. Uncommitted work is not in it — the subject is the commit — and it says so before it starts.
 
-Gates run in the order above and the runner **aggregates**: every selected gate runs and every
+Gates run in the order `npm run ci -- --list` prints (the order they are registered in, not this
+table's) and the runner **aggregates**: every selected gate runs and every
 failure is reported, rather than the run stopping at the first one. Exit `0` is a pass, `1` means
 a gate failed, and `2` means a gate **could not run** — a missing prerequisite, a misconfiguration,
 or a gate that passed without writing the report it declares.
@@ -2292,7 +2297,7 @@ Scratch on a real disk is slower than on a tmpfs. That is the right trade: the
 datastore gates take longer, and they run.
 
 **Free ports 27017 and 5000.** The E2E harness binds an in-memory MongoDB to 27017 and
-the API to 5000 — two of the three ports `docker-compose.dev.yml` publishes on loopback.
+the API to 5000 — two of the four ports `docker-compose.dev.yml` publishes on loopback.
 If something is already on 27017 the harness **adopts it** rather than failing —
 `port 27017 is busy — assuming a real MongoDB is running` — and writes into that server's
 `hvault` database, which on a box that also runs the dev stack is a live database rather
@@ -2382,7 +2387,7 @@ EOF
 sh ~/hvault-preflight.sh
 ```
 
-Then run the real thing once, because eighty-two seconds of truth beats any probe:
+Then run the real thing once, because seventy-eight seconds of truth beats any probe:
 
 ```bash
 npm run verify:fast
@@ -2499,7 +2504,7 @@ systemd-inhibit --list | grep h-vault     # the lock is held while the run is
 
 ### Watch it from anywhere
 
-The runner streams. It prints a `[n/39]` step line for each gate as it starts, the
+The runner streams. It prints a `[n/41]` step line for each gate as it starts, the
 gate's own output beneath it, and a pass or fail line with a duration when it ends. A
 boxed summary table and the tier budget comparison come last.
 
@@ -2529,12 +2534,12 @@ the launcher is the only unambiguous signal that this run is over.
 
 **The step counter is not a clock either.** Gates run in the order `npm run ci -- --list`
 prints, which interleaves the tiers rather than running T0, then T1, then T2 — and the three
-longest gates in the repository sit at positions 34, 35 and 36 of 39 (`flake`, `mutation`,
-`mutation-diff`). A `verify:full` that has been on `[35/39]` for four hours is not stuck; it
-is doing the thing you asked for. The same run reaching `[32/39]` in half an hour is
+longest gates in the repository sit at positions 36, 37 and 38 of 41 (`flake`, `mutation`,
+`mutation-diff`). A `verify:full` that has been on `[37/41]` for four hours is not stuck; it
+is doing the thing you asked for. The same run reaching `[34/41]` in half an hour is
 likewise normal, and tells you almost nothing about how much is left. A gate skipped by
 name prints no step line at all, so a run with `mutation` skipped goes straight from
-`[34/39]` to `[36/39]`; the skip appears in the summary table and in `summary.json`.
+`[36/41]` to `[38/41]`; the skip appears in the summary table and in `summary.json`.
 
 **Distinguishing slow from stuck** needs one number: how long the gate named on the
 last step line is expected to take. These are the longest, measured on one `verify:full`

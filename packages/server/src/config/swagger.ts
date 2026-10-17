@@ -456,6 +456,14 @@ const RESEAL_LOCK_BUSY =
 const VAULT_QUOTA_NOTE =
   'A write that would grow the vault past the account storage quota (`VAULT_STORAGE_QUOTA_MB_PER_USER`, counting the items and folders the account stores, trashed ones included until they are purged) is refused with 400 and the message "Storage limit reached: delete items or empty the trash to make room, then try again. ...". A write that does not grow the vault is never refused for the quota.';
 
+/**
+ * The per-account row caps (F-15), said once for the two creates that spend one.
+ * Decided by the same conditional update as the byte quota, so concurrent creates
+ * can never pass it together.
+ */
+const ROW_LIMIT_NOTE = (kind: 'item' | 'folder', cap: number): string =>
+  `A create past the account's limit of ${cap.toLocaleString('en-US')} ${kind}s${kind === 'item' ? ' (trashed ones included until they are purged)' : ''} is refused with 400 and the message "${kind === 'item' ? 'Item' : 'Folder'} limit reached. You can have a maximum of ${String(cap)} ${kind}s."`;
+
 /** The answer to an update that lost its row to other writers on every attempt. */
 const ROW_CHANGED_CONFLICT =
   'The same status, carrying no `data`, also answers an update whose row other requests kept changing while it was being saved (three attempts); reload and retry.';
@@ -1097,6 +1105,13 @@ export const swaggerSpec: JsonObject = {
           kdfAlgorithm: { type: 'string' },
           encryptionVersion: { type: 'integer' },
           vaultKeyVersion: { type: 'integer', minimum: 0 },
+          encryptedVaultKey: {
+            type: 'string',
+            description:
+              'The account vault key, wrapped under the MEK derived from the master password (AES-256-GCM, base64). The client unwraps it to resume a session and to prove a re-seal keeps the same key.',
+          },
+          vaultKeyIv: { type: 'string' },
+          vaultKeyTag: { type: 'string' },
           interruptedRotation: {
             type: 'boolean',
             description:
@@ -1603,7 +1618,7 @@ export const swaggerSpec: JsonObject = {
             type: 'object',
             additionalProperties: true,
             description:
-              "Per action. `token_reuse_detected` (a refresh token presented again after it was rotated, so its family, every trusted device and every sign-in proof were revoked): `familyIdHash` (the first 16 hex characters of the SHA-256 of the revoked family id, never the id or any token), `sessionsRevoked` and `trustedDevicesRevoked` (what this detection revoked; a second replay racing it may have revoked some first) and `revokedDeviceInfo` (`userAgent`, `ip`: the browser the family was issued to; the row's own `ipAddress` and `userAgent` are those of the request that replayed the token). `session_revoke` (log out everywhere) carries `sessionsRevoked` and `trustedDevicesRevoked`; `password_change` with `method` `reset` carries `trustedDevicesRevoked`.",
+              "Per action. `token_reuse_detected` (a refresh token presented again after it was rotated, so its family, every trusted device and every device proof were revoked): `familyIdHash` (the first 16 hex characters of the SHA-256 of the revoked family id, never the id or any token), `sessionsRevoked` and `trustedDevicesRevoked` (what this detection revoked; a second replay racing it may have revoked some first) and `revokedDeviceInfo` (`userAgent`, `ip`: the browser the family was issued to; the row's own `ipAddress` and `userAgent` are those of the request that replayed the token). `session_revoke` (log out everywhere) carries `sessionsRevoked` and `trustedDevicesRevoked`; `password_change` with `method` `reset` carries `trustedDevicesRevoked`.",
           },
           ipAddress: { type: 'string' },
           userAgent: { type: 'string' },
@@ -2701,6 +2716,11 @@ export const swaggerSpec: JsonObject = {
           'Returns server health status and database connectivity, with the same body fields in every mode: no version, no uptime and no mode (those are on the token-gated /metrics). Only the body is uniform: outside production the rate limiter is off, so the response carries no RateLimit-* headers there.',
         responses: {
           200: jsonEnvelope('Server is healthy', { $ref: '#/components/schemas/HealthResponse' }),
+          503: jsonEnvelope(
+            'The database is unreachable: the same three fields, with `status` "error" and `database` "disconnected", and `success` false.',
+            { $ref: '#/components/schemas/HealthResponse' },
+            { success: { type: 'boolean', example: false } },
+          ),
           429: { $ref: '#/components/responses/RateLimited' },
         },
       },
@@ -2857,6 +2877,9 @@ export const swaggerSpec: JsonObject = {
           401: errorResponse(
             'Invalid email or password. The same status and message answer an account whose deletion is still being completed, an account whose email is not yet verified (and, only once the password was correct and no lockout applies, with `data: { reason: "email_not_verified" }` so the client can say what to do), and EVERY sign-in without a device proof while the password is locked, right password or wrong.',
           ),
+          403: errorResponse(
+            'The CSRF token is missing or invalid. Never a lockout: a password lockout answers 401 as above.',
+          ),
           429: { $ref: '#/components/responses/RateLimited' },
         },
       },
@@ -2889,9 +2912,11 @@ export const swaggerSpec: JsonObject = {
           400: errorResponse(
             'The body failed schema validation, or the account no longer has two-factor authentication enabled (`TWO_FA_NOT_ENABLED`).',
           ),
-          401: { $ref: '#/components/responses/Unauthorized' },
+          401: errorResponse(
+            'The temp token is invalid, expired or already spent (`TOKEN_INVALID`, the code unread), or the code is wrong or was already used in this time step (`TWO_FA_INVALID`, counted toward the second-factor lockout).',
+          ),
           403: errorResponse(
-            '`ACCOUNT_LOCKED`: the SECOND factor is locked after too many wrong codes (counted here and at every other code check). The password is already proven at this step, so naming the lock confirms nothing; a PASSWORD lockout does not refuse this step.',
+            '`ACCOUNT_LOCKED`: the SECOND factor is locked after too many wrong codes (counted here and at every other code check). The password is already proven at this step, so naming the lock confirms nothing; a PASSWORD lockout does not refuse this step. The same status also answers a missing or invalid CSRF token.',
           ),
           429: { $ref: '#/components/responses/RateLimited' },
         },
@@ -2903,7 +2928,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Auth'],
         summary: 'Refresh access token',
         description:
-          'Exchanges a valid refresh token (httpOnly cookie) for a new access token. Implements token rotation with reuse detection (a replayed token revokes its whole family, every trusted device and every device proof of the account). The account is evaluated BEFORE the presented token is claimed, so a refusal costs nothing. A lockout of either factor never refuses a refresh: the cookie is itself proof of a prior authentication.',
+          'Exchanges a valid refresh token (httpOnly cookie) for a new access token. Implements token rotation with reuse detection (a replayed token revokes its whole family, every trusted device and every device proof of the account, and records one `token_reuse_detected` audit entry with the address and user agent of the replaying request, never a token; a token spent more than 7 days ago is simply refused). The account is evaluated BEFORE the presented token is claimed, so a refusal costs nothing. A lockout of either factor never refuses a refresh: the cookie is itself proof of a prior authentication.',
         responses: {
           200: {
             description:
@@ -2915,6 +2940,9 @@ export const swaggerSpec: JsonObject = {
             },
           },
           401: { $ref: '#/components/responses/Unauthorized' },
+          403: errorResponse(
+            'The CSRF token is missing, invalid or not bound to the presented refresh cookie. Never a lockout.',
+          ),
           429: { $ref: '#/components/responses/RateLimited' },
         },
       },
@@ -2995,6 +3023,9 @@ export const swaggerSpec: JsonObject = {
             'Not authenticated, or the master-password proof is wrong (the failure is audited). Nothing is stored.',
           ),
           403: errorResponse('This account is not listed in REGISTRATION_INVITERS.'),
+          404: errorResponse(
+            'The account was deleted while the request was in flight ("User not found").',
+          ),
           409: errorResponse(
             'The server does not register by invitation, or another invitation for this inviter is being minted at this moment.',
           ),
@@ -3014,6 +3045,7 @@ export const swaggerSpec: JsonObject = {
         requestBody: jsonRequestBody('VerifyEmailRequest'),
         responses: {
           200: successResponse('Email verified'),
+          403: { $ref: '#/components/responses/Forbidden' },
           400: { $ref: '#/components/responses/ValidationError' },
           429: { $ref: '#/components/responses/RateLimited' },
         },
@@ -3029,6 +3061,7 @@ export const swaggerSpec: JsonObject = {
         requestBody: jsonRequestBody('ResendVerificationRequest'),
         responses: {
           200: successResponse('Verification email sent (generic response for all inputs)'),
+          403: { $ref: '#/components/responses/Forbidden' },
           429: { $ref: '#/components/responses/RateLimited' },
         },
       },
@@ -3043,6 +3076,7 @@ export const swaggerSpec: JsonObject = {
         requestBody: jsonRequestBody('ForgotPasswordRequest'),
         responses: {
           200: successResponse('Reset email sent (generic response for all inputs)'),
+          403: { $ref: '#/components/responses/Forbidden' },
           429: { $ref: '#/components/responses/RateLimited' },
         },
       },
@@ -3057,6 +3091,7 @@ export const swaggerSpec: JsonObject = {
         requestBody: jsonRequestBody('ResetPasswordRequest'),
         responses: {
           200: successResponse('Password reset successful'),
+          403: { $ref: '#/components/responses/Forbidden' },
           400: { $ref: '#/components/responses/ValidationError' },
           429: { $ref: '#/components/responses/RateLimited' },
         },
@@ -3072,6 +3107,7 @@ export const swaggerSpec: JsonObject = {
         requestBody: jsonRequestBody('UnlockAccountRequest'),
         responses: {
           200: successResponse('Account unlocked'),
+          403: { $ref: '#/components/responses/Forbidden' },
           400: { $ref: '#/components/responses/ValidationError' },
           429: { $ref: '#/components/responses/RateLimited' },
         },
@@ -3123,7 +3159,7 @@ export const swaggerSpec: JsonObject = {
         operationId: 'createVaultItem',
         tags: ['Vault'],
         summary: 'Create vault item',
-        description: `Creates a new encrypted vault item. ${VAULT_QUOTA_NOTE} ${ITEM_WRITE_BUDGET}`,
+        description: `Creates a new encrypted vault item. ${VAULT_QUOTA_NOTE} ${ROW_LIMIT_NOTE('item', MAX_ITEMS_PER_USER)} ${ITEM_WRITE_BUDGET}`,
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: jsonRequestBody('CreateVaultItemRequest'),
         responses: {
@@ -3378,7 +3414,7 @@ export const swaggerSpec: JsonObject = {
         operationId: 'createFolder',
         tags: ['Folders'],
         summary: 'Create folder',
-        description: `Creates a new folder for organizing vault items. ${VAULT_QUOTA_NOTE} ${FOLDER_WRITE_BUDGET}`,
+        description: `Creates a new folder for organizing vault items. ${VAULT_QUOTA_NOTE} ${ROW_LIMIT_NOTE('folder', MAX_FOLDERS_PER_USER)} ${FOLDER_WRITE_BUDGET}`,
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: jsonRequestBody('CreateFolderRequest'),
         responses: {
@@ -3496,7 +3532,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['User'],
         summary: 'Update user settings',
         description:
-          'Updates user preferences such as theme, auto-lock timeout, and password generation defaults.',
+          'Updates user preferences such as theme, auto-lock timeout, password generation defaults and the security emails (`notifications`). Turning OFF a critical security email (one that signals a stolen password or session, or a change only the password holder could make) is refused here with 400, and nothing is written: that needs `PUT /user/notifications` and the master password. Turning any of them back on is accepted.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: jsonRequestBody('UserSettings'),
         responses: {
@@ -3506,6 +3542,9 @@ export const swaggerSpec: JsonObject = {
           ),
           401: { $ref: '#/components/responses/Unauthorized' },
           400: { $ref: '#/components/responses/ValidationError' },
+          404: errorResponse(
+            'The account was deleted while the request was in flight ("User not found").',
+          ),
           429: { $ref: '#/components/responses/RateLimited' },
         },
       },
@@ -3847,6 +3886,9 @@ export const swaggerSpec: JsonObject = {
           401: { $ref: '#/components/responses/Unauthorized' },
           400: { $ref: '#/components/responses/ValidationError' },
           429: BREACH_LOOKUP_REFUSED,
+          '5XX': errorResponse(
+            'Have I Been Pwned could not be reached and no earlier copy of the range is cached: the lookup failed, and is never reported as safe.',
+          ),
         },
       },
     },
@@ -4110,6 +4152,7 @@ export const swaggerSpec: JsonObject = {
         requestBody: jsonRequestBody('ConfirmBackupRecipientRequest'),
         responses: {
           200: successResponse('Address confirmed (the body names no account)'),
+          403: { $ref: '#/components/responses/Forbidden' },
           400: errorResponse(
             'The token is invalid, expired, already used, superseded, or its address is no longer waiting to confirm. All of these are answered the same way.',
           ),
@@ -4150,8 +4193,12 @@ export const swaggerSpec: JsonObject = {
           409: HEAVY_RESPONSE_BUSY,
           413: errorResponse('The backup would exceed BACKUP_MAX_SIZE_MB. Nothing is sent.'),
           200: {
-            description: 'Encrypted backup file',
+            description:
+              'Encrypted backup file, sent as `application/json` with `Content-Disposition: attachment; filename="hvault-backup-<timestamp>.enc"`: a JSON document whose rows are ciphertext. `application/octet-stream` is kept from earlier revisions of this document and is never sent.',
             content: {
+              'application/json': {
+                schema: { type: 'object', additionalProperties: true },
+              },
               'application/octet-stream': {
                 schema: { type: 'string', format: 'binary' },
               },
@@ -4259,7 +4306,8 @@ export const swaggerSpec: JsonObject = {
           400: { $ref: '#/components/responses/ValidationError' },
           409: staleVaultKeyConflict(
             'A restore never replaces the vault key, which is exactly why the generation matters here: the rows arrive already re-encrypted under whichever key the client held, so a rotation that commits in between would strand every one of them. The same status, carrying no `data`, also reports a vault-key rotation currently in progress; a backup carrying a field sealed to its row (an IV beginning `v2:`), which only a client that could not open it sends unchanged and which a restore under a fresh id would leave unreadable; and, before the body is read, a restore or key rotation this account already has in flight.' +
-              RESEAL_LOCK_BUSY,
+              RESEAL_LOCK_BUSY +
+              ' It also answers an overwrite whose row other requests kept changing while the restore saved it (three attempts); the rows restored before it stay restored.',
           ),
           429: { $ref: '#/components/responses/RateLimited' },
         },

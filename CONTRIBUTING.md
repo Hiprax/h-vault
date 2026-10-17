@@ -338,25 +338,31 @@ because the obvious way past each of them is the wrong one.
   provider-specific patterns, so a real finding is answered the same way: rotate first. A
   finding that is genuinely a test fixture is allowlisted in exactly one way: its
   commit-pinned fingerprint (`<commit>:<file>:<rule>:<line>`, which the gate prints) on its
-  own line in `.gitleaksignore`, plus one entry in `.testfortress/suppressions.json`
-  (rule `IGNORE-FILE-GITLEAKS`, the fingerprint as its symbol) saying what the line is.
+  own line in `.gitleaksignore`, plus an entry in `.testfortress/suppressions.json`
+  (rule `IGNORE-FILE-GITLEAKS`) saying what the line is. The entry's symbol is either that
+  exact fingerprint, or, for several findings in one file at one commit, the prefix
+  `<commit>:<file>:<rule>:` ending at the colon before the line number, with `maxHits` equal
+  to the number of lines it covers; any other symbol (a bare rule, commit or path) is
+  refused, because it could excuse a finding nobody has read.
   An inline `gitleaks:allow` comment, a `.gitleaks.toml`, a fingerprint without its commit
   and a `GITLEAKS_CONFIG` variable are all refused or ignored, because each would excuse a
   line nobody reviewed. Do not quote the flagged value in the ledger's `reason`: once
   committed, that text is a new finding. Describe it instead (its first four characters and
-  its length). It needs `gitleaks` on your `PATH` and a full clone; without either the gate
-  reports **could not run**.
+  its length). It needs `gitleaks` 8.30.1 (the version `release.yml` pins) on your `PATH`
+  and a full clone; without either the gate exits 2, **could not run**, and it is never
+  reported as skipped (only `sast` may be).
 - **`osv`** asks the OSV database about every package in `package-lock.json`, development
   tooling included, and fails on any advisory of any severity. **Upgrade the package**, or
   the dependency that pulls it in, until the version leaves the lockfile; an
   `osv-scanner.toml` is deliberately not honoured. Only an advisory with **no fixed
   release** may be accepted, and only by a `VULN-ACCEPT` entry in
   `.testfortress/suppressions.json` whose symbol is exactly `<advisory id> <name>@<version>`,
-  with a reviewer and an expiry at most thirty days out. The gate re-checks every one of
+  `file` `package-lock.json`, `maxHits` equal to the findings it excuses (1 for a single package version), a reviewer, real calendar dates and an expiry at
+  most thirty days out, one entry per advisory. The gate re-checks every one of
   those itself and goes red on an entry that no longer excuses anything, so an acceptance is
-  re-read monthly and removed the day a fix ships. It needs `osv-scanner` on your `PATH`
-  and network access to the OSV database; without either the gate reports **could not
-  run**.
+  re-read monthly and removed the day a fix ships. It needs `osv-scanner` 2.4.0 (the version `release.yml` pins) on your
+  `PATH` and network access to the OSV database; without either the gate exits 2, **could
+  not run**, and it is never reported as skipped.
 
 ### Escape hatches
 
@@ -372,7 +378,7 @@ documenting its own defeat. The hatches themselves are unchanged and still work.
 | `HUSKY=0` in the environment        | Disables every hook, including pre-commit. The bluntest of the three.                                   |
 
 The first is the one to reach for: it is scoped, it is visible in the run summary, and it
-leaves the other twenty-nine gates in place. **Say so in the pull request description
+leaves every other gate in place. **Say so in the pull request description
 whenever you use any of them**, and name the gate you skipped and why. A skipped gate is
 a claim someone else now has to check.
 
@@ -414,7 +420,16 @@ is listed in SECURITY.md; those are not pins this procedure moves.)
   `gh api repos/<owner>/<repo>/releases/tags/v<version> --jq '.assets[] | "\(.name) \(.digest)"'`,
   and against `sha256sum` of a copy you downloaded yourself. All three must agree, or the
   pin does not move. Never compute a hash from a download alone. Never copy one from
-  anywhere but the release itself.
+  anywhere but the release itself. Move the version, in the same commit, everywhere a
+  contributor is told to install it: README's prerequisites table and its version-check
+  block, the install hint in `scripts/ci/local-ci.mjs` `PREREQUISITES`, and, for `gitleaks`
+  and `osv-scanner`, the `INSTALL_HINT` in the gate's own script
+  (`scripts/ci/gitleaks-gate.mjs`, `scripts/ci/osv-gate.mjs`). `local-pipeline.test.ts`
+  holds the README prerequisites table equal to the workflow for every tool, but the
+  version-check block and the install hints only for `gitleaks`, `osv-scanner` and
+  `diff-cover`: for `actionlint`, `hadolint` and `oasdiff`, nothing catches a stale line in
+  README's version-check block, so move it by hand. A new scanner version can report different findings, so re-run its gate
+  and `npm run audit:ratchet` before committing.
 - **`diff-cover`.** Edit the version in `scripts/ci/requirements-diff-cover.in`. Then
   regenerate the locked file, which pins every dependency and every hash:
 
@@ -430,6 +445,10 @@ is listed in SECURITY.md; those are not pins this procedure moves.)
   python3 -m venv /tmp/dc && /tmp/dc/bin/pip install --require-hashes --no-deps \
     --only-binary=:all: -r scripts/ci/requirements-diff-cover.txt && /tmp/dc/bin/pip check
   ```
+
+  Then update every `diff-cover==` spelling to the new version (README, this file, and the
+  install hint in `scripts/ci/local-ci.mjs`); `local-pipeline.test.ts` holds them equal to
+  the lock.
 
   Do not install it through `pipx install --pip-args=...`. pipx passes the package as a
   positional requirement, which carries no hash, and in hash-checking mode pip refuses the

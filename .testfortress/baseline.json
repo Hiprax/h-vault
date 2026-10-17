@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "recordedAt": "2026-10-16",
-  "commit": "183495e",
+  "recordedAt": "2026-10-17",
+  "commit": "d6c02b1",
   "tests": {
-    "count": 13448
+    "count": 13454
   },
   "coverage": {
     "diff": 100
@@ -57,10 +57,10 @@
     "packages/server": {
       "coverage": {
         "line": 99.39,
-        "branch": 94.77,
-        "function": 98.97,
-        "linesTotal": 6597,
-        "branchesTotal": 3636,
+        "branch": 94.78,
+        "function": 98.98,
+        "linesTotal": 6599,
+        "branchesTotal": 3640,
         "filesMeasured": [
           "src/app.ts",
           "src/cli/invite.ts",
@@ -194,7 +194,7 @@
         ]
       },
       "tests": {
-        "count": 5904
+        "count": 5910
       }
     },
     "packages/client": {
@@ -657,7 +657,7 @@
       "spectral": 1
     }
   },
-  "reason": "Phase 17 verification: six tests that kill the mutation-diff survivors triaged in security-evidence.md (tests 13442->13448; client branch coverage 94.16->94.18)",
+  "reason": "Phase 18 docs: six new swagger contract tests (CSRF 403 with a forged-registration control, health 503, row-limit text, profile wrapped key and withheld secrets, download media type, breach 5XX) raise test counts and server coverage",
   "bundle": {
     "budgetKb": {
       "VaultItemForm": 230,
