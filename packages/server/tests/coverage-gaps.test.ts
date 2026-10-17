@@ -26,6 +26,7 @@ import {
   getCsrf as getCsrfWithAgent,
   JWT_SECRET,
   JWT_PURPOSE_SECRET,
+  signTwoFactorChallenge,
 } from './helpers.js';
 
 // coverage-gaps uses a bare request(app) instead of an agent; wrap the shared helper.
@@ -511,10 +512,8 @@ describe('TOTP window consistency', () => {
     if (msToNextStep < 2_000) advanceClockBy(msToNextStep + 50);
   }
 
-  function tempTokenFor(userId: string): string {
-    return jwt.sign({ userId, purpose: '2fa_temp' }, deriveTestPurposeKey('2fa_temp'), {
-      expiresIn: '5m',
-    });
+  async function tempTokenFor(userId: string): Promise<string> {
+    return signTwoFactorChallenge({ userId, purpose: '2fa_temp' });
   }
 
   it('login/2fa accepts a code from the adjacent 30s step (window 1)', async () => {
@@ -526,7 +525,7 @@ describe('TOTP window consistency', () => {
       .post('/api/v1/auth/login/2fa')
       .set('x-csrf-token', csrf)
       .set('Cookie', cookie)
-      .send({ tempToken: tempTokenFor(user.id), code: codeAt(secret, -30_000) });
+      .send({ tempToken: await tempTokenFor(user.id), code: codeAt(secret, -30_000) });
 
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
@@ -540,7 +539,7 @@ describe('TOTP window consistency', () => {
       .post('/api/v1/auth/login/2fa')
       .set('x-csrf-token', csrf)
       .set('Cookie', cookie)
-      .send({ tempToken: tempTokenFor(user.id), code: codeAt(secret, -60_000) });
+      .send({ tempToken: await tempTokenFor(user.id), code: codeAt(secret, -60_000) });
 
     expect(res.status).toBe(401);
     expect(res.body.success).toBe(false);

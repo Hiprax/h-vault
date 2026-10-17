@@ -51,14 +51,15 @@
  *     a string: the wrapped DEK and the sealed metadata blob.
  * **One obligation this module CANNOT enforce, so it is stated here.** A segment
  * nonce is derived, not random: `(streamKey, index, isLast)` determines it
- * completely. So a given triple may be sealed AT MOST ONCE, and a retry must
- * re-send bytes the caller still holds rather than re-reading them from disk. Two
- * different plaintexts under one AES-GCM nonce is the catastrophic case — it
- * hands an attacker the XOR of the two and a path to the authentication subkey,
- * which is a different order of failure from a segment that merely will not open.
- * The design's answer is that content is immutable after upload and that a
- * retried part re-encrypts the identical in-memory slice; the uploading store
- * owns that, and it is why the DEK is memory-only.
+ * completely. So a given triple may seal ONE plaintext, ever: a retry within a
+ * pass re-sends the sealed bytes the caller still holds, and a resume that
+ * re-reads a slice from disk may seal it again only if it is byte-identical to
+ * the slice first sealed there. Two different plaintexts under one AES-GCM nonce
+ * is the catastrophic case — it hands an attacker the XOR of the two and a path
+ * to the authentication subkey, which is a different order of failure from a
+ * segment that merely will not open. The uploading store owns that: it records
+ * each slice's SHA-256 when it is first read and ends the transfer when a re-read
+ * slice does not match, before sealing it. It is also why the DEK is memory-only.
  *
  *   - NOT a second base64 or key-zeroing implementation. Those live in
  *     `cryptoService` and are called from here, because one definition per rule
@@ -444,8 +445,8 @@ function segmentIv(framing: SegmentFraming): DocumentBytes {
  * not valid UTF-8 is the normal case here, not an edge case.
  *
  * The caller owns the rule this function cannot check: one `(index, isLast)` pair
- * is sealed at most once per stream key, over bytes it still holds. See the
- * module header.
+ * seals ONE plaintext per stream key, so sealing it again must be over
+ * byte-identical bytes. See the module header.
  */
 export async function encryptSegment(
   streamKey: CryptoKey,

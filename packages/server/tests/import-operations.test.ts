@@ -34,6 +34,7 @@ import { VaultItem } from '../src/models/VaultItem.js';
 import { AuditLog } from '../src/models/AuditLog.js';
 import { User } from '../src/models/User.js';
 import { acquireJobLock, releaseJobLock } from '../src/utils/jobLock.js';
+import { reserveVaultWrite } from '../src/utils/vaultQuota.js';
 import { JobLock } from '../src/models/JobLock.js';
 import {
   pickAllowedFields,
@@ -54,7 +55,11 @@ import {
 
 const API = '/api/v1';
 
-/** A distinct, well-formed (lowercase hex, 64-char) searchHash per index. */
+/**
+ * A distinct, well-formed (lowercase hex, 64-char) searchHash per index. The rows
+ * below carry one as an OLDER client's do; the server drops it (F-12), which is
+ * why every test that sends them keeps passing unchanged.
+ */
 function searchHashFor(index: number): string {
   return index.toString(16).padStart(64, '0');
 }
@@ -113,6 +118,17 @@ async function postOperations(
     .send({ format: 'json', operations, ...extra });
 }
 
+/**
+ * Plants the account's item count in its row counter (F-15: the cap is held
+ * there, reserved against in one conditional write, and `countDocuments` is no
+ * longer read). The counters are installed first by a zero reservation, exactly
+ * what any write does. Minting 10,000 real rows would be far too slow.
+ */
+async function plantItemCount(userId: string, count: number): Promise<void> {
+  await reserveVaultWrite(userId, { bytes: 0 });
+  await User.updateOne({ _id: userId }, { $set: { 'counters.items': count } });
+}
+
 describe('Phase 6 — POST /tools/import executes structured operations', () => {
   let user: TestUser;
 
@@ -155,11 +171,10 @@ describe('Phase 6 — POST /tools/import executes structured operations', () => 
     expect(stored.every((item) => String(item.userId) === user.id)).toBe(true);
   });
 
-  it('rewrites content in place for an updates-only request and refreshes searchHash', async () => {
+  it('rewrites content in place for an updates-only request and stores no searchHash', async () => {
     const existing = await seedItem(user.id, {
       encryptedName: 'original-name',
       encryptedData: 'original-data',
-      searchHash: searchHashFor(7),
     });
 
     const res = await postOperations(user.accessToken, {
@@ -173,9 +188,9 @@ describe('Phase 6 — POST /tools/import executes structured operations', () => 
     expect(stored).toHaveLength(1);
     expect(stored[0]!.encryptedName).toBe('updated-name');
     expect(stored[0]!.encryptedData).toBe('updated-data');
-    // An overwrite replaces `encryptedName`, so the stored hash must follow it
-    // or it strands against the old name.
-    expect(stored[0]!.searchHash).toBe(searchHashFor(999));
+    // F-12: the update row carries a hash, as an older client's does, and none is
+    // stored (this test used to pin the stored hash following the new name).
+    expect(stored[0]).not.toHaveProperty('searchHash');
   });
 
   it('applies inserts and updates together in one mixed request', async () => {
@@ -361,7 +376,6 @@ describe('Phase 6 — POST /tools/import executes structured operations', () => 
       'encryptedName',
       'nameIv',
       'nameTag',
-      'searchHash',
     ]);
   });
 
@@ -543,17 +557,15 @@ describe('Phase 6 — POST /tools/import executes structured operations', () => 
     // The rejection must originate INSIDE the locked region or this proves
     // nothing: validation failures (an unknown update id, an over-long field)
     // all fire before the lock is ever taken, so they would pass even with the
-    // `finally` release deleted. The cap check is the first step under the lock,
-    // so drive the failure through that.
-    const countSpy = vi
-      .spyOn(VaultItem, 'countDocuments')
-      .mockResolvedValue(MAX_ITEMS_PER_USER as never);
+    // `finally` release deleted. The cap reservation runs under the lock, so
+    // drive the failure through that.
+    await plantItemCount(user.id, MAX_ITEMS_PER_USER);
 
     const rejected = await postOperations(user.accessToken, { inserts: [insertRow(1)] });
     expect(rejected.status).toBe(400);
     expect(JSON.stringify(rejected.body)).toMatch(/per-user item limit/i);
 
-    countSpy.mockRestore();
+    await plantItemCount(user.id, 0);
 
     const retry = await postOperations(user.accessToken, { inserts: [insertRow(1)] });
     expect(retry.status).toBe(201);
@@ -584,9 +596,7 @@ describe('Phase 6 — POST /tools/import executes structured operations', () => 
     const existing = await seedItem(user.id, { encryptedData: 'original-data' });
 
     // Pinned rather than seeded: minting 10,000 real rows would be far too slow.
-    // The stub is persistent because the executor counts twice — once before the
-    // lock and once against the state the writes observe.
-    vi.spyOn(VaultItem, 'countDocuments').mockResolvedValue((MAX_ITEMS_PER_USER - 1) as never);
+    await plantItemCount(user.id, MAX_ITEMS_PER_USER - 1);
 
     const res = await postOperations(user.accessToken, {
       inserts: [insertRow(1), insertRow(2)],
@@ -606,7 +616,7 @@ describe('Phase 6 — POST /tools/import executes structured operations', () => 
   it('counts updates as free: an updates-only request at the cap still succeeds', async () => {
     const existing = await seedItem(user.id, { encryptedData: 'original-data' });
 
-    vi.spyOn(VaultItem, 'countDocuments').mockResolvedValue(MAX_ITEMS_PER_USER as never);
+    await plantItemCount(user.id, MAX_ITEMS_PER_USER);
 
     const res = await postOperations(user.accessToken, {
       updates: [updateRow(String(existing._id))],
@@ -618,7 +628,7 @@ describe('Phase 6 — POST /tools/import executes structured operations', () => 
   });
 
   it('allows a request that lands exactly on the cap', async () => {
-    vi.spyOn(VaultItem, 'countDocuments').mockResolvedValue((MAX_ITEMS_PER_USER - 2) as never);
+    await plantItemCount(user.id, MAX_ITEMS_PER_USER - 2);
 
     const res = await postOperations(user.accessToken, {
       inserts: [insertRow(1), insertRow(2)],
@@ -627,6 +637,10 @@ describe('Phase 6 — POST /tools/import executes structured operations', () => 
     expect(res.status).toBe(201);
     expect(res.body.data.insertedCount).toBe(2);
     expect(await rawItems(user.id)).toHaveLength(2);
+    // The two rows took the last two places.
+    expect((await User.findById(user.id).select('+counters').lean())?.counters?.items).toBe(
+      MAX_ITEMS_PER_USER,
+    );
   });
 
   // ── Audit trail ──────────────────────────────────────────────────────
@@ -716,8 +730,9 @@ describe('import projections and lock naming', () => {
       'nameIv',
       'nameTag',
       'passwordHistory',
-      'searchHash',
     ]);
+    // F-12: neither allowlist carries a name hash any more.
+    expect(Object.keys(asInsert)).not.toContain('searchHash');
   });
 
   it('names the import lock per user, not globally', () => {

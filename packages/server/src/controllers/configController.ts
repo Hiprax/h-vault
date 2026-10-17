@@ -15,9 +15,10 @@ import { config, storageConfigured } from '../config/index.js';
  * bucket — only whether the feature is available and the numbers the browser has
  * to know before it starts encrypting.
  *
- * Two blocks today, and both exist for the same reason: the work happens in the
- * browser, so the server can only ADVERTISE the operator's limit and the client
- * is what enforces it.
+ * Three blocks today. The first two exist for the same reason: the work happens
+ * in the browser, so the server can only ADVERTISE the operator's limit and the
+ * client is what enforces it. The third, `registration`, is the opposite: the
+ * server enforces it, and publishes it only so the register page can explain it.
  *
  *   * `fileEncryption` — the File Encryption tool's size guardrail. Files are
  *     encrypted entirely in the browser and never uploaded, so the server could
@@ -56,6 +57,11 @@ export const getPublicConfig = catchAsync((_req: Request, res: Response): void =
           allowedExtensions: config.DOCUMENT_ALLOWED_EXTENSIONS,
         }
       : { enabled: false },
+    // Who may register here. Published in every mode: the register page needs
+    // `invite` to ask for the invitation and `closed` to say so before the form is
+    // filled. The domain allowlist is NOT published; an address outside it is
+    // answered exactly as a registered one is.
+    registration: { mode: config.REGISTRATION_MODE },
   };
 
   res.json({ success: true, data });

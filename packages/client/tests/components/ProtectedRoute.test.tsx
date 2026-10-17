@@ -231,12 +231,13 @@ describe('ProtectedRoute', () => {
     });
   });
 
-  it('shows a locked-account screen instead of logging out on 403 ACCOUNT_LOCKED', async () => {
-    // A lockout is a thirty-minute condition and `/auth/refresh` refuses it
-    // WITHOUT claiming the presented token, so the cookie behind this screen is
-    // still good. Logging out would `POST /auth/logout` and delete it for real —
-    // turning a condition the owner clears from their inbox into a session they
-    // can never get back.
+  it('never logs out on a 403 ACCOUNT_LOCKED at refresh, and offers the recoverable screen', async () => {
+    // F-03: the server no longer refuses a refresh for a locked factor at all (the
+    // cookie is itself proof of a prior sign-in), so the dedicated "account
+    // temporarily locked" screen was removed with the branch that drew it. What
+    // must survive is the invariant behind it: a 403 `ACCOUNT_LOCKED` is never
+    // read as a dead session, because logging out would `POST /auth/logout` and
+    // delete a session the server never ended. It lands on the recoverable screen.
     const state = setupAuthStore({
       isAuthenticated: true,
       accessToken: null,
@@ -250,21 +251,18 @@ describe('ProtectedRoute', () => {
     renderProtected();
 
     await waitFor(() => {
-      expect(screen.getByText(/account temporarily locked/i)).toBeInTheDocument();
+      expect(screen.getByText(/could not reach the server/i)).toBeInTheDocument();
     });
 
     expect(state.logout).not.toHaveBeenCalled();
-    expect(screen.getByText(/unlock link we emailed you/i)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /try again/i })).toBeInTheDocument();
-    // The negative that distinguishes this from the stalled-connection screen:
-    // sending someone to debug their network over a lockout the server named
-    // outright is the failure this branch exists to prevent.
-    expect(screen.queryByText(/could not reach the server/i)).not.toBeInTheDocument();
+    // The removed screen is gone for good.
+    expect(screen.queryByText(/account temporarily locked/i)).not.toBeInTheDocument();
     // And the protected content stays hidden — there is no access token.
     expect(screen.queryByTestId('protected-content')).not.toBeInTheDocument();
   });
 
-  it('lets the user retry out of the locked screen once the account is unlocked', async () => {
+  it('lets the user retry into the same session after such a refusal', async () => {
     const state = setupAuthStore({
       isAuthenticated: true,
       accessToken: null,
@@ -283,11 +281,9 @@ describe('ProtectedRoute', () => {
     await waitFor(() => {
       expect(screen.getByTestId('protected-content')).toBeInTheDocument();
     });
-    // The whole point: the same session came back. Nothing was destroyed on the
-    // way through the lockout.
+    // The same session came back; nothing was destroyed on the way.
     expect(mockRefreshTokenApi).toHaveBeenCalledTimes(2);
     expect(state.logout).not.toHaveBeenCalled();
-    expect(screen.queryByText(/account temporarily locked/i)).not.toBeInTheDocument();
   });
 
   /**

@@ -43,6 +43,8 @@ import {
   DOCUMENT_META_TOO_LARGE_MESSAGE,
   completeDocumentUploadSchema,
   documentChunkCountFor,
+  documentCiphertextBytesFor,
+  documentPlaintextBytesFor,
   documentMetaJsonByteLength,
   documentMetaSchema,
   documentPartParamsSchema,
@@ -220,6 +222,28 @@ describe('documentChunkCountFor — the one copy of the framing derivation', () 
     // for which no Range read is ever issued.
     expect(documentChunkCountFor(0, DOCUMENT_PLAINTEXT_CHUNK_BYTES)).toBe(1);
     expect(documentChunkCountFor(0, 1)).toBe(1);
+  });
+});
+
+describe('documentCiphertextBytesFor — the size identity, forward', () => {
+  it('adds exactly one authentication tag per segment', () => {
+    expect(documentCiphertextBytesFor(0, 1)).toBe(DOCUMENT_TAG_BYTES);
+    expect(documentCiphertextBytesFor(10_000, 1)).toBe(10_000 + DOCUMENT_TAG_BYTES);
+    expect(documentCiphertextBytesFor(2 * DOCUMENT_PLAINTEXT_CHUNK_BYTES, 2)).toBe(
+      2 * DOCUMENT_CIPHERTEXT_CHUNK_BYTES,
+    );
+  });
+
+  it('is the exact inverse of documentPlaintextBytesFor', () => {
+    for (const [plaintext, chunks] of [
+      [0, 1],
+      [1, 1],
+      [DOCUMENT_PLAINTEXT_CHUNK_BYTES + 1, 2],
+      [5 * DOCUMENT_PLAINTEXT_CHUNK_BYTES, 5],
+    ] as const) {
+      const ciphertext = documentCiphertextBytesFor(plaintext, chunks);
+      expect(documentPlaintextBytesFor(ciphertext, chunks)).toBe(plaintext);
+    }
   });
 });
 

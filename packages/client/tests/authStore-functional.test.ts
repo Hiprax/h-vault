@@ -52,7 +52,6 @@ vi.mock('../src/services/crypto/cryptoService', () => ({
     decryptVaultKey: vi.fn(),
     encryptData: vi.fn(),
     decryptData: vi.fn(),
-    generateSearchHash: vi.fn(),
     clearKey: vi.fn(),
     clearCryptoKey: vi.fn().mockResolvedValue(undefined),
   },
@@ -276,6 +275,20 @@ describe('authStore.register', () => {
       kdfAlgorithm: 'PBKDF2',
       encryptionVersion: 1,
     });
+  });
+
+  it('sends the invitation when one is given, and only then', async () => {
+    vi.mocked(registerApi).mockResolvedValue({
+      data: { success: true, data: { emailSent: true } },
+    } as never);
+
+    await useAuthStore.getState().register('user@example.com', 'Master123!', 'invite-token_1');
+    expect(registerApi).toHaveBeenLastCalledWith(
+      expect.objectContaining({ email: 'user@example.com', invitationToken: 'invite-token_1' }),
+    );
+
+    await useAuthStore.getState().register('user@example.com', 'Master123!');
+    expect(vi.mocked(registerApi).mock.lastCall?.[0]).not.toHaveProperty('invitationToken');
   });
 
   it('should return emailSent: false when server reports email failure', async () => {

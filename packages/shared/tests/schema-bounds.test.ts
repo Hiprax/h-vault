@@ -11,9 +11,9 @@
  *
  * The four classes, and the defect each one would let ship:
  *
- *  1. AN UNANCHORED FORMAT. `/^[a-f0-9]{64}$/` with either anchor removed still
- *     matches every valid hash, so no existing test noticed — while
- *     `"<64 hex>; drop"` becomes an acceptable `searchHash`. Anchors, length and
+ *  1. AN UNANCHORED FORMAT. `/^#[0-9a-fA-F]{6}$/` with either anchor removed still
+ *     matches every valid colour, so no existing test noticed — while
+ *     `"#ff00AA; drop"` becomes an acceptable `color`. Anchors, length and
  *     character class are asserted per format, from BOTH ends.
  *  2. A BOUND THAT MOVED. `.max(100)` reads identically to `.min(100)` from any
  *     test that only ever sends a 40-character value. Each bound is probed AT
@@ -56,6 +56,7 @@ import {
   backupSetupSchema,
   backupChangePasswordSchema,
   restoreBackupSchema,
+  updateNotificationPreferencesSchema,
   verify2faSchema,
 } from '../src/schemas/user.js';
 import {
@@ -74,7 +75,6 @@ import {
 } from '../src/constants/index.js';
 
 const hex = (n: number, char = 'a') => char.repeat(n);
-const HASH = hex(64);
 const OID = hex(24, '1');
 const chars = (n: number) => 'x'.repeat(n);
 
@@ -105,7 +105,7 @@ const validChangePassword = {
 };
 const validImport = {
   format: 'json' as const,
-  operations: { inserts: [{ ...validItem, searchHash: HASH }], updates: [] },
+  operations: { inserts: [validItem], updates: [] },
 };
 const validRestore = { data: chars(64) };
 const validBackupSetup = {
@@ -144,39 +144,6 @@ describe('formats are anchored at both ends, and to their character class', () =
     valid: string;
     rejected: [string, string][];
   }[] = [
-    {
-      name: 'createFolderSchema.searchHash',
-      parse: (searchHash) => accepts(createFolderSchema, { ...validFolder, searchHash }),
-      valid: HASH,
-      rejected: [
-        [`${HASH}beef`, 'a suffix (the `$` anchor)'],
-        [`beef${HASH}`, 'a prefix (the `^` anchor)'],
-        [hex(63), 'one character short'],
-        [HASH.toUpperCase(), 'upper-case hex, which the server never writes'],
-        [`${hex(63)}Z`, 'a character outside the class'],
-      ],
-    },
-    {
-      name: 'updateFolderSchema.searchHash',
-      parse: (searchHash) => accepts(updateFolderSchema, { searchHash }),
-      valid: HASH,
-      rejected: [
-        [`${HASH}beef`, 'a suffix'],
-        [`beef${HASH}`, 'a prefix'],
-        [hex(65), 'one character too many'],
-        [HASH.toUpperCase(), 'upper-case hex'],
-      ],
-    },
-    {
-      name: 'createVaultItemSchema.searchHash',
-      parse: (searchHash) => accepts(createVaultItemSchema, { ...validItem, searchHash }),
-      valid: HASH,
-      rejected: [
-        [`${HASH}0`, 'a suffix'],
-        [`0${HASH}`, 'a prefix'],
-        [HASH.toUpperCase(), 'upper-case hex'],
-      ],
-    },
     {
       name: 'createFolderSchema.icon',
       parse: (icon) => accepts(createFolderSchema, { ...validFolder, icon }),
@@ -284,6 +251,21 @@ describe('bounds hold at the limit and refuse one past it', () => {
       name: 'registerSchema.authHash max 100',
       at: () => accepts(registerSchema, { ...validRegister, authHash: chars(100) }),
       past: () => accepts(registerSchema, { ...validRegister, authHash: chars(101) }),
+    },
+    {
+      // The master-password proof that turning a critical security email off
+      // requires (F-26): a bound that moved would refuse every real proof.
+      name: 'updateNotificationPreferencesSchema.authHash max 100',
+      at: () =>
+        accepts(updateNotificationPreferencesSchema, {
+          authHash: chars(100),
+          notifications: { password_reset: false },
+        }),
+      past: () =>
+        accepts(updateNotificationPreferencesSchema, {
+          authHash: chars(101),
+          notifications: { password_reset: false },
+        }),
     },
     {
       name: 'registerSchema.encryptedVaultKey max 200',
@@ -594,7 +576,6 @@ describe('the ciphertext trios are all-or-nothing', () => {
       encryptedName: chars(10),
       nameIv: chars(12),
       nameTag: chars(16),
-      searchHash: HASH,
     };
     const build = (n: number) => ({
       format: 'json' as const,

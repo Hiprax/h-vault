@@ -1,6 +1,7 @@
 import { useState, useCallback } from 'react';
 import { Link, useNavigate, useLocation } from 'react-router';
 import { useForm } from 'react-hook-form';
+import { isAxiosError } from 'axios';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from '@hvault/shared/zod';
 import { Eye, EyeOff, CheckCircle, AlertTriangle } from 'lucide-react';
@@ -56,6 +57,11 @@ export function LoginPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [apiError, setApiError] = useState<string | null>(null);
+  // Shown under EVERY refused sign-in (a 401), never only under some: during a
+  // lockout the server answers a right and a wrong password identically, so the
+  // owner cannot be told "your account is locked" without telling a guesser the
+  // same thing. The constant hint points at the way back in either way.
+  const [unlockHint, setUnlockHint] = useState(false);
   const [useBackupCode, setUseBackupCode] = useState(false);
   const [otpValue, setOtpValue] = useState('');
 
@@ -72,6 +78,7 @@ export function LoginPage() {
   const handleLogin = async (values: LoginFormValues) => {
     setIsSubmitting(true);
     setApiError(null);
+    setUnlockHint(false);
     try {
       await login(values.email, values.masterPassword, values.rememberMe);
       // If 2FA is required the store sets twoFactorRequired=true and we stay
@@ -85,6 +92,7 @@ export function LoginPage() {
       }
     } catch (err) {
       setApiError(getApiErrorMessage(err, 'Login failed. Please try again.'));
+      setUnlockHint(isAxiosError(err) && err.response?.status === 401);
     } finally {
       setIsSubmitting(false);
     }
@@ -289,6 +297,11 @@ export function LoginPage() {
             )}
 
             {apiError && <FormAlert message={apiError} />}
+            {unlockHint && (
+              <p className="text-sm text-[hsl(var(--muted-foreground))]">
+                If this keeps failing, check your inbox for an unlock link.
+              </p>
+            )}
 
             {/* Email */}
             <div className="space-y-2">

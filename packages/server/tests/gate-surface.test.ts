@@ -124,6 +124,8 @@ interface GateEntry {
   canSkip: boolean;
   dependsOn: string[];
   requires: string[];
+  /** Each `requires` name resolved against the runner's own PREREQUISITES table. */
+  prerequisites: { name: string; label: string; fix: string }[];
   log: string;
 }
 
@@ -451,6 +453,69 @@ describe('the skip sentinel stays bound to one gate', () => {
 });
 
 describe('prerequisites are declared, not discovered', () => {
+  it('declares the same prerequisites in the runner and the manifest, for every gate', () => {
+    // The runner checks its OWN list before it starts a gate, and the manifest's
+    // is what every other reader (the self-test, a person, the release workflow's
+    // install step) is told. A gate whose two lists disagree is one whose missing
+    // tool is reported by one of them and not the other.
+    const disagree = gates
+      .filter(
+        (gate) => !isDeepStrictEqual(manifest.tasks[gate.task]!.requires ?? [], gate.requires),
+      )
+      .map((gate) => gate.id);
+    expect(disagree).toEqual([]);
+  });
+
+  it('resolves every prerequisite a gate requires to a probe and an install hint', () => {
+    // A `requires` name with no entry in the runner's PREREQUISITES table used to
+    // be a TypeError at the moment the gate was reached, which is the one way a
+    // missing tool could surface as something other than "could not run".
+    for (const gate of gates) {
+      expect(
+        gate.prerequisites.map((prerequisite) => prerequisite.name),
+        `gate ${gate.id}`,
+      ).toEqual(gate.requires);
+      for (const prerequisite of gate.prerequisites) {
+        expect(prerequisite.label, `${gate.id} → ${prerequisite.name}`).toMatch(/\S/);
+        expect(prerequisite.fix, `${gate.id} → ${prerequisite.name}`).toMatch(/\S/);
+      }
+    }
+  });
+
+  it('registers the two security scanners at T1, each declaring its binary and neither skippable', () => {
+    // gitleaks (its rule corpus over the whole history) and osv-scanner (the OSV
+    // feed over every package in the lockfile) are push-tier gates. An absent
+    // scanner is "could not run", exit 2, through the declared prerequisite, and
+    // never a skip: `sast` stays the only gate that may report SKIPPED (pinned
+    // above), so neither gains `canSkip` in either list.
+    const byId = new Map(gates.map((gate) => [gate.id, gate]));
+    for (const [id, task, binary, report, script] of [
+      [
+        'gitleaks',
+        'audit:secrets:gitleaks',
+        'gitleaks',
+        'gitleaks.sarif',
+        'scripts/ci/gitleaks-gate.mjs',
+      ],
+      ['osv', 'audit:deps:osv', 'osv-scanner', 'osv.json', 'scripts/ci/osv-gate.mjs'],
+    ] as const) {
+      const gate = byId.get(id);
+      expect(gate?.task, `gate ${id}`).toBe(task);
+      expect(gate?.tier, `gate ${id}`).toBe(1);
+      expect(gate?.canSkip, `gate ${id}`).toBe(false);
+      expect(gate?.requires, `gate ${id}`).toEqual([binary]);
+      expect(gate?.dependsOn, `gate ${id}`).toEqual([]);
+      const entry = manifest.tasks[task];
+      expect(entry?.tier, task).toBe(1);
+      expect(entry?.requires, task).toEqual([binary]);
+      expect(entry?.canSkip, task).toBeUndefined();
+      expect(entry?.report, task).toBe(report);
+      expect(entry?.cmd, task).toBe(`node ${script}`);
+      // The npm script a reader is pointed at runs the same file.
+      expect(pkg.scripts[task], task).toBe(`node ${script}`);
+    }
+  });
+
   it('declares docker on the image gate and a built shared package on the rest', () => {
     const byId = new Map(gates.map((gate) => [gate.id, gate]));
     expect(byId.get('docker')?.requires).toContain('docker');
@@ -1820,6 +1885,7 @@ describe('machine-readable reports', () => {
       'reset-password',
       'verify-email',
       'unlock-account',
+      'confirm-recipient',
       'not-found',
       'vault-list',
       'item-detail',
@@ -1879,7 +1945,7 @@ describe('machine-readable reports', () => {
     // `/forgot-password` sits behind `PublicOnlyRoute` (as `login` and `register`
     // already did), which redirects a signed-in visitor away, so before the
     // sign-in is the ONLY point in the walk where it renders at all. The other
-    // four are reachable only through a full `page.goto`, which reloads the SPA
+    // five are reachable only through a full `page.goto`, which reloads the SPA
     // and drops the in-memory vault key; put any of them after the sign-in and
     // the walk continues against a locked vault, scanning unlock screens under
     // other views' names.
@@ -1888,6 +1954,7 @@ describe('machine-readable reports', () => {
       'reset-password',
       'verify-email',
       'unlock-account',
+      'confirm-recipient',
       'not-found',
     ]) {
       expect(A11Y_VIEW_IDS.indexOf(view), view).toBeLessThan(A11Y_VIEW_IDS.indexOf('vault-list'));

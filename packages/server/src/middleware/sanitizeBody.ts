@@ -3,33 +3,38 @@ import { httpErrors } from '@hiprax/errors';
 
 /**
  * MongoDB operator injection and prototype-pollution prevention for request bodies
- * (a custom middleware: express-mongo-sanitize is incompatible with Express 5).
+ * AND query strings (a custom middleware: express-mongo-sanitize is incompatible
+ * with Express 5).
  *
- * WHERE IT MUST RUN: immediately after whatever parsed the body, because before
- * that `req.body` is `undefined` and there is nothing to filter. That is two kinds
+ * WHERE IT MUST RUN: after everything that BUILDS the values it filters, because a
+ * filter judges the keys it is shown and nothing produced later. That is two kinds
  * of mount, and both are required:
  *
- *   1. once at app level, straight after the global 2 MB parser (`app.ts`);
+ *   1. once at app level, after the global parsers AND after `hppx` (`app.ts`);
  *   2. on every route that brings its OWN parser, straight after it. The global
  *      parser skips those paths (`CUSTOM_BODY_LIMIT_PATHS` in `app.ts`), so the
- *      app-level mount sees an unparsed body there and filters nothing.
+ *      app-level mount sees an unparsed body there and filters only the query.
  *
- * The second kind was missing once: both 30 MB routes reached their controllers
- * unfiltered while the comment here claimed every body was covered, and only
- * because both schemas happen to be plain `z.object()` (whose strip mode drops an
- * unknown key) was it not exploitable. `tests/route-table.test.ts` now requires,
- * over the real router stack, that every route-level JSON parser is followed by
- * this middleware and nothing else.
+ * Why after `hppx`: it is not only a duplicate-collapser. It EXPANDS dotted and
+ * bracketed keys into nested objects, in the query (Express 5's own "simple"
+ * parser leaves `folderId[$ne]` as one literal key) and in a urlencoded body (whose
+ * parser leaves `email.$ne` as one literal key). Those keys start with no `$`, so a
+ * filter that ran first passed them, and `hppx` then turned them into
+ * `{ folderId: { $ne: … } }` and `{ email: { $ne: … } }` on the way to the
+ * routes. An earlier version of this comment said query strings could not carry an
+ * operator under Express 5; through `hppx` they could.
  *
- * WHY ONLY THE BODY:
+ * The second kind of mount was missing once too: both 30 MB routes reached their
+ * controllers unfiltered while the comment here claimed every body was covered,
+ * and only because both schemas happen to be plain `z.object()` (whose strip mode
+ * drops an unknown key) was it not exploitable. `tests/route-table.test.ts` now
+ * requires, over the real router stack, that every route-level JSON parser is
+ * followed by this middleware and nothing else; `tests/input-filter-order.test.ts`
+ * pins the app-level order over the wire.
+ *
+ * WHAT IT DOES NOT FILTER:
  *
  * - Route params are always plain strings (no nested objects possible).
- * - Query params CAN contain nested objects via bracket syntax in Express 4
- *   (e.g. ?tags[$ne]=foo), but Express 5's default query parser ("simple")
- *   does NOT parse bracket notation — it treats them as literal characters,
- *   so operator injection via query strings is not possible.
- * - Zod validation on all endpoints catches any unexpected shapes downstream
- *   as a defense-in-depth measure.
  * - COOKIES are the one other source, and they are handled elsewhere rather
  *   than here: `cookieParser()` JSON-decodes any `j:`-prefixed value, so
  *   `req.cookies[x]` really can be an object or a number. Nothing reads one
@@ -37,12 +42,18 @@ import { httpErrors } from '@hiprax/errors';
  *   only when it is a non-empty string, so no cookie ever reaches a query as an
  *   operand. Narrow there, not here — see that file for why.
  *
- * Additionally, req.query and req.params are read-only getters in Express 5.
+ * Zod validation on every endpoint catches unexpected shapes downstream as a
+ * second line, not the first.
+ *
+ * `req.query` is a getter-only property in Express 5 (it re-parses the URL on every
+ * read), so the filtered copy is installed with `Object.defineProperty`, exactly as
+ * `middleware/validate.ts` installs a validated one.
  */
 
 /**
- * The deepest body, in object and array levels, the filter will walk. A request
- * past it is refused with 400.
+ * The deepest body (or query), in object and array levels, the filter will walk.
+ * A request past it is refused with 400. A query never gets near it in practice:
+ * `hppx` refuses one past 20 levels first (`middleware/parameterLimits.ts`).
  *
  * The walk is recursive, and an unbounded one overflowed the stack at 10,000 levels
  * — a 20 KB body, well inside every parser limit — which surfaced as a 500. The
@@ -53,6 +64,7 @@ import { httpErrors } from '@hiprax/errors';
 export const MAX_REQUEST_BODY_DEPTH = 32;
 
 const TOO_DEEP_MESSAGE = 'Request body is nested too deeply';
+const QUERY_TOO_DEEP_MESSAGE = 'Request query is nested too deeply';
 
 /** Returned up the walk in place of a value once the bound is passed. */
 const TOO_DEEP: unique symbol = Symbol('request body too deep');
@@ -93,23 +105,41 @@ function sanitizeValue(value: unknown, depth: number): unknown {
   return clean;
 }
 
+/** Returned in place of a copy when there is nothing to filter. */
+const NOTHING_TO_FILTER: unique symbol = Symbol('nothing to filter');
+
+/** The filtered copy of one parsed source, {@link TOO_DEEP}, or {@link NOTHING_TO_FILTER}. */
+function sanitizeSource(value: unknown): unknown {
+  if (value === null || typeof value !== 'object') return NOTHING_TO_FILTER;
+  return sanitizeValue(value, 1);
+}
+
 /**
- * Replaces a parsed object or array body with its sanitized copy. A request with no
- * parsed body, or a scalar one, passes through untouched. A body past
- * {@link MAX_REQUEST_BODY_DEPTH} goes to the error handler as a 400 and is left as
- * parsed, so nothing downstream ever reads a half-filtered body.
+ * Replaces a parsed object or array body, and the parsed query, with their
+ * sanitized copies. A request with no parsed body, or a scalar one, keeps it
+ * untouched, and likewise for the query. A body or query past
+ * {@link MAX_REQUEST_BODY_DEPTH} goes to the error handler as a 400 and BOTH are
+ * left as parsed, so nothing downstream ever reads a half-filtered request.
  */
 export function sanitizeRequestBody(req: Request, _res: Response, next: NextFunction): void {
-  const body: unknown = req.body;
-  if (body === null || typeof body !== 'object') {
-    next();
-    return;
-  }
-  const clean = sanitizeValue(body, 1);
-  if (clean === TOO_DEEP) {
+  const body = sanitizeSource(req.body);
+  if (body === TOO_DEEP) {
     next(httpErrors.badRequest(TOO_DEEP_MESSAGE));
     return;
   }
-  req.body = clean;
+  const query = sanitizeSource(req.query);
+  if (query === TOO_DEEP) {
+    next(httpErrors.badRequest(QUERY_TOO_DEEP_MESSAGE));
+    return;
+  }
+  if (body !== NOTHING_TO_FILTER) req.body = body;
+  if (query !== NOTHING_TO_FILTER) {
+    Object.defineProperty(req, 'query', {
+      value: query,
+      writable: true,
+      configurable: true,
+      enumerable: true,
+    });
+  }
   next();
 }

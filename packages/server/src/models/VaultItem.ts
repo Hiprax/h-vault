@@ -32,7 +32,6 @@ export interface IVaultItem {
   encryptedName: string;
   nameIv: string;
   nameTag: string;
-  searchHash?: string | undefined;
   // Restore provenance: the backup row's original `_id` (as a string), set ONLY
   // when the server fresh-inserts a NON-owned row during restore so a repeat
   // restore of the same backup can match `(userId, sourceRefId)` instead of
@@ -103,7 +102,9 @@ const vaultItemSchema = new Schema<IVaultItem>(
     encryptedName: { type: String, required: true, maxlength: 1000 },
     nameIv: { type: String, required: true, maxlength: 24 },
     nameTag: { type: String, required: true, maxlength: 32 },
-    searchHash: { type: String, match: /^[a-f0-9]{64}$/ },
+    // No keyed hash of the name is stored (F-12): nothing read it, and it made
+    // every entry of one name linkable. Migration v5 removed it from the rows and
+    // dropped its index; with the path gone, strict mode drops it from any write.
     sourceRefId: { type: String },
     passwordHistory: {
       type: [passwordHistoryEntrySchema],
@@ -138,7 +139,6 @@ vaultItemSchema.index({ userId: 1, favorite: 1 });
 vaultItemSchema.index({ userId: 1, deletedAt: -1 });
 vaultItemSchema.index({ userId: 1, updatedAt: -1 });
 vaultItemSchema.index({ userId: 1, createdAt: -1 });
-vaultItemSchema.index({ userId: 1, searchHash: 1 }, { sparse: true });
 vaultItemSchema.index({ userId: 1, tags: 1 });
 
 // Restore idempotency: matches a repeat-restored, non-owned row by its origin

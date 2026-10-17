@@ -43,9 +43,12 @@
  * the login budget) is invisible to any test that only exercises the endpoint.
  *
  * Middleware mounted at a PATH rather than at the root is reported too, against
- * {@link MIDDLEWARE_MOUNTS}. `app.use('/api/docs', swaggerUi.serve, …)` is the
- * one such mount today and is allowlisted there (it serves the Swagger UI and
- * is covered by `swagger.test.ts`). Without that check, `app.use('/api/v1/x',
+ * {@link MIDDLEWARE_MOUNTS} (by prefix) and {@link IDENTITY_MIDDLEWARE_MOUNTS} (by
+ * function identity AND exact mount). `app.use('/api/docs', swaggerUi.serve, …)`
+ * is allowlisted by prefix (it serves the Swagger UI and is covered by
+ * `swagger.test.ts`); `app.use('/api/v1', apiNoStore)` and
+ * `app.use('/api/v1', refuseCrossSiteRequests)` by identity, since their prefix is
+ * every route's. Without that check, `app.use('/api/v1/x',
  * someHandler)` would be neither a route nor a router and would answer requests
  * while being invisible to every assertion here.
  */
@@ -57,7 +60,10 @@ import {
   requirePartContentLength,
 } from '../../src/middleware/documentPartBody.js';
 import { holdLargeBodySlot, parseLargeJsonBody } from '../../src/middleware/largeBodyAdmission.js';
+import { holdHeavyResponseSlot } from '../../src/middleware/heavyResponseAdmission.js';
 import { sanitizeRequestBody } from '../../src/middleware/sanitizeBody.js';
+import { apiNoStore } from '../../src/middleware/apiCacheControl.js';
+import { refuseCrossSiteRequests } from '../../src/middleware/fetchMetadata.js';
 
 export type HttpMethod = 'get' | 'post' | 'put' | 'delete';
 
@@ -143,6 +149,21 @@ export const ROUTER_MOUNTS = [
 const MIDDLEWARE_MOUNTS = ['/api/docs'] as const;
 
 /**
+ * Path-scoped middleware admitted by IDENTITY rather than by prefix: the exact
+ * mount AND the very function object. `/api/v1` is every route's prefix, so
+ * admitting the prefix alone would wave through any handler mounted there,
+ * including one that answers requests no row covers. `apiNoStore` only sets two
+ * headers and calls `next()` (`middleware/apiCacheControl.ts`);
+ * `refuseCrossSiteRequests` only ever REFUSES (403 to the error handler) or calls
+ * `next()`, so it answers nothing a row would have to cover
+ * (`middleware/fetchMetadata.ts`).
+ */
+const IDENTITY_MIDDLEWARE_MOUNTS: readonly { path: string; handle: unknown }[] = [
+  { path: '/api/v1', handle: apiNoStore },
+  { path: '/api/v1', handle: refuseCrossSiteRequests },
+];
+
+/**
  * The surface. Grouped by router, in mount order, and within a router in the
  * order the routes are declared — so a diff against `src/routes/*.ts` reads
  * straight down.
@@ -226,7 +247,7 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     path: '/api/v1/auth/login',
     auth: 'none',
     csrf: 'required',
-    limiters: ['authLimiter', 'accountLimiter'],
+    limiters: ['authLimiter'],
     owned: null,
     when: 'always',
   },
@@ -278,6 +299,16 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     limiters: ['generalAuthLimiter'],
     owned: null,
     when: 'always',
+  },
+  {
+    method: 'post',
+    path: '/api/v1/auth/invitations',
+    auth: 'required',
+    csrf: 'required',
+    limiters: ['passwordVerifyLimiter'],
+    owned: null,
+    when: 'always',
+    note: 'Mints an invitation (REGISTRATION_MODE=invite) behind the master-password proof.',
   },
   {
     method: 'post',
@@ -340,7 +371,7 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     path: '/api/v1/vault/items',
     auth: 'required',
     csrf: 'exempt',
-    limiters: [],
+    limiters: ['vaultListLimiter'],
     owned: null,
     when: 'always',
   },
@@ -349,7 +380,7 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     path: '/api/v1/vault/items/trash',
     auth: 'required',
     csrf: 'exempt',
-    limiters: [],
+    limiters: ['vaultListLimiter'],
     owned: null,
     when: 'always',
   },
@@ -527,6 +558,15 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
   },
   {
     method: 'put',
+    path: '/api/v1/user/notifications',
+    auth: 'required',
+    csrf: 'required',
+    limiters: ['passwordVerifyLimiter'],
+    owned: null,
+    when: 'always',
+  },
+  {
+    method: 'put',
     path: '/api/v1/user/change-password',
     auth: 'required',
     csrf: 'required',
@@ -660,6 +700,12 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     auth: 'required',
     csrf: 'required',
     limiters: ['heavyOpLimiter', 'passwordVerifyLimiter'],
+    chain: [
+      'heavyOpLimiter',
+      'passwordVerifyLimiter',
+      'holdHeavyResponseSlot',
+      'heavyResponseHandler',
+    ],
     owned: null,
     when: 'always',
   },
@@ -676,7 +722,27 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     note: "Takes owned update ids in the BODY; covered by cross-user-isolation.test.ts's import suite.",
   },
 
-  // ── /api/v1/backup (router-level `authenticate`) ──────────────────────
+  // ── /api/v1/backup (router-level `authenticate`, below the one public route) ──
+  {
+    // A backup recipient following its confirmation link (F-05): mounted ABOVE the
+    // router's `authenticate`, because the recipient usually has no account here.
+    method: 'post',
+    path: '/api/v1/backup/recipients/confirm',
+    auth: 'none',
+    csrf: 'required',
+    limiters: ['tokenVerifyLimiter'],
+    owned: null,
+    when: 'always',
+  },
+  {
+    method: 'put',
+    path: '/api/v1/backup/recipients',
+    auth: 'required',
+    csrf: 'required',
+    limiters: ['passwordVerifyLimiter'],
+    owned: null,
+    when: 'always',
+  },
   {
     method: 'post',
     path: '/api/v1/backup/setup',
@@ -701,6 +767,7 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     auth: 'required',
     csrf: 'required',
     limiters: ['heavyOpLimiter'],
+    chain: ['heavyOpLimiter', 'holdHeavyResponseSlot', 'heavyResponseHandler'],
     owned: null,
     when: 'always',
   },
@@ -710,6 +777,7 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     auth: 'required',
     csrf: 'exempt',
     limiters: ['heavyOpLimiter'],
+    chain: ['heavyOpLimiter', 'holdHeavyResponseSlot', 'heavyResponseHandler'],
     owned: null,
     when: 'always',
   },
@@ -1136,6 +1204,7 @@ const ADMISSION_NAMES = new Map<unknown, string>([
   [holdPartUploadSlot, 'holdPartUploadSlot'],
   [parsePartUploadBody, 'parsePartUploadBody'],
   [holdLargeBodySlot, 'holdLargeBodySlot'],
+  [holdHeavyResponseSlot, 'holdHeavyResponseSlot'],
   [parseLargeJsonBody, 'parseLargeJsonBody'],
   [sanitizeRequestBody, BODY_SANITIZER],
 ]);
@@ -1150,6 +1219,7 @@ const NAMED_BODY_PARSERS: ReadonlySet<string> = new Set([
 export const SLOT_HOLDERS: ReadonlySet<string> = new Set([
   'holdPartUploadSlot',
   'holdLargeBodySlot',
+  'holdHeavyResponseSlot',
 ]);
 
 /**
@@ -1185,6 +1255,9 @@ export const UNNAMED_PARSER_PREFIX = 'unnamedBodyParser:';
 /** The name `holdingLargeBodySlot` gives the handler it wraps. */
 const LARGE_BODY_HANDLER = 'largeBodyHandler';
 
+/** The name `holdingHeavyResponseSlot` gives the handler it wraps. */
+const HEAVY_RESPONSE_HANDLER = 'heavyResponseHandler';
+
 /** The name `holdingPartUploadSlot` gives the handler it wraps. */
 const PART_UPLOAD_HANDLER = 'partUploadHandler';
 
@@ -1198,6 +1271,7 @@ const PART_UPLOAD_HANDLER = 'partUploadHandler';
 export const SLOT_HANDLERS: ReadonlyMap<string, string> = new Map([
   ['holdPartUploadSlot', PART_UPLOAD_HANDLER],
   ['holdLargeBodySlot', LARGE_BODY_HANDLER],
+  ['holdHeavyResponseSlot', HEAVY_RESPONSE_HANDLER],
 ]);
 
 const SLOT_HANDLER_NAMES: ReadonlySet<string> = new Set(SLOT_HANDLERS.values());
@@ -1272,7 +1346,14 @@ export function collectAppRoutes(app: Express): CollectedRoutes {
       // business; PATH-SCOPED middleware answers requests under a prefix and
       // must therefore be one this file knows about, or it is invisible to
       // every assertion here.
-      if (layer.slash !== true && mountOf(layer, MIDDLEWARE_MOUNTS) === null) {
+      const admittedByIdentity = IDENTITY_MIDDLEWARE_MOUNTS.some(
+        ({ path, handle }) => layer.handle === handle && mountOf(layer, [path]) === path,
+      );
+      if (
+        layer.slash !== true &&
+        !admittedByIdentity &&
+        mountOf(layer, MIDDLEWARE_MOUNTS) === null
+      ) {
         unknownMounts.push(`middleware "${layer.name}" at an unrecognised path`);
       }
       continue;

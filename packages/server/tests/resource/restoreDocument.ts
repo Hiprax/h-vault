@@ -51,7 +51,6 @@ function buildItem(index: number, shape: RestoreDocumentShape, fillerBytes: numb
     encryptedName: `restored-${String(index)}`,
     nameIv: IV,
     nameTag: TAG,
-    searchHash: index.toString(16).padStart(64, '0'),
     tags: Array.from({ length: shape.tags }, (_unused, t) => `tag${String(t)}`),
     favorite: false,
     passwordHistory: Array.from({ length: shape.historyEntries }, (_unused, h) => ({

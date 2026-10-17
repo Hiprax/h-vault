@@ -26,7 +26,13 @@
 # enumerates the launch sites rather than listing them, so a sixth cannot be added
 # without it. Never set it to 0: that is mongod's own default and precisely the
 # value that crash-loops.
-FROM mongo:8.0
+#
+# Pinned by DIGEST as well as by tag, like every image this repository pulls: the
+# multi-platform index digest of `mongo:8.0`, read from the registry on 2026-10-15
+# (`docker buildx imagetools inspect` and the registry's Docker-Content-Digest
+# header agreed). docker-compose.dev.yml names the same reference. Move both
+# together, deliberately, by reading the new digest the same way.
+FROM mongo:8.0@sha256:6657bf2413fefc5be649390318f5b4cd7328e982722f8ce2ac6dfa6f0a42cb03
 
 # 0755 is set explicitly rather than inherited: the repo may be checked out on a
 # filesystem that does not carry the executable bit (Windows/WSL, a zip export),

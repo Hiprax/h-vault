@@ -9,7 +9,7 @@ import { RefreshToken } from '../src/models/RefreshToken.js';
 import { TrustedDevice } from '../src/models/TrustedDevice.js';
 import { User } from '../src/models/User.js';
 import { hashToken } from '../src/utils/token.js';
-import { MAX_SESSIONS, MAX_TRUSTED_DEVICES } from '@hvault/shared';
+import { MAX_SESSIONS, MAX_TRUSTED_DEVICES, maskEmail } from '@hvault/shared';
 import { createTestUser, authHeader, getCsrf as getCsrfBase } from './helpers.js';
 import type { TestUser } from './helpers.js';
 import { advanceClockBy, withTestClock } from './clock.js';
@@ -884,7 +884,9 @@ describe('User routes', () => {
         $set: {
           'settings.backup.enabled': true,
           'settings.backup.scheduleHour': 3,
-          'settings.backup.backupEmails': ['backup@example.com'],
+          'settings.backup.backupRecipients': [
+            { email: 'backup@example.com', state: 'confirmed', nonce: 'never-on-the-wire' },
+          ],
           'settings.backup.encryptedBWK': 'opaque-bwk-ciphertext',
           'settings.backup.bwkIv': 'opaque-bwk-iv',
           'settings.backup.bwkTag': 'opaque-bwk-tag',
@@ -906,7 +908,13 @@ describe('User routes', () => {
       // Standard backup settings should be present
       expect(backup.enabled).toBe(true);
       expect(backup.scheduleHour).toBe(3);
-      expect(backup.backupEmails).toEqual(['backup@example.com']);
+      // F-05: the deprecated list is always empty; the recipients, with their
+      // confirmation state and never their nonce, are `backupRecipients`.
+      expect(backup.backupEmails).toEqual([]);
+      expect(backup.backupRecipients).toEqual([
+        { email: 'backup@example.com', state: 'confirmed', confirmedAt: null, approved: false },
+      ]);
+      expect(JSON.stringify(res.body)).not.toContain('never-on-the-wire');
       expect(backup.isConfigured).toBe(true);
 
       // BWK fields must be present so the client can verify the backup
@@ -1898,7 +1906,8 @@ describe('User routes', () => {
       expect(deletions[0]?.userId).toBeNull();
       expect(deletions[0]?.metadata).toMatchObject({
         deletedUserId: user.id,
-        deletedEmail: user.email,
+        // Masked (F-02): the erasure record never keeps the address in clear.
+        maskedEmail: maskEmail(user.email),
       });
 
       // ...and the account itself is gone.

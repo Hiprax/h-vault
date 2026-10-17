@@ -353,14 +353,16 @@ describe('Rotation completeness — sequential (standalone) branch', () => {
     const first = await seedFolder(user.id, { encryptedName: 'folder-a' });
     const second = await seedFolder(user.id, { encryptedName: 'folder-b' });
 
+    // Every write to the SECOND folder misses, so the first has already been
+    // applied and there is something for the rollback to undo. Every attempt, not
+    // one: a single miss is a row another request changed (a reorder bumps `__v`),
+    // which the rotation measures again and retries, at most three times (F-24).
     const realUpdateOne = Folder.updateOne.bind(Folder);
-    let writes = 0;
+    let missesOnSecond = 0;
     vi.spyOn(Folder, 'updateOne').mockImplementation(
       (...args: Parameters<typeof Folder.updateOne>) => {
-        writes += 1;
-        // The SECOND write, so the first has already been applied and there is
-        // something for the rollback to undo.
-        if (writes === 2) {
+        if (String((args[0] as { _id?: unknown })._id) === String(second._id)) {
+          missesOnSecond += 1;
           return Promise.resolve({
             acknowledged: true,
             matchedCount: 0,
@@ -381,6 +383,8 @@ describe('Rotation completeness — sequential (standalone) branch', () => {
 
       expect(res.status).toBe(409);
       expect(String(res.body.message)).toMatch(/0 item\(s\), 1 folder\(s\) and 0 document\(s\)/);
+      // Bounded: three attempts, then the row is reported.
+      expect(missesOnSecond).toBe(3);
 
       // Rolled back to the name the untouched vault key can still open.
       const rolledBack = await Folder.findById(first._id).lean();
@@ -424,15 +428,16 @@ describe('Rotation completeness — sequential (standalone) branch', () => {
     const first = await seedItem(user.id, { encryptedName: ORIGINAL_ITEM_NAME });
     const second = await seedItem(user.id, { encryptedName: 'item-b' });
 
+    // Every write to the SECOND item misses, so the first has already landed and
+    // the rollback has something real to undo. Keyed on the row rather than on a
+    // call count because the rollback goes through this same spy, and on every
+    // attempt because one miss is retried (see the folder case above).
     const realUpdateOne = VaultItem.updateOne.bind(VaultItem);
-    let writes = 0;
+    let missesOnSecond = 0;
     vi.spyOn(VaultItem, 'updateOne').mockImplementation(
       (...args: Parameters<typeof VaultItem.updateOne>) => {
-        writes += 1;
-        // The SECOND write, so the first has already landed and the rollback has
-        // something real to undo. `=== 2` and not `>= 2` for exactly that reason:
-        // the rollback goes through this same spy.
-        if (writes === 2) {
+        if (String((args[0] as { _id?: unknown })._id) === String(second._id)) {
+          missesOnSecond += 1;
           return Promise.resolve({
             acknowledged: true,
             matchedCount: 0,
@@ -455,6 +460,7 @@ describe('Rotation completeness — sequential (standalone) branch', () => {
       // The count lands on the ITEMS leg and nowhere else, which is what the three
       // separate error arrays buy.
       expect(String(res.body.message)).toMatch(/1 item\(s\), 0 folder\(s\) and 0 document\(s\)/);
+      expect(missesOnSecond).toBe(3);
 
       // Rolled back to the ciphertext the untouched vault key still opens.
       const rolledBack = await VaultItem.findById(first._id).lean();

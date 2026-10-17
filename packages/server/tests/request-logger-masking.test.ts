@@ -1,4 +1,5 @@
 import { describe, it, expect, afterEach, beforeAll, vi } from 'vitest';
+import { SECURITY_NOTIFICATION_PREFERENCE_EVENTS } from '@hvault/shared';
 import { EventEmitter } from 'node:events';
 import express from 'express';
 import * as shared from '@hvault/shared';
@@ -100,7 +101,7 @@ vi.mock('@hiprax/errors', async (importOriginal) => {
   };
 });
 
-import { createRequestLogger } from '@hiprax/logger';
+import { createRequestLogger, type LoggableRequest, type LoggableResponse } from '@hiprax/logger';
 import { createErrorMiddleware, httpErrors } from '@hiprax/errors';
 
 /** In-memory winston transport that records every log info object it receives. */
@@ -134,21 +135,23 @@ function runRequestLogger(body: unknown, maskBodyKeys: string[]): Record<string,
     maskBodyKeys,
   });
 
-  const req = {
+  // Typed as the logger's own framework-agnostic shapes, which is exactly what
+  // the middleware reads: no Express object is pretended.
+  const req: LoggableRequest = {
     method: 'POST',
     url: '/api/v1/test',
     originalUrl: '/api/v1/test',
     headers: {},
     body,
   };
-  const res = new EventEmitter() as EventEmitter & Record<string, unknown>;
-  res.statusCode = 200;
-  res.getHeader = () => undefined;
-  res.getHeaders = () => ({});
-  res.writableEnded = true;
+  const res: LoggableResponse & EventEmitter = Object.assign(new EventEmitter(), {
+    statusCode: 200,
+    getHeader: () => undefined,
+    getHeaders: () => ({}),
+    writableEnded: true,
+  });
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  middleware(req as any, res as any, () => {});
+  middleware(req, res, () => {});
   res.emit('finish');
   return capture.records;
 }
@@ -175,6 +178,9 @@ const PERSONAL = 'personal data the server already stores in the clear, not a cr
  * secret and belongs in `maskBodyKeys` in app.ts.
  */
 const LOGGABLE_BODY_KEYS = new Map<string, string>([
+  // F-26: which security emails the owner wants, one boolean per event.
+  ['notifications', METADATA],
+  ...SECURITY_NOTIFICATION_PREFERENCE_EVENTS.map((event): [string, string] => [event, METADATA]),
   ['autoLockTimeout', METADATA],
   ['backupEmails', PERSONAL],
   ['bwkIv', PUBLIC_PARAMETER],
@@ -263,9 +269,6 @@ const LOGGABLE_BODY_KEYS = new Map<string, string>([
   // A rotation's re-seal flag: rewrite under the same key.
   ['reseal', METADATA],
   ['scheduleHour', METADATA],
-  // An HMAC of the item NAME, stored server-side for duplicate detection; it reveals
-  // nothing the stored row does not.
-  ['searchHash', METADATA],
   // Whether the release notes open by themselves after an update.
   ['showReleaseNotes', METADATA],
   ['sortOrder', METADATA],

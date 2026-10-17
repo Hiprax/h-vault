@@ -29,6 +29,7 @@ import QRCode from 'qrcode';
 import type zxcvbnType from 'zxcvbn';
 import { getZxcvbn } from '../lib/lazyZxcvbn';
 import { cn, getApiErrorMessage } from '../lib/utils';
+import { ACCOUNT_LOCKED_MESSAGE, isAccountLocked } from '../services/auth/sessionFailure';
 import { downloadText } from '../lib/download';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../components/ui/Card';
 import {
@@ -102,6 +103,8 @@ import {
 } from '../services/crypto/documentCryptoService';
 import { clearSettingsCache } from '../hooks/useUserSettings';
 import { copySecretToClipboard } from '../services/clipboard/clipboardService';
+import { InviteCard } from '../components/settings/InviteCard';
+import { SecurityNotificationsCard } from '../components/settings/SecurityNotificationsCard';
 import { getItemsFetchGeneration, useVaultStore } from '../stores/vaultStore';
 import { passwordDidChange } from '../services/crypto/passwordHistory';
 import { decryptVaultField, encryptVaultField } from '../services/crypto/vaultField';
@@ -124,6 +127,7 @@ import type {
   PreviousPassword,
   ResolvableImportItem,
 } from '../services/import';
+import { refreshInBackground } from '../lib/backgroundRefresh';
 
 // ---------------------------------------------------------------------------
 // CSV helpers
@@ -551,11 +555,6 @@ async function decryptFolderNameUnderAnyKey(
  * matters: the server refuses a payload that does not name every row the account
  * holds, so dropping the row would refuse the whole rotation and the one poisoned
  * entry would wedge every future attempt as well.
- *
- * `searchHash` travels with it and stays under the superseded key. That is
- * correct rather than tolerated: the hash is an HMAC of a name nothing can read,
- * so there is no plaintext from which to recompute it and nothing that could
- * usefully match it.
  */
 function passThroughItem(item: IVaultItemResponse): BulkReEncryptInput['items'][number] {
   return {
@@ -566,7 +565,6 @@ function passThroughItem(item: IVaultItemResponse): BulkReEncryptInput['items'][
     encryptedData: item.encryptedData,
     dataIv: item.dataIv,
     dataTag: item.dataTag,
-    ...(item.searchHash !== undefined ? { searchHash: item.searchHash } : {}),
     ...(item.passwordHistory !== undefined ? { passwordHistory: item.passwordHistory } : {}),
   };
 }
@@ -686,6 +684,16 @@ const strengthColors: Record<number, string> = {
 // ---------------------------------------------------------------------------
 // Theme options
 // ---------------------------------------------------------------------------
+
+/**
+ * The toast for a failed two-factor code check in Settings (turning 2FA off,
+ * regenerating backup codes). A locked second factor gets its own sentence and
+ * remedy; anything else keeps the form's own wording, which deliberately does not
+ * say whether the password or the code was the wrong one.
+ */
+function secondFactorFailureTitle(error: unknown, otherwise: string): string {
+  return isAccountLocked(error) ? ACCOUNT_LOCKED_MESSAGE : otherwise;
+}
 
 const THEME_OPTIONS = [
   { value: 'light' as const, label: 'Light', icon: Sun },
@@ -1207,8 +1215,8 @@ export default function SettingsPage() {
       const res = await getProfileApi();
       const disableProfileResult = res.data;
       if (disableProfileResult.success) setProfile(disableProfileResult.data);
-    } catch {
-      toast({ title: 'Invalid code or password', type: 'error' });
+    } catch (err) {
+      toast({ title: secondFactorFailureTitle(err, 'Invalid code or password'), type: 'error' });
     } finally {
       setDisabling2fa(false);
     }
@@ -1235,8 +1243,14 @@ export default function SettingsPage() {
         setShowBackupCodes(true);
         toast({ title: 'Backup codes regenerated', type: 'success' });
       }
-    } catch {
-      toast({ title: 'Failed to regenerate backup codes. Check your password.', type: 'error' });
+    } catch (err) {
+      toast({
+        title: secondFactorFailureTitle(
+          err,
+          'Failed to regenerate backup codes. Check your password.',
+        ),
+        type: 'error',
+      });
     } finally {
       setRegeneratingCodes(false);
     }
@@ -1610,7 +1624,7 @@ export default function SettingsPage() {
           ...(sentBatches > 0 ? { description: retryAdvice } : {}),
           type: 'error',
         });
-        if (inserted > 0 || updated > 0) void useVaultStore.getState().fetchItems();
+        if (inserted > 0 || updated > 0) refreshInBackground(useVaultStore.getState().fetchItems());
         return;
       }
 
@@ -1641,7 +1655,7 @@ export default function SettingsPage() {
         ...(skipReasons.length > 0 ? { description: skipReasons.join('\n') } : {}),
         type: skippedInvalid > 0 ? 'warning' : 'success',
       });
-      if (inserted > 0 || updated > 0) void useVaultStore.getState().fetchItems();
+      if (inserted > 0 || updated > 0) refreshInBackground(useVaultStore.getState().fetchItems());
       setShowImport(false);
       setImportData('');
     } catch (err) {
@@ -1894,7 +1908,6 @@ export default function SettingsPage() {
             { role: 'item.data', rowId: item._id, itemType: item.itemType },
             newVaultKey,
           );
-          const searchHash = await cryptoService.generateSearchHash(plaintext.name, newVaultKey);
 
           // Re-encrypt password history entries if present. Each rewritten
           // password carries the `changedAt` it was decrypted beside, so the
@@ -1925,7 +1938,6 @@ export default function SettingsPage() {
             encryptedData: encData.encrypted,
             dataIv: encData.iv,
             dataTag: encData.tag,
-            searchHash,
             ...(reEncryptedHistory !== undefined ? { passwordHistory: reEncryptedHistory } : {}),
           });
         }
@@ -2431,6 +2443,17 @@ export default function SettingsPage() {
           </div>
         </CardContent>
       </Card>
+
+      {/* Invitations: only for an account the operator listed as an inviter, on a
+          server that registers by invitation. */}
+      {profile?.canInvite === true && (
+        <InviteCard email={profile.email} clipboardClearSeconds={clipboardClearTimeout} />
+      )}
+
+      {/* Security emails (F-26): which events the account owner is emailed about. */}
+      {profile && (
+        <SecurityNotificationsCard email={profile.email} initial={profile.settings.notifications} />
+      )}
 
       {/* Security */}
       <Card>

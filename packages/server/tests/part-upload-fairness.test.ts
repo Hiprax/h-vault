@@ -140,7 +140,9 @@ async function seedUpload(user: TestUser): Promise<string> {
     userId: user.id,
     objectKey: buildObjectKey(user.id, uploadId.toHexString()),
     ...FRAMING,
-    declaredPlaintextBytes: 1,
+    // The part every case sends is `DOCUMENT_TAG_BYTES + 32` bytes: a 32-byte file
+    // in one segment, which is exactly what the part handler holds it to.
+    declaredPlaintextBytes: 32,
     declaredChunkCount: 1,
     chunkPlaintextBytes: DOCUMENT_PLAINTEXT_CHUNK_BYTES,
     vaultKeyVersion: 0,

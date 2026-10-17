@@ -14,6 +14,16 @@ export const REFRESH_COOKIE_NAME = 'refreshToken';
 export const TRUSTED_DEVICE_COOKIE_NAME = 'trustedDevice';
 
 /**
+ * Cookie carrying the raw device-proof token (`models/DeviceProof.ts`): proof that
+ * this browser completed an authentication for one account, which a password
+ * lockout never refuses. Scoped to `path: '/api/v1/auth'` like the trusted-device
+ * cookie, so the browser sends it only to the auth endpoints that read it (the
+ * sign-in steps, the unlock link and log-out-everywhere). httpOnly; the server
+ * stores only its SHA-256.
+ */
+export const DEVICE_PROOF_COOKIE_NAME = '__hv_device';
+
+/**
  * Hard ceiling, in bytes, on the body of a single HIBP Pwned Passwords range
  * response (`utils/hibp.ts`). Applied as BOTH `maxContentLength` and
  * `maxBodyLength` on the outbound `axios` call. It is one of the two outbound
@@ -120,3 +130,11 @@ export const DEFAULT_UPDATE_CHECK_REPOSITORY = 'Hiprax/h-vault';
 export const GITHUB_REPOSITORY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}$/;
 /** The most addresses `UPDATE_NOTIFY_EMAILS` accepts. */
 export const MAX_UPDATE_NOTIFY_EMAILS = 10;
+
+/**
+ * What `authenticate` answers a request whose session is dead, word for word. The
+ * tenant-write guards (`assertTenantRowLive` in `utils/controllerHelpers.ts`) answer
+ * a write for an account that is gone with the same words, so the two refusals are
+ * one to the client.
+ */
+export const SESSION_INVALID_MESSAGE = 'Invalid or expired token';

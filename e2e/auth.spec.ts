@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { testEmail, TEST_PASSWORD } from './helpers';
+import { E2E_STRONG_PASSWORD, PBKDF2_STEP_TIMEOUT_MS, testEmail, TEST_PASSWORD } from './helpers';
 
 test.describe('Authentication Flows', () => {
   test.describe('Registration', () => {
@@ -51,6 +51,48 @@ test.describe('Authentication Flows', () => {
         .locator('#register-email')
         .evaluate((el) => !(el as HTMLInputElement).validity.valid);
       expect(isInvalid).toBe(true);
+    });
+  });
+
+  test.describe('Invitation links', () => {
+    // The dev server registers in `open` mode for every spec, so this proves the
+    // half only a browser can: the invitation travels in the link's FRAGMENT, the
+    // page moves it into the form and replaces the fragment away before anything
+    // else happens, and the registration request carries it. That the server then
+    // admits exactly that address once is pinned against the real handler by
+    // `packages/server/tests/registration-mode.test.ts`.
+    test('carries the invitation from the link into the registration and drops it from the address', async ({
+      page,
+    }) => {
+      test.setTimeout(PBKDF2_STEP_TIMEOUT_MS + 60_000);
+      const token = 'e2e-Invitation_token-0123456789abcdefghijk';
+      const email = testEmail();
+
+      await page.goto(`/register#invite=${token}`);
+
+      await expect(page.getByLabel('Invitation code')).toHaveValue(token);
+      await expect.poll(() => page.evaluate(() => window.location.hash)).toBe('');
+      expect(page.url()).not.toContain(token);
+
+      await page.getByLabel(/^email$/i).fill(email);
+      await page.getByLabel(/^master password$/i).fill(E2E_STRONG_PASSWORD);
+      await page.getByLabel(/confirm master password/i).fill(E2E_STRONG_PASSWORD);
+      await page.getByRole('checkbox').check();
+
+      const registration = page.waitForRequest(
+        (request) =>
+          request.method() === 'POST' &&
+          new URL(request.url()).pathname === '/api/v1/auth/register',
+        { timeout: PBKDF2_STEP_TIMEOUT_MS },
+      );
+      await page.getByRole('button', { name: /create account/i }).click();
+
+      const sent = (await registration).postDataJSON() as Record<string, unknown>;
+      expect(sent.email).toBe(email);
+      expect(sent.invitationToken).toBe(token);
+      // The master password itself never leaves the page, only its derived proof.
+      expect(JSON.stringify(sent)).not.toContain(E2E_STRONG_PASSWORD);
+      await expect(page).toHaveURL(/\/login/, { timeout: PBKDF2_STEP_TIMEOUT_MS });
     });
   });
 

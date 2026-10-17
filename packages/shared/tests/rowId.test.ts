@@ -141,7 +141,7 @@ describe('the idNonce wire field', () => {
   });
 
   it('refuses two import inserts naming one nonce, and names the repeat', () => {
-    const insert = { ...item, searchHash: 'a'.repeat(64), idNonce: NONCE };
+    const insert = { ...item, idNonce: NONCE };
     const other = { ...insert, idNonce: `${NONCE.slice(0, 39)}0` };
     expect(importOperationsSchema.safeParse({ inserts: [insert, other] }).success).toBe(true);
     const repeated = importOperationsSchema.safeParse({ inserts: [insert, other, insert] });

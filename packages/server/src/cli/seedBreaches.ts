@@ -40,6 +40,7 @@ import {
   type SeedSignal,
 } from '../utils/breachSeed.js';
 import { acquireJobLock, releaseJobLock } from '../utils/jobLock.js';
+import { createIndexesWithCurrentRetention } from '../utils/ttlIndexReconcile.js';
 import { BREACH_SEED_LOCK_NAME, BREACH_SEED_LOCK_TTL_MS } from '../jobs/breachSeed.js';
 import { parseArgs } from './seedBreachesArgs.js';
 
@@ -87,8 +88,9 @@ async function main(): Promise<void> {
     serverSelectionTimeoutMS: 10_000,
   });
 
-  // Ensure the unique prefix index exists before bulk upserting.
-  await PwnedRangeCache.createIndexes();
+  // Ensure the unique prefix index exists before bulk upserting, rebuilding the
+  // on-demand TTL index if BREACH_CACHE_TTL_DAYS changed since it was built.
+  await createIndexesWithCurrentRetention(PwnedRangeCache);
 
   const lockId = await acquireJobLock(BREACH_SEED_LOCK_NAME, BREACH_SEED_LOCK_TTL_MS);
   if (!lockId) {

@@ -54,7 +54,6 @@ vi.mock('../src/services/crypto/cryptoService', () => ({
     encryptData: vi.fn(),
     encryptDataWithAad: vi.fn(),
     decryptData: vi.fn(),
-    generateSearchHash: vi.fn(),
     clearKey: vi.fn(),
     clearCryptoKey: vi.fn().mockResolvedValue(undefined),
   },
@@ -130,6 +129,8 @@ import {
   deleteItemApi,
   permanentDeleteApi,
   emptyTrashApi,
+  restoreItemApi,
+  deleteFolderApi,
 } from '../src/services/api/vaultApi';
 import { MAX_ENCRYPTED_NAME_LENGTH, MAX_ENCRYPTED_DATA_LENGTH, deriveRowId } from '@hvault/shared';
 import type { ItemType } from '@hvault/shared';
@@ -529,7 +530,6 @@ describe('8.2 — createItem / updateItem pre-flight size checks', () => {
     vi.clearAllMocks();
     resetVault();
     setupUnlockedVault();
-    vi.mocked(cryptoService.generateSearchHash).mockResolvedValue('deadbeef'.repeat(8));
   });
 
   // Row fields are sealed through the bound (v2) path, `encryptDataWithAad`, so
@@ -719,7 +719,6 @@ describe('updateItem refuses an item type other than the row’s stored type', (
     vi.clearAllMocks();
     resetVault();
     setupUnlockedVault();
-    vi.mocked(cryptoService.generateSearchHash).mockResolvedValue('deadbeef'.repeat(8));
     vi.mocked(cryptoService.encryptDataWithAad).mockResolvedValue({
       encrypted: 'sealed',
       iv: 'sealed-iv',
@@ -732,7 +731,6 @@ describe('updateItem refuses an item type other than the row’s stored type', (
     expect(updateItemApi).not.toHaveBeenCalled();
     expect(cryptoService.encryptDataWithAad).not.toHaveBeenCalled();
     expect(cryptoService.encryptData).not.toHaveBeenCalled();
-    expect(cryptoService.generateSearchHash).not.toHaveBeenCalled();
   }
 
   function getItemResponse(data: unknown, success = true): Awaited<ReturnType<typeof getItemApi>> {
@@ -1065,9 +1063,13 @@ describe('4.6 — pagination cap', () => {
       ),
     );
 
+    const warn = vi.spyOn(logger, 'warn');
     await useVaultStore.getState().fetchTrashItems();
 
     expect(pagesRequested).toBe(50);
+    expect(warn).toHaveBeenCalledWith(
+      'fetchTrashItems: page cap (50) reached; some items may be missing',
+    );
 
     const state = useVaultStore.getState();
     expect(state.trashItems).toHaveLength(50);
@@ -1639,5 +1641,441 @@ describe('decryptExportResponse', () => {
     expect(items).toHaveLength(0);
     expect(folders).toHaveLength(0);
     expect(vi.mocked(logger.warn)).toHaveBeenCalled();
+  });
+});
+
+describe('a vault-list walk ends where the vault does, and a failed refresh keeps the list', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetVault();
+    setupUnlockedVault();
+    vi.mocked(cryptoService.decryptData).mockImplementation((enc) =>
+      Promise.resolve(
+        typeof enc === 'string' && enc.includes('name')
+          ? 'name'
+          : JSON.stringify({ username: 'u' }),
+      ),
+    );
+  });
+
+  /** A server whose vault is `totalPages` pages of one item each. */
+  function pages(totalPages: number, prefix: string) {
+    return (params?: { page?: number }) => {
+      const page = params?.page ?? 1;
+      return Promise.resolve({
+        data: {
+          success: true,
+          data: [
+            makeRawItemResponse({
+              _id: `${prefix}${String(page).padStart(24 - prefix.length, '0')}`,
+              ...(prefix === 't' ? { deletedAt: '2024-01-02T00:00:00Z' } : {}),
+            }),
+          ],
+          pagination: { page, limit: 200, total: totalPages, totalPages },
+        },
+      } as unknown);
+    };
+  }
+
+  const refused = () =>
+    Object.assign(new Error('Request failed with status code 429'), {
+      isAxiosError: true,
+      response: { status: 429, headers: { 'retry-after': '600' }, data: { message: 'Too many' } },
+    });
+
+  it('a vault of exactly MAX_PAGES pages loads whole, with no "may be missing" warning', async () => {
+    vi.mocked(listItemsApi).mockImplementation(pages(50, 'i') as never);
+    vi.mocked(listTrashApi).mockImplementation(pages(50, 't') as never);
+
+    await useVaultStore.getState().fetchItems();
+    await useVaultStore.getState().fetchTrashItems();
+
+    const state = useVaultStore.getState();
+    expect(vi.mocked(listItemsApi)).toHaveBeenCalledTimes(50);
+    expect(state.items).toHaveLength(50);
+    expect(state.trashItems).toHaveLength(50);
+    expect(state.lastDecryptionError).toBeNull();
+  });
+
+  it('a refresh refused on its first page leaves the list the user was looking at', async () => {
+    vi.mocked(listItemsApi).mockImplementation(pages(2, 'i') as never);
+    await useVaultStore.getState().fetchItems();
+    const before = useVaultStore.getState();
+    expect(before.items).toHaveLength(2);
+
+    vi.mocked(listItemsApi).mockRejectedValueOnce(refused() as never);
+    await expect(useVaultStore.getState().fetchItems()).rejects.toThrow(/429/);
+
+    const after = useVaultStore.getState();
+    expect(after.items.map((item) => item.id)).toEqual(before.items.map((item) => item.id));
+    expect(after.itemsTotal).toBe(before.itemsTotal);
+    expect(after.itemsLoading).toBe(false);
+  });
+
+  it('a refresh that fails part-way leaves the previous list, never a truncated one', async () => {
+    vi.mocked(listItemsApi).mockImplementation(pages(3, 'i') as never);
+    await useVaultStore.getState().fetchItems();
+    const before = useVaultStore.getState().items.map((item) => item.id);
+    expect(before).toHaveLength(3);
+
+    const second = pages(3, 'n');
+    vi.mocked(listItemsApi).mockImplementation(((params?: { page?: number }) =>
+      (params?.page ?? 1) === 1 ? second(params) : Promise.reject(refused())) as never);
+    await expect(useVaultStore.getState().fetchItems()).rejects.toThrow(/429/);
+
+    // Every row the user was looking at is still there (none truncated away), and
+    // so is the row the failed walk did load (fresher than anything kept).
+    const after = useVaultStore.getState().items.map((item) => item.id);
+    expect(after).toEqual(expect.arrayContaining(before));
+    expect(after).toContain('n00000000000000000000001');
+    expect(after).toHaveLength(before.length + 1);
+  });
+
+  it('the trash keeps its list the same way', async () => {
+    vi.mocked(listTrashApi).mockImplementation(pages(2, 't') as never);
+    await useVaultStore.getState().fetchTrashItems();
+    const before = useVaultStore.getState().trashItems.map((item) => item.id);
+    expect(before).toHaveLength(2);
+
+    vi.mocked(listTrashApi).mockRejectedValueOnce(refused() as never);
+    await expect(useVaultStore.getState().fetchTrashItems()).rejects.toThrow(/429/);
+
+    expect(useVaultStore.getState().trashItems.map((item) => item.id)).toEqual(before);
+  });
+
+  it('a trash refresh that fails part-way keeps the previous rows, except one purged meanwhile', async () => {
+    vi.mocked(listTrashApi).mockImplementation(pages(3, 't') as never);
+    await useVaultStore.getState().fetchTrashItems();
+    expect(useVaultStore.getState().trashItems).toHaveLength(3);
+
+    // Page 1 of the refresh answers with a fresh row; page 2 waits, then fails.
+    let fail!: () => void;
+    const secondPage = new Promise<never>((_resolve, reject) => {
+      fail = () => reject(refused());
+    });
+    const fresh = pages(3, 'u');
+    let asked = 0;
+    vi.mocked(listTrashApi).mockImplementation(((params?: { page?: number }) => {
+      asked += 1;
+      return (params?.page ?? 1) === 1 ? fresh(params) : secondPage;
+    }) as never);
+    const run = useVaultStore.getState().fetchTrashItems();
+    await vi.waitFor(() => {
+      expect(asked).toBeGreaterThanOrEqual(2);
+    });
+    // While page 2 is outstanding, a previous trash row is purged for good.
+    vi.mocked(permanentDeleteApi).mockResolvedValueOnce({ data: { success: true } } as never);
+    await useVaultStore.getState().permanentDeleteItem('t00000000000000000000002');
+    fail();
+    await expect(run).rejects.toThrow(/429/);
+
+    expect(useVaultStore.getState().trashItems.map((item) => item.id)).toEqual([
+      'u00000000000000000000001',
+      't00000000000000000000001',
+      't00000000000000000000003',
+    ]);
+  });
+
+  it('a lock while a trash page is in flight leaves the trash empty when it lands', async () => {
+    let answer!: () => void;
+    const page = pages(2, 't');
+    vi.mocked(listTrashApi).mockImplementation(
+      ((params?: { page?: number }) =>
+        new Promise((resolve) => {
+          answer = () => resolve(page(params) as never);
+        })) as never,
+    );
+    const run = useVaultStore.getState().fetchTrashItems();
+    await vi.waitFor(() => {
+      expect(vi.mocked(listTrashApi)).toHaveBeenCalledTimes(1);
+    });
+
+    useVaultStore.getState().clearStore();
+    answer();
+    await run.catch(() => undefined);
+
+    expect(useVaultStore.getState().trashItems).toEqual([]);
+    expect(vi.mocked(listTrashApi)).toHaveBeenCalledTimes(1);
+    // Nothing a lock has closed is decrypted afterwards with the key it held.
+    expect(vi.mocked(cryptoService.decryptData)).not.toHaveBeenCalled();
+  });
+
+  it('a lock while a trash page is being decrypted leaves the trash empty when it finishes', async () => {
+    vi.mocked(listTrashApi).mockImplementation(pages(2, 't') as never);
+    let decrypted!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      decrypted = resolve;
+    });
+    vi.mocked(cryptoService.decryptData).mockImplementation(async (enc) => {
+      await gate;
+      return typeof enc === 'string' && enc.includes('name')
+        ? 'name'
+        : JSON.stringify({ username: 'u' });
+    });
+    const run = useVaultStore.getState().fetchTrashItems();
+    await vi.waitFor(() => {
+      expect(vi.mocked(cryptoService.decryptData)).toHaveBeenCalled();
+    });
+
+    useVaultStore.getState().clearStore();
+    decrypted();
+    await run.catch(() => undefined);
+
+    expect(useVaultStore.getState().trashItems).toEqual([]);
+    expect(vi.mocked(listTrashApi)).toHaveBeenCalledTimes(1);
+  });
+
+  it('a FIRST load that fails shows what it got (there is no previous list to keep)', async () => {
+    const first = pages(2, 'i');
+    vi.mocked(listItemsApi).mockImplementation(((params?: { page?: number }) =>
+      (params?.page ?? 1) === 1 ? first(params) : Promise.reject(refused())) as never);
+
+    await expect(useVaultStore.getState().fetchItems()).rejects.toThrow(/429/);
+
+    expect(useVaultStore.getState().items).toHaveLength(1);
+  });
+});
+
+describe('a refresh that fails part-way loses no change made while it ran', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetVault();
+    setupUnlockedVault();
+    vi.mocked(cryptoService.decryptData).mockImplementation((enc) =>
+      Promise.resolve(
+        typeof enc === 'string' && enc.includes('name')
+          ? 'name'
+          : JSON.stringify({ username: 'u' }),
+      ),
+    );
+  });
+
+  const ID = (n: number) => `0000000000000000000000${String(n).padStart(2, '0')}`;
+  const FOLDER = 'f00000000000000000000001';
+
+  const refused = () =>
+    Object.assign(new Error('Request failed with status code 429'), {
+      isAxiosError: true,
+      response: { status: 429, headers: { 'retry-after': '600' }, data: { message: 'Too many' } },
+    });
+
+  /** A page of one stored row, as the list route answers it. */
+  function page(n: number, totalPages: number, row: Record<string, unknown>) {
+    return Promise.resolve({
+      data: {
+        success: true,
+        data: [makeRawItemResponse(row)],
+        pagination: { page: n, limit: 200, total: totalPages, totalPages },
+      },
+    } as unknown as Awaited<ReturnType<typeof listItemsApi>>);
+  }
+
+  async function loadPreviousList(): Promise<void> {
+    const rows = [{ _id: ID(1) }, { _id: ID(2) }, { _id: ID(3) }, { _id: ID(4), folderId: FOLDER }];
+    vi.mocked(listItemsApi).mockImplementation((params) =>
+      page(params?.page ?? 1, rows.length, rows[(params?.page ?? 1) - 1]!),
+    );
+    vi.mocked(listTrashApi).mockImplementation(() =>
+      Promise.resolve({
+        data: {
+          success: true,
+          data: [makeRawItemResponse({ _id: ID(9), deletedAt: '2024-01-02T00:00:00Z' })],
+          pagination: { page: 1, limit: 200, total: 1, totalPages: 1 },
+        },
+      } as unknown as Awaited<ReturnType<typeof listTrashApi>>),
+    );
+    await useVaultStore.getState().fetchItems();
+    await useVaultStore.getState().fetchTrashItems();
+    expect(useVaultStore.getState().items.map((item) => item.id)).toEqual([
+      ID(1),
+      ID(2),
+      ID(3),
+      ID(4),
+    ]);
+  }
+
+  /** Starts a refresh whose first page answers and whose second waits for `fail()`. */
+  function refreshFailingOnPage2() {
+    let fail!: () => void;
+    const secondPage = new Promise<never>((_resolve, reject) => {
+      fail = () => reject(refused());
+    });
+    let asked = 0;
+    vi.mocked(listItemsApi).mockImplementation((params) => {
+      asked += 1;
+      return (params?.page ?? 1) === 1
+        ? page(1, 4, { _id: ID(1), favorite: true })
+        : (secondPage as never);
+    });
+    const run = useVaultStore.getState().fetchItems();
+    return { run, fail, pageTwoAsked: () => asked >= 2 };
+  }
+
+  it('keeps every create, edit, restore, delete and folder delete made during the failed walk', async () => {
+    await loadPreviousList();
+    const walk = refreshFailingOnPage2();
+    await vi.waitFor(() => {
+      expect(walk.pageTwoAsked()).toBe(true);
+    });
+
+    // While page 2 is outstanding: an edit of a row the walk has not reloaded...
+    vi.mocked(updateItemApi).mockResolvedValueOnce({
+      data: { success: true, data: { updatedAt: '2025-01-01T00:00:00Z' } },
+    } as never);
+    await useVaultStore.getState().updateItemMeta(ID(2), { tags: ['edited'] });
+    // ...a delete of another...
+    vi.mocked(deleteItemApi).mockResolvedValueOnce({ data: { success: true } } as never);
+    await useVaultStore.getState().deleteItem(ID(3));
+    // ...a folder deleted with its members...
+    vi.mocked(deleteFolderApi).mockResolvedValueOnce({ data: { success: true } } as never);
+    await useVaultStore.getState().deleteFolder(FOLDER, 'delete');
+    // ...a row restored from the trash, and a row created.
+    vi.mocked(restoreItemApi).mockResolvedValueOnce({
+      data: { success: true, data: makeRawItemResponse({ _id: ID(9) }) },
+    } as never);
+    await useVaultStore.getState().restoreItem(ID(9));
+    const created = { ...useVaultStore.getState().items[0]!, id: ID(7) };
+    useVaultStore.setState((state) => ({ items: [created, ...state.items] }));
+
+    walk.fail();
+    await expect(walk.run).rejects.toThrow(/429/);
+
+    const items = useVaultStore.getState().items;
+    expect(new Set(items.map((item) => item.id))).toEqual(new Set([ID(1), ID(2), ID(7), ID(9)]));
+    // The reloaded row is the fresh one, and the edit of the not-yet-reloaded row stands.
+    expect(items.find((item) => item.id === ID(1))?.favorite).toBe(true);
+    expect(items.find((item) => item.id === ID(2))?.tags).toEqual(['edited']);
+    // Negative: the deleted row and the deleted folder's member do not come back.
+    expect(items.some((item) => item.id === ID(3))).toBe(false);
+    expect(items.some((item) => item.id === ID(4))).toBe(false);
+    expect(useVaultStore.getState().itemsTotal).toBe(items.length);
+  });
+
+  it('a full edit and a rename of rows the failed walk had not reloaded both stand', async () => {
+    await loadPreviousList();
+    const walk = refreshFailingOnPage2();
+    await vi.waitFor(() => {
+      expect(walk.pageTwoAsked()).toBe(true);
+    });
+    vi.mocked(cryptoService.encryptDataWithAad).mockResolvedValue({
+      encrypted: 'sealed',
+      iv: 'sealed-iv',
+      tag: 'sealed-tag',
+    });
+
+    // A full edit (a password change, say) of a row not yet reloaded: the store
+    // reads its stored type from the server, and the server answers the new row.
+    vi.mocked(getItemApi).mockResolvedValueOnce({
+      data: { success: true, data: makeRawItemResponse({ _id: ID(2) }) },
+    } as never);
+    vi.mocked(updateItemApi).mockResolvedValueOnce({
+      data: {
+        success: true,
+        data: makeRawItemResponse({ _id: ID(2), updatedAt: '2025-02-02T00:00:00Z' }),
+      },
+    } as never);
+    await useVaultStore.getState().updateItem(ID(2), 'login', 'name', { username: 'u2' });
+    // A rename of another.
+    vi.mocked(updateItemApi).mockResolvedValueOnce({
+      data: { success: true, data: { updatedAt: '2025-03-03T00:00:00Z' } },
+    } as never);
+    await useVaultStore.getState().renameItem(ID(3), 'Renamed');
+
+    walk.fail();
+    await expect(walk.run).rejects.toThrow(/429/);
+
+    const items = useVaultStore.getState().items;
+    expect(items.find((item) => item.id === ID(2))?.updatedAt).toBe('2025-02-02T00:00:00Z');
+    expect(items.find((item) => item.id === ID(3))?.name).toBe('Renamed');
+    // Negative: the untouched carried row is the previous one, unchanged.
+    expect(items.find((item) => item.id === ID(4))?.name).toBe('name');
+  });
+
+  it('a folder deleted with "move" during the failed walk re-parents the rows it had not reloaded', async () => {
+    await loadPreviousList();
+    const walk = refreshFailingOnPage2();
+    await vi.waitFor(() => {
+      expect(walk.pageTwoAsked()).toBe(true);
+    });
+    vi.mocked(deleteFolderApi).mockResolvedValueOnce({ data: { success: true } } as never);
+    await useVaultStore.getState().deleteFolder(FOLDER, 'move');
+
+    walk.fail();
+    await expect(walk.run).rejects.toThrow(/429/);
+
+    const moved = useVaultStore.getState().items.find((item) => item.id === ID(4));
+    expect(moved).toBeDefined();
+    expect(moved?.folderId).toBeUndefined();
+  });
+
+  it('two edits of one row during the failed walk both stand, applied in order', async () => {
+    await loadPreviousList();
+    const walk = refreshFailingOnPage2();
+    await vi.waitFor(() => {
+      expect(walk.pageTwoAsked()).toBe(true);
+    });
+
+    vi.mocked(updateItemApi).mockResolvedValueOnce({
+      data: { success: true, data: { updatedAt: '2025-04-01T00:00:00Z' } },
+    } as never);
+    await useVaultStore.getState().updateItemMeta(ID(2), { tags: ['first'] });
+    vi.mocked(updateItemApi).mockResolvedValueOnce({
+      data: { success: true, data: { updatedAt: '2025-04-02T00:00:00Z' } },
+    } as never);
+    await useVaultStore.getState().updateItemMeta(ID(2), { favorite: true });
+
+    walk.fail();
+    await expect(walk.run).rejects.toThrow(/429/);
+
+    const row = useVaultStore.getState().items.find((item) => item.id === ID(2));
+    // Neither edit replaced the other: the second is applied on top of the first.
+    expect(row?.tags).toEqual(['first']);
+    expect(row?.favorite).toBe(true);
+    expect(row?.updatedAt).toBe('2025-04-02T00:00:00Z');
+  });
+
+  it('a lock during a failing refresh leaves the list empty: nothing is restored into a cleared store', async () => {
+    await loadPreviousList();
+    const walk = refreshFailingOnPage2();
+    await vi.waitFor(() => {
+      expect(walk.pageTwoAsked()).toBe(true);
+    });
+
+    useVaultStore.getState().clearStore();
+    walk.fail();
+    await walk.run.catch(() => undefined);
+
+    expect(useVaultStore.getState().items).toEqual([]);
+  });
+});
+
+describe('deleting a folder with "move" re-parents its rows locally as the server does', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetVault();
+    setupUnlockedVault();
+  });
+
+  it("members go to the deleted folder's own parent, not to the root", async () => {
+    const parent = 'f00000000000000000000001';
+    const child = 'f00000000000000000000002';
+    useVaultStore.setState({
+      folders: [
+        { id: parent, name: 'Parent' },
+        { id: child, name: 'Child', parentId: parent },
+      ] as never,
+      items: [
+        { id: 'a', folderId: child, name: 'A' },
+        { id: 'b', folderId: undefined, name: 'B' },
+      ] as never,
+    });
+    vi.mocked(deleteFolderApi).mockResolvedValueOnce({ data: { success: true } } as never);
+
+    await useVaultStore.getState().deleteFolder(child, 'move');
+
+    const items = useVaultStore.getState().items;
+    expect(items.find((item) => item.id === 'a')?.folderId).toBe(parent);
+    // Negative: a row that was in no folder stays there.
+    expect(items.find((item) => item.id === 'b')?.folderId).toBeUndefined();
   });
 });

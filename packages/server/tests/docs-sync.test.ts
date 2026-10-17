@@ -3,7 +3,15 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { AUDIT_ACTIONS, MAX_PREVIEW_BYTES, PREVIEW_MODES, formatBytes } from '@hvault/shared';
+import {
+  AUDIT_ACTIONS,
+  HIBP_MAX_MISSES_PER_USER_PER_DAY,
+  HIBP_MAX_MISSES_PER_USER_PER_WINDOW,
+  HIBP_MISS_BUDGET_WINDOW_MINUTES,
+  MAX_PREVIEW_BYTES,
+  PREVIEW_MODES,
+  formatBytes,
+} from '@hvault/shared';
 import { TIER_BUDGET_SECONDS } from '../../../scripts/ci/lib/tiers.mjs';
 // The accessibility gate's membership, read from the ONE list that defines it —
 // the same import `gate-surface.test.ts` takes, for the same reason: a count
@@ -13,12 +21,13 @@ import { NUMBER_WORDS } from './support/numberWords';
 import * as rateLimiters from '../src/middleware/rateLimiter.js';
 import { swaggerSpec } from '../src/config/swagger.js';
 
-const { FOLDER_WRITE_RATE_LIMIT_MAX, VAULT_ITEM_WRITE_RATE_LIMIT_MAX } = rateLimiters;
+const { FOLDER_WRITE_RATE_LIMIT_MAX, VAULT_ITEM_WRITE_RATE_LIMIT_MAX, VAULT_LIST_RATE_LIMIT_MAX } =
+  rateLimiters;
 /**
  * The limiters the middleware module exports: its MIDDLEWARE (three parameters)
  * named `…Limiter`. The module also exports helpers (`resolveClientKey`,
- * `buildAccountKey`, the `skipAccountLimiter` predicate, …), which is why a bare
- * count of its functions is not the tier count.
+ * `buildRefreshKey`, `closeRateLimitStore`, …), which is why a bare count of its functions is not
+ * the tier count.
  */
 const LIMITER_EXPORTS = Object.entries(rateLimiters).filter(
   ([name, value]) => typeof value === 'function' && name.endsWith('Limiter') && value.length === 3,
@@ -171,6 +180,30 @@ describe('README documentation sync', () => {
     });
   });
 
+  it('quotes the derived vault list budget from its constant, in the README and on both list routes', () => {
+    // Derived from MAX_ITEMS_PER_USER and the largest page size, so a change to
+    // either moves it, and a hand-copied number would not move with it.
+    const formatted = (count: number): string => count.toLocaleString('en-US');
+    const row = readme.split('\n').find((line) => line.startsWith('| Vault list '));
+    expect(row?.split('|')[2]?.trim()).toBe(`${formatted(VAULT_LIST_RATE_LIMIT_MAX)} / user`);
+    const paths = swaggerSpec.paths as Record<string, Record<string, { description?: unknown }>>;
+    for (const path of ['/vault/items', '/vault/items/trash']) {
+      expect(String(paths[path]?.get?.description)).toContain(
+        `Rate limited: ${formatted(VAULT_LIST_RATE_LIMIT_MAX)} req/user per 15 min`,
+      );
+    }
+  });
+
+  it('quotes the breach fetch budgets from their constants', () => {
+    // Both are derived from MAX_ITEMS_PER_USER, so a hand-copied number would not
+    // move with a change to the per-account item cap.
+    const count = (value: number): string => value.toLocaleString('en-US');
+    expect(readme).toContain(
+      `**${count(HIBP_MAX_MISSES_PER_USER_PER_WINDOW)} per ${String(HIBP_MISS_BUDGET_WINDOW_MINUTES)} minutes**`,
+    );
+    expect(readme).toContain(`**${count(HIBP_MAX_MISSES_PER_USER_PER_DAY)} per day**`);
+  });
+
   it('the Heavy Ops rate-limit row reflects the real targets, not "password generation"', () => {
     const heavyOpsRow = readme.split('\n').find((line) => line.includes('Heavy Ops'));
     expect(heavyOpsRow).toBeDefined();
@@ -223,6 +256,71 @@ describe('README documentation sync', () => {
             `${gate.id}: README says T${String(documented.get(gate.id))}, runner T${String(gate.tier)}`,
         );
       expect(wrong).toEqual([]);
+    });
+
+    /**
+     * The gate COUNT, as opposed to the gate list above. Four sentences and one
+     * table in three documents state how many gates a tier runs, and none of them was pinned:
+     * the phase that registered `gitleaks` and `osv` found the push tier still
+     * described as thirty-one gates in CONTRIBUTING.md and SECURITY.md and the
+     * self-test as thirty-nine cases. Every number is derived from the runner's
+     * listing, and every sentence must still be found, so rewording one away
+     * fails here rather than passing vacuously.
+     */
+    it('states how many gates each tier runs, everywhere a document counts them', () => {
+      const fast = listed.filter((gate) => gate.tier === 0).length;
+      const push = listed.filter((gate) => gate.tier <= 1).length;
+      const all = listed.length;
+      expect(fast).toBeGreaterThan(0);
+      expect(push).toBeGreaterThan(fast);
+      expect(all).toBeGreaterThan(push);
+
+      const contributing = readFileSync(path.resolve(repoRoot, 'CONTRIBUTING.md'), 'utf-8');
+      const security = readFileSync(path.resolve(repoRoot, 'SECURITY.md'), 'utf-8');
+      const sites: { text: string; pattern: RegExp; expected: number; what: string }[] = [
+        {
+          text: contributing,
+          pattern: /The `pre-push` hook runs the entire\npipeline locally — ([a-z-]+) gates/,
+          expected: push,
+          what: 'CONTRIBUTING’s push-tier count',
+        },
+        {
+          text: security,
+          pattern: /through the `pre-push` hook — ([a-z-]+) gates,/,
+          expected: push,
+          what: 'SECURITY’s push-tier count',
+        },
+        {
+          // One self-test case per registered task, and every gate is one task.
+          text: readme,
+          pattern: /one case per registered task,\n([a-z-]+) of them/,
+          expected: all,
+          what: 'the README’s self-test case count',
+        },
+        {
+          text: readme,
+          pattern: /Three failures out of ([a-z-]+) gates/,
+          expected: all,
+          what: 'the README’s re-run paragraph',
+        },
+      ];
+      for (const site of sites) {
+        const match = site.pattern.exec(site.text);
+        expect(match, `${site.what}: the sentence is gone`).not.toBeNull();
+        expect(NUMBER_WORDS[site.expected], `no word for ${String(site.expected)}`).toBeDefined();
+        expect(match![1], site.what).toBe(NUMBER_WORDS[site.expected]);
+      }
+
+      // The remote-machine table counts in digits.
+      for (const [command, expected] of [
+        ['npm run verify:fast', fast],
+        ['npm run ci', push],
+        ['npm run verify:full', all],
+      ] as const) {
+        const row = new RegExp(`^\\|\\s*\`${command}\`\\s*\\|\\s*(\\d+)\\s*\\|`, 'm').exec(readme);
+        expect(row, `README remote table row for ${command}`).not.toBeNull();
+        expect(Number(row![1]), `README remote table: ${command}`).toBe(expected);
+      }
     });
 
     it('counts the release tier correctly in the prose under the table', () => {

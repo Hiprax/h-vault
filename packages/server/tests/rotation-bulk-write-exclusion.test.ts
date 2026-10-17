@@ -6,8 +6,8 @@
  *
  * `assertVaultNotRotating` is a READ. `assertVaultKeyVersion` is a READ. For
  * `POST /tools/import` and `POST /backup/restore` the distance between those
- * reads and the first row written is not a statement or two: it is a
- * multi-megabyte `JSON.parse`, the entry-count cap, the field-length checks, the
+ * reads and the first row written is not a statement or two: it is (for the
+ * import) a multi-megabyte `JSON.parse`, the entry-count cap, the field-length checks, the
  * folder lookups, the update-target lookups, a job-lock acquisition and up to
  * four counted collection scans. A rotation that raises its fence anywhere
  * inside that span is one both reads have already decided does not exist, and
@@ -40,6 +40,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import request from 'supertest';
+import { MAX_FOLDERS_PER_USER } from '@hvault/shared';
 import app from '../src/app.js';
 import { User } from '../src/models/User.js';
 import { VaultItem } from '../src/models/VaultItem.js';
@@ -124,6 +125,16 @@ async function heldLocks(): Promise<Record<string, number>> {
     rotation: await JobLock.countDocuments({ jobName: vaultRotationLockName(user.id) }),
     import: await JobLock.countDocuments({ jobName: vaultImportLockName(user.id) }),
   };
+}
+
+/** Fills this account to its folder cap, so restoring one more folder is refused INSIDE the locked span. */
+async function fillFolderCap(): Promise<void> {
+  await Folder.insertMany(
+    Array.from({ length: MAX_FOLDERS_PER_USER }, (_, i) => ({
+      userId: user.id,
+      ...sampleFolder({ encryptedName: `seed-${String(i)}` }),
+    })),
+  );
 }
 
 /** Takes the exclusion lock as a rotation would, and returns its release. */
@@ -300,19 +311,21 @@ describe('POST /backup/restore holds the vault-key exclusion lock across its spa
   });
 
   it('releases the lock when the restore fails for an unrelated reason', async () => {
-    // A malformed body is refused inside the span, after the lock is taken. The
-    // refusal must still be a 400 about the body — not a conflict — and it must
-    // not strand the lock.
+    // One folder past the account's cap is refused INSIDE the span, after the lock
+    // is taken (a malformed or oversized FILE no longer gets that far: it is
+    // refused before the lock, F-14). The refusal must still be a 400 about the
+    // request — not a conflict — and it must not strand the lock.
     const release = await holdRotationLock();
     await release();
+    await fillFolderCap();
 
     const res = await post('/api/v1/backup/restore', {
-      conflictStrategy: 'skip',
-      data: 'this is not JSON',
+      conflictStrategy: 'keep_both',
+      data: JSON.stringify({ items: [], folders: [sampleFolder({ encryptedName: 'one-more' })] }),
     });
 
     expect(res.status).toBe(400);
-    expect(res.body.message).toMatch(/malformed JSON/i);
+    expect(res.body.message).toMatch(/per-user folder limit/i);
     expect(await heldLocks()).toEqual({ rotation: 0, import: 0 });
   });
 });

@@ -179,7 +179,7 @@ export function productionEnv({ port, mongoUri, origin, extra = {} }) {
  * Start `dist/server.js` exactly as the image's CMD does, and wait until it
  * answers its health route or dies.
  *
- * Resolves to `{ child, health, output }`: `health` is `waitForHealth`'s verdict
+ * Resolves to `{ child, health, output, boundAddress }`: `health` is `waitForHealth`'s verdict
  * (or a synthesized failure naming the exit), and `output()` returns the tail of
  * everything the process printed, for the failure report.
  *
@@ -197,6 +197,10 @@ export async function bootArtifact({
 }) {
   const started = Date.now();
   const log = [];
+  // The address the server says it BOUND, from its boot line ("listening on
+  // 127.0.0.1:5000 in production mode"). Captured as the output streams, because
+  // `output()` keeps only the tail and the boot line is among the first.
+  let boundAddress = null;
   const child = spawn(process.execPath, [path.join(artifact, 'dist', 'server.js')], {
     cwd: workspace,
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -205,7 +209,9 @@ export async function bootArtifact({
   onSpawn(child);
   for (const source of [child.stdout, child.stderr]) {
     source?.on('data', (chunk) => {
-      log.push(chunk.toString('utf8'));
+      const text = chunk.toString('utf8');
+      log.push(text);
+      boundAddress ??= /server listening on (\S+) in /.exec(text)?.[1] ?? null;
     });
   }
   child.once('exit', (code, signal) => {
@@ -228,7 +234,13 @@ export async function bootArtifact({
       );
     }),
   ]);
-  return { child, baseUrl, health, output: () => log.join('').slice(-4000) };
+  return {
+    child,
+    baseUrl,
+    health,
+    output: () => log.join('').slice(-4000),
+    boundAddress: () => boundAddress,
+  };
 }
 
 /** SIGTERM the artifact, and SIGKILL it if it has not exited within the grace. */

@@ -90,8 +90,17 @@ export function TotpImportFlow({ onStartOver }: TotpImportFlowProps) {
   }, []);
 
   // The attach picker reads `items`, which is empty on a cold load of this page.
+  // Only then: an already loaded vault is current (the store applies every write),
+  // and re-reading every page on each visit spent the account's list budget. Read
+  // once, on mount, from the store itself rather than subscribed to.
   useEffect(() => {
-    void fetchItems();
+    const { items, itemsLoading } = useVaultStore.getState();
+    if (items.length === 0 && !itemsLoading) {
+      // A refused or failed load leaves the picker empty; it is not an error here.
+      void fetchItems().catch(() => {
+        /* nothing to attach to until the next walk */
+      });
+    }
   }, [fetchItems]);
 
   const handleDecoded = useCallback(

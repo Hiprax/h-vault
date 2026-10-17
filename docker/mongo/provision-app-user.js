@@ -7,9 +7,9 @@
 // The user is created IN the `hvault` database and granted the built-in
 // `readWrite` role on `hvault` and nothing else — no `admin` database, no
 // cluster privileges, no second database. That is the exact ceiling the server
-// needs: every operation it performs is CRUD, index creation, or a cursor over
-// a `hvault` collection. Two of those are easy to overlook and are why the role
-// can never be narrowed below `readWrite`:
+// needs: every operation it performs is CRUD, index creation or removal, or a
+// cursor over a `hvault` collection. Three of those are easy to overlook and are
+// why the role can never be narrowed below `readWrite`:
 //
 //   * `createIndex` is a HARD boot requirement, not a nicety. `runMigrations()`
 //     is awaited during startup and its first act is `ensureLockIndexes()`,
@@ -17,6 +17,11 @@
 //     `createIndexes` there kills the process before it listens.
 //   * The rate-limit store creates its own TTL index lazily on the `rateLimits`
 //     collection, which the model-driven bootstrap never touches.
+//   * Migrations drop indexes a schema change superseded (v2 drops the two audit
+//     log page indexes that lacked `_id`), because the bootstrap builds rather than
+//     prunes; and the bootstrap itself drops and rebuilds an expiry index whose
+//     retention setting changed, since `collMod` is not part of `readWrite`.
+//     `dropIndex` is part of `readWrite`, and a refusal would fail the boot.
 //
 // The one command the app sends outside `hvault` is `hello` against `admin`,
 // which MongoDB exempts from authorization entirely — so it needs no grant here.

@@ -69,6 +69,10 @@ PLAN.md
 plan.md
 plan-*.md
 TEST-AUDIT.md
+SECURITY-AUDIT.md
+# The security-remediation phase log: every fix task appends its red/green
+# transcripts here. Scratch, like PLAN.md; never committed.
+security-evidence.md
 
 # Working notes for the hardening plan: scratch, like PLAN.md itself.
 .testfortress/phase-logs/

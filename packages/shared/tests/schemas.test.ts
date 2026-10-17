@@ -44,6 +44,9 @@ import {
   checkBreachSchema,
   backupSetupSchema,
   backupSettingsSchema,
+  backupRecipientsSchema,
+  confirmBackupRecipientSchema,
+  BACKUP_RECIPIENTS_MOVED_MESSAGE,
   backupChangePasswordSchema,
   backupHistorySchema,
   auditLogQuerySchema,
@@ -63,6 +66,7 @@ import {
   BACKUP_HISTORY_PAGE_LIMIT,
   BACKUP_HISTORY_MAX_LIMIT,
   MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH,
+  MAX_BACKUP_EMAILS,
 } from '../src/constants/index.js';
 
 const VALID_OBJECT_ID = 'a'.repeat(24);
@@ -540,20 +544,24 @@ describe('createVaultItemSchema', () => {
     expect(result.success).toBe(false);
   });
 
-  it('accepts valid searchHash', () => {
+  // F-12: the keyed name hash is no longer stored, so an older client's value is
+  // accepted and dropped whatever its shape, never validated.
+  it('accepts a searchHash from an older client and drops it', () => {
     const result = createVaultItemSchema.safeParse({
       ...validItem,
       searchHash: 'a'.repeat(64),
     });
     expect(result.success).toBe(true);
+    expect(result.data).not.toHaveProperty('searchHash');
   });
 
-  it('rejects invalid searchHash format', () => {
+  it('drops a malformed searchHash too, rather than refusing the item', () => {
     const result = createVaultItemSchema.safeParse({
       ...validItem,
       searchHash: 'not-a-hash',
     });
-    expect(result.success).toBe(false);
+    expect(result.success).toBe(true);
+    expect(result.data).not.toHaveProperty('searchHash');
   });
 });
 
@@ -880,20 +888,24 @@ describe('bulkReEncryptSchema', () => {
     expect(bulkReEncryptSchema.safeParse({ ...validReEncrypt, authHash: '' }).success).toBe(false);
   });
 
-  it('accepts optional searchHash in items', () => {
+  it('drops a searchHash an older client sends with an item (F-12)', () => {
     const withHash = {
       ...validReEncrypt,
       items: [{ ...validReEncrypt.items[0]!, searchHash: 'a'.repeat(64) }],
     };
-    expect(bulkReEncryptSchema.safeParse(withHash).success).toBe(true);
+    const result = bulkReEncryptSchema.safeParse(withHash);
+    expect(result.success).toBe(true);
+    expect(result.data?.items[0]).not.toHaveProperty('searchHash');
   });
 
-  it('rejects invalid searchHash format', () => {
+  it('drops a malformed searchHash too, rather than refusing the rotation', () => {
     const withBadHash = {
       ...validReEncrypt,
       items: [{ ...validReEncrypt.items[0]!, searchHash: 'not-a-hash' }],
     };
-    expect(bulkReEncryptSchema.safeParse(withBadHash).success).toBe(false);
+    const result = bulkReEncryptSchema.safeParse(withBadHash);
+    expect(result.success).toBe(true);
+    expect(result.data?.items[0]).not.toHaveProperty('searchHash');
   });
 
   it('accepts folders array in bulkReEncrypt', () => {
@@ -2840,11 +2852,7 @@ describe('backupSettingsSchema', () => {
   });
 
   it('accepts valid settings', () => {
-    const result = backupSettingsSchema.safeParse({
-      enabled: true,
-      scheduleHour: 14,
-      backupEmails: ['user@example.com'],
-    });
+    const result = backupSettingsSchema.safeParse({ enabled: true, scheduleHour: 14 });
     expect(result.success).toBe(true);
   });
 
@@ -2856,32 +2864,117 @@ describe('backupSettingsSchema', () => {
     expect(backupSettingsSchema.safeParse({ scheduleHour: 24 }).success).toBe(false);
   });
 
-  it('accepts valid backupEmails array', () => {
-    const result = backupSettingsSchema.safeParse({ backupEmails: ['a@b.com', 'c@d.com'] });
-    expect(result.success).toBe(true);
+  // F-05 (PLAN.md 6.1): recipients moved to `backupRecipientsSchema`, behind the
+  // master-password proof. Any `backupEmails` here is REFUSED, never stripped, and
+  // every shape is refused with the sentence that names the route to use instead.
+  it.each([
+    ['a valid list', { enabled: true, scheduleHour: 14, backupEmails: ['user@example.com'] }],
+    ['an empty list', { backupEmails: [] }],
+    ['an invalid address', { backupEmails: ['not-email'] }],
+    [
+      'eleven entries',
+      { backupEmails: Array.from({ length: 11 }, (_, i) => `u${String(i)}@x.io`) },
+    ],
+    ['an over-long entry', { backupEmails: ['a'.repeat(300)] }],
+    ['a non-string entry', { backupEmails: [42] }],
+    ['a non-array value', { backupEmails: 'user@example.com' }],
+  ])('refuses %s in backupEmails, naming PUT /backup/recipients', (_label, body) => {
+    const result = backupSettingsSchema.safeParse(body);
+    expect(result.success).toBe(false);
+    expect(result.error!.issues.map((issue) => issue.message)).toContain(
+      BACKUP_RECIPIENTS_MOVED_MESSAGE,
+    );
+    expect(
+      result.error!.issues.every((issue) => issue.message === BACKUP_RECIPIENTS_MOVED_MESSAGE),
+    ).toBe(true);
+    // Every issue points at the field, so the 400's message reads "backupEmails: …".
+    expect(
+      result.error!.issues.every((issue) => issue.path.join('.').startsWith('backupEmails')),
+    ).toBe(true);
+  });
+});
+
+it('refuses a valid list with exactly one custom issue on the field', () => {
+  const result = backupSettingsSchema.safeParse({ backupEmails: ['user@example.com'] });
+  expect(result.success).toBe(false);
+  expect(result.error!.issues).toEqual([
+    expect.objectContaining({
+      code: 'custom',
+      path: ['backupEmails'],
+      message: BACKUP_RECIPIENTS_MOVED_MESSAGE,
+    }),
+  ]);
+});
+
+describe('backupRecipientsSchema', () => {
+  const proof = 'h'.repeat(44);
+
+  it('accepts the proof and a list, lowercasing each address', () => {
+    const result = backupRecipientsSchema.parse({
+      authHash: proof,
+      backupEmails: ['User@Example.COM'],
+    });
+    expect(result).toEqual({ authHash: proof, backupEmails: ['user@example.com'] });
   });
 
-  it('rejects invalid email in backupEmails', () => {
-    expect(backupSettingsSchema.safeParse({ backupEmails: ['not-email'] }).success).toBe(false);
+  it('accepts an empty list (backups then go to the account address)', () => {
+    expect(backupRecipientsSchema.safeParse({ authHash: proof, backupEmails: [] }).success).toBe(
+      true,
+    );
   });
 
-  it('lowercases backupEmails', () => {
-    const result = backupSettingsSchema.parse({ backupEmails: ['User@Example.COM'] });
-    expect(result.backupEmails![0]).toBe('user@example.com');
+  it('requires the proof: absent, empty and 101 characters are refused, 100 accepted', () => {
+    expect(backupRecipientsSchema.safeParse({ backupEmails: [] }).success).toBe(false);
+    expect(backupRecipientsSchema.safeParse({ authHash: '', backupEmails: [] }).success).toBe(
+      false,
+    );
+    expect(
+      backupRecipientsSchema.safeParse({ authHash: 'h'.repeat(101), backupEmails: [] }).success,
+    ).toBe(false);
+    expect(
+      backupRecipientsSchema.safeParse({ authHash: 'h'.repeat(100), backupEmails: [] }).success,
+    ).toBe(true);
   });
 
-  it('rejects backupEmails over 10 entries', () => {
-    const emails = Array.from({ length: 11 }, (_, i) => `user${String(i)}@example.com`);
-    expect(backupSettingsSchema.safeParse({ backupEmails: emails }).success).toBe(false);
+  it('requires the list', () => {
+    expect(backupRecipientsSchema.safeParse({ authHash: proof }).success).toBe(false);
   });
 
-  it('rejects backupEmail over 254 chars in array', () => {
-    const longEmail = 'a'.repeat(243) + '@example.com';
-    expect(backupSettingsSchema.safeParse({ backupEmails: [longEmail] }).success).toBe(false);
+  it(`accepts ${String(MAX_BACKUP_EMAILS)} addresses and refuses one more`, () => {
+    const list = (n: number) => Array.from({ length: n }, (_, i) => `u${String(i)}@example.com`);
+    expect(
+      backupRecipientsSchema.safeParse({ authHash: proof, backupEmails: list(MAX_BACKUP_EMAILS) })
+        .success,
+    ).toBe(true);
+    expect(
+      backupRecipientsSchema.safeParse({
+        authHash: proof,
+        backupEmails: list(MAX_BACKUP_EMAILS + 1),
+      }).success,
+    ).toBe(false);
   });
 
-  it('accepts empty backupEmails array', () => {
-    expect(backupSettingsSchema.safeParse({ backupEmails: [] }).success).toBe(true);
+  it('refuses an invalid address and one over 254 characters, and accepts one of 254', () => {
+    const at254 = `${'a'.repeat(254 - '@example.com'.length)}@example.com`;
+    expect(
+      backupRecipientsSchema.safeParse({ authHash: proof, backupEmails: ['nope'] }).success,
+    ).toBe(false);
+    expect(
+      backupRecipientsSchema.safeParse({ authHash: proof, backupEmails: [at254] }).success,
+    ).toBe(true);
+    expect(
+      backupRecipientsSchema.safeParse({ authHash: proof, backupEmails: [`a${at254}`] }).success,
+    ).toBe(false);
+  });
+});
+
+describe('confirmBackupRecipientSchema', () => {
+  it('accepts a token of 1 to 2000 characters and refuses empty and 2001', () => {
+    expect(confirmBackupRecipientSchema.safeParse({ token: 't' }).success).toBe(true);
+    expect(confirmBackupRecipientSchema.safeParse({ token: 't'.repeat(2000) }).success).toBe(true);
+    expect(confirmBackupRecipientSchema.safeParse({ token: 't'.repeat(2001) }).success).toBe(false);
+    expect(confirmBackupRecipientSchema.safeParse({ token: '' }).success).toBe(false);
+    expect(confirmBackupRecipientSchema.safeParse({}).success).toBe(false);
   });
 });
 
@@ -3255,7 +3348,6 @@ const minimalImportInsert = {
   encryptedData: 'enc-data',
   dataIv: 'data-iv',
   dataTag: 'data-tag',
-  searchHash: 'c'.repeat(64),
 };
 
 /** A minimal, schema-valid `operations` payload for envelope-level tests. */
@@ -3348,7 +3440,6 @@ describe('importSchema operations contract', () => {
     encryptedData: 'enc-data',
     dataIv: 'data-iv',
     dataTag: 'data-tag',
-    searchHash: 'a'.repeat(64),
     tags: ['work'],
     favorite: false,
   };
@@ -3361,7 +3452,6 @@ describe('importSchema operations contract', () => {
     encryptedData: 'enc-data',
     dataIv: 'data-iv',
     dataTag: 'data-tag',
-    searchHash: 'b'.repeat(64),
   };
 
   const validHistoryEntry = {
@@ -3454,13 +3544,18 @@ describe('importSchema operations contract', () => {
     expect(result.success).toBe(false);
   });
 
-  it('rejects an insert missing its required searchHash', () => {
-    const { searchHash: _omit, ...noHash } = validInsert;
+  it('accepts an insert and an update without a searchHash, and drops one an older client sends (F-12)', () => {
     const result = importSchema.safeParse({
       format: 'json',
-      operations: { inserts: [noHash] },
+      operations: {
+        inserts: [validInsert, { ...validInsert, searchHash: 'a'.repeat(64) }],
+        updates: [{ ...validUpdate, searchHash: 'b'.repeat(64) }],
+      },
     });
-    expect(result.success).toBe(false);
+    expect(result.success).toBe(true);
+    expect(result.data?.operations.inserts[0]).not.toHaveProperty('searchHash');
+    expect(result.data?.operations.inserts[1]).not.toHaveProperty('searchHash');
+    expect(result.data?.operations.updates[0]).not.toHaveProperty('searchHash');
   });
 
   it('rejects a non-hex update id', () => {
@@ -3550,11 +3645,10 @@ describe('vaultItemResponseSchema', () => {
     expect(vaultItemResponseSchema.safeParse(validItem).success).toBe(true);
   });
 
-  it('accepts optional fields (folderId, searchHash, deletedAt, passwordHistory)', () => {
+  it('accepts optional fields (folderId, deletedAt, passwordHistory)', () => {
     const result = vaultItemResponseSchema.safeParse({
       ...validItem,
       folderId: '507f1f77bcf86cd799439013',
-      searchHash: 'hash',
       deletedAt: '2025-06-01T00:00:00Z',
       passwordHistory: [
         { encryptedPassword: 'ep', iv: 'iv', tag: 'tg', changedAt: '2025-01-01T00:00:00Z' },
@@ -3625,10 +3719,9 @@ describe('folderResponseSchema', () => {
     expect(folderResponseSchema.safeParse(validFolder).success).toBe(true);
   });
 
-  it('accepts optional fields (searchHash, parentId, icon, color)', () => {
+  it('accepts optional fields (parentId, icon, color)', () => {
     const result = folderResponseSchema.safeParse({
       ...validFolder,
-      searchHash: 'hash',
       parentId: '507f1f77bcf86cd799439013',
       icon: 'folder',
       color: '#ff0000',
@@ -3661,5 +3754,30 @@ describe('folderResponseSchema', () => {
   it('rejects when nameIv is missing', () => {
     const { nameIv: _, ...rest } = validFolder;
     expect(folderResponseSchema.safeParse(rest).success).toBe(false);
+  });
+});
+
+describe('a folder sort position of -0', () => {
+  // JSON can spell `-0`, and BSON stores it as a double where `0` is an int32: the
+  // schemas normalise it, so a stored position never depends on how a client
+  // happened to write zero.
+  it('is stored as 0 by create, update and reorder alike', () => {
+    const created = createFolderSchema.parse({
+      encryptedName: 'n',
+      nameIv: 'i',
+      nameTag: 't',
+      sortOrder: -0,
+    });
+    const reordered = reorderFolderSchema.parse({ sortOrder: -0 });
+    const updated = updateFolderSchema.parse({ sortOrder: -0 });
+
+    expect(Object.is(created.sortOrder, 0)).toBe(true);
+    expect(Object.is(reordered.sortOrder, 0)).toBe(true);
+    expect(Object.is(updated.sortOrder, 0)).toBe(true);
+  });
+
+  it('leaves every other position as it was', () => {
+    expect(reorderFolderSchema.parse({ sortOrder: 7 }).sortOrder).toBe(7);
+    expect(reorderFolderSchema.parse({ sortOrder: 0 }).sortOrder).toBe(0);
   });
 });

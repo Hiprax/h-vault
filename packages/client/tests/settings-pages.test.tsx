@@ -138,7 +138,6 @@ const cryptoServiceDefaults = vi.hoisted(() => ({
       iv: 'iv',
       tag: 'tag',
     }),
-  generateSearchHash: (fn: Mock) => fn.mockResolvedValue('hash'),
   clearKey: (fn: Mock) => fn,
   clearCryptoKey: (fn: Mock) => fn.mockResolvedValue(undefined),
   rotateVaultKey: (fn: Mock) =>
@@ -555,6 +554,27 @@ describe('SettingsPage', () => {
     await waitFor(() => {
       expect(screen.getByText('Not verified')).toBeInTheDocument();
     });
+  });
+
+  // ---- Invitations ----
+
+  it('offers to invite someone only to an account the server lists as an inviter', async () => {
+    setupDefaultProfileMock({ canInvite: true });
+    await renderSettings();
+    expect(await screen.findByText('Invite someone')).toBeInTheDocument();
+    expect(screen.getByLabelText('Invitee email')).toBeInTheDocument();
+  });
+
+  it.each([
+    ['false', { canInvite: false }],
+    ['absent (an older server)', {}],
+  ])('shows no invitation card when canInvite is %s', async (_label, overrides) => {
+    setupDefaultProfileMock(overrides);
+    await renderSettings();
+    await waitFor(() => {
+      expect(screen.getByText('test@example.com')).toBeInTheDocument();
+    });
+    expect(screen.queryByText('Invite someone')).toBeNull();
   });
 
   // ---- Security Section: Change Password ----
@@ -1553,8 +1573,8 @@ describe('SettingsPage', () => {
     ]);
     // Nothing is sealed unbound (v1).
     expect(cryptoService.encryptData).not.toHaveBeenCalled();
-    // The search hash is recomputed — it is a deterministic HMAC of the name.
-    expect(insert.searchHash).toBe('hash');
+    // F-12: no name hash is computed or sent.
+    expect(insert).not.toHaveProperty('searchHash');
   });
 
   it('shows CSV field mapping UI when CSV format is selected', async () => {
@@ -2562,7 +2582,8 @@ describe('BackupSettingsPage', () => {
   it('renders backup email input', async () => {
     await renderBackup();
     await waitFor(() => {
-      expect(screen.getByText('Backup Emails')).toBeInTheDocument();
+      // F-05: the list is "Backup Recipients" (each address shows whether it has confirmed).
+      expect(screen.getByText('Backup Recipients')).toBeInTheDocument();
       expect(screen.getByPlaceholderText('Add backup email')).toBeInTheDocument();
     });
   });

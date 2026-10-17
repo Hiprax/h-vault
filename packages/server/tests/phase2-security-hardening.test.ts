@@ -49,12 +49,15 @@ async function getCsrf(agent: request.Agent): Promise<{ csrfToken: string; csrfC
   return { csrfToken: token, csrfCookie: cookie };
 }
 
-/** A well-formed 64-char lowercase-hex searchHash — required on every import row. */
+/**
+ * A well-formed 64-char lowercase-hex searchHash, as an older client sends on every
+ * import row. No longer required or stored (F-12): the server drops it.
+ */
 const VALID_SEARCH_HASH = 'a'.repeat(64);
 
 /**
- * One `operations.inserts` row: the shared sample item plus the `searchHash`
- * the import contract requires on every insert.
+ * One `operations.inserts` row: the shared sample item plus the `searchHash` an
+ * older client sends (dropped by the schema since F-12).
  */
 function importInsert(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return sampleVaultItem({ searchHash: VALID_SEARCH_HASH, ...overrides });
@@ -114,19 +117,23 @@ describe('Phase 2: Security Hardening', () => {
         .send(body);
     }
 
-    describe('searchHash validation', () => {
-      it('should reject a malformed searchHash (not 64-char hex) and write nothing', async () => {
+    // F-12: no keyed hash of a name is stored, so the import no longer validates
+    // or requires one. These tests used to pin a malformed or missing `searchHash`
+    // refusing the whole import with 400; each now pins the opposite: the row is
+    // accepted, the value dropped, and nothing of it stored.
+    describe('searchHash is neither validated nor stored (F-12)', () => {
+      it('accepts an insert whose searchHash is malformed, and stores no hash', async () => {
         const res = await postImport(
           importBody([importInsert({ searchHash: 'not-a-valid-hash!' })]),
         );
 
-        expect(res.status).toBe(400);
-        expect(res.body.success).toBe(false);
-        expect(res.body.message).toContain('searchHash');
-        expect(await VaultItem.countDocuments({ userId: user.id })).toBe(0);
+        expect(res.status).toBe(201);
+        const item = await VaultItem.findOne({ userId: user.id }).lean();
+        expect(item).not.toBeNull();
+        expect(item).not.toHaveProperty('searchHash');
       });
 
-      it('should accept valid 64-char lowercase hex searchHash', async () => {
+      it('accepts a well-formed searchHash from an older client, and stores none', async () => {
         const res = await postImport(importBody([importInsert()]));
 
         expect(res.status).toBe(201);
@@ -138,47 +145,39 @@ describe('Phase 2: Security Hardening', () => {
         // One echoed id per insert, in order (pinned exactly in vault-field-format.test.ts).
         expect(res.body.data.insertedIds).toHaveLength(1);
 
-        const item = await VaultItem.findOne({ userId: user.id });
+        const item = await VaultItem.findOne({ userId: user.id }).lean();
         expect(item).not.toBeNull();
-        expect(item!.searchHash).toBe(VALID_SEARCH_HASH);
+        expect(item).not.toHaveProperty('searchHash');
       });
 
-      it('should reject a searchHash with uppercase chars', async () => {
-        // The regex requires lowercase: /^[a-f0-9]{64}$/
+      it('accepts a searchHash with uppercase chars, and stores none', async () => {
         const res = await postImport(importBody([importInsert({ searchHash: 'A'.repeat(64) })]));
 
-        expect(res.status).toBe(400);
-        expect(res.body.message).toContain('searchHash');
-        expect(await VaultItem.countDocuments({ userId: user.id })).toBe(0);
+        expect(res.status).toBe(201);
+        expect(await VaultItem.countDocuments({ userId: user.id })).toBe(1);
+        expect(await VaultItem.countDocuments({ searchHash: { $exists: true } })).toBe(0);
       });
 
-      it('should reject a searchHash that is too short', async () => {
+      it('accepts a searchHash that is too short, and stores none', async () => {
         const res = await postImport(importBody([importInsert({ searchHash: 'abcdef' })]));
 
-        expect(res.status).toBe(400);
-        expect(res.body.message).toContain('searchHash');
-        expect(await VaultItem.countDocuments({ userId: user.id })).toBe(0);
+        expect(res.status).toBe(201);
+        expect(await VaultItem.countDocuments({ userId: user.id })).toBe(1);
+        expect(await VaultItem.countDocuments({ searchHash: { $exists: true } })).toBe(0);
       });
 
-      it('should reject an insert that carries no searchHash at all', async () => {
+      it('accepts an insert that carries no searchHash at all', async () => {
         const insert = importInsert();
         delete insert.searchHash;
 
         const res = await postImport(importBody([insert]));
 
-        expect(res.status).toBe(400);
-        expect(res.body.message).toContain('searchHash');
-        expect(await VaultItem.countDocuments({ userId: user.id })).toBe(0);
+        expect(res.status).toBe(201);
+        expect(await VaultItem.countDocuments({ userId: user.id })).toBe(1);
       });
 
-      it('should reject an update whose searchHash is malformed, leaving the target untouched', async () => {
-        // An overwrite replaces `encryptedName`, so the stored hash must be
-        // refreshed alongside it — a malformed one fails the whole request
-        // rather than stranding the row against its old name.
-        const existing = await seedItem(user.id, {
-          encryptedName: 'update-target',
-          searchHash: VALID_SEARCH_HASH,
-        });
+      it('applies an update whose searchHash is malformed, storing no hash', async () => {
+        const existing = await seedItem(user.id, { encryptedName: 'update-target' });
 
         const res = await postImport({
           format: 'json',
@@ -193,12 +192,11 @@ describe('Phase 2: Security Hardening', () => {
           },
         });
 
-        expect(res.status).toBe(400);
-        expect(res.body.message).toContain('searchHash');
-
-        const persisted = await VaultItem.findById(String(existing._id));
+        expect(res.status).toBe(201);
+        const persisted = await VaultItem.findById(String(existing._id)).lean();
         expect(persisted).not.toBeNull();
-        expect(persisted!.encryptedName).toBe('update-target');
+        expect(persisted!.encryptedName).toBe('rewritten');
+        expect(persisted).not.toHaveProperty('searchHash');
       });
     });
 
@@ -303,7 +301,8 @@ describe('Phase 2: Security Hardening', () => {
     describe('source-format independence', () => {
       it('should apply the same field validation to a bitwarden import', async () => {
         // `format` is audit metadata only: it never relaxes validation, so the
-        // same malformed row is rejected whichever source it claims to be from.
+        // same malformed row (its `folderId`; the garbage `searchHash` is simply
+        // dropped since F-12) is rejected whichever source it claims to be from.
         const res = await postImport(
           importBody([importInsert({ searchHash: 'INVALID', folderId: 'bad-id' })], {
             format: 'bitwarden',

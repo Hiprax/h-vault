@@ -1,9 +1,10 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { MAX_DOCUMENT_EXT_LENGTH, publicConfigResponseSchema } from '@hvault/shared';
 import { HIBP_MAX_RANGE_RESPONSE_BYTES } from '../src/constants/index.js';
+import { createTestPki, type TestPki } from './smtpTestPki.js';
 
 // The monorepo root, resolved from this file rather than from cwd: the server
 // suite is run both from the repository root and workspace-scoped, and the
@@ -74,22 +75,29 @@ describe('Server Config Validation', () => {
       const fs = (await import('node:fs')).default;
       const rootEnvPath = path.join(repoRoot, '.env');
       const realExistsSync = fs.existsSync.bind(fs);
-      vi.spyOn(fs, 'existsSync').mockImplementation((candidate) =>
-        candidate === rootEnvPath ? rootExists : realExistsSync(candidate),
-      );
+      const existsSync = vi
+        .spyOn(fs, 'existsSync')
+        .mockImplementation((candidate) =>
+          candidate === rootEnvPath ? rootExists : realExistsSync(candidate),
+        );
       // The hoisted mock outlives `vi.resetModules()`, so earlier loads in this
       // file have already called it: count only this load.
       const config = vi.mocked((await import('dotenv')).default.config);
       config.mockClear();
       await loadConfigWithEnv();
-      return { rootEnvPath, config };
+      return { rootEnvPath, config, existsSync };
     }
 
     it('reads the root .env, once, with every option that decides what is loaded pinned', async () => {
-      const { rootEnvPath, config } = await loadWithRootEnv(true);
+      const { rootEnvPath, config, existsSync } = await loadWithRootEnv(true);
 
       expect(config).toHaveBeenCalledTimes(1);
       expect(config).toHaveBeenCalledWith({ ...PINNED, path: rootEnvPath });
+      // The root it looks for is the repository root, four levels above
+      // `src/config/`, checked by its own path. Asserted directly, because where the
+      // working directory IS the repository root (the mutation runner's workers)
+      // a wrong root still ends at the same file through the fallback.
+      expect(existsSync).toHaveBeenCalledWith(rootEnvPath);
     });
 
     it('falls back to the working directory .env, named explicitly, with the same pins', async () => {
@@ -848,6 +856,155 @@ describe('Server Config Validation', () => {
     });
 
     // -------------------------------------------------------------------------
+    // Registration (F-24)
+    // -------------------------------------------------------------------------
+
+    describe('registration', () => {
+      const PRODUCTION = {
+        NODE_ENV: 'production',
+        JWT_ACCESS_SECRET: 'prod-access-secret-very-secure-and-long-enough!!',
+        JWT_REFRESH_SECRET: 'prod-refresh-secret-very-secure-and-long-enough!!',
+        SESSION_SECRET: 'ProdSessionSecretVerySecure!!1234',
+        CORS_ORIGIN: 'https://hvault.example.com',
+      };
+
+      it.each([
+        ['unset', undefined, 'open'],
+        ['an empty assignment', '', 'open'],
+        ['open', 'open', 'open'],
+        ['invite', 'invite', 'invite'],
+        ['closed', 'closed', 'closed'],
+      ])('REGISTRATION_MODE %s resolves to %s', async (_label, value, expected) => {
+        const { config } = await loadConfigWithEnv({ REGISTRATION_MODE: value });
+        expect(config.REGISTRATION_MODE).toBe(expected);
+      });
+
+      it.each([
+        ['unset', undefined, 7],
+        ['an empty assignment', '', 7],
+        ['the lower bound', '1', 1],
+        ['the upper bound', '365', 365],
+      ])('UNVERIFIED_ACCOUNT_TTL_DAYS %s resolves to %s', async (_label, value, expected) => {
+        const { config } = await loadConfigWithEnv({ UNVERIFIED_ACCOUNT_TTL_DAYS: value });
+        expect(config.UNVERIFIED_ACCOUNT_TTL_DAYS).toBe(expected);
+      });
+
+      it.each(['0', '366', '1.5', 'seven'])(
+        'refuses to boot with UNVERIFIED_ACCOUNT_TTL_DAYS=%s',
+        async (value) => {
+          await expect(loadConfigWithEnv({ UNVERIFIED_ACCOUNT_TTL_DAYS: value })).rejects.toThrow(
+            'UNVERIFIED_ACCOUNT_TTL_DAYS',
+          );
+        },
+      );
+
+      it.each(['OPEN', 'invite-only', 'off', '0'])(
+        'refuses to boot with REGISTRATION_MODE=%s rather than guess',
+        async (value) => {
+          await expect(loadConfigWithEnv({ REGISTRATION_MODE: value })).rejects.toThrow(
+            'REGISTRATION_MODE',
+          );
+        },
+      );
+
+      it.each([
+        ['unset', undefined, []],
+        ['an empty assignment', '', []],
+        [
+          'blanks, a leading @, mixed case and a duplicate',
+          ' @Example.ORG , ,example.org,corp.example.net,',
+          ['example.org', 'corp.example.net'],
+        ],
+        ['a punycode domain', 'xn--bcher-kva.example', ['xn--bcher-kva.example']],
+        [
+          'one-character labels, the shortest a domain may carry',
+          'x.co,a.b.io',
+          ['x.co', 'a.b.io'],
+        ],
+      ])('REGISTRATION_ALLOWED_DOMAINS with %s resolves to %j', async (_label, value, expected) => {
+        const { config } = await loadConfigWithEnv({ REGISTRATION_ALLOWED_DOMAINS: value });
+        expect(config.REGISTRATION_ALLOWED_DOMAINS).toEqual(expected);
+      });
+
+      it.each([
+        ['a bare label', 'localhost'],
+        ['an address rather than a domain', 'admin@example.org'],
+        ['a wildcard', '*.example.org'],
+        ['an empty label', 'example..org'],
+        ['a label ending in a hyphen', 'bad-.example.org'],
+        ['a 64-character label', `${'a'.repeat(64)}.example.org`],
+        ['a name longer than 253 characters', `${'a.'.repeat(126)}example`],
+      ])('refuses to boot with REGISTRATION_ALLOWED_DOMAINS holding %s', async (_label, value) => {
+        await expect(loadConfigWithEnv({ REGISTRATION_ALLOWED_DOMAINS: value })).rejects.toThrow(
+          'REGISTRATION_ALLOWED_DOMAINS entries must be plain domain names',
+        );
+      });
+
+      it('accepts a 63-character label, the longest a domain may carry', async () => {
+        const domain = `${'a'.repeat(63)}.example.org`;
+        const { config } = await loadConfigWithEnv({ REGISTRATION_ALLOWED_DOMAINS: domain });
+        expect(config.REGISTRATION_ALLOWED_DOMAINS).toEqual([domain]);
+      });
+
+      it('normalises REGISTRATION_INVITERS like the other address lists', async () => {
+        const { config } = await loadConfigWithEnv({
+          REGISTRATION_INVITERS: ' Admin@Example.org , ,admin@example.org,second@example.org',
+        });
+        expect(config.REGISTRATION_INVITERS).toEqual(['admin@example.org', 'second@example.org']);
+      });
+
+      const inviterList = (count: number) =>
+        Array.from({ length: count }, (_, index) => `inviter${String(index)}@example.org`).join(
+          ',',
+        );
+
+      it('accepts ten inviters', async () => {
+        const { config } = await loadConfigWithEnv({ REGISTRATION_INVITERS: inviterList(10) });
+        expect(config.REGISTRATION_INVITERS).toHaveLength(10);
+      });
+
+      it('refuses eleven inviters', async () => {
+        await expect(loadConfigWithEnv({ REGISTRATION_INVITERS: inviterList(11) })).rejects.toThrow(
+          'REGISTRATION_INVITERS accepts at most 10 addresses',
+        );
+      });
+
+      it('refuses an inviter entry that is not an address', async () => {
+        await expect(loadConfigWithEnv({ REGISTRATION_INVITERS: 'not-an-email' })).rejects.toThrow(
+          'REGISTRATION_INVITERS',
+        );
+      });
+
+      it('warns once at a production boot while registration is open', async () => {
+        mockWarn.mockClear();
+        await loadConfigWithEnv({ ...PRODUCTION, REGISTRATION_MODE: undefined });
+        const warnings = mockWarn.mock.calls.filter(([message]) =>
+          String(message).includes('REGISTRATION_MODE is open'),
+        );
+        expect(warnings).toHaveLength(1);
+      });
+
+      it.each(['invite', 'closed'])(
+        'does not warn at a production boot with REGISTRATION_MODE=%s',
+        async (mode) => {
+          mockWarn.mockClear();
+          await loadConfigWithEnv({ ...PRODUCTION, REGISTRATION_MODE: mode });
+          expect(mockWarn).not.toHaveBeenCalledWith(
+            expect.stringContaining('REGISTRATION_MODE is open'),
+          );
+        },
+      );
+
+      it('does not warn outside production, where open registration is expected', async () => {
+        mockWarn.mockClear();
+        await loadConfigWithEnv({ REGISTRATION_MODE: 'open' });
+        expect(mockWarn).not.toHaveBeenCalledWith(
+          expect.stringContaining('REGISTRATION_MODE is open'),
+        );
+      });
+    });
+
+    // -------------------------------------------------------------------------
     // The production endpoint rule
     // -------------------------------------------------------------------------
 
@@ -1260,6 +1417,21 @@ describe('Server Config Validation', () => {
       await expect(loadConfigWithEnv({ AUDIT_LOG_RETENTION_DAYS: '4000' })).rejects.toThrow(
         /Invalid environment configuration/,
       );
+    });
+
+    it('lists an index-key issue together with every other one, in one refusal', async () => {
+      // The index keys (config/indexConfigSchema.ts) are composed into this schema
+      // and parsed with the rest; the application must not validate them first on
+      // their own and hide the other problems until the next boot (F-20).
+      const attempt = loadConfigWithEnv({
+        BACKUP_RETENTION_DAYS: '400',
+        BCRYPT_ROUNDS: '2',
+        JWT_ACCESS_SECRET: 'short',
+      });
+      await expect(attempt).rejects.toThrow(/^Invalid environment configuration:\n/);
+      await expect(attempt).rejects.toThrow(/\n {2}BACKUP_RETENTION_DAYS: /);
+      await expect(attempt).rejects.toThrow(/\n {2}BCRYPT_ROUNDS: /);
+      await expect(attempt).rejects.toThrow(/\n {2}JWT_ACCESS_SECRET: /);
     });
 
     it('HIBP_CACHE_MAX_BYTES below the 1 MiB floor is rejected', async () => {
@@ -1907,6 +2079,134 @@ describe('Server Config Validation', () => {
     });
   });
 
+  // ---------------------------------------------------------------------------
+  // Listener address (F-23)
+  // ---------------------------------------------------------------------------
+
+  describe('HOST', () => {
+    it.each([
+      ['unset', undefined, '127.0.0.1'],
+      ['empty', '', '127.0.0.1'],
+      ['every IPv4 interface', '0.0.0.0', '0.0.0.0'],
+      ['every interface, dual stack', '::', '::'],
+      ['IPv6 loopback', '::1', '::1'],
+      ['a private address', '10.0.0.5', '10.0.0.5'],
+    ] as const)('%s reads as %s', async (_label, raw, expected) => {
+      const { config } = await loadConfigWithEnv({ HOST: raw });
+      expect(config.HOST).toBe(expected);
+    });
+
+    it.each([
+      ['a host name (a shell may export HOST as the machine name)', 'my-laptop'],
+      ['localhost, which resolves to whichever address the resolver lists first', 'localhost'],
+      ['an address with a port', '127.0.0.1:5000'],
+      ['a bracketed IPv6 address', '[::1]'],
+    ] as const)('refuses to boot on %s', async (_label, raw) => {
+      await expect(loadConfigWithEnv({ HOST: raw })).rejects.toThrow(
+        /Invalid environment configuration:[\s\S]*HOST: HOST must be an IP address/,
+      );
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // SMTP transport security (F-08)
+  // ---------------------------------------------------------------------------
+
+  describe('SMTP_REQUIRE_TLS', () => {
+    // One case per load: the config module is evaluated once per test.
+    it.each([
+      ['unset', undefined, undefined],
+      ['empty', '', undefined],
+      ['true', 'true', true],
+      ['false', 'false', false],
+    ] as const)(
+      'is tri-state: %s reads as %s (unset and empty mean "decide from the host")',
+      async (_label, raw, expected) => {
+        const { config } = await loadConfigWithEnv({ SMTP_REQUIRE_TLS: raw });
+        expect(config.SMTP_REQUIRE_TLS).toBe(expected);
+      },
+    );
+
+    it.each(['yes', '1', 'TRUE', 'off'])(
+      'refuses to boot on %s rather than guessing which way the operator meant it',
+      async (value) => {
+        await expect(loadConfigWithEnv({ SMTP_REQUIRE_TLS: value })).rejects.toThrow(
+          /Invalid environment configuration:[\s\S]*SMTP_REQUIRE_TLS/,
+        );
+      },
+    );
+  });
+
+  describe('SMTP_TLS_CA', () => {
+    let pki: TestPki;
+    let other: TestPki;
+
+    beforeAll(async () => {
+      pki = await createTestPki('H-Vault config test CA');
+      other = await createTestPki('H-Vault config test second CA');
+    });
+
+    it('accepts a PEM certificate and hands it on unchanged', async () => {
+      const { config } = await loadConfigWithEnv({ SMTP_TLS_CA: pki.caPem });
+      expect(config.SMTP_TLS_CA).toBe(pki.caPem);
+    });
+
+    it('accepts a bundle of several certificates', async () => {
+      const bundle = `${pki.caPem}\n${other.caPem}`;
+      const { config } = await loadConfigWithEnv({ SMTP_TLS_CA: bundle });
+      expect(config.SMTP_TLS_CA).toBe(bundle);
+    });
+
+    it('reads a literal \\n as a line break, for a PEM kept on one line of the .env file', async () => {
+      const oneLine = pki.caPem.replaceAll('\n', '\\n');
+      expect(oneLine).not.toContain('\n');
+      const { config } = await loadConfigWithEnv({ SMTP_TLS_CA: oneLine });
+      expect(config.SMTP_TLS_CA).toBe(pki.caPem);
+    });
+
+    it('accepts a PEM saved with Windows line endings', async () => {
+      const crlf = pki.caPem.replaceAll('\n', '\r\n');
+      const { config } = await loadConfigWithEnv({ SMTP_TLS_CA: crlf });
+      expect(config.SMTP_TLS_CA).toBe(crlf);
+    });
+
+    it('never repeats a refused value in the boot error (it may be a pasted private key)', async () => {
+      const marker = 'SECRETMARKER7f3cQ';
+      const pasted = `${pki.caPem}-----BEGIN ${'PRIVATE'} KEY-----\n${marker}\n-----END ${'PRIVATE'} KEY-----\n`;
+      const failure = await loadConfigWithEnv({ SMTP_TLS_CA: pasted }).then(
+        () => null,
+        (err: unknown) => err,
+      );
+      expect(failure).toBeInstanceOf(Error);
+      expect((failure as Error).message).toMatch(/SMTP_TLS_CA: SMTP_TLS_CA must be one or more/);
+      expect((failure as Error).message).not.toContain(marker);
+      // Nor any of the certificate's own body.
+      const certificateBody = pki.caPem.split('\n')[1] ?? '';
+      expect(certificateBody.length).toBeGreaterThan(16);
+      expect((failure as Error).message).not.toContain(certificateBody);
+    });
+
+    it.each([
+      ['unset', undefined],
+      ['empty', ''],
+    ] as const)('is absent when %s', async (_label, raw) => {
+      const { config } = await loadConfigWithEnv({ SMTP_TLS_CA: raw });
+      expect(config.SMTP_TLS_CA).toBeUndefined();
+    });
+
+    it.each([
+      ['a file path', '/etc/ssl/private-ca.pem'],
+      ['a truncated certificate', () => pki.caPem.replace(/\n[A-Za-z0-9+/=]{8,}\n/, '\n')],
+      ['a certificate followed by other text', () => `${pki.caPem}\nnot a certificate\n`],
+      ['a certificate followed by its private key', () => `${pki.caPem}${pki.serverKeyPem}`],
+    ] as const)('refuses to boot on %s', async (_label, value) => {
+      const raw = typeof value === 'function' ? value() : value;
+      await expect(loadConfigWithEnv({ SMTP_TLS_CA: raw })).rejects.toThrow(
+        /Invalid environment configuration:[\s\S]*SMTP_TLS_CA: SMTP_TLS_CA must be one or more PEM certificates/,
+      );
+    });
+  });
+
   /**
    * `.env.example` against the schema, in both directions.
    *
@@ -2031,6 +2331,11 @@ describe('Server Config Validation', () => {
       LOG_DIRECTORY: {
         readBy: 'packages/server/src/utils/logger.ts',
         reads: 'env.LOG_DIRECTORY',
+      },
+      // Read from `process.env` by the logger too, for the same reason (F-17).
+      LOG_MODULE_FILES: {
+        readBy: 'packages/server/src/utils/logger.ts',
+        reads: 'env.LOG_MODULE_FILES',
       },
     };
 

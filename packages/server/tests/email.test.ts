@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest';
+import { createTestPki } from './smtpTestPki.js';
 
 // ── Mock nodemailer ──────────────────────────────────────────────────────────
 // The email module creates a transporter lazily via nodemailer.createTransport.
@@ -44,6 +45,8 @@ const emailEnvKeys = [
   'EMAIL_PROVIDER',
   'GMAIL_USERNAME',
   'GMAIL_PASSWORD',
+  'SMTP_REQUIRE_TLS',
+  'SMTP_TLS_CA',
 ] as const;
 let savedEnv: Record<string, string | undefined>;
 
@@ -84,10 +87,10 @@ async function importWithSmtp(overrides: Record<string, string | undefined> = {}
   process.env['SMTP_HOST'] = overrides['SMTP_HOST'] ?? 'smtp.example.com';
   process.env['SMTP_USER'] = overrides['SMTP_USER'] ?? 'user@example.com';
   process.env['SMTP_PASS'] = overrides['SMTP_PASS'] ?? 'password123';
-  if (overrides['SMTP_FROM'] !== undefined) {
-    process.env['SMTP_FROM'] = overrides['SMTP_FROM'];
-  } else {
-    delete process.env['SMTP_FROM'];
+  for (const key of ['SMTP_FROM', 'SMTP_REQUIRE_TLS', 'SMTP_TLS_CA'] as const) {
+    const value = overrides[key];
+    if (value !== undefined) process.env[key] = value;
+    else Reflect.deleteProperty(process.env, key);
   }
 
   return freshImport();
@@ -154,6 +157,19 @@ describe('Email utility', () => {
       expect(result.success).toBe(false);
       expect(result.message).toBe('transporter_not_configured');
       expect(mockCreateTransport).not.toHaveBeenCalled();
+      expect(mockSendMail).not.toHaveBeenCalled();
+    });
+
+    it('resolves smtp_send_failed, never throws, when building the transport throws', async () => {
+      mockCreateTransport.mockImplementationOnce(() => {
+        throw new Error('unsupported transport option');
+      });
+      const { sendEmail } = await importWithSmtp();
+
+      await expect(sendEmail('recipient@example.com', 'Subject', '<p>Body</p>')).resolves.toEqual({
+        success: false,
+        message: 'smtp_send_failed: unsupported transport option',
+      });
       expect(mockSendMail).not.toHaveBeenCalled();
     });
 
@@ -254,8 +270,10 @@ describe('Email utility', () => {
       await sendEmail('test@example.com', 'Subject', '<p>Body</p>');
 
       expect(mockLog.error).toHaveBeenCalledWith(
-        'SMTP transporter verification failed — sends may still work',
-        { error: 'Invalid login: 535 5.7.8 u***r@example.com: credentials rejected' },
+        expect.stringContaining('SMTP relay verification FAILED'),
+        expect.objectContaining({
+          error: 'Invalid login: 535 5.7.8 u***r@example.com: credentials rejected',
+        }),
       );
       expect(JSON.stringify(mockLog.error.mock.calls)).not.toContain('user@example.com');
     });
@@ -348,6 +366,152 @@ describe('Email utility', () => {
 
   // ── Gmail transporter ──────────────────────────────────────────────────
 
+  // ── Transport security (F-08) ──────────────────────────────────────────
+
+  describe('SMTP transport security', () => {
+    /** The options the email module handed nodemailer for its one SMTP transport. */
+    function transportOptions(): Record<string, unknown> {
+      expect(mockCreateTransport).toHaveBeenCalledOnce();
+      return mockCreateTransport.mock.calls[0]?.[0] as Record<string, unknown>;
+    }
+
+    it.each([
+      ['a relay on the network, policy unset', true, 'smtp.example.com', undefined],
+      ['127.0.0.1, policy unset (the loopback exemption)', false, '127.0.0.1', undefined],
+      ['localhost, a NAME that DNS answers for, policy unset', true, 'localhost', undefined],
+      ['a name under .localhost, policy unset', true, 'mail.localhost', undefined],
+      ['::1, policy unset', false, '::1', undefined],
+      [
+        'a name that only CONTAINS localhost, policy unset',
+        true,
+        'localhost.example.com',
+        undefined,
+      ],
+      ['loopback with SMTP_REQUIRE_TLS=true', true, '127.0.0.1', 'true'],
+      ['a relay on the network with SMTP_REQUIRE_TLS=false', false, 'smtp.example.com', 'false'],
+    ] as const)('for %s, requireTLS is %s', async (_label, required, host, policy) => {
+      const { sendEmail } = await importWithSmtp({ SMTP_HOST: host, SMTP_REQUIRE_TLS: policy });
+
+      await sendEmail('recipient@example.com', 'Subject', '<p>Body</p>');
+
+      const options = transportOptions();
+      expect(options['requireTLS']).toBe(required);
+      // The protocol floor applies whatever the policy, and certificate
+      // verification is never turned off.
+      expect(options['tls']).toEqual({ minVersion: 'TLSv1.2' });
+      expect(JSON.stringify(options)).not.toContain('rejectUnauthorized');
+    });
+
+    it('hands nodemailer the operator CA when one is configured, and nothing else about trust', async () => {
+      const { caPem: ca } = await createTestPki('H-Vault email unit test CA');
+      const { sendEmail } = await importWithSmtp({ SMTP_TLS_CA: ca });
+
+      await sendEmail('recipient@example.com', 'Subject', '<p>Body</p>');
+
+      expect(transportOptions()['tls']).toEqual({ minVersion: 'TLSv1.2', ca });
+    });
+
+    describe('verifyEmailTransportAtBoot', () => {
+      it('verifies the relay once at boot and logs success, so the first send does not verify again', async () => {
+        const { verifyEmailTransportAtBoot, sendEmail } = await importWithSmtp();
+
+        await verifyEmailTransportAtBoot();
+        await verifyEmailTransportAtBoot();
+        // Verified at boot, before any mail was sent, and only once.
+        expect(mockVerify).toHaveBeenCalledOnce();
+        expect(mockSendMail).not.toHaveBeenCalled();
+        await sendEmail('recipient@example.com', 'Subject', '<p>Body</p>');
+
+        expect(mockVerify).toHaveBeenCalledOnce();
+        expect(mockLog.info).toHaveBeenCalledWith('SMTP transporter verification succeeded');
+        expect(mockLog.error).not.toHaveBeenCalled();
+        // TLS is required for smtp.example.com, so there is nothing to warn about.
+        expect(mockLog.warn).not.toHaveBeenCalled();
+      });
+
+      it('reports a relay that cannot be used LOUDLY, naming the remedy, and never rejects', async () => {
+        mockVerify.mockRejectedValueOnce(new Error('Error upgrading connection with STARTTLS'));
+        const { verifyEmailTransportAtBoot } = await importWithSmtp();
+
+        await expect(verifyEmailTransportAtBoot()).resolves.toBeUndefined();
+
+        expect(mockLog.error).toHaveBeenCalledOnce();
+        const [message, meta] = mockLog.error.mock.calls[0] as [string, Record<string, unknown>];
+        expect(message).toMatch(/verification, password-reset and unlock emails/i);
+        expect(message).toContain('SMTP_REQUIRE_TLS');
+        expect(meta).toEqual({
+          host: 'smtp.example.com',
+          port: 587,
+          requireTLS: true,
+          error: 'Error upgrading connection with STARTTLS',
+        });
+        expect(mockLog.info).not.toHaveBeenCalledWith('SMTP transporter verification succeeded');
+      });
+
+      it.each([
+        ['SMTP_REQUIRE_TLS=false', 'smtp.example.com', 'false'],
+        ['loopback SMTP_HOST', '127.0.0.1', undefined],
+      ] as const)(
+        'warns once at boot that mail is not required to be encrypted (%s)',
+        async (reason, host, policy) => {
+          const { verifyEmailTransportAtBoot, sendEmail } = await importWithSmtp({
+            SMTP_HOST: host,
+            SMTP_REQUIRE_TLS: policy,
+          });
+
+          await verifyEmailTransportAtBoot();
+          await verifyEmailTransportAtBoot();
+          await sendEmail('recipient@example.com', 'Subject', '<p>Body</p>');
+
+          const warnings = mockLog.warn.mock.calls.filter(([m]) =>
+            String(m).includes('not required to use TLS'),
+          );
+          expect(warnings).toHaveLength(1);
+          expect(warnings[0]?.[1]).toEqual({ host, reason });
+        },
+      );
+
+      it('never rejects, even when building the transport throws, and says so', async () => {
+        mockCreateTransport.mockImplementationOnce(() => {
+          throw new Error('unsupported transport option');
+        });
+        const { verifyEmailTransportAtBoot } = await importWithSmtp();
+
+        await expect(verifyEmailTransportAtBoot()).resolves.toBeUndefined();
+
+        expect(mockVerify).not.toHaveBeenCalled();
+        expect(mockLog.error).toHaveBeenCalledWith('SMTP startup check could not run', {
+          error: 'unsupported transport option',
+        });
+      });
+
+      it('names the Gmail remedy, not the SMTP one, when Gmail verification fails', async () => {
+        mockVerify.mockRejectedValueOnce(
+          new Error('Invalid login: 535-5.7.8 Username and Password not accepted'),
+        );
+        const { verifyEmailTransportAtBoot } = await importWithGmail();
+
+        await verifyEmailTransportAtBoot();
+
+        const [message, meta] = mockLog.error.mock.calls[0] as [string, Record<string, unknown>];
+        expect(message).toMatch(/^Gmail verification FAILED/);
+        expect(message).toContain('GMAIL_PASSWORD');
+        expect(message).not.toContain('SMTP_REQUIRE_TLS');
+        expect(meta).toMatchObject({ host: 'smtp.gmail.com', port: 465, requireTLS: true });
+      });
+
+      it('does nothing when email is not configured: no transport, no verification, no error', async () => {
+        const { verifyEmailTransportAtBoot } = await importWithoutEmail();
+
+        await verifyEmailTransportAtBoot();
+
+        expect(mockCreateTransport).not.toHaveBeenCalled();
+        expect(mockVerify).not.toHaveBeenCalled();
+        expect(mockLog.error).not.toHaveBeenCalled();
+      });
+    });
+  });
+
   describe('Gmail provider', () => {
     it('should create Gmail transporter when EMAIL_PROVIDER is gmail', async () => {
       const { sendEmail } = await importWithGmail();
@@ -358,6 +522,7 @@ describe('Email utility', () => {
       expect(mockCreateTransport).toHaveBeenCalledWith(
         expect.objectContaining({
           service: 'gmail',
+          tls: { minVersion: 'TLSv1.2' },
           auth: {
             user: 'user@gmail.com',
             pass: 'app-password-123',
@@ -419,7 +584,7 @@ describe('Email utility', () => {
       await sendVerificationEmail('user@example.com', token);
 
       const html = (mockSendMail as Mock).mock.calls[0]?.[0]?.html as string;
-      const expectedUrl = `http://localhost:5000/verify-email?token=${encodeURIComponent(token)}`;
+      const expectedUrl = `http://localhost:5000/verify-email#token=${encodeURIComponent(token)}`;
 
       expect(html).toContain(expectedUrl);
     });
@@ -467,7 +632,7 @@ describe('Email utility', () => {
       await sendPasswordResetEmail('user@example.com', token);
 
       const html = (mockSendMail as Mock).mock.calls[0]?.[0]?.html as string;
-      const expectedUrl = `http://localhost:5000/reset-password?token=${encodeURIComponent(token)}`;
+      const expectedUrl = `http://localhost:5000/reset-password#token=${encodeURIComponent(token)}`;
 
       expect(html).toContain(expectedUrl);
     });
@@ -515,9 +680,29 @@ describe('Email utility', () => {
       await sendAccountUnlockEmail('user@example.com', token);
 
       const html = (mockSendMail as Mock).mock.calls[0]?.[0]?.html as string;
-      const expectedUrl = `http://localhost:5000/unlock-account?token=${encodeURIComponent(token)}`;
+      const expectedUrl = `http://localhost:5000/unlock-account#token=${encodeURIComponent(token)}`;
 
       expect(html).toContain(expectedUrl);
+    });
+
+    it('names the link as the remedy and warns that a reset erases the vault', async () => {
+      const { sendAccountUnlockEmail } = await importWithSmtp();
+
+      await sendAccountUnlockEmail('user@example.com', 'token123');
+
+      const html = (mockSendMail as Mock).mock.calls[0]?.[0]?.html as string;
+      expect(html).toContain('Do not reset your master password to get back in.');
+      expect(html).toContain('A reset erases everything');
+      expect(html).toContain('this link is the way back in');
+      // What a lockout leaves alone, stated whole: the owner's sessions and a
+      // recently signed-in browser keep working while strangers keep guessing.
+      expect(html).toContain(
+        'Sessions you already have are not affected, and neither, usually, is a browser that ' +
+          'signed in recently.',
+      );
+      // The old promise ("will also automatically unlock after 30 minutes") is
+      // no longer true while guessing continues, so it must not be made.
+      expect(html).not.toContain('automatically unlock after 30 minutes');
     });
 
     it('should include APP_URL in HTML', async () => {
@@ -533,6 +718,52 @@ describe('Email utility', () => {
       const { sendAccountUnlockEmail } = await importWithoutEmail();
 
       const result = await sendAccountUnlockEmail('user@example.com', 'token123');
+
+      expect(result.success).toBe(false);
+      expect(mockSendMail).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── sendAccountUnlockEmail, second factor ───────────────────────────────
+  //
+  // Rewritten for F-26 (PLAN.md 14.2, judged design option A): the second-factor
+  // lockout mail was ONE mail carrying both the alert ("your master password was
+  // entered correctly") and the unlock link. A security notice may carry no token or
+  // link, so the alert moved to `utils/securityNotifications.ts` (pinned in
+  // `security-notifications.test.ts`) and the link is now the same factor-worded
+  // sender as the password factor's. What is pinned here is the link mail itself.
+
+  describe('sendAccountUnlockEmail for the second factor', () => {
+    it('sends the two-factor unlock link, worded for that step, with the remedy if it was not the owner', async () => {
+      const { sendAccountUnlockEmail } = await importWithSmtp();
+
+      const token = 'sf/token&special=true';
+      const result = await sendAccountUnlockEmail('user@example.com', token, 'second_factor');
+
+      expect(result.success).toBe(true);
+      expect(mockSendMail).toHaveBeenCalledTimes(1);
+      const sent = (mockSendMail as Mock).mock.calls[0]?.[0] as {
+        to: string;
+        subject: string;
+        html: string;
+      };
+      expect(sent.to).toBe('user@example.com');
+      expect(sent.subject).toBe('Unlock two-factor sign-in to your H-Vault account');
+      expect(sent.html).toContain('It unlocks the two-factor step only.');
+      // The remedy that evicts a password holder is named, not only the link.
+      expect(sent.html).toContain('Change Password');
+      expect(sent.html).toContain(
+        `http://localhost:5000/unlock-account#token=${encodeURIComponent(token)}`,
+      );
+      // It is not the password-lockout mail, nor does it advise a reset.
+      expect(sent.subject).not.toBe('Your H-Vault account has been locked');
+      expect(sent.html).not.toContain('Do not reset your master password');
+    });
+
+    it('returns failure and sends nothing when email is not configured', async () => {
+      const { sendAccountUnlockEmail } = await importWithoutEmail();
+
+      const result = await sendAccountUnlockEmail('user@example.com', 'token123', 'second_factor');
 
       expect(result.success).toBe(false);
       expect(mockSendMail).not.toHaveBeenCalled();
@@ -703,6 +934,83 @@ describe('escapeHtml', () => {
   });
 });
 
+// ── Token links (F-27) ──────────────────────────────────────────────────
+
+describe('every one-time token link carries its token in the URL fragment, never the query', () => {
+  // A query string is part of the request line both Nginx tiers log, and it is
+  // sent on as a Referer; a fragment never leaves the browser. So the token must
+  // appear after `#` and nowhere after `?`, in the button AND in the copy-paste
+  // text, for all four links: verification, reset, unlock (password and second
+  // factor share the page) and the backup recipient's confirmation.
+  const TOKEN = 'eyJhbGciOiJIUzI1NiJ9.eyJwIjoieCJ9.sig-_nature';
+
+  beforeEach(() => {
+    saveEmailEnv();
+    mockSendMail.mockClear();
+    mockCreateTransport.mockClear();
+    mockSendMail.mockResolvedValue({ messageId: 'test-msg-id', accepted: ['user@example.com'] });
+    mockVerify.mockResolvedValue(true);
+  });
+
+  afterEach(() => {
+    restoreEmailEnv();
+  });
+
+  /** Every absolute link in a sent message, parsed. */
+  function linksIn(html: string): URL[] {
+    return [...html.matchAll(/href="([^"]+)"/g)].map(
+      (m) => new URL(m[1]!.replaceAll('&amp;', '&')),
+    );
+  }
+
+  it.each([
+    ['verification', '/verify-email', 'sendVerificationEmail'],
+    ['password reset', '/reset-password', 'sendPasswordResetEmail'],
+    ['account unlock', '/unlock-account', 'sendAccountUnlockEmail'],
+  ] as const)('the %s email links to %s#token=…', async (_label, path, sender) => {
+    const email = await importWithSmtp();
+
+    await email[sender]('user@example.com', TOKEN);
+
+    const html = (mockSendMail as Mock).mock.calls[0]?.[0]?.html as string;
+    const [link, ...others] = linksIn(html);
+    expect(others).toEqual([]);
+    expect(link?.origin).toBe('http://localhost:5000');
+    expect(link?.pathname).toBe(path);
+    expect(link?.hash).toBe(`#token=${TOKEN}`);
+    expect(link?.search).toBe('');
+    // The copy-paste paragraph is the same link, and nothing carries it in a query.
+    expect(html).toContain(`>http://localhost:5000${path}#token=${TOKEN}</p>`);
+    expect(html).not.toContain('?token=');
+    expect(html).not.toContain('&token=');
+  });
+
+  it('the second-factor unlock email links to /unlock-account#token=…', async () => {
+    const { sendAccountUnlockEmail } = await importWithSmtp();
+
+    await sendAccountUnlockEmail('user@example.com', TOKEN, 'second_factor');
+
+    const html = (mockSendMail as Mock).mock.calls[0]?.[0]?.html as string;
+    const [link, ...others] = linksIn(html);
+    expect(others).toEqual([]);
+    expect(link?.pathname).toBe('/unlock-account');
+    expect(link?.hash).toBe(`#token=${TOKEN}`);
+    expect(link?.search).toBe('');
+    expect(html).not.toContain('?token=');
+  });
+
+  it('tokenLink builds the recipient confirmation link the same way, percent-encoding the token', async () => {
+    const { tokenLink } = await importWithSmtp();
+
+    const link = new URL(tokenLink('/backup/confirm-recipient', 'a b&c=d#e'));
+
+    expect(link.pathname).toBe('/backup/confirm-recipient');
+    expect(link.search).toBe('');
+    expect(link.hash).toBe('#token=a%20b%26c%3Dd%23e');
+    expect(decodeURIComponent(link.hash.slice('#token='.length))).toBe('a b&c=d#e');
+  });
+});
+
 // ── URL escaping in email display text ──────────────────────────────────
 
 describe('email template URL display-text escaping', () => {
@@ -742,11 +1050,11 @@ describe('email template URL display-text escaping', () => {
 
     const html = (mockSendMail as Mock).mock.calls[0]?.[0]?.html as string;
     // href attribute carries the RAW ampersand.
-    expect(html).toContain('href="http://localhost:5000/app?x=1&y=2/verify-email?token=tok"');
+    expect(html).toContain('href="http://localhost:5000/app?x=1&y=2/verify-email#token=tok"');
     // Display-text paragraph carries the ESCAPED ampersand (proves escapeHtml ran).
-    expect(html).toContain('http://localhost:5000/app?x=1&amp;y=2/verify-email?token=tok</p>');
+    expect(html).toContain('http://localhost:5000/app?x=1&amp;y=2/verify-email#token=tok</p>');
     // And the display paragraph must NOT contain the raw `x=1&y=2` sequence.
-    expect(html).not.toContain('x=1&y=2/verify-email?token=tok</p>');
+    expect(html).not.toContain('x=1&y=2/verify-email#token=tok</p>');
   });
 
   it('should escape display-text URLs in password reset email', async () => {
@@ -755,9 +1063,20 @@ describe('email template URL display-text escaping', () => {
     await sendPasswordResetEmail('user@example.com', 'tok');
 
     const html = (mockSendMail as Mock).mock.calls[0]?.[0]?.html as string;
-    expect(html).toContain('href="http://localhost:5000/app?x=1&y=2/reset-password?token=tok"');
-    expect(html).toContain('http://localhost:5000/app?x=1&amp;y=2/reset-password?token=tok</p>');
-    expect(html).not.toContain('x=1&y=2/reset-password?token=tok</p>');
+    expect(html).toContain('href="http://localhost:5000/app?x=1&y=2/reset-password#token=tok"');
+    expect(html).toContain('http://localhost:5000/app?x=1&amp;y=2/reset-password#token=tok</p>');
+    expect(html).not.toContain('x=1&y=2/reset-password#token=tok</p>');
+  });
+
+  it('should escape display-text URLs in the second-factor unlock email', async () => {
+    const { sendAccountUnlockEmail } = await importWithSmtp();
+
+    await sendAccountUnlockEmail('user@example.com', 'tok', 'second_factor');
+
+    const html = (mockSendMail as Mock).mock.calls[0]?.[0]?.html as string;
+    expect(html).toContain('href="http://localhost:5000/app?x=1&y=2/unlock-account#token=tok"');
+    expect(html).toContain('http://localhost:5000/app?x=1&amp;y=2/unlock-account#token=tok</p>');
+    expect(html).not.toContain('x=1&y=2/unlock-account#token=tok</p>');
   });
 
   it('should escape display-text URLs in account unlock email', async () => {
@@ -766,8 +1085,8 @@ describe('email template URL display-text escaping', () => {
     await sendAccountUnlockEmail('user@example.com', 'tok');
 
     const html = (mockSendMail as Mock).mock.calls[0]?.[0]?.html as string;
-    expect(html).toContain('href="http://localhost:5000/app?x=1&y=2/unlock-account?token=tok"');
-    expect(html).toContain('http://localhost:5000/app?x=1&amp;y=2/unlock-account?token=tok</p>');
-    expect(html).not.toContain('x=1&y=2/unlock-account?token=tok</p>');
+    expect(html).toContain('href="http://localhost:5000/app?x=1&y=2/unlock-account#token=tok"');
+    expect(html).toContain('http://localhost:5000/app?x=1&amp;y=2/unlock-account#token=tok</p>');
+    expect(html).not.toContain('x=1&y=2/unlock-account#token=tok</p>');
   });
 });

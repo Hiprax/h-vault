@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import request from 'supertest';
 import mongoose from 'mongoose';
 import app from '../src/app.js';
@@ -105,44 +105,48 @@ describe('Vault API', () => {
     it('should reject creation when per-user item limit is reached', async () => {
       const { MAX_ITEMS_PER_USER } = await import('@hvault/shared');
 
-      // Stub countDocuments to simulate the limit being reached
-      const spy = vi
-        .spyOn(VaultItem, 'countDocuments')
-        .mockResolvedValueOnce(MAX_ITEMS_PER_USER as never);
-
+      // The cap is held by the account's row counter (F-15), so the account is put
+      // AT the cap there: install the counters with one real create, then plant
+      // the count. Seeding 10,000 rows would prove the same thing slowly.
       const agent = request.agent(app);
       const { csrfToken, csrfCookie } = await getCsrf(agent);
+      const send = (): request.Test =>
+        agent
+          .post('/api/v1/vault/items')
+          .set('Authorization', authHeader(user.accessToken))
+          .set('Cookie', csrfCookie)
+          .set('x-csrf-token', csrfToken)
+          .send(sampleVaultItem());
+      await send().expect(201);
+      await mongoose.connection
+        .collection('users')
+        .updateOne(
+          { _id: new mongoose.Types.ObjectId(user.id) },
+          { $set: { 'counters.items': MAX_ITEMS_PER_USER } },
+        );
 
-      const res = await agent
-        .post('/api/v1/vault/items')
-        .set('Authorization', authHeader(user.accessToken))
-        .set('Cookie', csrfCookie)
-        .set('x-csrf-token', csrfToken)
-        .send(sampleVaultItem())
-        .expect(400);
+      const res = await send().expect(400);
 
       expect(res.body.success).toBe(false);
-      expect(JSON.stringify(res.body)).toContain('Item limit reached');
-      // The cap must count only THIS user's items — assert the real query is
-      // scoped to the authenticated userId. Without this, the stub would hide a
-      // regression that counts every user's items (`countDocuments({})`) or an
-      // unscoped/wrong filter, and the test would still pass on the stubbed value.
-      expect(spy).toHaveBeenCalledWith({ userId: user.id });
-      spy.mockRestore();
+      expect(res.body.message).toBe(
+        `Item limit reached. You can have a maximum of ${String(MAX_ITEMS_PER_USER)} items.`,
+      );
+      // Nothing was written, and the refused reservation moved no counter.
+      expect(await VaultItem.countDocuments({ userId: user.id })).toBe(1);
+      const stored = await mongoose.connection
+        .collection('users')
+        .findOne({ _id: new mongoose.Types.ObjectId(user.id) }, { projection: { counters: 1 } });
+      expect(stored?.counters).toEqual({ items: MAX_ITEMS_PER_USER, folders: 0 });
     });
 
     it('counts only the authenticated user’s items toward the cap (real state, scoping)', async () => {
-      const { MAX_ITEMS_PER_USER } = await import('@hvault/shared');
-
       // Seed real items for a DIFFERENT user; they must not count toward this
-      // user's cap. This exercises the real countDocuments query against real
-      // persisted state (no stub) and proves cross-user isolation of the cap.
+      // user's cap. The counter this create installs is measured from real
+      // persisted rows (no stub), so it proves cross-user isolation of the cap.
       const otherUser = await createTestUser();
       await seedItem(otherUser.id);
       await seedItem(otherUser.id);
       await seedItem(user.id);
-
-      const spy = vi.spyOn(VaultItem, 'countDocuments');
 
       const agent = request.agent(app);
       const { csrfToken, csrfCookie } = await getCsrf(agent);
@@ -155,15 +159,19 @@ describe('Vault API', () => {
         .send(sampleVaultItem())
         .expect(201);
 
-      // The real count query ran and saw only this user's single pre-seeded
-      // item (1), far below the cap — the other user's 2 items were excluded.
-      expect(spy).toHaveBeenCalledWith({ userId: user.id });
-      const realCount = await VaultItem.countDocuments({ userId: user.id });
-      expect(realCount).toBe(2); // the seeded one + the just-created one
-      expect(realCount).toBeLessThan(MAX_ITEMS_PER_USER);
-      const otherCount = await VaultItem.countDocuments({ userId: otherUser.id });
-      expect(otherCount).toBe(2);
-      spy.mockRestore();
+      // This user's counter saw only this user's single pre-seeded item plus the
+      // one just created; the other user's 2 items were excluded, and that
+      // account's counters were never touched.
+      const counters = async (id: string): Promise<unknown> =>
+        (
+          await mongoose.connection
+            .collection('users')
+            .findOne({ _id: new mongoose.Types.ObjectId(id) }, { projection: { counters: 1 } })
+        )?.counters;
+      expect(await counters(user.id)).toEqual({ items: 2, folders: 0 });
+      expect(await counters(otherUser.id)).toBeUndefined();
+      expect(await VaultItem.countDocuments({ userId: user.id })).toBe(2);
+      expect(await VaultItem.countDocuments({ userId: otherUser.id })).toBe(2);
     });
 
     // ── Get single item ───────────────────────────────────────────────
@@ -380,8 +388,8 @@ describe('Vault API', () => {
     it('accepts a NAME-ONLY update and leaves the item ciphertext byte-identical', async () => {
       // The server half of the client's `renameItem` path, which exists so an item
       // whose decrypted payload could not be read can still be renamed. Its request
-      // carries the `encryptedName` trio plus a refreshed `searchHash` and omits the
-      // `encryptedData` trio entirely — `updateVaultItemSchema` permits that, and
+      // carries the `encryptedName` trio (an older client's adds a `searchHash`,
+      // which is dropped) and omits the `encryptedData` trio entirely — `updateVaultItemSchema` permits that, and
       // `$set` is built only from the fields actually present, so the row's data
       // ciphertext must be untouched. If that ever stopped holding, a rename would
       // destroy the very item it was offered to rescue, with no way back.
@@ -413,7 +421,8 @@ describe('Vault API', () => {
       expect(after!.encryptedData).toBe(before!.encryptedData);
       expect(after!.dataIv).toBe(before!.dataIv);
       expect(after!.dataTag).toBe(before!.dataTag);
-      expect(after!.searchHash).toBe('b'.repeat(64));
+      // F-12: the name hash the request carried is not stored.
+      expect(after).not.toHaveProperty('searchHash');
     });
 
     it('rejects a name trio sent without its IV and tag', async () => {
@@ -1389,7 +1398,7 @@ describe('Vault API', () => {
   // 8. Filter by folderId and searchHash
   // ========================================================================
 
-  describe('Filtering by folderId and searchHash', () => {
+  describe('Filtering by folderId, and no searchHash', () => {
     it('should filter items by folderId', async () => {
       // Create a folder for the user
       const folder = await Folder.create({
@@ -1413,18 +1422,20 @@ describe('Vault API', () => {
       expect(res.body.data[0].folderId).toBe(folderId);
     });
 
-    it('should store and return searchHash on a created item', async () => {
-      // searchHash must be a valid 64-char hex string (SHA-256 format)
-      const searchHash = 'a'.repeat(64);
-
-      const { id } = await createItemViaApi(user.accessToken, { searchHash });
+    // F-12: this used to pin the hash being stored and returned; no keyed name
+    // hash is stored any more, so the create accepts it and neither keeps nor
+    // returns it.
+    it('neither stores nor returns a searchHash sent on create', async () => {
+      const { id } = await createItemViaApi(user.accessToken, { searchHash: 'a'.repeat(64) });
 
       const res = await request(app)
         .get(`/api/v1/vault/items/${id}`)
         .set('Authorization', authHeader(user.accessToken))
         .expect(200);
 
-      expect(res.body.data.searchHash).toBe(searchHash);
+      expect(res.body.data.searchHash).toBeUndefined();
+      expect(res.body.data.encryptedName).toBe('test-encrypted-name');
+      expect(await VaultItem.findById(id).lean()).not.toHaveProperty('searchHash');
     });
   });
 
@@ -1725,7 +1736,13 @@ describe('Vault API', () => {
 
       // One row naming the item and its type, with no echo of what changed.
       expect(updates).toHaveLength(1);
-      expect(updates[0]?.metadata).toEqual({ itemId: id, itemType: 'login' });
+      // `contentChanged: false`: a favourite toggle carries no ciphertext, which is
+      // what lets the audit service count a run of them into one row (F-02).
+      expect(updates[0]?.metadata).toEqual({
+        itemId: id,
+        itemType: 'login',
+        contentChanged: false,
+      });
 
       // ...and the update the row claims actually landed.
       const updated = await VaultItem.findById(id).lean();
@@ -2066,7 +2083,8 @@ describe('Vault API', () => {
       expect(updatedUser!.encryptedVaultKey).toBe('test-encrypted-vault-key');
     });
 
-    it('should update searchHash when provided', async () => {
+    // F-12: this used to pin a rotation storing the hash it was sent.
+    it('stores no searchHash a rotation is sent', async () => {
       const { id } = await createItemViaApi(user.accessToken);
       const newSearchHash = 'a'.repeat(64);
 
@@ -2100,8 +2118,9 @@ describe('Vault API', () => {
 
       expect(res.body.success).toBe(true);
 
-      const item = await VaultItem.findById(id);
-      expect(item!.searchHash).toBe(newSearchHash);
+      const item = await VaultItem.findById(id).lean();
+      expect(item!.encryptedName).toBe('rotated-name');
+      expect(item).not.toHaveProperty('searchHash');
     });
 
     it('should re-encrypt folders during vault key rotation', async () => {

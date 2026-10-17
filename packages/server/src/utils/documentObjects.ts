@@ -201,15 +201,11 @@ export function segmentRange(
  * ONE-BASED part numbering, which is the only place in this design where an index
  * is not zero-based, and therefore exactly where an off-by-one would live.
  *
- * The COMPLETION path uses it to verify the ledger `ListParts` reports, where the
- * committed `ciphertextBytes` exists. The upload path cannot call it yet and should
- * not pretend otherwise: a staging row holds `declaredPlaintextBytes` and
- * `declaredChunkCount`, so reaching this from there needs the forward conversion
- * `ciphertext = plaintext + DOCUMENT_TAG_BYTES * chunkCount` — which already lives,
- * inline, in `documentResponseSchema`'s refine. Whoever needs it first should name
- * it `documentCiphertextBytesFor` in `@hvault/shared` beside `documentChunkCountFor`
- * and rewrite that refine to call it, rather than writing the identity a second
- * time here. Both matter because the engine itself does not: a short
+ * Two callers, and both matter because the engine itself does not. The UPLOAD path
+ * holds every incoming part to it, the final one included, computing the object
+ * size from what init declared with `documentCiphertextBytesFor` (`@hvault/shared`,
+ * beside the inverse identity). The COMPLETION path uses it to verify the ledger
+ * `ListParts` reports, where the committed `ciphertextBytes` exists. A short
  * middle part is ACCEPTED by the storage engine (measured), and it silently moves
  * every later segment boundary, so the server is the only thing standing between a
  * mis-sized part and a document that can never be decrypted.

@@ -104,6 +104,9 @@ import { ensureReportDir, reportPath, writeJsonReport } from './lib/reports.mjs'
 import { SANDBOX_NGINX_JUNIT, SANDBOX_SUITE, sandboxRunProblems } from './lib/sandbox-browser.mjs';
 import {
   SERVICE_EXPECTATIONS,
+  argvCredentialProblems,
+  argvSamplerScript,
+  bootstrapEnvironmentProblems,
   parseComposePs,
   parseProvisionLog,
   portExposureVerdict,
@@ -317,21 +320,29 @@ function probeTcp(port) {
   });
 }
 
-/** Runs a mongosh script inside the database container, with secrets passed as env, never argv. */
+/**
+ * Runs a mongosh script inside the database container, with secrets passed as
+ * env, never argv: not mongosh's, and not the host docker client's either. Each
+ * variable is named with a bare `-e NAME`, which the CLI fills from its OWN
+ * environment, so no value reaches a command line anywhere (F-18).
+ */
 function mongosh(script, env) {
-  const envArgs = Object.entries(env).flatMap(([key, value]) => ['-e', `${key}=${value}`]);
-  return compose([
-    'exec',
-    '-T',
-    ...envArgs,
-    'hvault-db',
-    'mongosh',
-    '--quiet',
-    '--host',
-    '127.0.0.1',
-    '--eval',
-    script,
-  ]);
+  const envArgs = Object.keys(env).flatMap((key) => ['-e', key]);
+  return compose(
+    [
+      'exec',
+      '-T',
+      ...envArgs,
+      'hvault-db',
+      'mongosh',
+      '--quiet',
+      '--host',
+      '127.0.0.1',
+      '--eval',
+      script,
+    ],
+    { env: { ...composeEnv, ...env } },
+  );
 }
 
 /** Runs a one-shot service again, exactly as a redeploy would, and waits for its exit code. */
@@ -602,6 +613,100 @@ try {
         ? `no service outside the expected set of ${String(expectedCount)}`
         : `unexamined service(s) in the stack: ${unexpected.join(', ')} — add each to SERVICE_EXPECTATIONS with the state it must reach`,
       { unexpected },
+    );
+
+    // -----------------------------------------------------------------------
+    // 3a. The index bootstrap ran with the index keys and no secret (F-20)
+    // -----------------------------------------------------------------------
+    // It reads only the secret-free index configuration, so it is handed exactly
+    // those keys and no `env_file`. This reads the environment the exited
+    // container actually ran with, and the one its image declares, and requires
+    // the first to be the index keys plus the second, with no generated secret's
+    // value anywhere in it (the application password is expected only inside
+    // MONGODB_URI, so it is not searched for). What this cannot see: a re-added
+    // `env_file` in a checkout with no root .env would inject nothing here, since
+    // the drill's override no longer supplies one to the bootstrap; the static
+    // tests (docker-hardening.test.ts, index-config.test.ts) are the guard for that.
+    const bootstrapContainer = `${STACK_NAME}-bootstrap`;
+    const containerEnv = captureExe('docker', [
+      'inspect',
+      '--format',
+      '{{json .Config.Env}}',
+      bootstrapContainer,
+    ]);
+    const bootstrapImage = captureExe('docker', [
+      'inspect',
+      '--format',
+      '{{.Image}}',
+      bootstrapContainer,
+    ]);
+    const imageEnv = bootstrapImage.ok
+      ? captureExe('docker', [
+          'image',
+          'inspect',
+          '--format',
+          '{{json .Config.Env}}',
+          bootstrapImage.stdout.trim(),
+        ])
+      : bootstrapImage;
+    let bootstrapProblems;
+    try {
+      bootstrapProblems =
+        containerEnv.ok && imageEnv.ok
+          ? bootstrapEnvironmentProblems(
+              JSON.parse(containerEnv.stdout),
+              JSON.parse(imageEnv.stdout),
+              Object.entries(drillEnv)
+                .filter(([name]) => /PASSWORD|SECRET/.test(name) && name !== 'MONGO_APP_PASSWORD')
+                .map(([name, value]) => ({ name, value })),
+            )
+          : [
+              `could not read the bootstrap's environment: ${(containerEnv.stderr || imageEnv.stderr).slice(0, 300)}`,
+            ];
+    } catch (error) {
+      bootstrapProblems = [`could not judge the bootstrap's environment: ${String(error)}`];
+    }
+    record(
+      'bootstrap-environment',
+      bootstrapProblems.length === 0,
+      bootstrapProblems.length === 0
+        ? 'the index bootstrap ran with exactly the index keys and no application secret'
+        : bootstrapProblems.join('; '),
+    );
+
+    // -----------------------------------------------------------------------
+    // 3b. No credential on a command line inside the database container (F-18)
+    // -----------------------------------------------------------------------
+    // The healthcheck used to hand the root password to mongosh as `-p`, and a
+    // process's argv is readable by every account on the host. Once the stack is
+    // up, this watches the command lines of every mongosh process in the
+    // database container across two healthcheck runs and requires that no
+    // generated secret's value appear in any of them, and that a probe was seen
+    // as it started. It reads argv only; values never leave this process (a
+    // problem names the secret, not its value). It does not see the first
+    // initialisation, which is over before `up --wait` returns (SECURITY.md
+    // records the one exposure there, in the upstream image's entrypoint).
+    const argvSample = compose(['exec', '-T', 'hvault-db', 'bash', '-c', argvSamplerScript()]);
+    const argvVerdict = argvSample.ok
+      ? argvCredentialProblems(
+          argvSample.stdout,
+          // Every generated credential, derived rather than listed, so one added
+          // to the throwaway configuration is searched for too.
+          Object.entries(drillEnv)
+            .filter(([name]) => /PASSWORD|SECRET/.test(name))
+            .map(([name, value]) => ({ name, value })),
+        )
+      : {
+          problems: [`the sampler could not run: ${argvSample.stderr.slice(0, 300)}`],
+          observed: 0,
+        };
+    record(
+      'argv-credentials',
+      argvVerdict.problems.length === 0,
+      argvVerdict.problems.length === 0
+        ? `${String(argvVerdict.observed)} mongosh command line(s) sampled, none carrying a secret`
+        : argvVerdict.problems.join('; '),
+      { observed: argvVerdict.observed },
     );
 
     // -----------------------------------------------------------------------

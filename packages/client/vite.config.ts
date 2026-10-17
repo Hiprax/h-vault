@@ -118,7 +118,9 @@ export default defineConfig({
     cors: { origin: [defaultAllowedOrigins, 'null'] },
     proxy: {
       '/api': {
-        target: 'http://localhost:5000',
+        // The API listens on HOST, 127.0.0.1 unless configured, so the proxy names
+        // that address rather than `localhost`, which a resolver may answer with ::1.
+        target: 'http://127.0.0.1:5000',
         changeOrigin: true,
         secure: false,
       },

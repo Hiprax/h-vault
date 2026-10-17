@@ -254,11 +254,19 @@ describe('deriveUserHash entropy (Task 3.8)', () => {
     const stub = vi.spyOn(crypto.subtle, 'digest').mockImplementation(() => {
       throw new Error('SubtleCrypto unavailable');
     });
+    // The fallback announces itself on the console; captured, not printed.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       const hash = await deriveUserHash('507f1f77bcf86cd799439011');
       expect(hash).toMatch(/^[0-9a-f]{16}$/);
+      expect(warn.mock.calls).toEqual([
+        [
+          'SubtleCrypto unavailable — using FNV hash fallback for the offline cache DB name. HTTPS is recommended.',
+        ],
+      ]);
     } finally {
       stub.mockRestore();
+      warn.mockRestore();
       // Sanity check the stub really restored
       expect(crypto.subtle.digest).toBe(originalDigest);
     }
@@ -272,6 +280,8 @@ describe('deriveUserHash entropy (Task 3.8)', () => {
     const stub = vi.spyOn(crypto.subtle, 'digest').mockImplementation(() => {
       throw new Error('SubtleCrypto unavailable');
     });
+    // The fallback announces itself on the console; captured, not printed.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       const ids = Array.from(
         { length: 5000 },
@@ -282,8 +292,10 @@ describe('deriveUserHash entropy (Task 3.8)', () => {
         seen.add(await deriveUserHash(id));
       }
       expect(seen.size).toBe(ids.length);
+      expect(warn).toHaveBeenCalledTimes(ids.length);
     } finally {
       stub.mockRestore();
+      warn.mockRestore();
     }
   }, 30_000);
 
@@ -292,12 +304,15 @@ describe('deriveUserHash entropy (Task 3.8)', () => {
     const stub = vi.spyOn(crypto.subtle, 'digest').mockImplementation(() => {
       throw new Error('SubtleCrypto unavailable');
     });
+    // The fallback announces itself on the console; captured, not printed.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       const a = await deriveUserHash('507f1f77bcf86cd799439011');
       const b = await deriveUserHash('507f1f77bcf86cd799439011');
       expect(a).toBe(b);
     } finally {
       stub.mockRestore();
+      warn.mockRestore();
     }
   });
 
@@ -314,6 +329,8 @@ describe('deriveUserHash entropy (Task 3.8)', () => {
     const stub = vi.spyOn(crypto.subtle, 'digest').mockImplementation(() => {
       throw new Error('SubtleCrypto unavailable');
     });
+    // The fallback announces itself on the console; captured, not printed.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       const N = 2000;
       const upperHalves = new Set<string>();
@@ -326,6 +343,7 @@ describe('deriveUserHash entropy (Task 3.8)', () => {
       expect(upperHalves.size).toBeGreaterThan(N * 0.9);
     } finally {
       stub.mockRestore();
+      warn.mockRestore();
     }
   }, 30_000);
 });

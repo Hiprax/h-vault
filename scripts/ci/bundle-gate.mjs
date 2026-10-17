@@ -69,10 +69,10 @@
  *     render document is served under `connect-src 'none'`, which blocks every
  *     way of READING a response — `fetch`, `XMLHttpRequest`, WebSockets,
  *     `EventSource`, `sendBeacon` — so any one of those in its bundle is dead
- *     code that a later policy change would silently bring to life. (It is only
- *     those that the policy stops: `script-src`, `style-src`, `img-src` and
- *     `font-src` allow `'self'`, so an `<img>` src is still a GET this server
- *     sees. `packages/server/src/config/sandboxCsp.ts` states the bound.) The
+ *     code that a later policy change would silently bring to life. (It is not
+ *     every request the policy stops: `script-src` and `style-src` keep `'self'`,
+ *     so a module import is still a GET this server sees, and the API refuses it
+ *     as cross-site. `packages/server/src/config/sandboxCsp.ts` states the bound.) The
  *     rule exists because the absence was briefly FALSE of the built artifact
  *     while true of the source: Vite injects a
  *     modulepreload polyfill into every entry by default, and it carries a

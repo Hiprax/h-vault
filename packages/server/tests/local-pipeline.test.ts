@@ -15,7 +15,7 @@
  *      a release workflow that re-mints an existing tag fails the push with the
  *      exact red X this whole change exists to remove.
  */
-import { describe, it, expect } from 'vitest';
+import { afterAll, describe, it, expect } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import {
   copyFileSync,
@@ -41,6 +41,31 @@ import {
 } from '../../../scripts/ci/lib/version.mjs';
 import { evaluateDenominator } from '../../../scripts/ci/lib/scan-denominator.mjs';
 import { extractRelease } from '../../../scripts/ci/changelog-extract.mjs';
+import {
+  OSV_EXIT,
+  OsvLedgerError,
+  OsvReportError,
+  VULN_ACCEPT,
+  acceptanceExitCode,
+  classifyFindings,
+  formatAccepted,
+  parseAcceptanceSymbol,
+  readAcceptances,
+  summarizeVerdict,
+  exitCodeFor as osvExitCodeFor,
+  formatFinding as formatOsvFinding,
+  parseOsvReport,
+  summarizeReport,
+} from '../../../scripts/ci/osv-gate.mjs';
+import {
+  COMMIT_FINGERPRINT,
+  GitleaksReportError,
+  LOG_OPTS,
+  exitCodeFor as gitleaksExitCodeFor,
+  formatFinding as formatGitleaksFinding,
+  parseGitleaksSarif,
+  parseIgnoreFile,
+} from '../../../scripts/ci/gitleaks-gate.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..', '..', '..');
@@ -55,12 +80,13 @@ interface ReleaseWorkflow {
     pull_request?: unknown;
     schedule?: unknown;
   };
-  permissions: Record<string, string>;
+  permissions?: Record<string, string>;
   concurrency: { group: string; 'cancel-in-progress': boolean };
   jobs: Record<
     string,
     {
       needs?: string[];
+      permissions?: Record<string, string>;
       'timeout-minutes'?: number;
       steps: {
         name?: string;
@@ -68,6 +94,7 @@ interface ReleaseWorkflow {
         if?: string;
         uses?: string;
         with?: Record<string, unknown>;
+        env?: Record<string, unknown>;
         run?: string;
       }[];
     }
@@ -130,11 +157,21 @@ describe('release workflow', () => {
     expect(release.on.push?.tags).toBeUndefined();
   });
 
-  it('grants only contents: write', () => {
-    // Enough to push a tag and publish a release ("write" implies read, so
-    // checkout still works); nothing else — notably not the `security-events:
-    // write` the deleted CodeQL job required.
-    expect(release.permissions).toEqual({ contents: 'write' });
+  it('grants write access only to the job that publishes, and none at workflow level', () => {
+    // A workflow-level block is inherited by EVERY job, so the one that runs
+    // `npm ci` (every dependency's install script) and the whole gauntlet held a
+    // token able to push to `main` and move tags. Each job now names its own
+    // scopes: `verify` reads, `release` writes `contents` (enough to push a tag
+    // and publish a Release) and nothing else — notably not the `security-events:
+    // write` the deleted CodeQL job required. A job added without a block of its
+    // own would inherit the repository default, which can be read-write, so every
+    // job must declare one.
+    expect(release.permissions).toBeUndefined();
+    for (const [name, job] of Object.entries(release.jobs)) {
+      expect(job.permissions, `job ${name} must declare its own permissions`).toBeDefined();
+    }
+    expect(release.jobs['verify']?.permissions).toEqual({ contents: 'read' });
+    expect(release.jobs['release']?.permissions).toEqual({ contents: 'write' });
   });
 
   it('serialises runs without cancelling one mid-release', () => {
@@ -188,12 +225,36 @@ describe('release workflow', () => {
   it('installs every gate prerequisite, so no gate can report "could not run"', () => {
     // `local-ci.mjs` declares host binaries per gate and reports a missing one
     // as exit 2 rather than as a pass. A prerequisite left uninstalled here does
-    // not silently shrink the job — it turns it red — but naming them keeps the
-    // two lists together, since the failure would otherwise be diagnosed on a
-    // runner rather than here.
-    const install = (release.jobs['verify']?.steps ?? []).map((step) => step.run ?? '').join('\n');
-    for (const binary of ['actionlint', 'hadolint', 'oasdiff', 'diff-cover']) {
-      expect(install, `prerequisite ${binary}`).toContain(binary);
+    // not silently shrink the job — it turns it red — but checking it here moves
+    // the diagnosis from a runner, minutes into a hosted run, to this file.
+    //
+    // DERIVED from the runner's own listing rather than written out: the list
+    // this replaced named four binaries, so registering a gate that requires a
+    // fifth passed here and failed only on the hosted runner. What the runner
+    // provides itself (a daemon the image ships, the builds its own gates
+    // produce) is the one thing excluded, by name.
+    const RUNNER_PROVIDED = new Set(['docker', 'build:shared', 'build:server', 'build:client']);
+    const binaries = [...new Set(listedGates().flatMap((gate) => gate.requires))]
+      .filter((name) => !RUNNER_PROVIDED.has(name))
+      .sort();
+    // Non-vacuous, and a record of what the derivation found today.
+    expect(binaries).toEqual([
+      'actionlint',
+      'diff-cover',
+      'gitleaks',
+      'hadolint',
+      'oasdiff',
+      'osv-scanner',
+    ]);
+    // INSTALLED onto PATH, not merely mentioned: a name in a comment or an echo
+    // satisfies a substring check while nothing lands where the gate looks.
+    const commands = (release.jobs['verify']?.steps ?? [])
+      .flatMap((step) => shellCommands(step.run ?? ''))
+      .join('\n');
+    for (const binary of binaries) {
+      expect(commands, `prerequisite ${binary} installed into $HOME/.local/bin`).toMatch(
+        new RegExp(`"\\$HOME/\\.local/bin(?:/|"\\s+)${binary.replace(/[-.]/g, '\\$&')}(?:"|\\s|$)`),
+      );
     }
   });
 
@@ -278,6 +339,274 @@ describe('release workflow', () => {
         /steps\.version\.outputs\.should_release == 'true'/,
       );
     }
+  });
+});
+
+/**
+ * A `run:` script as the shell will execute it: backslash-continued lines joined
+ * into one command, comments and blank lines dropped. Asserting over raw lines
+ * lets a command split across a continuation hide the half that matters (the old
+ * `curl … \` / `| tar xz` pair did exactly that).
+ */
+const shellCommands = (script: string): string[] =>
+  script
+    .replace(/\\\n\s*/g, ' ')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line !== '' && !line.startsWith('#'));
+
+const allRunScripts = (): string[] =>
+  Object.values(release.jobs)
+    .flatMap((job) => job.steps)
+    .map((step) => step.run ?? '');
+
+const unquote = (word: string): string => word.replace(/^(["'])(.*)\1$/, '$2');
+
+const DIFF_COVER_REQUIREMENTS = 'scripts/ci/requirements-diff-cover.txt';
+const SHA256_HEX = /^[0-9a-f]{64}$/;
+
+/**
+ * The hash-locked requirements file, one entry per requirement with its
+ * continuation lines folded in. pip-compile writes each as `name==version \`
+ * followed by `--hash=sha256:…` lines and a `# via` comment, which is dropped.
+ */
+const parseLockedRequirements = (
+  text: string,
+): { name: string; version: string; hashes: string[] }[] =>
+  shellCommands(text).map((entry) => {
+    const [spec = '', ...options] = entry.split(/\s+/);
+    const match = /^([A-Za-z0-9._-]+)==(\S+)$/.exec(spec);
+    if (!match) throw new Error(`not an exact pin: ${entry}`);
+    const hashes = options
+      .filter((option) => !option.startsWith('#'))
+      .map((option) => {
+        const hash = /^--hash=sha256:(.+)$/.exec(option);
+        if (!hash) throw new Error(`unexpected option ${option} in ${spec}`);
+        return hash[1] ?? '';
+      });
+    return { name: (match[1] ?? '').toLowerCase(), version: match[2] ?? '', hashes };
+  });
+
+describe('release workflow supply chain (F-01): nothing it runs can change under it', () => {
+  it('keeps the checkout token out of .git/config in the job that runs third-party code', () => {
+    // actions/checkout otherwise writes the job token into the clone's git config
+    // for every later step to read, `npm ci`'s install scripts included. `verify`
+    // pushes nothing, so it keeps nothing.
+    const verifyCheckout = release.jobs['verify']?.steps.find((step) =>
+      step.uses?.startsWith('actions/checkout@'),
+    );
+    expect(verifyCheckout?.with?.['persist-credentials']).toBe(false);
+
+    // The release job is the opposite case, and is NOT to be "fixed" the same
+    // way: `git push origin refs/tags/$TAG` authenticates with that persisted
+    // token, so turning it off there breaks every release at the tag step.
+    const releaseCheckout = release.jobs['release']?.steps.find((step) =>
+      step.uses?.startsWith('actions/checkout@'),
+    );
+    expect(releaseCheckout).toBeDefined();
+    expect(releaseCheckout?.with?.['persist-credentials']).not.toBe(false);
+  });
+
+  it('pins every action to a full commit SHA, naming the release in a comment', () => {
+    // A tag is a pointer its owner (or whoever compromises them) can move; a
+    // 40-hex commit id cannot be moved. The trailing `# vX.Y.Z` is what makes
+    // the pin reviewable and refreshable (CONTRIBUTING.md), and is read from the
+    // RAW text because the YAML parser discards comments.
+    const usesLines = releaseYaml
+      .split('\n')
+      .map((line) => /^\s*(?:-\s+)?uses:\s*(.*)$/.exec(line)?.[1]?.trim())
+      .filter((value): value is string => value !== undefined);
+    const parsedUses = Object.values(release.jobs)
+      .flatMap((job) => job.steps)
+      .flatMap((step) => (step.uses === undefined ? [] : [step.uses]));
+
+    // Every `uses` the parser sees was on a line checked here, so a flow-style
+    // `{ uses: … }` cannot slip past the raw-text check.
+    expect(parsedUses.length).toBeGreaterThan(0);
+    expect(usesLines).toHaveLength(parsedUses.length);
+
+    const pinned = /^([\w.-]+\/[\w.-]+(?:\/[\w./-]+)?)@([0-9a-f]{40})\s+#\s*v\d+\.\d+\.\d+$/;
+    const refsByAction = new Map<string, Set<string>>();
+    for (const line of usesLines) {
+      const match = pinned.exec(line);
+      expect(match, `uses: ${line}`).not.toBeNull();
+      const [, action = '', sha = ''] = match ?? [];
+      refsByAction.set(action, (refsByAction.get(action) ?? new Set<string>()).add(line));
+      expect(parsedUses).toContain(`${action}@${sha}`);
+    }
+    // One action, one pin: two checkouts at different commits would mean one of
+    // them was refreshed and the other forgotten.
+    for (const [action, refs] of refsByAction) {
+      expect([...refs], `${action} is pinned more than one way`).toHaveLength(1);
+    }
+  });
+
+  it('verifies every downloaded binary against a committed checksum before using it', () => {
+    // A release asset can be replaced after the fact, and `curl … | tar xz`
+    // unpacked whatever arrived. Each download now goes to a file, and the very
+    // next command checks that file against a SHA-256 written in this workflow;
+    // `set -e` stops the step on a mismatch, before the binary is ever run.
+    const downloads: string[] = [];
+    for (const script of allRunScripts()) {
+      const commands = shellCommands(script);
+      commands.forEach((command, index) => {
+        expect(command, 'no download tool but curl').not.toMatch(/\bwget\b/);
+        if (!/\bcurl\b/.test(command)) return;
+        expect(script, 'a step that downloads stops on the first failure').toMatch(
+          /set -euo pipefail/,
+        );
+        // Never streamed into an extractor or an interpreter.
+        expect(command, `curl piped: ${command}`).not.toMatch(/\|/);
+        const target = /\s(?:-o|--output)\s+(\S+)/.exec(command)?.[1];
+        expect(target, `curl without -o: ${command}`).toBeDefined();
+        const next = commands[index + 1] ?? '';
+        const check =
+          /^echo\s+"([0-9a-f]+)\s{2}(\S+)"\s*\|\s*sha256sum\s+--check\s+--strict\s+-$/.exec(next);
+        expect(check, `no checksum right after: ${command}`).not.toBeNull();
+        expect(check?.[1], `checksum for ${String(target)}`).toMatch(SHA256_HEX);
+        expect(check?.[2]).toBe(unquote(target ?? ''));
+        downloads.push(unquote(target ?? ''));
+      });
+    }
+    // Non-vacuous: every binary this job fetches itself is among them, the two
+    // security scanners included.
+    for (const tool of ['actionlint', 'hadolint', 'oasdiff', 'gitleaks', 'osv-scanner']) {
+      expect(
+        downloads.some((file) => file.startsWith(tool)),
+        `${tool} is downloaded and checked`,
+      ).toBe(true);
+    }
+  });
+
+  it('installs diff-cover only from its hash-locked requirements, inside a venv', () => {
+    // `pipx install diff-cover` took whatever version PyPI served that minute,
+    // with whatever dependencies. `--require-hashes` refuses any archive whose
+    // hash is not in the committed file; `--no-deps` refuses to resolve anything
+    // the file does not already list; `pip check` then proves the list complete.
+    const commands = allRunScripts().flatMap(shellCommands);
+    expect(commands.join('\n')).not.toMatch(/\bpipx\b/);
+    const installs = commands.filter((command) => /\bpip3?["']?\s+install\b/.test(command));
+    expect(installs.length).toBeGreaterThan(0);
+    for (const install of installs) {
+      expect(install).toMatch(/\s--require-hashes(\s|$)/);
+      expect(install).toMatch(/\s--no-deps(\s|$)/);
+      // Wheels only: an sdist would run its own build backend, installed
+      // without any hash check, before a single file is verified.
+      expect(install).toMatch(/\s--only-binary=:all:(\s|$)/);
+      expect(install).toMatch(new RegExp(`\\s-r\\s+${DIFF_COVER_REQUIREMENTS}$`));
+      // Into the venv, never the runner's own interpreter.
+      expect(install).toMatch(/^"\$HOME\/\.diff-cover\/bin\/pip"\s/);
+    }
+    expect(commands).toContain('python3 -m venv "$HOME/.diff-cover"');
+    expect(commands).toContain('"$HOME/.diff-cover/bin/pip" check');
+
+    const locked = parseLockedRequirements(read(...DIFF_COVER_REQUIREMENTS.split('/')));
+    expect(locked.map((entry) => entry.name)).toContain('diff-cover');
+    // diff-cover has runtime dependencies; a file listing it alone would make
+    // `--no-deps` install a diff-cover that cannot import them.
+    expect(locked.length).toBeGreaterThan(1);
+    for (const entry of locked) {
+      expect(entry.hashes.length, `${entry.name} carries a hash`).toBeGreaterThan(0);
+      for (const hash of entry.hashes) expect(hash, entry.name).toMatch(SHA256_HEX);
+    }
+    // The compiled file is the input's resolution, not a hand edit of it.
+    const inputs = shellCommands(read('scripts', 'ci', 'requirements-diff-cover.in'));
+    expect(inputs.length).toBeGreaterThan(0);
+    for (const input of inputs) {
+      const [name = '', version = ''] = input.split('==');
+      expect(
+        locked.find((entry) => entry.name === name.toLowerCase())?.version,
+        `input ${input}`,
+      ).toBe(version);
+    }
+  });
+
+  it('names the pinned versions wherever a contributor is told what to install', () => {
+    // A pin refreshed in the workflow but not in the prose sends every local run
+    // back to the old version, and several gates ratchet counts that another
+    // scanner version reports differently. The README table, its version-check
+    // block and every `diff-cover==` spelling are held to the workflow and the lock.
+    const install = release.jobs['verify']?.steps.find(
+      (step) => step.env?.['ACTIONLINT_VERSION'] !== undefined,
+    );
+    const lockedDiffCover = parseLockedRequirements(
+      read(...DIFF_COVER_REQUIREMENTS.split('/')),
+    ).find((entry) => entry.name === 'diff-cover')?.version;
+    expect(lockedDiffCover).toBeDefined();
+    const diffCoverVersion = String(lockedDiffCover);
+    const pinned: Record<string, string> = {
+      actionlint: String(install?.env?.['ACTIONLINT_VERSION']),
+      hadolint: String(install?.env?.['HADOLINT_VERSION']),
+      oasdiff: String(install?.env?.['OASDIFF_VERSION']),
+      gitleaks: String(install?.env?.['GITLEAKS_VERSION']),
+      'osv-scanner': String(install?.env?.['OSV_SCANNER_VERSION']),
+      'diff-cover': diffCoverVersion,
+    };
+    for (const [tool, version] of Object.entries(pinned)) {
+      expect(version, `${tool} is pinned in the workflow`).toMatch(/^\d+\.\d+\.\d+$/);
+    }
+    const escaped = (version: string): string => version.replaceAll('.', '\\.');
+
+    const readme = read('README.md');
+    // The rows are read from the prerequisites table itself: a tool can share
+    // its name with a gate (`gitleaks` is both), and the gate table, which comes
+    // first, would otherwise answer with a tier.
+    const prerequisitesAt = readme.indexOf(
+      'binaries on `PATH`, pinned to the versions the release workflow installs.',
+    );
+    expect(prerequisitesAt, 'the README prerequisites paragraph').toBeGreaterThan(-1);
+    const prerequisites = readme.slice(prerequisitesAt);
+    for (const [tool, version] of Object.entries(pinned)) {
+      const row = new RegExp(`^\\| \`${tool}\`\\s*\\|\\s*([^|\\s]+)\\s*\\|`, 'm').exec(
+        prerequisites,
+      );
+      expect(row?.[1], `README prerequisites row for ${tool}`).toBe(version);
+    }
+    // The version-check block: each line is the command and the answer it gives
+    // at the pin, so a reader compares their own output against it.
+    for (const [command, answer] of [
+      ['diff-cover --version', `diff-cover ${escaped(diffCoverVersion)}`],
+      ['gitleaks version', escaped(pinned['gitleaks'] ?? '')],
+      ['osv-scanner --version', `osv-scanner version: ${escaped(pinned['osv-scanner'] ?? '')}`],
+    ] as const) {
+      expect(readme, `README version check for ${command}`).toMatch(
+        new RegExp(`${command}\\s+# ${answer}\\n`),
+      );
+    }
+
+    // The runner's own install hint for each scanner, which is what a contributor
+    // reads when the gate reports "could not run", names the same pin.
+    const fixes = new Map(
+      listedGates()
+        .flatMap((gate) => gate.prerequisites)
+        .map((prerequisite) => [prerequisite.name, prerequisite.fix]),
+    );
+    for (const tool of ['gitleaks', 'osv-scanner']) {
+      expect(fixes.get(tool), `local-ci.mjs install hint for ${tool}`).toContain(
+        `${tool} ${pinned[tool] ?? ''}`,
+      );
+    }
+
+    const spellings = [
+      readme,
+      read('CONTRIBUTING.md'),
+      read('scripts', 'ci', 'local-ci.mjs'),
+    ].flatMap((text) => [...text.matchAll(/diff-cover==([^\s`'")]+)/g)].map((m) => m[1]));
+    expect(spellings.length).toBeGreaterThan(0);
+    for (const spelling of spellings) expect(spelling).toBe(diffCoverVersion);
+  });
+
+  it('reads the requirements file strictly, so a weakened lock fails the check above', () => {
+    // The parser is what the assertions above stand on; a lenient one would
+    // pass a file that pip itself would install without verifying.
+    expect(parseLockedRequirements('a==1 \\\n    --hash=sha256:' + 'a'.repeat(64))).toEqual([
+      { name: 'a', version: '1', hashes: ['a'.repeat(64)] },
+    ]);
+    expect(parseLockedRequirements('a==1\n')).toEqual([{ name: 'a', version: '1', hashes: [] }]);
+    expect(() => parseLockedRequirements('a>=1 \\\n    --hash=sha256:00')).toThrow(
+      /not an exact pin/,
+    );
+    expect(() => parseLockedRequirements('a==1 --index-url=http://x')).toThrow(/unexpected option/);
   });
 });
 
@@ -500,7 +829,7 @@ describe('computeNextTag', () => {
 
 describe('planRelease: the tag may never disagree with the version of truth', () => {
   // `package.json` is what `scripts/inject-version.js` compiles into
-  // APP_VERSION, which `/health` and the OpenAPI document both serve. A release
+  // APP_VERSION, which the OpenAPI document and the signed-in release status both serve. A release
   // tagged v0.9.1 whose artifact reports 0.8.0 is the defect this guards.
 
   it('releases when the version has never been tagged and the series agrees', () => {
@@ -1037,5 +1366,593 @@ describe('secret-scan --staged: the pre-commit hook, run against a real index', 
     expect(result.status).toBe(0);
     expect(result.output).toContain('no secrets in 1 file(s)');
     expect(result.output).not.toContain('nothing to scan');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The two scanner gates: their verdicts are decided from RECORDED reports here,
+// so no test calls the OSV API, runs gitleaks, or needs either binary.
+// ---------------------------------------------------------------------------
+
+/** The skip sentinel; `sast` is the only gate allowed to return it. */
+const SKIP_EXIT = 78;
+
+describe('osv gate: the verdict is read from the report and the exit code together', () => {
+  /**
+   * Recorded with osv-scanner 2.4.0 (`scan source --lockfile <throwaway lockfile>
+   * --format json --all-packages`) against lockfiles naming minimist 1.2.8 and
+   * 1.2.5; only `source.path` was rewritten to `/recorded/package-lock.json`.
+   */
+  const clean = parseOsvReport(
+    read('packages', 'server', 'tests', 'fixtures', 'osv-report-clean.json'),
+  );
+  const vulnerable = parseOsvReport(
+    read('packages', 'server', 'tests', 'fixtures', 'osv-report-vulnerable.json'),
+  );
+
+  it('passes the recorded clean report and counts its packages from the report', () => {
+    expect(clean).toEqual({ packages: 1, vulnerabilities: [] });
+    expect(osvExitCodeFor(OSV_EXIT.CLEAN, clean)).toBe(0);
+    expect(summarizeReport(clean)).toBe('0 vulnerabilities across 1 package');
+    expect(summarizeReport({ packages: 1450, vulnerabilities: [] })).toBe(
+      '0 vulnerabilities across 1,450 packages',
+    );
+  });
+
+  it('fails the recorded vulnerable report and names the package, version and advisory', () => {
+    expect(vulnerable.packages).toBe(1);
+    expect(vulnerable.vulnerabilities).toHaveLength(1);
+    const [finding] = vulnerable.vulnerabilities;
+    expect(finding).toMatchObject({
+      package: 'minimist',
+      version: '1.2.5',
+      id: 'GHSA-xvch-5gv4-984h',
+    });
+    expect(finding!.summary).not.toBe('');
+    expect(formatOsvFinding(finding!)).toBe(
+      `minimist@1.2.5  GHSA-xvch-5gv4-984h  ${finding!.summary}`,
+    );
+    expect(summarizeReport(vulnerable)).toBe('1 vulnerability across 1 package');
+    expect(osvExitCodeFor(OSV_EXIT.VULNERABLE, vulnerable)).toBe(1);
+  });
+
+  it('is red whenever the report lists a vulnerability, whatever the tool exited with', () => {
+    for (const toolExit of [0, 1, 2, 124, 127, 128]) {
+      expect(osvExitCodeFor(toolExit, vulnerable)).toBe(1);
+    }
+  });
+
+  it('never reads a scan that did not complete as clean', () => {
+    // A failed advisory fetch, a scan of nothing, a hang and an exit 1 whose
+    // report names nothing are all "could not run", never a pass.
+    for (const toolExit of [
+      OSV_EXIT.VULNERABLE,
+      OSV_EXIT.GENERAL_ERROR,
+      OSV_EXIT.NO_PACKAGES,
+      124,
+      129,
+      255,
+    ]) {
+      expect(osvExitCodeFor(toolExit, clean)).toBe(2);
+    }
+    expect(osvExitCodeFor(OSV_EXIT.CLEAN, null)).toBe(2);
+    // Without `--all-packages` a clean report lists no packages at all.
+    const unlisted = parseOsvReport('{"results": []}');
+    expect(unlisted).toEqual({ packages: 0, vulnerabilities: [] });
+    expect(osvExitCodeFor(OSV_EXIT.CLEAN, unlisted)).toBe(2);
+  });
+
+  it('never answers with the skip sentinel', () => {
+    for (const toolExit of [0, 1, 2, 78, 124, 127, 128, 255]) {
+      for (const report of [clean, vulnerable, null]) {
+        expect(osvExitCodeFor(toolExit, report)).not.toBe(SKIP_EXIT);
+      }
+    }
+  });
+
+  it('refuses a report it cannot read rather than finding nothing in it', () => {
+    const cases: [string, RegExp][] = [
+      ['not json', /report is not JSON/],
+      ['{}', /no `results` array/],
+      ['{"results": [{"source": {}}]}', /results\[0\] has no `packages` array/],
+      ['{"results": [{"packages": [{"package": {"name": "a"}}]}]}', /names no package and version/],
+      [
+        '{"results": [{"packages": [{"package": {"name": "a", "version": "1"}, "vulnerabilities": {}}]}]}',
+        /a@1: `vulnerabilities` is not an array/,
+      ],
+      [
+        '{"results": [{"packages": [{"package": {"name": "a", "version": "1"}, "vulnerabilities": [{"summary": "x"}]}]}]}',
+        /a@1: a vulnerability has no id/,
+      ],
+    ];
+    for (const [text, message] of cases) {
+      expect(() => parseOsvReport(text)).toThrow(OsvReportError);
+      expect(() => parseOsvReport(text)).toThrow(message);
+    }
+  });
+});
+
+describe('gitleaks gate: only commit-pinned fingerprints, and a finding is never green', () => {
+  const COMMIT = '0123456789abcdef0123456789abcdef01234567';
+
+  /** The shape gitleaks 8.30.1 writes with `--report-format sarif --redact`. */
+  const sarifWith = (results: unknown[]): unknown => ({
+    $schema: 'https://json.schemastore.org/sarif-2.1.0.json',
+    version: '2.1.0',
+    runs: [{ tool: { driver: { name: 'gitleaks', rules: [] } }, results }],
+  });
+  const result = (overrides: { uri?: string; line?: unknown; commit?: unknown } = {}): unknown => ({
+    message: { text: 'generic-api-key has detected secret' },
+    ruleId: 'generic-api-key',
+    locations: [
+      {
+        physicalLocation: {
+          artifactLocation: { uri: overrides.uri ?? 'tests/token.test.ts' },
+          region: { startLine: overrides.line ?? 12, snippet: { text: 'REDACTED' } },
+        },
+      },
+    ],
+    partialFingerprints: { commitSha: overrides.commit ?? COMMIT },
+  });
+
+  it('accepts every line of the committed .gitleaksignore as a commit-pinned fingerprint', () => {
+    const { fingerprints, refused } = parseIgnoreFile(read('.gitleaksignore'));
+    expect(refused).toEqual([]);
+    expect(fingerprints.length).toBeGreaterThan(0);
+    for (const { value } of fingerprints) expect(value).toMatch(COMMIT_FINGERPRINT);
+    // One line per finding: a duplicate would be dead capacity in the ledger.
+    expect(new Set(fingerprints.map((f) => f.value)).size).toBe(fingerprints.length);
+  });
+
+  it('reads .gitleaksignore the way gitleaks does and refuses a global fingerprint', () => {
+    const text = [
+      '# fixture fingerprints',
+      '',
+      `  ${COMMIT}:tests/token.test.ts:generic-api-key:12  `,
+      'tests/token.test.ts:generic-api-key:12',
+      `${COMMIT}:tests/token.test.ts:generic-api-key`,
+      `${COMMIT.toUpperCase()}:tests/token.test.ts:generic-api-key:12`,
+      `${COMMIT}:tests/token.test.ts:generic-api-key:0`,
+    ].join('\n');
+    const { fingerprints, refused } = parseIgnoreFile(text);
+    expect(fingerprints).toEqual([
+      { line: 3, value: `${COMMIT}:tests/token.test.ts:generic-api-key:12` },
+    ]);
+    expect(refused.map((r) => r.line)).toEqual([4, 5, 6, 7]);
+    // Line 5 also has three parts, so it is refused as global too.
+    expect(refused[0]!.reason).toMatch(/global fingerprint ignores this line in every commit/);
+    expect(refused[1]!.reason).toMatch(/global fingerprint/);
+    expect(refused[2]!.reason).toMatch(/not a `<commit>:<file>:<rule>:<line>` fingerprint/);
+    expect(refused[3]!.reason).toMatch(/not a `<commit>:<file>:<rule>:<line>` fingerprint/);
+  });
+
+  it("reads the history with git's own output filters off", () => {
+    // Measured in a throwaway clone: each of `* -diff` in .git/info/attributes, a
+    // textconv driver, `color.ui=always` and `log.showRoot=false` hid findings
+    // from the default options; these flags are what restored all of them. A
+    // `--log-opts` value REPLACES gitleaks' defaults, so those are restated too.
+    const opts = LOG_OPTS.split(' ');
+    for (const flag of [
+      '--full-history',
+      '--all',
+      '--diff-filter=tuxdb',
+      '--text',
+      '--no-textconv',
+      '--no-ext-diff',
+      '--no-color',
+      '--root',
+    ]) {
+      expect(opts).toContain(flag);
+    }
+    // gitleaks splits the value on single spaces: an empty token would reach git.
+    expect(opts).not.toContain('');
+  });
+
+  it('rebuilds the fingerprint gitleaks matches .gitleaksignore against', () => {
+    const findings = parseGitleaksSarif(JSON.stringify(sarifWith([result()])));
+    expect(findings).toEqual([
+      {
+        rule: 'generic-api-key',
+        file: 'tests/token.test.ts',
+        line: 12,
+        commit: COMMIT,
+        fingerprint: `${COMMIT}:tests/token.test.ts:generic-api-key:12`,
+      },
+    ]);
+    expect(findings[0]!.fingerprint).toMatch(COMMIT_FINGERPRINT);
+    expect(formatGitleaksFinding(findings[0]!)).toBe(
+      `generic-api-key | tests/token.test.ts:12 | ${COMMIT}\n` +
+        `    fingerprint: ${COMMIT}:tests/token.test.ts:generic-api-key:12`,
+    );
+    expect(parseGitleaksSarif(sarifWith([]))).toEqual([]);
+  });
+
+  it('refuses a report it cannot read rather than finding nothing in it', () => {
+    const cases: [unknown, RegExp][] = [
+      ['not json', /report is not JSON/],
+      [{}, /report has no `runs`/],
+      [{ runs: [] }, /report has no `runs`/],
+      [{ runs: [{}] }, /runs\[0\] has no `results` array/],
+      [sarifWith([result({ line: '12' })]), /runs\[0\]\.results\[0\] names no rule, file and line/],
+      [sarifWith([result({ commit: '' })]), /names no commit \(was the history scanned\?\)/],
+    ];
+    for (const [input, message] of cases) {
+      expect(() => parseGitleaksSarif(input)).toThrow(GitleaksReportError);
+      expect(() => parseGitleaksSarif(input)).toThrow(message);
+    }
+  });
+
+  it('maps the tool exit and the report to one verdict, and never to the skip sentinel', () => {
+    const finding = parseGitleaksSarif(sarifWith([result()]));
+    expect(gitleaksExitCodeFor(0, [], 0)).toBe(0);
+    // gitleaks exits 1 for leaks AND for a fatal error; the report decides.
+    expect(gitleaksExitCodeFor(1, finding, 0)).toBe(1);
+    expect(gitleaksExitCodeFor(1, [], 0)).toBe(2);
+    expect(gitleaksExitCodeFor(1, null, 0)).toBe(2);
+    expect(gitleaksExitCodeFor(124, null, 0)).toBe(2);
+    // A finding in the report is red whatever the exit code said.
+    expect(gitleaksExitCodeFor(0, finding, 0)).toBe(1);
+    // An allowlist the gate may not use is red even over a clean scan.
+    expect(gitleaksExitCodeFor(0, [], 1)).toBe(1);
+    expect(gitleaksExitCodeFor(2, null, 1)).toBe(1);
+    for (const toolExit of [0, 1, 2, 78, 124, 127]) {
+      for (const findings of [[], finding, null]) {
+        for (const refused of [0, 1]) {
+          expect(gitleaksExitCodeFor(toolExit, findings, refused)).not.toBe(SKIP_EXIT);
+        }
+      }
+    }
+  });
+});
+
+/**
+ * The two scanners are tier-1 gates that DECLARE their binary rather than
+ * skipping without it: `sast` is the only gate allowed to report itself
+ * SKIPPED, so an absent `gitleaks` or `osv-scanner` must be exit 2, "could not
+ * run", which fails the pipeline. The runner checks the declared prerequisite
+ * before it starts the gate; this is the gate's OWN answer when it is started
+ * directly (`npm run audit:secrets:gitleaks`, the self-test, a clean room), on
+ * a PATH that holds nothing at all.
+ */
+describe('an absent scanner is "could not run", never a pass or a skip', () => {
+  const emptyPath = mkdtempSync(path.join(tmpdir(), 'hv-no-scanner-'));
+  afterAll(() => {
+    rmSync(emptyPath, { recursive: true, force: true });
+  });
+
+  it.each([
+    ['gitleaks', 'gitleaks-gate.mjs', 'GITLEAKS_VERSION', 'gitleaks.sarif'],
+    ['osv-scanner', 'osv-gate.mjs', 'OSV_SCANNER_VERSION', 'osv.json'],
+  ])(
+    '%s: exit 2 with the pinned install hint, and no report touched',
+    (tool, script, versionKey, reportName) => {
+      const report = path.join(repoRoot, '.testfortress', 'reports', reportName);
+      const before = existsSync(report) ? readFileSync(report) : null;
+      const run = spawnSync(process.execPath, [path.join(repoRoot, 'scripts', 'ci', script)], {
+        cwd: repoRoot,
+        encoding: 'utf-8',
+        env: { ...process.env, PATH: emptyPath },
+      });
+      expect(run.status).toBe(2);
+      expect(run.status).not.toBe(SKIP_EXIT);
+      expect(run.stderr).toContain(`${tool} is not installed`);
+      // The hint names the version the release workflow installs, so a
+      // contributor who follows it gets the scanner the ratchet was recorded with.
+      const pinned = release.jobs['verify']?.steps.find(
+        (step) => step.env?.[versionKey] !== undefined,
+      )?.env?.[versionKey];
+      expect(pinned, `${versionKey} in release.yml`).toBeDefined();
+      expect(run.stderr).toContain(`v${String(pinned)}`);
+      // Nothing that reads as a verdict about the subject.
+      expect(run.stdout).not.toMatch(/✔|unignored findings in the history|across/);
+      // The gate stopped before it deleted or wrote its report.
+      expect(existsSync(report) ? readFileSync(report) : null).toEqual(before);
+    },
+  );
+});
+
+/** One gate as `local-ci.mjs --list --json` reports it. */
+interface ListedGate {
+  id: string;
+  task: string;
+  tier: number;
+  canSkip: boolean;
+  requires: string[];
+  prerequisites: { name: string; label: string; fix: string }[];
+}
+
+let listing: ListedGate[] | undefined;
+/** The runner's own gate table, asked for rather than parsed out of its source. */
+function listedGates(): ListedGate[] {
+  listing ??= JSON.parse(
+    spawnSync(
+      process.execPath,
+      [path.join(repoRoot, 'scripts', 'ci', 'local-ci.mjs'), '--list', '--json'],
+      {
+        encoding: 'utf-8',
+      },
+    ).stdout,
+  ) as ListedGate[];
+  return listing;
+}
+
+/**
+ * An advisory with no fixed release can only be ACCEPTED, never ignored, and
+ * only through a ledger entry the osv gate itself re-validates: rule
+ * `VULN-ACCEPT`, the exact advisory id and `name@version`, a reviewer, and an
+ * expiry at most thirty days out. The integrity scan exempts marker-less rules
+ * from its staleness and unused-capacity checks, so a dead or lapsed acceptance
+ * is caught here or nowhere. The two recordings are real osv-scanner 2.4.0
+ * output for throwaway lockfiles (braces 3.0.3 alone, and with minimist 1.2.5),
+ * with only `source.path` rewritten.
+ */
+describe('osv gate: an advisory is accepted only by a strict, dated, reviewed ledger entry', () => {
+  const TODAY = '2026-10-16';
+  const fixture = (name: string): ReturnType<typeof parseOsvReport> =>
+    parseOsvReport(read('packages', 'server', 'tests', 'fixtures', name));
+  const braces = fixture('osv-report-accepted.json');
+  const mixed = fixture('osv-report-mixed.json');
+  const entry = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
+    id: 'SUP-9001',
+    rule: 'VULN-ACCEPT',
+    kind: 'vulnerability-acceptance',
+    file: 'package-lock.json',
+    symbol: 'GHSA-vfj7-8cjw-p6xm braces@3.0.3',
+    maxHits: 1,
+    reason: 'dev-only, no fixed release',
+    owner: 'maintainer',
+    created: '2026-10-16',
+    expires: '2026-11-15',
+    approvedBy: ['judge:readonly'],
+    ...overrides,
+  });
+  const ledgerOf = (...entries: Record<string, unknown>[]): unknown => ({
+    version: 1,
+    policy: {},
+    entries: [{ id: 'SUP-0001', rule: 'KNOWN-GAP', kind: 'known-gap' }, ...entries],
+  });
+
+  it('reads the recordings as the advisories the acceptance names', () => {
+    expect(braces.packages).toBe(1);
+    expect(braces.vulnerabilities.map((v) => [v.package, v.version, v.id])).toEqual([
+      ['braces', '3.0.3', 'GHSA-vfj7-8cjw-p6xm'],
+    ]);
+    expect(mixed.vulnerabilities.map((v) => [v.package, v.version, v.id])).toEqual([
+      ['braces', '3.0.3', 'GHSA-vfj7-8cjw-p6xm'],
+      ['minimist', '1.2.5', 'GHSA-xvch-5gv4-984h'],
+    ]);
+  });
+
+  it('parses a symbol only in the exact `<id> <name>@<version>` shape, scoped names included', () => {
+    expect(parseAcceptanceSymbol('GHSA-vfj7-8cjw-p6xm braces@3.0.3')).toEqual({
+      id: 'GHSA-vfj7-8cjw-p6xm',
+      name: 'braces',
+      version: '3.0.3',
+    });
+    expect(parseAcceptanceSymbol('GHSA-aaaa-bbbb-cccc @scope/pkg@1.0.0-beta.1')).toEqual({
+      id: 'GHSA-aaaa-bbbb-cccc',
+      name: '@scope/pkg',
+      version: '1.0.0-beta.1',
+    });
+    for (const loose of [
+      'GHSA-vfj7-8cjw-p6xm braces',
+      'GHSA-vfj7-8cjw-p6xm braces@',
+      'GHSA-vfj7-8cjw-p6xm braces@^3.0.0',
+      'GHSA-vfj7-8cjw-p6xm  braces@3.0.3',
+      'braces@3.0.3',
+      'GHSA-vfj7-8cjw-p6xm braces@3.0.3 extra',
+      'GHSA-vfj7-8cjw-p6xm braces@3.0.*',
+      '',
+    ]) {
+      expect(parseAcceptanceSymbol(loose), JSON.stringify(loose)).toBeNull();
+    }
+  });
+
+  it('accepts the one valid entry and ignores every other rule in the ledger', () => {
+    const { acceptances, problems } = readAcceptances(ledgerOf(entry()), TODAY);
+    expect(problems).toEqual([]);
+    expect(acceptances).toEqual([
+      {
+        entryId: 'SUP-9001',
+        id: 'GHSA-vfj7-8cjw-p6xm',
+        name: 'braces',
+        version: '3.0.3',
+        maxHits: 1,
+        expires: '2026-11-15',
+      },
+    ]);
+    expect(VULN_ACCEPT.maxDays).toBe(30);
+  });
+
+  it('refuses, by entry id and reason, every entry that is not exactly a reviewed, current acceptance', () => {
+    const cases: [Record<string, unknown>, RegExp][] = [
+      [{ kind: 'known-gap' }, /kind/],
+      [{ file: 'packages/server/package.json' }, /file/],
+      [{ symbol: 'braces@3.0.3' }, /symbol/],
+      [{ symbol: undefined }, /symbol/],
+      [{ maxHits: 0 }, /maxHits/],
+      [{ maxHits: 1.5 }, /maxHits/],
+      [{ approvedBy: [] }, /approvedBy/],
+      [{ approvedBy: [''] }, /approvedBy/],
+      [{ approvedBy: undefined }, /approvedBy/],
+      [{ reason: '' }, /reason/],
+      [{ created: '2026-10-17' }, /created/],
+      [{ created: '16/10/2026' }, /created/],
+      // The day after expiry.
+      [{ expires: '2026-10-15' }, /expired/],
+      // Thirty-one days out is one day past the cap.
+      [{ expires: '2026-11-16' }, /30 days/],
+      [{ expires: 'never' }, /expires/],
+      // Dates the calendar does not have: each has the shape, and each made the
+      // day arithmetic NaN, which no cap comparison is ever true of.
+      [{ expires: '2099-13-01' }, /expires/],
+      [{ expires: '2026-11-99' }, /expires/],
+      [{ created: '2026-02-30' }, /created/],
+    ];
+    for (const [overrides, reason] of cases) {
+      const { acceptances, problems } = readAcceptances(ledgerOf(entry(overrides)), TODAY);
+      expect(acceptances, JSON.stringify(overrides)).toEqual([]);
+      expect(problems, JSON.stringify(overrides)).toHaveLength(1);
+      expect(problems[0]!.entryId).toBe('SUP-9001');
+      expect(problems[0]!.reason, JSON.stringify(overrides)).toMatch(reason);
+    }
+    // The boundaries themselves are inside: expiring today, and exactly 30 days out.
+    for (const expires of ['2026-10-16', '2026-11-15']) {
+      expect(readAcceptances(ledgerOf(entry({ expires })), TODAY).problems).toEqual([]);
+    }
+  });
+
+  it('refuses a ledger it cannot read rather than reading it as "nothing accepted"', () => {
+    for (const ledger of [null, 'text', [], { entries: {} }, { version: 1 }]) {
+      expect(() => readAcceptances(ledger, TODAY), JSON.stringify(ledger)).toThrow(OsvLedgerError);
+    }
+  });
+
+  it('matches on the exact id, name and version, never an alias, another version or another package', () => {
+    for (const symbol of [
+      'GHSA-vfj7-8cjw-p6xm braces@3.0.2',
+      'CVE-2026-93687 braces@3.0.3',
+      'GHSA-vfj7-8cjw-p6xx braces@3.0.3',
+      'GHSA-vfj7-8cjw-p6xm brace@3.0.3',
+    ]) {
+      const { acceptances } = readAcceptances(ledgerOf(entry({ symbol })), TODAY);
+      const verdict = classifyFindings(braces.vulnerabilities, acceptances);
+      expect(verdict.accepted, symbol).toEqual([]);
+      expect(
+        verdict.unaccepted.map((v) => v.package),
+        symbol,
+      ).toEqual(['braces']);
+      expect(verdict.dead, symbol).toEqual(['SUP-9001']);
+      expect(acceptanceExitCode(OSV_EXIT.VULNERABLE, braces, verdict, []), symbol).toBe(1);
+    }
+  });
+
+  it('is green when every finding is accepted and the tool said so, and only then', () => {
+    const { acceptances } = readAcceptances(ledgerOf(entry()), TODAY);
+    const verdict = classifyFindings(braces.vulnerabilities, acceptances);
+    expect(verdict.unaccepted).toEqual([]);
+    expect(verdict.accepted.map((a) => [a.entryId, a.finding.package, a.expires])).toEqual([
+      ['SUP-9001', 'braces', '2026-11-15'],
+    ]);
+    expect(verdict.dead).toEqual([]);
+    expect(acceptanceExitCode(OSV_EXIT.VULNERABLE, braces, verdict, [])).toBe(0);
+    // osv-scanner exits 1 whenever it found anything, accepted or not: any other
+    // exit with findings in the report is a scan that did not complete.
+    for (const toolExit of [0, 2, 124, 127, 128]) {
+      expect(acceptanceExitCode(toolExit, braces, verdict, []), String(toolExit)).toBe(2);
+    }
+    expect(summarizeVerdict(braces, verdict)).toBe(
+      '0 unaccepted vulnerabilities and 1 accepted (SUP-9001) across 1 package',
+    );
+    const [accepted] = verdict.accepted;
+    expect(formatAccepted(accepted!)).toBe(
+      'accepted  braces@3.0.3  GHSA-vfj7-8cjw-p6xm  (SUP-9001, until 2026-11-15)',
+    );
+    // Never the line shape an unaccepted finding is printed in.
+    expect(formatAccepted(accepted!)).not.toMatch(/^braces@3\.0\.3 {2}GHSA/);
+  });
+
+  it('stays red for the unaccepted finding beside an accepted one', () => {
+    const { acceptances } = readAcceptances(ledgerOf(entry()), TODAY);
+    const verdict = classifyFindings(mixed.vulnerabilities, acceptances);
+    expect(verdict.accepted.map((a) => a.finding.package)).toEqual(['braces']);
+    expect(verdict.unaccepted.map((v) => v.package)).toEqual(['minimist']);
+    for (const toolExit of [0, 1, 2, 127]) {
+      expect(acceptanceExitCode(toolExit, mixed, verdict, []), String(toolExit)).toBe(1);
+    }
+    expect(summarizeVerdict(mixed, verdict)).toBe(
+      '1 unaccepted vulnerability and 1 accepted (SUP-9001) across 2 packages',
+    );
+  });
+
+  it('fails on an entry that excuses nothing, but only once the scan completed', () => {
+    const { acceptances } = readAcceptances(ledgerOf(entry()), TODAY);
+    const clean = parseOsvReport(
+      read('packages', 'server', 'tests', 'fixtures', 'osv-report-clean.json'),
+    );
+    const verdict = classifyFindings(clean.vulnerabilities, acceptances);
+    expect(verdict.dead).toEqual(['SUP-9001']);
+    // The good outcome (a fix shipped, the package left the tree), and still a
+    // red gate: an acceptance with nothing to accept must be pruned.
+    expect(acceptanceExitCode(OSV_EXIT.CLEAN, clean, verdict, [])).toBe(1);
+    // A scan that did not complete says nothing about whether it is dead.
+    expect(acceptanceExitCode(OSV_EXIT.GENERAL_ERROR, clean, verdict, [])).toBe(2);
+    expect(acceptanceExitCode(OSV_EXIT.CLEAN, null, verdict, [])).toBe(2);
+    expect(
+      acceptanceExitCode(OSV_EXIT.CLEAN, { packages: 0, vulnerabilities: [] }, verdict, []),
+    ).toBe(2);
+  });
+
+  it('fails on unused capacity and on a reused entry id, once the scan completed', () => {
+    // The integrity scan skips its unused-capacity and staleness checks for
+    // marker-less rules, so an acceptance sized for more than it excuses would
+    // otherwise stand ready to excuse a second finding nobody reviewed.
+    const roomy = readAcceptances(ledgerOf(entry({ maxHits: 2 })), TODAY);
+    const verdict = classifyFindings(braces.vulnerabilities, roomy.acceptances);
+    expect(verdict.underused).toEqual([{ entryId: 'SUP-9001', hits: 1, maxHits: 2 }]);
+    expect(acceptanceExitCode(OSV_EXIT.VULNERABLE, braces, verdict, [])).toBe(1);
+    expect(acceptanceExitCode(OSV_EXIT.GENERAL_ERROR, braces, verdict, [])).toBe(2);
+    // Two entries sharing an id would let the live one hide the dead one, so
+    // NEITHER accepts anything: each is refused by that id.
+    const twins = readAcceptances(
+      ledgerOf(entry(), entry({ symbol: 'GHSA-xvch-5gv4-984h minimist@1.2.5' })),
+      TODAY,
+    );
+    expect(twins.acceptances).toEqual([]);
+    expect(twins.problems).toEqual([
+      { entryId: 'SUP-9001', reason: expect.stringMatching(/exactly one ledger entry/) },
+      { entryId: 'SUP-9001', reason: expect.stringMatching(/exactly one ledger entry/) },
+    ]);
+    // An entry with no id at all cannot be named in a verdict, so it accepts nothing.
+    const anonymous = readAcceptances(ledgerOf(entry({ id: undefined })), TODAY);
+    expect(anonymous.acceptances).toEqual([]);
+    expect(anonymous.problems).toEqual([
+      { entryId: '(no id)', reason: expect.stringMatching(/exactly one ledger entry/) },
+    ]);
+    // Any entry in the ledger counts, not only another acceptance.
+    const clash = readAcceptances(ledgerOf(entry({ id: 'SUP-0001' })), TODAY);
+    expect(clash.acceptances).toEqual([]);
+    expect(clash.problems.map((p) => p.entryId)).toEqual(['SUP-0001']);
+  });
+
+  it('fails when one entry would excuse more findings than its capacity', () => {
+    const twice = {
+      packages: 2,
+      vulnerabilities: [braces.vulnerabilities[0]!, braces.vulnerabilities[0]!],
+    };
+    const { acceptances } = readAcceptances(ledgerOf(entry()), TODAY);
+    const verdict = classifyFindings(twice.vulnerabilities, acceptances);
+    expect(verdict.overused).toEqual([{ entryId: 'SUP-9001', hits: 2, maxHits: 1 }]);
+    expect(acceptanceExitCode(OSV_EXIT.VULNERABLE, twice, verdict, [])).toBe(1);
+  });
+
+  it('fails on an invalid entry even when the scan is clean and the entry matches nothing', () => {
+    const { acceptances, problems } = readAcceptances(ledgerOf(entry({ approvedBy: [] })), TODAY);
+    const clean = parseOsvReport(
+      read('packages', 'server', 'tests', 'fixtures', 'osv-report-clean.json'),
+    );
+    const verdict = classifyFindings(clean.vulnerabilities, acceptances);
+    expect(acceptanceExitCode(OSV_EXIT.CLEAN, clean, verdict, problems)).toBe(1);
+    expect(acceptanceExitCode(OSV_EXIT.CLEAN, null, verdict, problems)).toBe(1);
+  });
+
+  it('with no acceptance at all, decides exactly as the unaccepting verdict always did', () => {
+    const none = classifyFindings([], []);
+    const clean = parseOsvReport(
+      read('packages', 'server', 'tests', 'fixtures', 'osv-report-clean.json'),
+    );
+    const vulnerable = parseOsvReport(
+      read('packages', 'server', 'tests', 'fixtures', 'osv-report-vulnerable.json'),
+    );
+    for (const toolExit of [0, 1, 2, 78, 124, 127, 128, 255]) {
+      for (const report of [clean, vulnerable, null, { packages: 0, vulnerabilities: [] }]) {
+        const verdict = classifyFindings(report?.vulnerabilities ?? [], []);
+        expect(acceptanceExitCode(toolExit, report, verdict, [])).toBe(
+          osvExitCodeFor(toolExit, report),
+        );
+        expect(acceptanceExitCode(toolExit, report, verdict, [])).not.toBe(SKIP_EXIT);
+      }
+    }
+    expect(none).toEqual({ accepted: [], unaccepted: [], dead: [], overused: [], underused: [] });
   });
 });

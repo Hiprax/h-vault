@@ -3,17 +3,27 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import crypto from 'node:crypto';
 import mongoose from 'mongoose';
-import type { HydratedDocument, UpdateQuery } from 'mongoose';
-import { TOTP, Secret } from 'otpauth';
 import { catchAsync, httpErrors } from '@hiprax/errors';
 import { createModuleLogger, errorMessage } from '../utils/logger.js';
-import { config, isProduction, isTest, twoFactorEncryptionKey } from '../config/index.js';
+import { config, isProduction, isTest } from '../config/index.js';
 import { REFRESH_COOKIE_NAME, TRUSTED_DEVICE_COOKIE_NAME } from '../constants/index.js';
 import { User } from '../models/User.js';
-import type { IUser } from '../models/User.js';
 import { RefreshToken } from '../models/RefreshToken.js';
 import { TrustedDevice } from '../models/TrustedDevice.js';
 import { revokeTrustedDevices } from '../utils/trustedDevices.js';
+import {
+  clearDeviceProofCookie,
+  consumeDeviceProof,
+  extendPresentedDeviceProof,
+  findPresentedDeviceProof,
+  issueDeviceProof,
+  issueUnlockProof,
+  provesAccount,
+  recordProofFailure,
+  revokeDeviceProofs,
+} from '../utils/deviceProofs.js';
+import { suspendThirdPartyRecipients } from '../utils/backupRecipients.js';
+import { notifySecurityEventLater } from '../utils/securityNotifications.js';
 import { supportsTransactions } from '../utils/transactionSupport.js';
 import {
   generateAccessToken,
@@ -24,11 +34,9 @@ import {
 import {
   sendVerificationEmail,
   sendPasswordResetEmail,
-  sendAccountUnlockEmail,
   sendRegistrationAttemptEmail,
 } from '../utils/email.js';
-import { createAuditLog } from '../services/auditService.js';
-import { cryptoManager } from '../utils/cryptoManager.js';
+import { createAuditLog, recordLockedAttempt, recordNothing } from '../services/auditService.js';
 import { recordFailedLoginAttempt, resetLoginAttempts } from '../utils/loginThrottle.js';
 import {
   getRequestContext,
@@ -39,15 +47,43 @@ import {
 } from '../utils/controllerHelpers.js';
 import { readStringCookie } from '../utils/cookies.js';
 import { evaluateAccountStatus } from '../utils/accountStatus.js';
+import {
+  LOCKOUT_FACTORS,
+  clearLockoutStateOnDocument,
+  dischargeOnCompletion,
+  dischargeUnlockedEpisode,
+  extendNothing,
+  extendPasswordLockout,
+  lockoutClearUpdate,
+  registerFailedAuthAttempt,
+  unlockEpisodeOf,
+  unlockTokenNamesEpisode,
+  type JwtUnlockPayload,
+  type LockoutFactor,
+} from '../utils/lockout.js';
+import { verifySecondFactor } from '../utils/secondFactor.js';
+import {
+  consumeTwoFactorChallenge,
+  isChallengeOpen,
+  issueTwoFactorChallenge,
+  revokeTwoFactorChallenges,
+} from '../utils/twoFactorChallenge.js';
+import {
+  INVITATION_INVALID_MESSAGE,
+  REGISTRATION_CLOSED_MESSAGE,
+  claimInvitation,
+  invitationAdmits,
+  isAllowedRegistrationDomain,
+  returnInvitationClaim,
+} from '../utils/invitations.js';
 import { clearCsrfCookie } from '../middleware/csrf.js';
 import {
   APP_VERSION,
   ERROR_CODES,
-  LOCKOUT_DURATION_MINUTES,
-  MAX_LOGIN_ATTEMPTS,
   MAX_SESSIONS,
   MAX_TRUSTED_DEVICES,
   maskEmail,
+  CRITICAL_SECURITY_NOTIFICATION_EVENTS,
 } from '@hvault/shared';
 import type {
   RegisterInput,
@@ -60,26 +96,13 @@ import type {
 const logger = createModuleLogger('auth');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-const LOCKOUT_DURATION_MS = LOCKOUT_DURATION_MINUTES * 60 * 1000;
-const MAX_FAILED_ATTEMPTS = MAX_LOGIN_ATTEMPTS;
 
 /**
- * How long an emailed unlock link stays usable.
- *
- * ONE definition, because three things have to agree on it: the JWT's own
- * `expiresIn`, the re-mail decision in {@link registerFailedAuthAttempt} (which
- * asks whether the outstanding token will still verify when the new lockout
- * ends), and the sentence a user reads in `utils/email.ts` — "This link will
- * expire in 1 hour". The last of those is prose and no test can pin it, so the
- * value must not be changed here without changing it there.
- *
- * It must stay STRICTLY GREATER than `LOCKOUT_DURATION_MS`. The link is the
- * shortcut out of a lockout, so a token that expires before the lockout it was
- * minted for would leave the owner waiting out the full window with a dead link
- * in their inbox — the failure this whole mechanism exists to prevent.
+ * Hex characters of a refresh family id's SHA-256 kept on a reuse audit row
+ * (F-16): 64 bits, enough to tell one stolen family's rows from another's, and
+ * never the id itself.
  */
-const UNLOCK_TOKEN_TTL_MINUTES = 60;
-const UNLOCK_TOKEN_TTL_MS = UNLOCK_TOKEN_TTL_MINUTES * 60 * 1000;
+const FAMILY_ID_HASH_LENGTH = 16;
 
 // Pre-computed bcrypt hash used for timing-safe dummy comparisons when a user
 // is not found. This ensures the login endpoint takes approximately the same
@@ -122,13 +145,25 @@ function sleep(ms: number): Promise<void> {
  * of by three hand-audited call sites. Calling it twice on one branch, or
  * skipping it on one, reopens the oracle.
  *
- * The remaining asymmetry — the wrong-password branch also writes the counter,
- * an audit log, and sometimes a lockout — is a few milliseconds of database
- * work against the seconds this equalizes, and equalizing it would mean issuing
- * dummy writes for arbitrary attacker-supplied emails. Deliberately not chased.
+ * The awaited DATABASE work is equalised separately, and only where it is
+ * unbounded: a locked account answers every unproven attempt with one
+ * conditional User update and one coalesced audit upsert, and an unknown address
+ * (or an account mid-erasure) makes the same two round trips with filters that
+ * match nothing, so no row is ever created for an address nobody registered.
+ * The unlocked wrong-password branch still does its own counting (a few
+ * milliseconds), which at most ten attempts per lock episode can sample.
  */
 async function applyFailedLoginDelay(email: string): Promise<void> {
-  const attempts = recordFailedLoginAttempt(email);
+  await applyProgressiveDelay(recordFailedLoginAttempt(email));
+}
+
+/**
+ * Sleeps for the progressive delay `attempts` failures earn (skipped in the test
+ * environment). The ONE place the delay is applied, for both steps: the password
+ * step passes the per-email throttle's count (see `applyFailedLoginDelay`), the
+ * 2FA step the second factor's durable counter.
+ */
+async function applyProgressiveDelay(attempts: number): Promise<void> {
   if (isTest) return;
 
   const delay = getProgressiveDelay(attempts);
@@ -157,12 +192,12 @@ interface JwtTempPayload {
   // trusting a client-supplied field. Optional so a temp token minted before
   // this field existed (or by a non-remembered login) is read as false.
   rememberMe?: boolean;
-}
-
-interface JwtUnlockPayload {
-  userId: string;
-  purpose: string;
-  stateHash: string;
+  // The challenge row the token names (`utils/twoFactorChallenge.ts`). Optional in
+  // the type because a token minted before challenges existed has none, and
+  // `login2fa` refuses exactly that token.
+  jti?: string;
+  iat?: number;
+  exp?: number;
 }
 
 /**
@@ -172,209 +207,6 @@ interface JwtUnlockPayload {
  */
 function generateStateHash(value: string): string {
   return crypto.createHash('sha256').update(value).digest('hex');
-}
-
-/**
- * The update that ends a lock episode, as ONE definition.
- *
- * A lockout is four fields, not one — the counter, the deadline, the episode
- * identity the emailed link is bound to, and the timestamp of the link that was
- * mailed for it — and every site that discharges a lockout has to clear all four.
- * Leaving `lockoutEpisodeId` behind would keep a spent unlock link alive; leaving
- * `lockoutNotifiedAt` behind would suppress the next episode's mail. Four sites
- * discharge a lockout through THIS update — `login`'s served-lockout discharge,
- * `finishLogin`, `login2fa`'s post-verify reset and `unlockAccount` — and a fifth,
- * `resetPassword`, discharges it through the document-shaped twin below because it
- * is already saving other fields in the same write. `login`'s served-lockout
- * discharge uses BOTH, since it must correct the in-memory copy it goes on to read.
- * Those two functions are the only two spellings there are; a hand-written copy at
- * a sixth site is the drift this pair exists to prevent.
- *
- * A fresh object per call: Mongoose may annotate the update it is handed, and a
- * shared literal would carry that annotation into the next caller.
- */
-function lockoutClearUpdate(): UpdateQuery<IUser> {
-  return {
-    $set: { failedLoginAttempts: 0 },
-    $unset: { lockoutUntil: 1, lockoutEpisodeId: 1, lockoutNotifiedAt: 1 },
-  };
-}
-
-/**
- * The same discharge applied to a loaded document: for `resetPassword`, which is
- * already saving other fields in the same write and must not split them across
- * two round trips, and for `login`'s served-lockout discharge, which persists
- * through {@link lockoutClearUpdate} and then has to correct the copy it loaded
- * before the bcrypt compare. Change it together with {@link lockoutClearUpdate}.
- */
-function clearLockoutStateOnDocument(user: HydratedDocument<IUser>): void {
-  user.failedLoginAttempts = 0;
-  user.lockoutUntil = undefined;
-  user.lockoutEpisodeId = undefined;
-  user.lockoutNotifiedAt = undefined;
-}
-
-/**
- * Records ONE failed authentication attempt against the durable, cross-step
- * counter, locks the account when it crosses the threshold, and guarantees that a
- * usable unlock link is outstanding for the resulting lock EPISODE. Returns the
- * counter after the increment, which the 2FA step feeds to its progressive delay.
- *
- * Shared by both doors — a wrong password and a wrong second factor — because the
- * counter and the lockout are one brake across both, and two copies of this logic
- * is how the two steps came to differ in the first place.
- *
- * ## The three writes, and why each is a conditional update rather than a read
- *
- * 1. **The increment.** Atomic, so concurrent failures cannot both read the same
- *    stale count.
- * 2. **Start-or-extend the episode, in ONE statement.** An aggregation-pipeline
- *    update, so the deadline and the episode identity are decided in a single
- *    atomic write and the account is never observable as locked with no episode.
- *    `$ifNull` keeps a running episode's identity and mints one only when the
- *    field is null or missing, so exactly ONE of N concurrent threshold-crossing
- *    requests starts the episode and every other one inherits it. The deadline is
- *    always pushed out — that is the brake still working — but the IDENTITY is
- *    never replaced, which is precisely what makes the link already in the
- *    owner's inbox survive the re-lock. A conditional `findOneAndUpdate` pair
- *    (start-if-absent, else extend) would decide the same thing, but a discharge
- *    landing between its two halves would write a deadline onto an account with
- *    no episode — locked, with no link, for the rest of the window, since the next
- *    failed attempt is turned away by the live lockout before it reaches this
- *    helper and never gets the chance to repair it. The pipeline has no such
- *    gap. It is `updateOne` rather than `findOneAndUpdate` because Mongoose types
- *    only `updateOne`/`updateMany` to accept `UpdateWithAggregationPipeline`;
- *    reaching it through `findOneAndUpdate` would need a cast.
- * 3. **Claim the mail.** A link is "outstanding" only while it will still verify
- *    at the moment the new lockout ends, i.e. while
- *    `lockoutNotifiedAt >= lockoutUntil - UNLOCK_TOKEN_TTL_MS`. Expressing the
- *    claim as a filter rather than a read-then-write is what keeps the
- *    anti-flood property the old `newAttempts === MAX_FAILED_ATTEMPTS` guard was
- *    written for: the filter matches for exactly one concurrent request.
- *
- * The replaced equality guard had the right goal and the wrong test. It suppressed
- * a duplicate mail by suppressing EVERY mail after the first crossing, and since
- * `failedLoginAttempts` is cleared only where an authentication completes, an
- * abandoned lockout never crossed the threshold again — so the victim was mailed
- * once, ever, and every subsequent attempt silently invalidated that one link.
- *
- * Several live tokens can name one episode and that is harmless: they are the same
- * capability, and the first one spent clears the episode and kills the rest. More
- * than one can be live at once — a replacement is sent while the token it replaces
- * still has up to half an hour to run — and that is by design; what is bounded is
- * how often a new one is SENT, not how many remain valid.
- *
- * A discharge landing after write 2 but before the read that follows it leaves no
- * episode and no lockout, so this returns without mailing. That is the right
- * answer and not a missed one: the account is unlocked, and a link is only worth
- * sending to an account that is locked.
- */
-async function registerFailedAuthAttempt(
-  userId: mongoose.Types.ObjectId,
-  email: string,
-  step: 'password' | '2fa',
-): Promise<number> {
-  const incremented = await User.findOneAndUpdate(
-    { _id: userId },
-    { $inc: { failedLoginAttempts: 1 } },
-    { returnDocument: 'after' },
-  );
-
-  const attempts = incremented?.failedLoginAttempts ?? 1;
-  if (attempts < MAX_FAILED_ATTEMPTS) return attempts;
-
-  const now = new Date();
-  const lockoutUntil = new Date(now.getTime() + LOCKOUT_DURATION_MS);
-
-  await User.updateOne(
-    { _id: userId },
-    [
-      {
-        $set: {
-          lockoutUntil,
-          lockoutEpisodeId: { $ifNull: ['$lockoutEpisodeId', crypto.randomUUID()] },
-        },
-      },
-    ],
-    // Mongoose refuses an update pipeline unless it is asked for by name, because
-    // it does not cast one. Nothing here needs casting: `lockoutUntil` is already
-    // a `Date` and the minted identity is already a string.
-    { updatePipeline: true },
-  );
-
-  // `updateOne` cannot return the post-image, so the episode is read back. The
-  // read is not part of the decision above — that was settled atomically — it only
-  // reports which identity won. `lockoutEpisodeId` is `select: false`, so it is
-  // asked for by name; without the `+` this mails no link at all, which is what
-  // every test in `lockout-unlock-token-survival.test.ts` would say.
-  //
-  // Pinned to the PRIMARY, and that is not belt-and-braces. `MONGODB_URI` is the
-  // operator's, and a deployment that sets `readPreference=secondaryPreferred` on
-  // it makes this a read that may legitimately predate the write two lines above:
-  // it would answer `undefined`, take the bail below, and the account would be
-  // locked for thirty minutes with NO unlock link ever mailed — the exact silence
-  // this whole mechanism exists to end, reachable by a connection-string option
-  // nothing else in the code would object to. Read-your-own-write is a property
-  // of the primary, so it is asked for by name rather than assumed.
-  const locked = await User.findById(userId).read('primary').select('+lockoutEpisodeId');
-
-  // The account was deleted, or its lockout discharged, since that write. There is
-  // no episode to name, so there is nothing a link could unlock; mailing one bound
-  // to the empty string would produce a token that matches every account with no
-  // episode running.
-  const episodeId = locked?.lockoutEpisodeId;
-  if (!episodeId) return attempts;
-
-  const claimed = await User.findOneAndUpdate(
-    {
-      _id: userId,
-      // Scoped to the episode this mail would be FOR. Without it, an unlock link
-      // spent (or a sign-in completed) in the gap between the write above and
-      // this one would leave `lockoutNotifiedAt` stamped on an account with no
-      // episode — which would then suppress the mail for the NEXT lockout for up
-      // to half an hour, reproducing in miniature the silence this phase exists
-      // to end. With it, a discharged episode simply declines the claim.
-      lockoutEpisodeId: episodeId,
-      $or: [
-        { lockoutNotifiedAt: null },
-        { lockoutNotifiedAt: { $lt: new Date(lockoutUntil.getTime() - UNLOCK_TOKEN_TTL_MS) } },
-      ],
-    },
-    { $set: { lockoutNotifiedAt: now } },
-  );
-  if (!claimed) return attempts;
-
-  logger.warn('Account locked due to too many failed attempts', {
-    userId: userId.toString(),
-    email: maskEmail(email),
-    step,
-  });
-
-  const unlockToken = jwt.sign(
-    {
-      userId: userId.toString(),
-      purpose: 'account_unlock',
-      // Bound to the EPISODE, never to `lockoutUntil`: the deadline moves on
-      // every re-lock and the identity does not.
-      stateHash: generateStateHash(episodeId),
-    } satisfies JwtUnlockPayload,
-    derivePurposeKey(config.JWT_REFRESH_SECRET, 'account_unlock'),
-    { algorithm: 'HS256', expiresIn: UNLOCK_TOKEN_TTL_MS / 1000 },
-  );
-
-  // Fire-and-forget: the response must not wait on SMTP, and a send failure must
-  // not turn a 401 into a 500.
-  void sendAccountUnlockEmail(email, unlockToken).then((result) => {
-    if (!result.success) {
-      logger.error('Failed to send account unlock email', {
-        userId: userId.toString(),
-        email: maskEmail(email),
-        error: result.message,
-      });
-    }
-  });
-
-  return attempts;
 }
 
 /**
@@ -611,11 +443,62 @@ const ALLOWED_REGISTER_FIELDS = new Set([
   'encryptionVersion',
 ]);
 
+/**
+ * The answer every registration gets that is not refused outright, whether or not
+ * it created an account: an address already registered, an address outside the
+ * domain allowlist and a genuinely new account are indistinguishable from here.
+ */
+function sendGenericRegistrationSuccess(res: Response): void {
+  res.status(201).json({
+    success: true,
+    message: 'Registration successful. Please check your email to verify your account.',
+    data: { emailSent: true },
+  });
+}
+
 export const register = catchAsync(async (req: Request, res: Response): Promise<void> => {
   const body = req.body as RegisterInput;
   const sanitized = pickAllowedFields(body, ALLOWED_REGISTER_FIELDS);
   const email = sanitized.email as string;
   const authHash = sanitized.authHash as string;
+
+  // ── Who may register (F-24) ──────────────────────────────────────────────
+  //
+  // Every check below runs BEFORE the account lookup, so none of their answers
+  // can depend on whether the address is registered.
+  //
+  // A closed server refuses honestly: the answer is the same for every address
+  // and involves no account data, so there is nothing to hide behind a fake
+  // success.
+  if (config.REGISTRATION_MODE === 'closed') {
+    throw httpErrors.forbidden(REGISTRATION_CLOSED_MESSAGE);
+  }
+
+  // In invite mode the invitation comes FIRST, before the domain allowlist: an
+  // invitation is only ever minted for an address inside the allowlist, so this
+  // loses nothing, and checking the domain first would answer an address outside
+  // the list with the generic 201 and one inside it with this 403, publishing the
+  // allowlist one guess at a time. The invitation is checked, not spent, here: the
+  // address may turn out to be registered already, and that must cost the invitee
+  // nothing.
+  const invitationToken = config.REGISTRATION_MODE === 'invite' ? body.invitationToken : undefined;
+  if (
+    config.REGISTRATION_MODE === 'invite' &&
+    (invitationToken === undefined || !(await invitationAdmits(invitationToken, email)))
+  ) {
+    throw httpErrors.forbidden(INVITATION_INVALID_MESSAGE);
+  }
+
+  // An address outside the domain allowlist gets exactly what a registered
+  // address gets below: the generic 201 after the same bcrypt work, and no row
+  // and no mail. The allowlist is the operator's business; a refusal naming it
+  // would publish it one guess at a time. (In invite mode only an invitation that
+  // predates a narrowing of the list gets this far, and it is not spent.)
+  if (!isAllowedRegistrationDomain(email)) {
+    await bcrypt.hash(authHash, config.BCRYPT_ROUNDS);
+    sendGenericRegistrationSuccess(res);
+    return;
+  }
 
   const existingUser = await User.findOne({ email });
   if (existingUser) {
@@ -634,25 +517,38 @@ export const register = catchAsync(async (req: Request, res: Response): Promise<
     });
 
     // Return the same response as a successful registration to prevent email enumeration
-    res.status(201).json({
-      success: true,
-      message: 'Registration successful. Please check your email to verify your account.',
-      data: { emailSent: true },
-    });
+    sendGenericRegistrationSuccess(res);
     return;
   }
 
   const hashedAuth = await bcrypt.hash(authHash, config.BCRYPT_ROUNDS);
 
-  const user = await User.create({
-    ...sanitized,
-    authHash: hashedAuth,
-    // A new account starts caught up: the release notes are for what changed
-    // since someone last used the app, and this account has not used it yet.
-    // Written by the server, never taken from the body (the allowlist above
-    // would drop it anyway).
-    releaseNotesSeenVersion: APP_VERSION,
-  });
+  // Spent now, atomically, and only now: of two registrations presenting one
+  // invitation, exactly one gets past this line.
+  const claimedAt =
+    invitationToken === undefined ? null : await claimInvitation(invitationToken, email);
+  if (invitationToken !== undefined && claimedAt === null) {
+    throw httpErrors.forbidden(INVITATION_INVALID_MESSAGE);
+  }
+
+  let user;
+  try {
+    user = await User.create({
+      ...sanitized,
+      authHash: hashedAuth,
+      // A new account starts caught up: the release notes are for what changed
+      // since someone last used the app, and this account has not used it yet.
+      // Written by the server, never taken from the body (the allowlist above
+      // would drop it anyway).
+      releaseNotesSeenVersion: APP_VERSION,
+    });
+  } catch (err: unknown) {
+    // The account was not created, so the invitation it spent is handed back.
+    if (invitationToken !== undefined && claimedAt !== null) {
+      await returnInvitationClaim(invitationToken, email, claimedAt);
+    }
+    throw err;
+  }
 
   const registerCtx = getRequestContext(req);
   await createAuditLog(
@@ -699,11 +595,7 @@ export const register = catchAsync(async (req: Request, res: Response): Promise<
   // Keep the same message and emailSent value regardless of email delivery
   // outcome to prevent email enumeration. The frontend uses data.emailSent for
   // feedback; it is constant here to match the existing-account path exactly.
-  res.status(201).json({
-    success: true,
-    message: 'Registration successful. Please check your email to verify your account.',
-    data: { emailSent: true },
-  });
+  sendGenericRegistrationSuccess(res);
 });
 
 // ─── Login ───────────────────────────────────────────────────────────────────
@@ -713,11 +605,30 @@ export const login = catchAsync(async (req: Request, res: Response): Promise<voi
   const { email, authHash, deviceInfo, rememberMe } = body;
   const { ip, userAgent } = getRequestContext(req);
 
-  const user = await User.findOne({ email }).select('+authHash +twoFactorSecret +backupCodes');
+  // The device proof the browser presented, looked up by its hash alone BEFORE
+  // the account is known, so the lookup costs the same whether or not the address
+  // is registered (a lookup made only for real accounts would itself be an oracle).
+  const presented = await findPresentedDeviceProof(req);
+  // A value that names no live proof (forged, spent, revoked, expired) is
+  // cleared HERE, before the address is looked up, so every such request gets the
+  // same directive whether or not the address is registered: clearing it only for
+  // a real account turned one request per address into a certain existence answer.
+  if (presented !== null && presented.proof === null) {
+    clearDeviceProofCookie(res);
+  }
+
+  const user = await User.findOne({ email }).select(
+    '+authHash +twoFactorSecret +backupCodes +secondFactorLockout',
+  );
   if (!user) {
     // Perform a dummy bcrypt compare to equalize response time with the
-    // existing-user path, preventing email enumeration via timing side-channel.
+    // existing-user path, preventing email enumeration via timing side-channel,
+    // and the same two awaited round trips a locked account makes, with filters
+    // that match nothing: an unregistered address costs what a locked one does,
+    // however long a stranger keeps asking, and writes nothing.
     await bcrypt.compare(authHash, DUMMY_BCRYPT_HASH);
+    await extendNothing();
+    await recordNothing();
     await applyFailedLoginDelay(email);
     throw httpErrors.unauthorized('Invalid email or password');
   }
@@ -730,6 +641,13 @@ export const login = catchAsync(async (req: Request, res: Response): Promise<voi
   // (`utils/accountStatus.ts`).
   const status = evaluateAccountStatus(user);
 
+  // PROVEN: this browser completed an authentication for THIS account before, so
+  // it is not guessing and a password lockout does not brake it. A proof for
+  // another account proves nothing here and is not charged or deleted (its row
+  // lapses at its own expiry; the browser's cookie is replaced if this sign-in
+  // completes).
+  const proof = provesAccount(presented, user._id) ? presented.proof : null;
+
   // An account whose cascade delete is still outstanding is served nothing, and
   // is served it identically whether or not the password was right. `deletionPending`
   // survives only a FAILED cascade, so such a record is a zombie mid-erasure: the
@@ -738,37 +656,66 @@ export const login = catchAsync(async (req: Request, res: Response): Promise<voi
   // an audit row under an account being deleted — for the whole six-hour
   // `tokenCleanup` window. The refusal is the generic 401 with the shared delay
   // rather than anything specific, because a distinguishable answer here would tell
-  // an attacker that the address is registered AND being closed; and it is applied
-  // before the lockout branch so a dying account can never be handed the
-  // `ACCOUNT_LOCKED` signal either. Nothing is written, deliberately: the point is
-  // that no row is created under an account mid-erasure.
+  // an attacker that the address is registered AND being closed, and it costs the
+  // same round trips as an unknown address. Nothing is written, deliberately: the
+  // point is that no row is created under an account mid-erasure.
   if (status.deletionPending) {
+    await extendNothing();
+    await recordNothing();
     await applyFailedLoginDelay(email);
     throw httpErrors.unauthorized('Invalid email or password');
   }
 
-  // Handle account lockout AFTER the bcrypt compare so a locked account is
-  // indistinguishable from invalid credentials to anyone who does not already
-  // know the password. Returning 403 ACCOUNT_LOCKED *before* the compare (the
-  // previous behaviour) let an attacker force a lockout on a target email and
-  // read the 403 as confirmation the account exists — an enumeration oracle,
-  // and a timing oracle since the locked path skipped bcrypt entirely. We now
-  // surface ACCOUNT_LOCKED only to a caller that supplies the correct password
-  // (the legitimate owner); a wrong/guessed password on a locked account
-  // returns the same generic 401 as a non-existent email. Lockout state is not
-  // mutated on this path, so any unlock email already issued (its token bound
-  // to the current lock episode) stays valid.
-  if (status.lockedOut) {
-    if (isMatch) {
-      throw httpErrors.forbidden(ERROR_CODES.ACCOUNT_LOCKED);
-    }
-    // Wrong password against a locked account returns the same generic 401 as
-    // an unknown email, so it must carry the same delay. Without this, a locked
-    // account would answer in bcrypt time while an unknown email slept for
-    // seconds — "fast" would then mean "this account exists and is locked",
-    // an inverse oracle worse than the one being closed. The throttle only
-    // sleeps; lockout state is still left untouched here, so an unlock email
-    // already issued (its token bound to the current lock episode) stays valid.
+  // A single-use proof (the unlock link's) is SPENT by the first correct password
+  // it accompanies, even when a second factor is still owed, and spending it is an
+  // atomic claim: of two requests racing with it, only the one whose delete landed
+  // is proven, so it cannot carry a browser past the password lockout twice. It is
+  // decided here, after the mid-erasure refusal, so an account being deleted does
+  // not spend it (the unverified-address refusal below still can: no proof exists
+  // for an account that never signed in, except an unlock link's).
+  const proven =
+    proof !== null && (!proof.singleUse || !isMatch || (await consumeDeviceProof(proof)));
+
+  // A running PASSWORD lockout, for a browser that has not proven itself.
+  //
+  // The answer is EXACTLY the wrong-password answer, whether or not the password
+  // was right: same 401, same message, same delay, and the same awaited writes
+  // (one conditional User update, one coalesced audit upsert) on both branches. The
+  // bcrypt compare above still runs, so the time is the same too. A distinct answer
+  // for the correct password — the `403 ACCOUNT_LOCKED` this used to send — turned
+  // every lockout into an oracle that confirmed a guessed password to whoever made
+  // it, and a correct-password-only write would have been the same oracle in time.
+  //
+  // The accounting is bounded, because a stranger can send these forever: the
+  // counter is not incremented (it already sits at the threshold), the deadline is
+  // pushed out at most once a minute while attempts continue (so the lockout lasts
+  // as long as the guessing, at one modified User write a minute, which is also
+  // what keeps an owner's vault-key rotation, whose transaction writes the User
+  // document last, from being aborted by the flood), and the audit row is one per
+  // account per minute with a count. The row says `reason: 'locked'` and nothing
+  // else: `GET /user/audit-log` returns whole rows to any session holder, so a
+  // field that differed by correctness would hand the oracle to anyone who could
+  // lock the account and read the log.
+  //
+  // A PROVEN browser never reaches this branch (see `proven` above), and nothing
+  // here clears the lockout: only the deadline passing, the unlock link, or a
+  // completed sign-in outside a running lockout does.
+  if (status.passwordLocked && !proven) {
+    // The ONE out-of-band signal that the guessing found the password (F-26): a
+    // mail to the owner, sent once the response is gone. The listener is added on
+    // BOTH branches and decides inside, so nothing done before the response differs
+    // by correctness; the mail's own work (an account read, the hourly slot, SMTP)
+    // happens after it, and nothing it writes is returned by any API.
+    const correct = isMatch;
+    const signal = () => {
+      if (correct) notifySecurityEventLater(user._id, 'locked_sign_in_correct_password', { ip });
+    };
+    // A client that left during the bcrypt compare has no response left to time,
+    // and its `close` has already fired.
+    if (res.destroyed) signal();
+    else res.once('close', signal);
+    await extendPasswordLockout(user._id, email);
+    await recordLockedAttempt(user._id.toString(), ip, userAgent);
     await applyFailedLoginDelay(email);
     throw httpErrors.unauthorized('Invalid email or password');
   }
@@ -788,12 +735,32 @@ export const login = catchAsync(async (req: Request, res: Response): Promise<voi
     return;
   }
 
+  if (!isMatch && proof !== null) {
+    // A wrong password from a PROVEN browser counts against the proof, not the
+    // account (the OWASP device-cookie protocol: lock the device cookie, not the
+    // account), so the owner's typo never locks out the owner's other new
+    // devices. Five in the window revoke the proof, and the browser is then an
+    // ordinary unrecognised one. Same row, same delay and same 401 as any other
+    // wrong password.
+    await recordProofFailure(res, proof, { ip, userAgent });
+    await createAuditLog(
+      user._id.toString(),
+      'login_failed',
+      { reason: 'invalid_password' },
+      ip,
+      userAgent,
+    );
+    await applyFailedLoginDelay(email);
+    throw httpErrors.unauthorized('Invalid email or password');
+  }
+
   if (!isMatch) {
-    // Counts the attempt, locks at the threshold, and keeps a usable unlock link
-    // outstanding for the lock episode. Shared with the 2FA step, which enforces
-    // the same single counter. The returned count is unused here: this step's
-    // progressive delay comes from the per-email throttle, not the durable
-    // counter, so that a non-existent email is delayed identically.
+    // Counts the attempt on the PASSWORD factor's own state, locks that factor at
+    // the threshold, and keeps a usable unlock link outstanding for its episode.
+    // The second factor has a state of its own and is never written here. The
+    // returned count is unused: this step's progressive delay comes from the
+    // per-email throttle, not the durable counter, so that a non-existent email
+    // is delayed identically.
     await registerFailedAuthAttempt(user._id, email, 'password');
 
     await createAuditLog(
@@ -825,53 +792,36 @@ export const login = catchAsync(async (req: Request, res: Response): Promise<voi
   // delay the next typo.
   resetLoginAttempts(email);
 
-  // A lockout that was actually SERVED is discharged here, before the
-  // `twoFactorEnabled` branch — the one and only case in which a password alone
-  // clears the durable counter.
+  // A PASSWORD lockout that was actually SERVED is discharged here, before the
+  // `twoFactorEnabled` branch — the one case in which a password alone clears the
+  // password factor's counter.
   //
-  // It is reachable only after a real 30-minute wait: `lockoutUntil` is written
-  // solely by the two threshold crossings below and in `login2fa`, and while it
-  // is in the FUTURE both doors refuse — this handler 403s above with the
-  // correct password, and `login2fa` 403s before it reads the code. So the
-  // budget it restores is ten guesses per half hour, which is the designed
-  // lockout rate, not a bypass of it.
-  //
-  // Without this, a 2FA account would be discharged only by a completed second
-  // factor, and the first fumbled TOTP code after any lockout would `$inc` 10 to
-  // 11 and re-lock for another half hour — silently, because the unlock mail
-  // fires on `=== MAX_FAILED_ATTEMPTS` and 11 is not equal. Worse, that re-lock
-  // REWRITES `lockoutUntil`, and the emailed unlock token's `stateHash` is bound
-  // to that exact value, so the one recovery link the user was ever sent dies
-  // with it and no replacement is issued. TOTP fails systematically rather than
-  // randomly — a phone clock drifted past the ±1 step window fails every code,
-  // and a code entered twice is refused as a replay and counted as a failure —
-  // and this product's password reset MINTS A NEW VAULT KEY, so "just reset your
-  // password" is total data loss, not a recovery path. The remaining exit would
-  // be a backup code, if one is left. Discharging a served lockout keeps
-  // `README.md`'s "30 minutes after 10 failed attempts" true for accounts with a
-  // second factor as well as without, matches what a non-2FA account has always
-  // done, and re-arms the alert: each cycle crosses the threshold exactly once,
-  // so a victim under a grinding attack keeps being mailed instead of being
-  // told once and then left in silence.
+  // It is reachable only after the deadline passed: `lockoutUntil` is written
+  // solely by `utils/lockout.ts`, and while it is in the FUTURE this handler
+  // refuses above. So the budget it restores is ten guesses per half hour, which
+  // is the designed lockout rate, not a bypass of it. Without it the counter
+  // would sit at the threshold for ever (a failure only ever caps it), and the
+  // first typo after any lockout would re-lock the account for another half hour.
+  // The second factor has its own served discharge, inside the one verifier in
+  // `utils/secondFactor.ts`, and this one never touches it.
   //
   // Atomic update rather than `user.save()` on the document loaded before the
-  // bcrypt compare, mirroring `login2fa`: a concurrent `$inc` must not be
-  // clobbered by a stale in-memory zero. The in-memory copy is corrected too, so
-  // `finishLogin`'s own guarded reset below does not repeat the write.
+  // bcrypt compare: a concurrent `$inc` must not be clobbered by a stale
+  // in-memory zero. The in-memory copy is corrected through the SAME helper pair,
+  // so `finishLogin`'s own guarded reset below does not repeat the write.
   //
-  // No second clock read: reaching this line means `status.lockedOut` was false,
-  // so any `lockoutUntil` still present was already in the past when the status
-  // was evaluated. Re-asking `new Date()` here could only disagree with the
-  // branch that let this request through.
-  if (user.lockoutUntil) {
-    await User.updateOne({ _id: user._id }, lockoutClearUpdate());
-    // The in-memory copy is corrected through the SAME helper the persisted form
-    // uses, so `finishLogin`'s own guarded reset below does not repeat the write
-    // and no half of the episode is left behind to keep a spent unlock link
-    // alive. Spelling the four assignments out here instead would be a fifth
-    // copy of the discharge — exactly the drift this pair of helpers exists to
-    // prevent.
-    clearLockoutStateOnDocument(user);
+  // Only a lockout that is NOT running: a proven browser reaches this line during
+  // a running lockout, and signing in must not clear what strangers built. No
+  // second clock read: `status` was evaluated against one instant, and asking
+  // `new Date()` again could only disagree with the branch that let this through.
+  if (user.lockoutUntil && !status.passwordLocked) {
+    // Conditioned on the stored deadline still being the served one, so a
+    // lockout written by a concurrent failure in the meantime is not wiped.
+    await User.updateOne(
+      { _id: user._id, lockoutUntil: { $lte: user.lockoutUntil } },
+      lockoutClearUpdate('password'),
+    );
+    clearLockoutStateOnDocument(user, 'password');
   }
 
   // Detect and recover from interrupted vault key rotation. If rotationInProgress
@@ -962,53 +912,27 @@ export const login = catchAsync(async (req: Request, res: Response): Promise<voi
   // it with the SAME `rememberMe` from the request, so an unchecked box never
   // silently produces a 30-day session on either path.
   const finishLogin = async (auditMetadata?: Record<string, unknown>): Promise<void> => {
-    // Discharge the durable counter, FIRST — before any token is minted, so a
-    // failure here cannot 500 a request that has already written a session row
-    // and shipped a refresh cookie.
+    // Discharge the counters, FIRST — before any token is minted, so a failure
+    // here cannot 500 a request that has already written a session row and
+    // shipped a refresh cookie.
     //
-    // `failedLoginAttempts` / `lockoutUntil` are ONE brake shared by both
-    // authentication steps, and they are the ONLY per-account brake on the
-    // second one: `routes/auth.ts` gives `/login/2fa` `authLimiter` and
-    // `tokenVerifyLimiter`, both keyed by IP, never by account. So the reset
-    // belongs to a COMPLETED authentication and not merely to a verified
-    // password. Clearing it before the `twoFactorEnabled` branch below — which
-    // is what this handler used to do — let an attacker who already held the
-    // master password replay this step between batches of wrong codes and reset
-    // the second factor's only brake for ever: nine guesses, one `/auth/login`,
-    // nine more, never reaching the threshold. The residual bound was
-    // `accountLimiter` at 20 per email per 15 minutes, i.e. roughly 180 TOTP
-    // guesses a quarter hour instead of ten a half hour, and worse still on a
-    // self-hosted instance not running `NODE_ENV=production`, where every
-    // limiter is a no-op and this counter is the only brake there is.
-    //
+    // The reset belongs to a COMPLETED authentication and not merely to a
+    // verified password: clearing the second factor's counter at the password
+    // step would let a password holder replay that step between batches of wrong
+    // codes and reset the second factor's only per-account brake for ever.
     // `finishLogin` is the right home because BOTH paths that complete a login
-    // without a submitted TOTP code run through it: the ordinary non-2FA
-    // completion, and the trusted-device 2FA skip. The skip resets deliberately.
-    // It is a completed authentication, not a replayable oracle: it presents two
-    // factors — the password, and a device-bound trust token minted at exactly
-    // one site, inside `login2fa` AFTER a code verified — and `findOneAndDelete`
-    // burns that token as it is spent, scoped to this user and an unexpired
-    // grant. Anyone who reaches it has already been handed an access token, a
-    // refresh cookie and the wrapped vault key, so there is nothing left to
-    // brute-force. A cookie that does NOT match resets nothing: it falls through
-    // to the 2FA challenge below. Refusing to reset here would be its own bug,
-    // in the other direction — a user sitting at nine from earlier typos who
-    // then signs in on a trusted device would carry that nine indefinitely, and
-    // their next single mistake would lock them out.
+    // without a submitted code run through it: the ordinary non-2FA completion,
+    // and the trusted-device 2FA skip (two factors presented: the password, and a
+    // device-bound token minted only after a verified TOTP and burned as it is
+    // spent). The counterpart for a submitted code is the end of `login2fa`.
     //
-    // The counterpart for a real second factor lives at the end of `login2fa`,
-    // once the code verifies. A challenge that is issued and abandoned resets
-    // nothing, so a lockout survives until an authentication completes, a served
-    // lockout is discharged above, the emailed unlock link is used, or the
-    // password is reset.
+    // A factor whose lockout is RUNNING is not cleared here: a client completes a
+    // sign-in past a running lockout only by proving itself, and the failures
+    // that built that lockout were somebody else's (`dischargeOnCompletion`).
     //
     // Atomic update rather than `user.save()` on the document loaded before the
-    // bcrypt compare, mirroring `login2fa`: a concurrent `$inc` must not be
-    // clobbered by a stale in-memory zero, and a login is not the place to run
-    // whole-document validators.
-    if (user.failedLoginAttempts > 0 || user.lockoutUntil) {
-      await User.updateOne({ _id: user._id }, lockoutClearUpdate());
-    }
+    // bcrypt compare: a concurrent `$inc` must not be clobbered by a stale zero.
+    await dischargeOnCompletion(user, status);
 
     const accessToken = generateAccessToken(user._id.toString());
     const refreshTokenRaw = generateRefreshToken();
@@ -1028,6 +952,9 @@ export const login = catchAsync(async (req: Request, res: Response): Promise<voi
 
     setRefreshCookie(res, refreshTokenRaw, lifetime.maxAgeMs);
     clearCsrfCookie(res);
+    // A completed authentication earns this browser a device proof, rotating the
+    // one it presented.
+    await issueDeviceProof(res, user._id, presented);
 
     await createAuditLog(user._id.toString(), 'login', auditMetadata, ip, userAgent);
 
@@ -1113,6 +1040,10 @@ export const login = catchAsync(async (req: Request, res: Response): Promise<voi
       );
     }
 
+    // The token names a single-use challenge row (`jti`) and expires with it, so
+    // the first exchange that presents a correct code is the only one that ever
+    // completes; see `utils/twoFactorChallenge.ts`.
+    const challenge = await issueTwoFactorChallenge(user._id);
     const tempToken = jwt.sign(
       {
         userId: user._id.toString(),
@@ -1121,9 +1052,10 @@ export const login = catchAsync(async (req: Request, res: Response): Promise<voi
         // Carry "remember me" into the SIGNED token so the 2FA step honours it
         // from the verified payload, never from a forgeable request body.
         rememberMe,
+        ...challenge,
       } satisfies JwtTempPayload,
       derivePurposeKey(config.JWT_REFRESH_SECRET, '2fa_temp'),
-      { algorithm: 'HS256', expiresIn: '5m' },
+      { algorithm: 'HS256' },
     );
 
     res.status(200).json({
@@ -1184,8 +1116,19 @@ export const login2fa = catchAsync(async (req: Request, res: Response): Promise<
     }
   }
 
+  // The token must name a challenge that can still complete a sign-in: one that
+  // exists for THIS account, unexpired and not yet consumed. Asked before the code
+  // is read, so a spent token costs nothing (no code check, no count on the second
+  // factor, no bcrypt) and is refused like any other dead token. A token without a
+  // `jti` predates challenges and is refused the same way: honouring it would
+  // reopen the reuse this closes for the rest of its five minutes.
+  const challengeId = payload.jti;
+  if (typeof challengeId !== 'string' || !(await isChallengeOpen(challengeId, payload.userId))) {
+    throw httpErrors.unauthorized(ERROR_CODES.TOKEN_INVALID);
+  }
+
   const user = await User.findById(payload.userId).select(
-    '+twoFactorSecret +backupCodes +encryptedVaultKey +vaultKeyIv +vaultKeyTag',
+    '+twoFactorSecret +backupCodes +encryptedVaultKey +vaultKeyIv +vaultKeyTag +secondFactorLockout',
   );
   if (!user) {
     throw httpErrors.unauthorized(ERROR_CODES.TOKEN_INVALID);
@@ -1204,104 +1147,32 @@ export const login2fa = catchAsync(async (req: Request, res: Response): Promise<
     throw httpErrors.unauthorized(ERROR_CODES.TOKEN_INVALID);
   }
 
-  // Defense-in-depth: reject 2FA completion if the account became locked
-  // between the password step and the 2FA step (e.g. a concurrent brute-force
-  // attempt on another session triggered the lockout). The temp token alone
-  // must not bypass an active lockout.
-  if (status.lockedOut) {
-    throw httpErrors.forbidden(ERROR_CODES.ACCOUNT_LOCKED);
-  }
-
   if (!user.twoFactorEnabled || !user.twoFactorSecret) {
     throw httpErrors.badRequest(ERROR_CODES.TWO_FA_NOT_ENABLED);
   }
 
-  // Decrypt the stored secret before TOTP verification
-  const decryptedSecret = cryptoManager.decryptTextSync(
-    user.twoFactorSecret,
-    twoFactorEncryptionKey,
-  );
+  // The browser's device proof, read now, before the code is checked, so a read
+  // failure is a 500 that has spent nothing rather than one after a TOTP step or a
+  // backup code was consumed. It is only used to rotate the proof on completion.
+  const presented = await findPresentedDeviceProof(req);
 
-  // Try TOTP verification first
-  const totp = new TOTP({
-    algorithm: 'SHA1',
-    digits: 6,
-    period: 30,
-    secret: Secret.fromBase32(decryptedSecret),
+  // The ONE verifier reads only the SECOND factor's state: it refuses while that
+  // factor is locked (the password is already proven at this step, so the
+  // distinct `ACCOUNT_LOCKED` below is no oracle), discharges a served lockout,
+  // counts a wrong code on that factor alone, and hands back the compare-and-set
+  // that consumes a right one. A PASSWORD lockout is deliberately not consulted:
+  // this client proved the password before it was locked (or with a device
+  // proof), and refusing it here would lock the owner out of the very sign-in a
+  // proven client is allowed to complete.
+  const verdict = await verifySecondFactor(user, code, {
+    site: 'login2fa',
+    acceptBackupCodes: true,
   });
-  // window: 1 allows ±1 time step (±30s) to tolerate minor clock drift
-  const totpDelta = totp.validate({ token: code, window: 1 });
-  let isValid = totpDelta !== null;
-  let usedBackupCode = false;
 
-  // TOTP replay protection: reject codes that have already been used.
-  // The delta from validate() tells us which time step the code belongs to.
-  // We store the time step and reject codes at or before the stored timestamp.
-  if (isValid && totpDelta !== null) {
-    const currentTimeStep = Math.floor(Date.now() / 1000 / 30) + totpDelta;
-    if (user.lastTotpTimestamp != null && currentTimeStep <= user.lastTotpTimestamp) {
-      isValid = false; // Replay detected — code already used
+  if (!verdict.ok) {
+    if (verdict.reason === 'locked') {
+      throw httpErrors.forbidden(ERROR_CODES.ACCOUNT_LOCKED);
     }
-  }
-
-  // If TOTP fails, try backup codes
-  if (!isValid && user.backupCodes && user.backupCodes.length > 0) {
-    const matchIndex = await findMatchingBackupCodeIndex(code, user.backupCodes);
-    if (matchIndex >= 0) {
-      // Atomically remove the matched backup code to prevent race conditions
-      // where the same code could be used twice concurrently.
-      const matchedCode = user.backupCodes[matchIndex];
-      // `as any` is required here because Mongoose's TypeScript definitions
-      // (FilterQuery<T>) do not support MongoDB's array element matching syntax
-      // where `{ backupCodes: matchedCode }` means "match documents where the
-      // backupCodes array contains matchedCode". The Mongoose types expect
-      // `backupCodes` to be the full array type, not a single element value.
-      // This is a known Mongoose typing limitation (not a runtime concern).
-      //
-      // `backupCodes` is `select: false` on the model, so the post-update
-      // document only carries the surviving codes if they are asked for. The
-      // count is what the audit row below reports, and it must come from the
-      // document the atomic pull actually produced rather than from
-      // `user.backupCodes.length - 1`: that in-memory array was read before the
-      // update and a concurrent code redemption would make the arithmetic lie.
-      const result = await User.findOneAndUpdate(
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-argument
-        { _id: user._id, backupCodes: matchedCode } as any,
-        { $pull: { backupCodes: matchedCode } },
-        { returnDocument: 'after' },
-      ).select('+backupCodes');
-      if (result) {
-        isValid = true;
-        usedBackupCode = true;
-        logger.info('Backup code used for 2FA', { userId: user._id.toString() });
-        // Audited HERE, at the point of consumption, rather than beside the
-        // `login` row below: the code is spent whatever happens next, and a
-        // failure between here and the response would otherwise burn a recovery
-        // credential leaving no record the owner can see. The server log line
-        // above is not that record — it is not theirs to read. `remaining` is
-        // the actionable half: the row that says `0` is the one telling a user
-        // to regenerate before they are locked out of their own account.
-        await createAuditLog(
-          user._id.toString(),
-          '2fa_backup_code_used',
-          { remaining: countBackupCodes(result) },
-          ip,
-          userAgent,
-        );
-      }
-      // If result is null, the code was already consumed by a concurrent request
-    }
-  }
-
-  if (!isValid) {
-    // Brute-force protection parity with the password step: a wrong 2FA code
-    // counts as a failed authentication attempt. Without this the 2FA step —
-    // the last line of defense once the password is known or phished — could be
-    // brute-forced for the full 5-minute life of the (reusable, IP-keyed-only)
-    // temp token. The counter, the lockout and the unlock link are the SAME
-    // mechanism as the password step's, so both go through one helper: two copies
-    // is how the two doors came to differ.
-    const newAttempts = await registerFailedAuthAttempt(user._id, user.email, '2fa');
 
     await createAuditLog(
       user._id.toString(),
@@ -1312,62 +1183,72 @@ export const login2fa = catchAsync(async (req: Request, res: Response): Promise<
     );
 
     // Progressive delay: slow down brute-force attempts (skipped in test
-    // environment). This step keeps using the durable `failedLoginAttempts`
-    // counter — unlike `login`, which must source its delay from the per-email
-    // throttle. There is no enumeration vector to equalize here: reaching this
-    // code requires a valid, device-bound temp token, which is only ever issued
-    // for an account that exists and whose password already verified.
-    if (!isTest) {
-      const delay = getProgressiveDelay(newAttempts);
-      if (delay > 0) {
-        await sleep(delay);
-      }
-    }
+    // environment). This step uses the second factor's durable counter — unlike
+    // `login`, which must source its delay from the per-email throttle. There is
+    // no enumeration vector to equalize here: reaching this code requires a
+    // valid, device-bound temp token, which is only ever issued for an account
+    // that exists and whose password already verified.
+    await applyProgressiveDelay(verdict.attempts);
 
     throw httpErrors.unauthorized(ERROR_CODES.TWO_FA_INVALID);
   }
 
-  // Reset any failed-attempt count accrued from earlier wrong 2FA codes in
-  // this session (parity with the password step, which resets on a successful
-  // credential check). Uses an atomic update rather than saving the loaded doc
-  // so a concurrent increment is not clobbered.
-  if (user.failedLoginAttempts > 0 || user.lockoutUntil) {
-    await User.updateOne({ _id: user._id }, lockoutClearUpdate());
+  // The challenge is consumed FIRST, by one compare-and-set: of two exchanges
+  // racing on the same token, exactly one gets past this line, and the other is
+  // refused while its code is still unspent (a backup code is a recovery
+  // credential; a refused exchange must not burn one). A challenge consumed here
+  // whose code then turns out to be spent elsewhere costs the user one fresh
+  // sign-in, never a second session.
+  if (!(await consumeTwoFactorChallenge(challengeId, payload.userId))) {
+    throw httpErrors.unauthorized(ERROR_CODES.TOKEN_INVALID);
   }
 
-  // Atomically persist the TOTP time step to prevent replay — including the
-  // same-time-step concurrent race that the earlier read-check (a non-atomic
-  // read-then-write) cannot catch, since two requests can both pass that check
-  // before either writes. This compare-and-set writes only when the time step
-  // strictly advances the stored value; a no-op update (matchedCount === 0)
-  // means another concurrent request already consumed this (or a later) code,
-  // so it is rejected as a replay. It runs BEFORE token issuance below, so a
-  // replay loser never receives tokens. Skipped for backup codes (already
-  // consumed single-use atomically via the $pull above).
-  if (!usedBackupCode && totpDelta !== null) {
-    const usedTimeStep = Math.floor(Date.now() / 1000 / 30) + totpDelta;
-    const cas = await User.updateOne(
-      {
-        _id: user._id,
-        $or: [
-          { lastTotpTimestamp: { $exists: false } },
-          { lastTotpTimestamp: null },
-          { lastTotpTimestamp: { $lt: usedTimeStep } },
-        ],
-      },
-      { $set: { lastTotpTimestamp: usedTimeStep } },
+  // Consume the code, atomically, BEFORE any token is issued: a TOTP step is
+  // spent by the compare-and-set on `lastTotpTimestamp`, a backup code by pulling
+  // it out of the array. A write that matches nothing means another request spent
+  // the same code first (or the factor was disabled or replaced since it was
+  // checked), so this one is refused as a replay and receives nothing. It is
+  // answered as the dead token it now is, not as a mistyped code: the challenge was
+  // consumed above, so a retyped code on the same token could never succeed, and
+  // the client discards the key it is holding for this sign-in only on a dead token.
+  const usedBackupCode = verdict.kind === 'backup_code';
+  const consumed = await User.findOneAndUpdate(
+    { _id: user._id, ...verdict.casFilter },
+    verdict.casUpdate,
+    { returnDocument: 'after' },
+  ).select('+backupCodes');
+  if (!consumed) {
+    await createAuditLog(
+      user._id.toString(),
+      'login_failed',
+      { reason: '2fa_replay' },
+      ip,
+      userAgent,
     );
-    if (cas.matchedCount === 0) {
-      await createAuditLog(
-        user._id.toString(),
-        'login_failed',
-        { reason: '2fa_replay' },
-        ip,
-        userAgent,
-      );
-      throw httpErrors.unauthorized(ERROR_CODES.TWO_FA_INVALID);
-    }
+    throw httpErrors.unauthorized(ERROR_CODES.TOKEN_INVALID);
   }
+
+  if (usedBackupCode) {
+    logger.info('Backup code used for 2FA', { userId: user._id.toString() });
+    // Audited HERE, at the point of consumption, rather than beside the `login`
+    // row below: the code is spent whatever happens next, and a failure between
+    // here and the response would otherwise burn a recovery credential leaving no
+    // record the owner can see. `remaining` comes from the document the atomic
+    // pull actually produced, never from the pre-read array, which a concurrent
+    // redemption would make lie.
+    await createAuditLog(
+      user._id.toString(),
+      '2fa_backup_code_used',
+      { remaining: countBackupCodes(consumed) },
+      ip,
+      userAgent,
+    );
+  }
+
+  // A completed authentication: clear each factor's counter, except a factor
+  // whose lockout is running now (a password lockout that strangers built while
+  // this client, which had already proven the password, was at this step).
+  await dischargeOnCompletion(user, status);
 
   // Issue tokens
   const accessToken = generateAccessToken(user._id.toString());
@@ -1393,6 +1274,9 @@ export const login2fa = catchAsync(async (req: Request, res: Response): Promise<
 
   setRefreshCookie(res, refreshTokenRaw, lifetime.maxAgeMs);
   clearCsrfCookie(res);
+  // A completed authentication earns this browser a device proof, rotating the
+  // one it presented (the 2FA step is where a 2FA account's sign-in completes).
+  await issueDeviceProof(res, user._id, presented);
 
   // Grant a trusted device so this device may skip the 2FA step until the grant
   // expires. Minted only on a remembered login completed with a REAL second
@@ -1421,6 +1305,7 @@ export const login2fa = catchAsync(async (req: Request, res: Response): Promise<
   if (remember && !usedBackupCode) {
     await grantTrustedDevice(res, user._id, sanitizedDeviceInfo);
     await createAuditLog(user._id.toString(), 'trusted_device_grant', undefined, ip, userAgent);
+    notifySecurityEventLater(user._id, 'trusted_device_granted', { ip });
   }
 
   // `backupCode` discriminates the two credentials on the row itself. The
@@ -1457,21 +1342,18 @@ export const login2fa = catchAsync(async (req: Request, res: Response): Promise<
 // ─── Refresh ─────────────────────────────────────────────────────────────────
 
 /**
- * Which of the two account-level refusals a refresh hit.
+ * The one account-level refusal a refresh can hit: the account is gone,
+ * mid-erasure, or never verified. Nothing will ever make that cookie work again,
+ * so the refusal clears it.
  *
- * They are kept apart because their COOKIE treatment is opposite, and that is the
- * whole point of the distinction:
- *
- *  - `invalid` — the account is gone, mid-erasure, or never verified. Nothing will
- *    ever make this cookie work again, so the browser should stop carrying it: the
- *    refusal clears it.
- *  - `locked` — a `LOCKOUT_DURATION_MINUTES` (30) condition on an account that is
- *    otherwise perfectly healthy, and one the owner can discharge right now with
- *    the emailed unlock link. The cookie may be the only copy of a remembered
- *    family with `REFRESH_TOKEN_REMEMBER_DAYS` (30) on it, so clearing it would
- *    spend a month of session to answer half an hour of lockout. It is KEPT.
+ * A LOCKOUT is deliberately not a refusal, for either factor. The refresh cookie
+ * is itself proof of a prior authentication, so the client presenting it is not
+ * guessing anything; refusing it froze every existing session for as long as a
+ * stranger kept the account locked, and under a second-factor lockout it would
+ * also stop the owner changing the master password, the one remedy that evicts
+ * someone who knows it.
  */
-type RefreshRefusal = 'invalid' | 'locked';
+type RefreshRefusal = 'invalid';
 
 /**
  * The account-level policy for a refresh, as a value: the refusal it earns, or
@@ -1481,13 +1363,10 @@ type RefreshRefusal = 'invalid' | 'locked';
  *
  * The refresh handler's claim is destructive by design: it marks the presented row
  * `usedAt` and commits a successor whose raw value exists only in the response
- * about to be written. Evaluating the account AFTER that — which is what this
- * handler used to do — meant the refusal threw between the commit and
- * `setRefreshCookie`, so the presented cookie was spent, its successor was
- * unreachable, and the session was gone. For `ACCOUNT_LOCKED` that traded a
- * thirty-minute condition for a thirty-day remembered session, irreversibly, and
- * the user's natural next move — retrying with the cookie they still hold — was a
- * *reuse* event that revoked the whole family and every trusted device with it.
+ * about to be written. Evaluating the account AFTER that meant the refusal threw
+ * between the commit and `setRefreshCookie`, so the presented cookie was spent,
+ * its successor was unreachable, and the next presentation of the cookie the user
+ * still held was a *reuse* event that revoked the whole family.
  *
  * @param session binds the read to an open transaction, so a caller inside one
  *   reads what that transaction sees.
@@ -1503,7 +1382,6 @@ async function accountRefreshRefusal(
   // the caller chose, so distinguishing "no such account" from "mid-erasure" from
   // "never verified" tells a holder of a stolen cookie something it should not.
   if (!status || status.deletionPending || status.emailUnverified) return 'invalid';
-  if (status.lockedOut) return 'locked';
   return null;
 }
 
@@ -1513,29 +1391,23 @@ async function accountRefreshRefusal(
  * ABORTS the claim it has already made. The standalone branch reads the value
  * directly instead, because a gate that runs before the claim has nothing to undo.
  *
- * The exception carries the refusal rather than an HTTP error so that nothing
- * writes to `res` from inside the transaction callback — `withTransaction` is free
- * to re-run that callback, and a `Set-Cookie` header appended twice is a header
- * sent twice.
+ * Nothing writes to `res` from inside the transaction callback — `withTransaction`
+ * is free to re-run that callback, and a `Set-Cookie` header appended twice is a
+ * header sent twice.
  */
 class RefreshRefusedError extends Error {
-  constructor(readonly refusal: RefreshRefusal) {
-    super(`refresh refused: ${refusal}`);
+  constructor() {
+    super('refresh refused: invalid');
     this.name = 'RefreshRefusedError';
   }
 }
 
 /**
- * Renders a {@link RefreshRefusal} as its HTTP refusal, from ONE place, so the two
- * topology branches cannot drift on which refusal clears the cookie. Never returns.
+ * Renders the refusal from ONE place, so the two topology branches cannot drift
+ * on it: the cookie is cleared, because nothing will make it work again. Never
+ * returns.
  */
-function throwRefreshRefusal(res: Response, refusal: RefreshRefusal): never {
-  if (refusal === 'locked') {
-    // Deliberately no `clearRefreshCookie`: see {@link RefreshRefusal}. The CSRF
-    // cookie is left alone too — it is an HMAC over the refresh token that was NOT
-    // rotated here, so it is still the right one when the lockout ends.
-    throw httpErrors.forbidden(ERROR_CODES.ACCOUNT_LOCKED);
-  }
+function throwRefreshRefusal(res: Response): never {
   clearRefreshCookie(res);
   throw httpErrors.unauthorized(ERROR_CODES.TOKEN_INVALID);
 }
@@ -1607,7 +1479,7 @@ export const refresh = catchAsync(async (req: Request, res: Response): Promise<v
         // `withTransaction` abort: the claim above is undone together with the
         // successor below, so a refused refresh spends nothing at all.
         const refusal = await accountRefreshRefusal(storedToken.userId, session);
-        if (refusal) throw new RefreshRefusedError(refusal);
+        if (refusal) throw new RefreshRefusedError();
 
         // Rotation carries any absolute family deadline forward unchanged; a row
         // without one slides to now + REFRESH_TOKEN_DAYS (today's behaviour).
@@ -1640,7 +1512,7 @@ export const refresh = catchAsync(async (req: Request, res: Response): Promise<v
       });
     } catch (err) {
       // Converted OUT here, after the abort and before anything touches `res`.
-      if (err instanceof RefreshRefusedError) throwRefreshRefusal(res, err.refusal);
+      if (err instanceof RefreshRefusedError) throwRefreshRefusal(res);
       throw err;
     } finally {
       await session.endSession();
@@ -1655,7 +1527,7 @@ export const refresh = catchAsync(async (req: Request, res: Response): Promise<v
     // that cannot burn the token: ahead of the claim, with nothing yet to undo.
     // The read carries the claim's OWN filter, and that is load-bearing — a row
     // that is already spent or expired must fall straight through to the reuse and
-    // expiry branches below, or a locked account would be the one state in which a
+    // expiry branches below, or a refused account would be the one state in which a
     // replayed cookie escaped family revocation.
     const claimable = await RefreshToken.findOne({
       tokenHash,
@@ -1666,7 +1538,7 @@ export const refresh = catchAsync(async (req: Request, res: Response): Promise<v
       .lean();
     if (claimable) {
       const refusal = await accountRefreshRefusal(claimable.userId);
-      if (refusal) throwRefreshRefusal(res, refusal);
+      if (refusal) throwRefreshRefusal(res);
     }
 
     const storedToken = await RefreshToken.findOneAndUpdate(
@@ -1727,15 +1599,72 @@ export const refresh = catchAsync(async (req: Request, res: Response): Promise<v
         userId: existingToken.userId.toString(),
         familyId: existingToken.familyId,
       });
-      await RefreshToken.deleteMany({
+      // The family's live sessions first (counted for the record), then the
+      // devices, and only then the replayed row itself, on its own: that one-row
+      // delete is the claim, and exactly one request removes a given row, so two
+      // replays of ONE value record one detection. The family's OTHER spent rows
+      // are left in place until after the claim: deleting them first is what let
+      // two replays of two DIFFERENT spent values each delete the other's row
+      // before claiming its own, so that neither recorded anything. Now every
+      // replay that found its row claims it, unless another replay's sweep below
+      // (which runs only after that replay's own claim) took it first: a reuse is
+      // recorded at least once, unless the audit write itself fails (it is logged)
+      // or another request ends every session of the account at that moment. And a failure before the claim leaves the
+      // replayed row, and the rest of the family, where the next replay finds them
+      // and runs all of this again.
+      const liveSessions = await RefreshToken.deleteMany({
         userId: existingToken.userId,
         familyId: existingToken.familyId,
+        usedAt: null,
       });
       // Reuse detection is the strongest compromise signal in the system: the
       // cookie has been replayed after rotation, so the device is presumed
       // stolen. Revoke the user's trusted devices too — otherwise a stolen-cookie
       // attacker's next login on that device would skip 2FA (§1.5 site 7).
-      await revokeTrustedDevices(existingToken.userId);
+      const trustedDevicesRevoked = await revokeTrustedDevices(existingToken.userId);
+      // The device proofs go too: they share the cookie jar a stolen refresh token
+      // came out of, and each one exempts a browser from the password lockout.
+      await revokeDeviceProofs(existingToken.userId);
+      // And every sign-in still waiting for its second factor, so none of them
+      // finishes into a session issued after this revocation.
+      await revokeTwoFactorChallenges(existingToken.userId);
+      const detection = await RefreshToken.deleteOne({ _id: existingToken._id });
+      // And the owner can see why their sessions ended (F-16). The row's own
+      // address and user agent are THIS request's, the replayer's; the browser
+      // the stolen cookie was issued to is the family's stored device. Nothing
+      // that could be presented again is written: no token, no hash of one, and
+      // only a truncated hash of the family id, enough to tell two families apart.
+      if (detection.deletedCount === 1) {
+        const reuseCtx = getRequestContext(req);
+        await createAuditLog(
+          existingToken.userId.toString(),
+          'token_reuse_detected',
+          {
+            familyIdHash: hashToken(existingToken.familyId).slice(0, FAMILY_ID_HASH_LENGTH),
+            sessionsRevoked: liveSessions.deletedCount,
+            trustedDevicesRevoked,
+            revokedDeviceInfo: {
+              userAgent: existingToken.deviceInfo.userAgent,
+              ip: existingToken.deviceInfo.ip,
+            },
+          },
+          reuseCtx.ip,
+          reuseCtx.userAgent,
+        );
+        notifySecurityEventLater(existingToken.userId, 'token_reuse_detected', {
+          ip: reuseCtx.ip,
+        });
+      }
+      // The rest of the family, in EVERY replay, claimed or not: its other spent
+      // rows, and any successor a rotation running concurrently committed after
+      // the live-session delete above. After this replay's own claim, so the first
+      // spent row to disappear among racing replays is always taken by a claim, and
+      // a claim that lands records: a replay whose row another replay's sweep took
+      // first records nothing, and the other one already did.
+      await RefreshToken.deleteMany({
+        userId: existingToken.userId,
+        familyId: existingToken.familyId,
+      });
       clearRefreshCookie(res);
       throw httpErrors.unauthorized(ERROR_CODES.TOKEN_REUSE_DETECTED);
     }
@@ -1751,11 +1680,13 @@ export const refresh = catchAsync(async (req: Request, res: Response): Promise<v
   // that committed it), so reaching this line already means the account may be
   // served. Re-checking here is precisely what was removed — a refusal at this
   // point arrives after the presented token has been spent and its successor
-  // committed, which is how a thirty-minute lockout destroyed a thirty-day session.
+  // committed, which is how a refusal destroyed a session it never meant to end.
   const accessToken = generateAccessToken(claimedMeta.userId.toString());
 
   setRefreshCookie(res, newRefreshTokenRaw, claimedMeta.maxAgeMs);
   clearCsrfCookie(res);
+  // A browser using its session keeps its device proof alive (best effort).
+  await extendPresentedDeviceProof(req, res, claimedMeta.userId);
 
   res.status(200).json({
     success: true,
@@ -1829,8 +1760,36 @@ export const logoutAll = catchAsync(async (req: Request, res: Response): Promise
   // "Log out everywhere" is an explicit user request to drop every other
   // session, so the second-factor trust granted to those devices must drop with
   // them (§1.5 site 6). Unlike per-session logout, this revokes ALL trusted
-  // devices — a returning device then has to complete 2FA again.
-  await revokeTrustedDevices(userId);
+  // devices — a returning device then has to complete 2FA again. How many went is
+  // recorded on the audit row below (F-16).
+  const trustedDevicesRevoked = await revokeTrustedDevices(userId);
+
+  // EVERY device proof goes, including the one this browser holds: a stolen copy
+  // of it is exactly what "log out everywhere" has to cut off, and keeping the
+  // value would keep the copy working. A browser that presented a live proof for
+  // this account is handed a fresh one (a replacement, never a first proof: a
+  // session alone does not earn one), so it stays recognised and the copy dies.
+  const presented = await findPresentedDeviceProof(req);
+  const callerProven = provesAccount(presented, new mongoose.Types.ObjectId(userId));
+  await revokeDeviceProofs(userId);
+  // And every sign-in still waiting for its second factor: "everywhere" includes
+  // one that proved the password a minute ago and has not typed its code yet.
+  await revokeTwoFactorChallenges(userId);
+  if (callerProven) {
+    // Like for like: a single-use proof is replaced by a single-use one.
+    const id = new mongoose.Types.ObjectId(userId);
+    if (presented.proof.singleUse) {
+      await issueUnlockProof(res, id);
+    } else {
+      await issueDeviceProof(res, id, null);
+    }
+  }
+
+  // "Log out everywhere" is what an owner does on suspecting somebody else holds a
+  // session; a session could not add a recipient without the master password, but
+  // anybody who ever knew it could have, so every third-party recipient is
+  // suspended until the owner approves the list again.
+  const suspendedRecipients = await suspendThirdPartyRecipients(userId);
 
   clearCsrfCookie(res);
 
@@ -1838,10 +1797,24 @@ export const logoutAll = catchAsync(async (req: Request, res: Response): Promise
   await createAuditLog(
     userId,
     'session_revoke',
-    { sessionsRevoked: result.deletedCount },
+    { sessionsRevoked: result.deletedCount, trustedDevicesRevoked },
     logoutAllCtx.ip,
     logoutAllCtx.userAgent,
   );
+  if (suspendedRecipients > 0) {
+    await createAuditLog(
+      userId,
+      'backup_recipients_suspended',
+      { count: suspendedRecipients, reason: 'logout_all' },
+      logoutAllCtx.ip,
+      logoutAllCtx.userAgent,
+    );
+    notifySecurityEventLater(userId, 'backup_recipients_suspended', {
+      ip: logoutAllCtx.ip,
+      count: suspendedRecipients,
+      reason: 'logout_all',
+    });
+  }
 
   logger.info('All other sessions revoked', { userId, count: result.deletedCount });
 
@@ -1871,7 +1844,9 @@ export const verifyEmail = catchAsync(async (req: Request, res: Response): Promi
   }
 
   const user = await User.findById(payload.userId);
-  if (!user) {
+  // An account being erased (by its owner, or by the reaper of never-verified
+  // accounts, F-21) is answered exactly as an unknown one.
+  if (!user || user.deletionPending === true) {
     throw httpErrors.badRequest(ERROR_CODES.TOKEN_INVALID);
   }
 
@@ -1889,8 +1864,21 @@ export const verifyEmail = catchAsync(async (req: Request, res: Response): Promi
     return;
   }
 
-  user.emailVerified = true;
-  await user.save();
+  // A CONDITIONAL write, never `user.save()` on the document read above: the reaper
+  // of never-verified accounts claims an account by setting `deletionPending` and
+  // then erases it by id, so a verification that landed after that claim would
+  // mark verified an account whose data is already going. Of the two writes on
+  // this document exactly one wins: this one (and the claim then matches nothing),
+  // or the claim (and this matches nothing and is refused like an unknown account).
+  const verified = await User.updateOne(
+    // `$ne: true` rather than `false`: a row stored before the field existed has
+    // none, and its owner must still be able to verify.
+    { _id: user._id, emailVerified: { $ne: true }, deletionPending: { $ne: true } },
+    { $set: { emailVerified: true } },
+  );
+  if (verified.matchedCount === 0) {
+    throw httpErrors.badRequest(ERROR_CODES.TOKEN_INVALID);
+  }
 
   const verifyEmailCtx = getRequestContext(req);
   await createAuditLog(
@@ -1925,7 +1913,10 @@ export const forgotPassword = catchAsync(async (req: Request, res: Response): Pr
   // bcrypt work (it only sends an email and signs a JWT).
   await bcrypt.compare('dummy-timing-equalization-value', DUMMY_BCRYPT_HASH);
 
-  if (!user) {
+  // An account being erased gets the same answer and no link: completing a reset
+  // is refused for it (see resetPassword), so a link would only promise a way back
+  // that does not exist.
+  if (!user || user.deletionPending === true) {
     // Return generic success to avoid email enumeration
     res.status(200).json({
       success: true,
@@ -1993,7 +1984,12 @@ export const resetPassword = catchAsync(async (req: Request, res: Response): Pro
   }
 
   const user = await User.findById(payload.userId).select('+authHash');
-  if (!user) {
+  // An account being erased is answered as an unknown one, before anything is
+  // written. It cannot be signed in to, refreshed or used with a session, so a new
+  // password would restore nothing; completing the reset would only answer
+  // "success" for an account about to vanish and write rows the erasure has to
+  // find again.
+  if (!user || user.deletionPending === true) {
     throw httpErrors.badRequest(ERROR_CODES.TOKEN_INVALID);
   }
 
@@ -2023,8 +2019,20 @@ export const resetPassword = catchAsync(async (req: Request, res: Response): Pro
 
   // A password reset invalidates every existing session; the second-factor trust
   // that let devices skip 2FA must drop with them (§1.5 site 1), or a device
-  // trusted under the old password would still bypass 2FA after the reset.
-  await revokeTrustedDevices(user._id);
+  // trusted under the old password would still bypass 2FA after the reset. How
+  // many went is recorded on the audit row below (F-16).
+  const trustedDevicesRevoked = await revokeTrustedDevices(user._id);
+  // And every device proof: a reset changes the footing every one was granted on.
+  await revokeDeviceProofs(user._id);
+  // And every sign-in waiting for its second factor: each was granted by a proof
+  // of the password this reset replaces.
+  await revokeTwoFactorChallenges(user._id);
+  // And every third-party backup recipient: suspended, its mailed links dead, until
+  // the owner approves the list again with the new master password. Before the
+  // save, like the revocations: a failure after it leaves the account suspended
+  // rather than still mailing an address somebody who held it may have added. (The
+  // save below writes only the paths it changed, so it cannot put them back.)
+  let suspendedRecipients = await suspendThirdPartyRecipients(user._id);
 
   user.authHash = hashedAuth;
   user.encryptedVaultKey = newEncryptedVaultKey;
@@ -2053,18 +2061,70 @@ export const resetPassword = catchAsync(async (req: Request, res: Response): Pro
   // still flagged would otherwise leave the account refusing its own writes until
   // the next login lowered it, over a rotation whose subject no longer exists.
   user.rotationInProgress = false;
-  clearLockoutStateOnDocument(user);
+  clearLockoutStateOnDocument(user, 'password');
   user.passwordChangedAt = new Date();
-  await user.save();
+  try {
+    await user.save();
+  } catch (error) {
+    // The row was erased between the read above and this write: a dead link.
+    if (error instanceof mongoose.Error.DocumentNotFoundError) {
+      throw httpErrors.badRequest(ERROR_CODES.TOKEN_INVALID);
+    }
+    throw error;
+  }
+  // And an erasure that CLAIMED the account in that same interval: the write above
+  // landed on a row that is being deleted, so nothing more is written for it (no
+  // opt-out change, no audit row, no notice) and the link is answered as dead.
+  if (!(await User.exists({ _id: user._id, deletionPending: { $ne: true } }).read('primary'))) {
+    throw httpErrors.badRequest(ERROR_CODES.TOKEN_INVALID);
+  }
+  // A reset is how an owner takes the account back, so every CRITICAL security
+  // email is turned back on (F-26): whoever held the old password could have turned
+  // them off, and the recovered owner must hear about what happens next. The
+  // optional ones are left as the owner chose them. Unconditional and AFTER the
+  // save: an opt-out written with a proof of the OLD password between this request's
+  // read and its save is cleared too (none can land after it, since that write is
+  // conditioned on the credential it proved).
+  await User.updateOne(
+    { _id: user._id },
+    {
+      $unset: Object.fromEntries(
+        CRITICAL_SECURITY_NOTIFICATION_EVENTS.map((event) => [
+          `settings.notifications.${event}`,
+          1,
+        ]),
+      ),
+    },
+  );
+  // And once more AFTER the new credential is stored: a recipient-list update
+  // carrying a proof of the OLD password could have landed between the first
+  // suspension and the save (its write is conditioned on the credential it proved,
+  // so none can land after this point).
+  suspendedRecipients += await suspendThirdPartyRecipients(user._id);
 
   const resetCtx = getRequestContext(req);
   await createAuditLog(
     user._id.toString(),
     'password_change',
-    { method: 'reset' },
+    { method: 'reset', trustedDevicesRevoked },
     resetCtx.ip,
     resetCtx.userAgent,
   );
+  if (suspendedRecipients > 0) {
+    await createAuditLog(
+      user._id.toString(),
+      'backup_recipients_suspended',
+      { count: suspendedRecipients, reason: 'password_reset' },
+      resetCtx.ip,
+      resetCtx.userAgent,
+    );
+    notifySecurityEventLater(user._id, 'backup_recipients_suspended', {
+      ip: resetCtx.ip,
+      count: suspendedRecipients,
+      reason: 'password_reset',
+    });
+  }
+  notifySecurityEventLater(user._id, 'password_reset', { ip: resetCtx.ip });
 
   logger.info('Password reset completed', { userId: user._id.toString() });
 
@@ -2093,43 +2153,69 @@ export const unlockAccount = catchAsync(async (req: Request, res: Response): Pro
     throw httpErrors.badRequest(ERROR_CODES.TOKEN_INVALID);
   }
 
-  // `lockoutEpisodeId` is `select: false`; without the `+` every link would be
+  // Which factor this link unlocks. A link minted before the claim existed was
+  // always a password link, so an absent claim reads as `password`; anything
+  // else must be one of the known factors, or the link is refused. The claim is
+  // inside the signature, so a link can only ever discharge the factor it was
+  // mailed for.
+  const factor: LockoutFactor | undefined =
+    payload.factor === undefined
+      ? 'password'
+      : LOCKOUT_FACTORS.find((known) => known === payload.factor);
+  if (factor === undefined) {
+    throw httpErrors.badRequest(ERROR_CODES.TOKEN_INVALID);
+  }
+
+  // Both episode fields are `select: false`; without the `+` every link would be
   // compared against `undefined` and rejected.
-  const user = await User.findById(payload.userId).select('+lockoutEpisodeId');
-  if (!user) {
+  const user = await User.findById(payload.userId).select('+lockoutEpisodeId +secondFactorLockout');
+  // An account being erased is answered as an unknown one: it cannot be signed in
+  // to whatever its lockout says, so an unlock restores nothing (and the discharge
+  // below is conditioned on the same, for an erasure that starts meanwhile).
+  if (!user || user.deletionPending === true) {
     throw httpErrors.badRequest(ERROR_CODES.TOKEN_INVALID);
   }
 
-  // Verify the token names the lock episode that is still running.
+  // Verify the token names the lock episode that is still running for ITS factor.
   //
-  // Binding to the EPISODE rather than to `lockoutUntil` is the whole fix: the
-  // deadline is rewritten by every re-lock, so a token bound to it died on the
-  // victim's next failed attempt while the mail guard refused to send a
-  // replacement. The episode identity is minted once per lockout and carried
-  // through every extension, so one link covers the whole episode however long an
-  // attacker grinds.
-  //
-  // Clearing the episode on discharge is what keeps the link SINGLE-USE, exactly
-  // as clearing `lockoutUntil` used to. The explicit "no episode, no unlock" arm
-  // matters: without it the comparison would fall back to the hash of the empty
-  // string, which is a fixed value that every account with no episode running
-  // would match — and an unlock link for an account that is not locked has
-  // nothing to do anyway.
-  const episodeId = user.lockoutEpisodeId;
-  if (!episodeId || payload.stateHash !== generateStateHash(episodeId)) {
+  // Binding to the EPISODE rather than to the deadline is what keeps one link
+  // alive for a whole episode however long an attacker grinds: the deadline is
+  // rewritten by every re-lock and the identity is not. Clearing the episode on
+  // discharge is what keeps the link SINGLE-USE. A missing episode matches
+  // nothing: the hash of the empty string is a fixed value every account with no
+  // episode would otherwise match.
+  const episodeId = unlockEpisodeOf(user, factor);
+  if (episodeId === undefined || !unlockTokenNamesEpisode(payload.stateHash, episodeId)) {
     throw httpErrors.badRequest(ERROR_CODES.TOKEN_INVALID);
   }
 
-  // An atomic update rather than `user.save()`: this clears four fields and
-  // nothing else, and it must not run whole-document validators against a record
-  // an unauthenticated caller reached.
-  await User.updateOne({ _id: user._id }, lockoutClearUpdate());
+  // An atomic update rather than `user.save()`: this clears one factor's state
+  // and nothing else, it must not run whole-document validators against a record
+  // an unauthenticated caller reached, and it is conditioned on the episode just
+  // verified still being the stored one, so a second use of the same link that
+  // raced the first discharges nothing and is refused like any spent link.
+  // Read BEFORE the link is spent: a failure here must leave the link usable.
+  const presentedProof = await findPresentedDeviceProof(req);
+
+  if (!(await dischargeUnlockedEpisode(user._id, factor, episodeId))) {
+    throw httpErrors.badRequest(ERROR_CODES.TOKEN_INVALID);
+  }
+
+  // The browser that followed the link gets a single-use, ten-minute device
+  // proof: a stranger can re-lock the account seconds after the link is used,
+  // and without this the owner would be locked out again before they could sign in.
+  // A browser that already holds a live proof for this account keeps it rather
+  // than trading a 30-day proof for a 10-minute one. Best effort: the link is
+  // spent by now, so nothing after this point may fail the unlock.
+  if (!provesAccount(presentedProof, user._id)) {
+    await issueUnlockProof(res, user._id);
+  }
 
   const unlockCtx = getRequestContext(req);
   await createAuditLog(
     user._id.toString(),
     'account_unlock',
-    { method: 'email_link' },
+    { method: 'email_link', factor },
     unlockCtx.ip,
     unlockCtx.userAgent,
   );
@@ -2157,7 +2243,9 @@ export const resendVerification = catchAsync(async (req: Request, res: Response)
   // ~200ms asymmetry and leak account existence.
   await bcrypt.compare('dummy-timing-equalization-value', DUMMY_BCRYPT_HASH);
 
-  if (!user || user.emailVerified) {
+  // An account being erased gets the same answer and no link: verifying it is
+  // refused (see verifyEmail), so a link would only promise what cannot happen.
+  if (!user || user.emailVerified || user.deletionPending === true) {
     // Return generic success to prevent email enumeration
     res.status(200).json({
       success: true,
@@ -2304,21 +2392,4 @@ function sanitizeDeviceInfo(
  */
 export function countBackupCodes(user: { backupCodes?: string[] | undefined }): number {
   return user.backupCodes?.length ?? 0;
-}
-
-export async function findMatchingBackupCodeIndex(
-  code: string,
-  hashedCodes: string[],
-): Promise<number> {
-  // Always iterate ALL backup codes to prevent timing-based leakage of the
-  // backup code position. Short-circuiting on first match would reveal which
-  // index matched via response-time differences.
-  let matchIndex = -1;
-  for (let i = 0; i < hashedCodes.length; i++) {
-    const hashed = hashedCodes[i];
-    if (hashed !== undefined && (await bcrypt.compare(code, hashed))) {
-      matchIndex = i;
-    }
-  }
-  return matchIndex;
 }

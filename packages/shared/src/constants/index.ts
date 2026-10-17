@@ -50,12 +50,37 @@ export const TRASH_AUTO_PURGE_DAYS = 30;
 export const MAX_LOGIN_ATTEMPTS = 10;
 
 // ---------------------------------------------------------------------------
+// Device proofs (the `__hv_device` cookie)
+// ---------------------------------------------------------------------------
+//
+// A browser that completed an authentication holds a proof for that account, and
+// a password lockout never brakes a login that presents one: a lockout exists to
+// slow GUESSING, and the owner's own browsers are not guessing.
+
+/** How long a proof minted at a completed sign-in lasts. */
+export const DEVICE_PROOF_DAYS = 30;
+/** How long the single-use proof the unlock link hands its browser lasts. */
+export const UNLOCK_DEVICE_PROOF_MINUTES = 10;
+/**
+ * Wrong passwords a proof survives inside {@link DEVICE_PROOF_FAILURE_WINDOW_MINUTES}.
+ * The failure that reaches it revokes the proof: one typo must not burn a device,
+ * and five must.
+ */
+export const MAX_DEVICE_PROOF_FAILURES = 5;
+export const DEVICE_PROOF_FAILURE_WINDOW_MINUTES = 15;
+/** Proofs one account may hold; the oldest are evicted past it. */
+export const MAX_DEVICE_PROOFS_PER_USER = 50;
+
+// ---------------------------------------------------------------------------
 // Credential-attempt rate limiting
 // ---------------------------------------------------------------------------
 //
-// These three are the SINGLE source of truth for the server's `authLimiter` and
-// `accountLimiter` (`middleware/rateLimiter.ts`), which import them rather than
-// restating the numbers inline.
+// These two are the SINGLE source of truth for the server's `authLimiter`
+// (`middleware/rateLimiter.ts`), which imports them rather than restating the
+// numbers inline. There is deliberately no per-account (per-e-mail) sign-in limit:
+// keyed on the submitted address, it let anyone refuse the owner's correct
+// password on every device; the account lockout brakes guessing across addresses
+// instead, inside the handler.
 //
 // They bound CREDENTIAL ATTEMPTS ONLY — deliberate, human-initiated tries at a
 // password or an email link: register, login, the 2FA step, forgot-password and
@@ -70,11 +95,9 @@ export const LOGIN_RATE_LIMIT_WINDOW_MINUTES = 15;
 // Per-IP ceiling. A 2FA sign-in costs two (`/login` then `/login/2fa`), so this
 // is ~10 complete sign-ins per window from one address — enough headroom for a
 // household or an office behind one NAT, while still far below anything useful
-// for guessing. The precise anti-brute-force controls are elsewhere and unchanged:
-// per-email counting below, `MAX_LOGIN_ATTEMPTS` account lockout, and the
-// progressive per-email delay.
+// for guessing. The precise anti-brute-force controls are elsewhere: the
+// `MAX_LOGIN_ATTEMPTS` account lockout and the progressive per-email delay.
 export const LOGIN_RATE_LIMIT_MAX_PER_IP = 20;
-export const LOGIN_RATE_LIMIT_MAX_PER_ACCOUNT = 20;
 export const BACKUP_CODES_COUNT = 8;
 export const DEFAULT_PASSWORD_LENGTH = 20;
 
@@ -127,6 +150,98 @@ export const MAX_SESSIONS = 50;
 export const MAX_TRUSTED_DEVICES = 10;
 export const AUTH_TAG_BYTES = 16;
 export const MAX_BACKUP_EMAILS = 10;
+// How many emails the backup feature may send on behalf of ONE account in one UTC
+// day: every mailed backup (one per recipient), every recipient confirmation and
+// every "backup not sent" notice to the owner. A request-rate limiter bounds a
+// burst, not a day, and each of these is a message the server writes to an
+// address on the account's behalf, so the day is what has to be bounded. Counted
+// by a per-account day counter claimed before each send, never by log rows.
+export const MAX_BACKUP_MAILS_PER_USER_PER_DAY = 30;
+// The security events the account owner is emailed about (F-26). Every one of them
+// is something the owner would want to know happened to the account WITHOUT having
+// to open the audit log, and most of them are exactly what an intruder would rather
+// the owner did not learn. Two identical notices in a row are sent at most once an
+// hour (`SECURITY_NOTIFICATION_INTERVAL_MINUTES`).
+export const SECURITY_NOTIFICATION_EVENTS = [
+  // The correct master password was presented from a browser that has not signed
+  // in before, during a password lockout. The sign-in was refused like every other
+  // (the answer and the audit entry are the same as for a wrong password), so this
+  // email is the only place the owner learns that the guessing found the password.
+  'locked_sign_in_correct_password',
+  'password_reset',
+  'password_changed',
+  'two_factor_enabled',
+  'two_factor_disabled',
+  'backup_codes_regenerated',
+  'trusted_device_granted',
+  'device_proof_revoked',
+  'second_factor_lockout',
+  'backup_recipients_changed',
+  'backup_recipients_suspended',
+  'token_reuse_detected',
+  'backup_not_sent',
+  'account_deletion_requested',
+  // Some of the notices above were turned off: the last one the owner gets about
+  // them, so whoever silenced them (it takes the master password) cannot do it
+  // unseen.
+  'security_notices_turned_off',
+] as const;
+// The events that are ALWAYS mailed and are not a preference at all: one about an
+// account that is being erased, and one about the preferences themselves.
+export const MANDATORY_SECURITY_NOTIFICATION_EVENTS = [
+  'account_deletion_requested',
+  'security_notices_turned_off',
+] as const satisfies readonly (typeof SECURITY_NOTIFICATION_EVENTS)[number][];
+// The events an owner may choose not to be mailed about (every event but the
+// mandatory two), stored under `settings.notifications`.
+export const SECURITY_NOTIFICATION_PREFERENCE_EVENTS = [
+  'locked_sign_in_correct_password',
+  'password_reset',
+  'password_changed',
+  'two_factor_enabled',
+  'two_factor_disabled',
+  'backup_codes_regenerated',
+  'trusted_device_granted',
+  'device_proof_revoked',
+  'second_factor_lockout',
+  'backup_recipients_changed',
+  'backup_recipients_suspended',
+  'token_reuse_detected',
+  'backup_not_sent',
+] as const satisfies readonly (typeof SECURITY_NOTIFICATION_EVENTS)[number][];
+// The preferences that can be turned OFF only with the master password
+// (`PUT /user/notifications`): each event is either the sign that someone holds the
+// password (or a stolen session) or a change only someone holding it could make,
+// so a stolen session that could silence them would erase its own trail.
+// `PUT /user/settings`, which takes no password, may turn any of them back ON.
+export const CRITICAL_SECURITY_NOTIFICATION_EVENTS = [
+  'locked_sign_in_correct_password',
+  'password_reset',
+  'password_changed',
+  // Turning two-factor ON is critical too: someone holding the password and a
+  // session could otherwise silence it and enrol their own authenticator unseen.
+  'two_factor_enabled',
+  'two_factor_disabled',
+  'second_factor_lockout',
+  'backup_recipients_changed',
+  'token_reuse_detected',
+] as const satisfies readonly (typeof SECURITY_NOTIFICATION_PREFERENCE_EVENTS)[number][];
+// The shortest gap between two IDENTICAL notices in a row to the same account.
+export const SECURITY_NOTIFICATION_INTERVAL_MINUTES = 60;
+export type SecurityNotificationEvent = (typeof SECURITY_NOTIFICATION_EVENTS)[number];
+export type SecurityNotificationPreferenceEvent =
+  (typeof SECURITY_NOTIFICATION_PREFERENCE_EVENTS)[number];
+/** Whether the owner is emailed about each event they may choose: absent means yes. */
+export type SecurityNotificationPreferences = Record<SecurityNotificationPreferenceEvent, boolean>;
+// Where a backup recipient stands. `pending`: the owner approved the address with
+// the master password (or it was carried over from before recipients were
+// confirmed, in which case the owner has NOT yet approved it) and the address has
+// not confirmed. `confirmed`: the address followed its confirmation link, or it is
+// the account's own verified address. `suspended`: a password reset, a password
+// change or "log out everywhere" happened since; it receives nothing until the
+// owner approves the list again with the master password.
+export const BACKUP_RECIPIENT_STATES = ['pending', 'confirmed', 'suspended'] as const;
+export type BackupRecipientState = (typeof BACKUP_RECIPIENT_STATES)[number];
 export const MAX_ITEMS_PER_USER = 10_000;
 export const MAX_FOLDERS_PER_USER = 500;
 export const MAX_SORT_ORDER = 10_000;
@@ -260,6 +375,54 @@ export const MAX_IMPORT_FILE_SIZE_BYTES = 8_388_608;
 // HIBP fan-out and is the divisor the batch rate-limit budget is sized against,
 // so a full-vault breach scan never exhausts the limiter mid-scan.
 export const HIBP_BATCH_MAX_PREFIXES = 100;
+
+/**
+ * How many breach ranges fetched ON DEMAND (`source: 'hibp'`) the shared range
+ * cache keeps. Past it the oldest-fetched are evicted, hourly by the maintenance
+ * job and after every 500th range a server process inserts in between. Ranges imported
+ * by the seed command (`source: 'seed'`) are never counted against it and never
+ * evicted by it: seeding the whole corpus is the operator's deliberate choice.
+ *
+ * Arithmetic: a padding-stripped range is ~800-900 `SUFFIX:COUNT` rows of ~40
+ * bytes, about 36 KB (measured), so 20,000 ranges are about 720 MB of range text
+ * before storage compression. That is ~2% of the 1,048,576 possible prefixes,
+ * which is ample for the prefixes one instance's accounts actually hold, while
+ * no account can grow the collection toward the full ~37 GB corpus.
+ */
+export const HIBP_ONDEMAND_MAX_ROWS = 20_000;
+
+/** Full cold-cache breach scans of the largest vault one day's budget fits. */
+const HIBP_FULL_SCANS_PER_DAY = 3;
+
+/**
+ * How many breach ranges one account may make the server fetch from HIBP per
+ * window (`HIBP_MISS_BUDGET_WINDOW_MINUTES`): lookups the shared cache could not
+ * answer. Ranges the cache already holds are free. Past it both breach endpoints
+ * answer 429 with `Retry-After` until the window resets.
+ *
+ * Derived, not chosen: one full breach scan of the largest vault an account may
+ * hold, every item with a distinct password, on a cache that holds none of its
+ * prefixes, needs `MAX_ITEMS_PER_USER` fetches, and it must fit one window or a
+ * legitimate scan is refused part-way (the same invariant `breachBatchLimiter`
+ * is sized by). Written as a number, not as an alias of `MAX_ITEMS_PER_USER`;
+ * the shared and server tests fail the moment the two differ. It is a third of
+ * the prefixes that limiter lets through per window, so it is what bounds one
+ * account's outbound lookups.
+ */
+export const HIBP_MAX_MISSES_PER_USER_PER_WINDOW = 10_000;
+
+/** The window `HIBP_MAX_MISSES_PER_USER_PER_WINDOW` is counted over. */
+export const HIBP_MISS_BUDGET_WINDOW_MINUTES = 15;
+
+/**
+ * How many breach ranges one account may make the server fetch from HIBP per
+ * day: three full cold-cache scans of the largest vault. The window budget above
+ * bounds a burst; without this one an account could keep it spent round the
+ * clock (96 windows, ~960,000 fetches a day). Past it both breach endpoints
+ * answer 429 with a `Retry-After` of up to a day; the client waits out at most one
+ * window of it and otherwise reports those passwords as not checked.
+ */
+export const HIBP_MAX_MISSES_PER_USER_PER_DAY = MAX_ITEMS_PER_USER * HIBP_FULL_SCANS_PER_DAY;
 
 // File Encryption tool (client-side, account-agnostic). The size cap is a
 // client-enforced guardrail (the file is encrypted in the browser and never
@@ -446,6 +609,20 @@ export const MAX_IN_FLIGHT_LARGE_BODY_REQUESTS = 2;
 // strictly BELOW MAX_IN_FLIGHT_LARGE_BODY_REQUESTS, for the same reason the part
 // share must.
 export const MAX_IN_FLIGHT_LARGE_BODY_REQUESTS_PER_USER = 1;
+
+// Heavy RESPONSES the server builds concurrently, PER WORKER PROCESS, across all
+// users: a backup download, a backup mailed on demand, a vault export, and the
+// scheduled backup job (which takes the same slots). Each reads a whole vault of
+// up to 25 MB; nine concurrent downloads of a 22 MB vault measured a 564 MB peak
+// against the app's `mem_limit: 1g`. Two is the floor for the same reason the
+// large-body budget's is: with the per-user share below at one, a budget of one
+// would let one account hold all of it. A request past the budget WAITS (its body,
+// if any, is at most the 2 MB global cap and already read); a request past the
+// share is refused with 409.
+export const MAX_IN_FLIGHT_HEAVY_RESPONSES = 2;
+// One account's share of the budget above. Strictly below it, so one account can
+// never hold every slot.
+export const MAX_IN_FLIGHT_HEAVY_RESPONSES_PER_USER = 1;
 
 // The slowest sustained uplink this deployment stands behind, in bytes per second
 // (128 KiB/s is about 1 Mbit/s). It is not a throttle and nothing measures against
@@ -733,16 +910,6 @@ export type VaultFieldRole = (typeof VAULT_FIELD_ROLES)[number];
 // change on one side alone makes every created row unreadable. Pinned by a vector.
 export const ROW_ID_DERIVATION_PREFIX = 'hvault/row-id/v1|';
 export const ROW_ID_NONCE_PATTERN = /^[0-9a-f]{40}$/;
-
-// ---------------------------------------------------------------------------
-// VAULT SEARCH KEY
-// ---------------------------------------------------------------------------
-// An item's `searchHash` is HMAC-SHA256 of its normalised name under a SUBKEY of
-// the vault key, `HKDF-SHA256(ikm = vault key, salt = empty, info = this)`, and
-// never under the vault key itself: the vault key is an AES-GCM key, and using the
-// same bytes as an HMAC key as well is exactly the key reuse NIST SP 800-108
-// separates. FORMAT constant: changing it changes every hash written afterwards.
-export const VAULT_SEARCH_KEY_INFO = 'hvault/item/search/v1';
 
 // ---------------------------------------------------------------------------
 // DOCUMENT PREVIEW
@@ -1151,12 +1318,27 @@ export const AUDIT_ACTIONS = [
   '2fa_backup_code_used',
   'rotation_recovery',
   'deletion_cleanup',
+  // The system row recording that `tokenCleanup` erased an account whose address
+  // was never verified within `UNVERIFIED_ACCOUNT_TTL_DAYS` (F-21). Written with
+  // `userId: null` and the address masked, like the other two erasure records.
+  'unverified_account_reaped',
   'settings_update',
   'email_verified',
   'registration',
   'trusted_device_grant',
   'trusted_device_revoke',
   'trusted_device_rejected',
+  // A refresh token presented again after it was rotated: the cookie was copied,
+  // so the token's whole family, every trusted device and every device proof are
+  // revoked. The strongest compromise signal the server has, so it is a security
+  // row the owner can read; it carries what was revoked and the revoked family's
+  // device, never the token. Written at most once per family (the family is gone
+  // after the first detection).
+  'token_reuse_detected',
+  // A device proof (the `__hv_device` cookie) revoked because wrong passwords
+  // presented with it reached its budget. Only a browser that once signed in can
+  // write it, so it is not stranger-writable.
+  'device_proof_revoked',
   // The document store's five mutations, and deliberately only five. There is no
   // download action: no read is audited anywhere in this codebase, and one
   // download is many segment requests, so auditing it would bury every other row
@@ -1168,8 +1350,52 @@ export const AUDIT_ACTIONS = [
   'document_delete',
   'document_restore',
   'document_purge',
+  // An inviting account minting an invitation to register (REGISTRATION_MODE=
+  // invite). Security, not activity: it is how an account lets another one in.
+  'invitation_create',
+  // Where mailed backups go. Each is a change to where the whole vault leaves the
+  // server, so all three are security rows: the owner approving the recipient list
+  // with the master password, a recipient confirming its address through the
+  // mailed link, and a password reset, password change or "log out everywhere"
+  // suspending every third-party recipient until the owner approves them again.
+  'backup_recipients_update',
+  'backup_recipient_confirmed',
+  'backup_recipients_suspended',
 ] as const;
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];
+
+/**
+ * The audit actions an UNAUTHENTICATED request can write into somebody else's
+ * log: a failed sign-in (including every attempt during a lockout), a rejected
+ * trusted-device cookie, and an unlock by the emailed link. They are capped per
+ * account at {@link MAX_STRANGER_AUDIT_ROWS_PER_USER}, trimmed oldest first, so a
+ * stranger cannot grow an account's log without bound or push the owner's own
+ * history out of it: every other action is untouched by that cap.
+ */
+export const STRANGER_WRITABLE_AUDIT_ACTIONS = [
+  'login_failed',
+  'trusted_device_rejected',
+  'account_unlock',
+] as const satisfies readonly AuditAction[];
+export const MAX_STRANGER_AUDIT_ROWS_PER_USER = 5_000;
+
+/**
+ * How many ACTIVITY-class audit rows (what an account did to its own items,
+ * folders, documents and backups) one account keeps. Past it the oldest are
+ * trimmed, hourly by the maintenance job and on every hundredth insert of the
+ * account in between. SECURITY-class rows are never counted against it and never
+ * removed by it: a session that floods edits can push its own old edits out of
+ * the log, never a sign-in, a password change or a 2FA event.
+ */
+export const MAX_ACTIVITY_AUDIT_ROWS_PER_USER = 100_000;
+
+/**
+ * How recent an account's newest audit row must be for an identical
+ * metadata-only edit (same action, same item or folder, same address, same user
+ * agent) to be counted into it instead of written as a row of its own. The row's
+ * timestamp moves to the latest edit, so the window slides.
+ */
+export const AUDIT_COALESCE_WINDOW_MS = 60_000;
 
 export const BACKUP_STATUSES = ['success', 'failed'] as const;
 export type BackupStatus = (typeof BACKUP_STATUSES)[number];
@@ -1308,3 +1534,44 @@ export const MAX_RELEASE_WIRE_CODE_LENGTH = 32;
 export const MAX_RELEASE_NOTES_LISTED = 500;
 /** The longest release link the client accepts. */
 export const MAX_RELEASE_URL_LENGTH = 300;
+
+// ── Registration ─────────────────────────────────────────────────────
+
+/**
+ * Who may create an account on a server, set by the operator's
+ * `REGISTRATION_MODE`:
+ *
+ *  - `open`    anyone who can reach the server (the default, kept for
+ *              compatibility; the server warns about it at boot in production);
+ *  - `invite`  only an address holding an invitation minted for it, by the
+ *              operator's CLI or by an account listed in `REGISTRATION_INVITERS`;
+ *  - `closed`  nobody.
+ *
+ * Published on `GET /config` so the register page can say which one applies
+ * before the form is filled.
+ */
+export const REGISTRATION_MODES = ['open', 'invite', 'closed'] as const;
+export type RegistrationMode = (typeof REGISTRATION_MODES)[number];
+
+/** How long an invitation stays usable after it is minted, in days. */
+export const INVITATION_TTL_DAYS = 7;
+
+/**
+ * Invitations one inviting account may mint in any 24 hours. Minting is the one
+ * way an account can let another account in, and each invitee can be an inviter
+ * only if the operator lists it, so this bounds how fast one listed account can
+ * add others.
+ */
+export const MAX_INVITATIONS_PER_INVITER_PER_DAY = 10;
+
+/**
+ * Random bytes in an invitation token. Carried base64url-encoded (43 characters)
+ * in the fragment of the link the inviter hands over.
+ */
+export const INVITATION_TOKEN_BYTES = 32;
+
+/** The longest invitation token the register schema accepts, with room to spare. */
+export const MAX_INVITATION_TOKEN_LENGTH = 128;
+
+/** The most addresses `REGISTRATION_INVITERS` may list. */
+export const MAX_REGISTRATION_INVITERS = 10;

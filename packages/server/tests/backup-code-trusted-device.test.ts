@@ -405,28 +405,30 @@ describe('A3 — a backup code completes a login without minting a trusted devic
     expect(await TrustedDevice.countDocuments({ userId: user.id })).toBe(0);
   });
 
-  it('discharges the shared lockout counter when a backup code verifies', async () => {
-    // Parity with the TOTP path, and with the rule Phase 4 established: the
-    // durable `failedLoginAttempts` counter — the ONLY per-account brake on the
-    // 2FA step — is cleared by a COMPLETED authentication, and completing with a
-    // backup code is one. Without this a user who mistyped a few codes before
-    // reaching for the printed sheet would carry those failures forward and lock
-    // themselves out on their next slip. `twofa-lockout-counter.test.ts` pins
-    // this for TOTP; nothing pinned it for the credential people reach for
-    // precisely when they are already having a bad day.
+  it("discharges the second factor's counter when a backup code verifies", async () => {
+    // Parity with the TOTP path: a COMPLETED authentication clears the counters,
+    // and completing with a backup code is one. Without this a user who mistyped
+    // a few codes before reaching for the printed sheet would carry those
+    // failures forward and lock themselves out on their next slip. F-03/F-28:
+    // the wrong codes count on the SECOND factor's own state
+    // (`secondFactorLockout`), never on the password's, so that is what is
+    // asserted to be discharged here.
     const { user, codes } = await create2faUser();
 
     const tempToken = await challenge(agent, user, true);
     for (let i = 0; i < 4; i++) {
       expect((await post2fa(agent, tempToken, 'ffffffffffffffff')).status).toBe(401);
     }
-    expect((await User.findById(user.id))!.failedLoginAttempts).toBe(4);
+    const counted = await User.findById(user.id).select('+secondFactorLockout');
+    expect(counted!.secondFactorLockout?.failedAttempts).toBe(4);
+    expect(counted!.failedLoginAttempts).toBe(0);
 
     const res = await post2fa(agent, tempToken, codes[0]!);
     expect(res.status).toBe(200);
     expect(res.body.data.accessToken).toBeDefined();
 
-    const after = await User.findById(user.id);
+    const after = await User.findById(user.id).select('+secondFactorLockout');
+    expect(after!.secondFactorLockout).toBeUndefined();
     expect(after!.failedLoginAttempts).toBe(0);
     expect(after!.lockoutUntil).toBeUndefined();
 

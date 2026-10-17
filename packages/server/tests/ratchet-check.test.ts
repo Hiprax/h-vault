@@ -615,6 +615,255 @@ describe('audit:ratchet', () => {
     });
   });
 
+  describe('the two security scanners, whose unignored findings are ratcheted at zero', () => {
+    /** The shape `gitleaks detect --report-format sarif --redact` writes, one result per finding. */
+    const gitleaksSarif = (findings: number): string =>
+      JSON.stringify({
+        runs: [
+          {
+            tool: { driver: { name: 'gitleaks', rules: [] } },
+            results: Array.from({ length: findings }, (_, index) => ({
+              ruleId: 'generic-api-key',
+              locations: [
+                {
+                  physicalLocation: {
+                    artifactLocation: { uri: `packages/app/src/f${String(index)}.ts` },
+                    region: { startLine: 1 },
+                  },
+                },
+              ],
+              partialFingerprints: { commitSha: 'a'.repeat(40) },
+            })),
+          },
+        ],
+      });
+    /** The shape `osv-scanner --format json --all-packages` writes. */
+    const osvJson = (packages: number, vulnerable: number): string =>
+      JSON.stringify({
+        results: [
+          {
+            source: { path: 'package-lock.json', type: 'lockfile' },
+            packages: Array.from({ length: packages }, (_, index) => ({
+              package: { name: `p${String(index)}`, version: '1.0.0', ecosystem: 'npm' },
+              ...(index < vulnerable ? { vulnerabilities: [{ id: `GHSA-${String(index)}` }] } : {}),
+            })),
+          },
+        ],
+      });
+    const scanReports = (
+      gitleaks: string | undefined,
+      osv: string | undefined,
+    ): Record<string, string> => ({
+      ...HEALTHY_REPORTS,
+      ...(gitleaks === undefined ? {} : { '.testfortress/reports/gitleaks.sarif': gitleaks }),
+      ...(osv === undefined ? {} : { '.testfortress/reports/osv.json': osv }),
+    });
+    const baselineWithScanners = {
+      ...HEALTHY_BASELINE,
+      gitleaks: { unignored: 0 },
+      osv: { vulnerabilities: 0 },
+      meta: {
+        fields: [
+          ...HEALTHY_BASELINE.meta.fields,
+          'gitleaks.unignored',
+          'osv.vulnerabilities',
+        ].sort(),
+      },
+    };
+
+    it('reads both counts from the scanners own reports and passes while they hold at zero', () => {
+      const result = ratchet({
+        baseline: baselineWithScanners,
+        reports: scanReports(gitleaksSarif(0), osvJson(3, 0)),
+      });
+      expect(result.regressions).toEqual([]);
+      expect(result.missing).toEqual([]);
+      expect(result.undeclared).toEqual([]);
+      expect(result.exitCode).toBe(0);
+    });
+
+    it('fails on ONE unignored history finding, in the lower-is-better direction', () => {
+      const result = ratchet({
+        baseline: baselineWithScanners,
+        reports: scanReports(gitleaksSarif(1), osvJson(3, 0)),
+      });
+      expect(result.regressions.map((r) => [r.path, r.want, r.got, r.dir])).toEqual([
+        ['gitleaks.unignored', 0, 1, 'lower'],
+      ]);
+      expect(result.exitCode).toBe(1);
+    });
+
+    it('fails on ONE vulnerable package, counted per advisory, in the lower-is-better direction', () => {
+      const result = ratchet({
+        baseline: baselineWithScanners,
+        reports: scanReports(gitleaksSarif(0), osvJson(3, 2)),
+      });
+      expect(result.regressions.map((r) => [r.path, r.want, r.got, r.dir])).toEqual([
+        ['osv.vulnerabilities', 0, 2, 'lower'],
+      ]);
+      expect(result.exitCode).toBe(1);
+    });
+
+    it('treats an absent, unreadable or empty scan as UNMEASURED, never as zero findings', () => {
+      // Each of these "contains no finding", and none of them is a scan: the
+      // report was not written, was not the tool's shape, or read no package.
+      for (const [gitleaks, osv, unmeasured] of [
+        [undefined, osvJson(3, 0), 'gitleaks.unignored'],
+        ['{"runs": []}', osvJson(3, 0), 'gitleaks.unignored'],
+        [gitleaksSarif(0), undefined, 'osv.vulnerabilities'],
+        [gitleaksSarif(0), '{"results": {}}', 'osv.vulnerabilities'],
+        [gitleaksSarif(0), osvJson(0, 0), 'osv.vulnerabilities'],
+      ] as const) {
+        const result = ratchet({
+          baseline: baselineWithScanners,
+          reports: scanReports(gitleaks, osv),
+        });
+        expect(
+          result.missing.map((m) => m.path),
+          String(osv),
+        ).toEqual([unmeasured]);
+        expect(result.regressions).toEqual([]);
+        expect(result.exitCode).toBe(1);
+      }
+    });
+
+    /** A ledger whose one VULN-ACCEPT entry names finding p0's advisory. */
+    const ledgerAccepting = (overrides: Record<string, unknown> = {}): string => {
+      const today = new Date().toISOString().slice(0, 10);
+      const inTwentyDays = new Date(Date.now() + 20 * 86_400_000).toISOString().slice(0, 10);
+      return JSON.stringify({
+        version: 1,
+        policy: {},
+        entries: [
+          {
+            id: 'SUP-0900',
+            rule: 'VULN-ACCEPT',
+            kind: 'vulnerability-acceptance',
+            file: 'package-lock.json',
+            symbol: 'GHSA-0 p0@1.0.0',
+            maxHits: 1,
+            reason: 'no fixed release',
+            owner: 'maintainer',
+            created: today,
+            expires: inTwentyDays,
+            approvedBy: ['judge:readonly'],
+            ...overrides,
+          },
+        ],
+      });
+    };
+
+    it('counts an advisory the ledger validly accepts as accepted, and only that one', () => {
+      const baseline = {
+        ...baselineWithScanners,
+        osv: { vulnerabilities: 0, accepted: 1 },
+        meta: { fields: [...baselineWithScanners.meta.fields, 'osv.accepted'].sort() },
+      };
+      const accepted = ratchet({
+        baseline,
+        reports: {
+          ...scanReports(gitleaksSarif(0), osvJson(3, 1)),
+          '.testfortress/suppressions.json': ledgerAccepting(),
+        },
+      });
+      expect(accepted.regressions).toEqual([]);
+      expect(accepted.missing).toEqual([]);
+      expect(accepted.exitCode).toBe(0);
+
+      // An entry the gate would refuse (no reviewer) accepts nothing here either:
+      // the same finding is counted as unaccepted.
+      const refused = ratchet({
+        baseline,
+        reports: {
+          ...scanReports(gitleaksSarif(0), osvJson(3, 1)),
+          '.testfortress/suppressions.json': ledgerAccepting({ approvedBy: [] }),
+        },
+      });
+      expect(refused.regressions.map((r) => [r.path, r.want, r.got])).toEqual([
+        ['osv.vulnerabilities', 0, 1],
+      ]);
+      expect(refused.improvements.map((i) => [i.path, i.want, i.got])).toEqual([
+        ['osv.accepted', 1, 0],
+      ]);
+      expect(refused.exitCode).toBe(1);
+    });
+
+    it('fails when a SECOND advisory is accepted, because acceptances ratchet down too', () => {
+      const result = ratchet({
+        baseline: baselineWithScanners,
+        reports: {
+          ...scanReports(gitleaksSarif(0), osvJson(3, 1)),
+          '.testfortress/suppressions.json': ledgerAccepting(),
+        },
+      });
+      // `osv.accepted` is absent from this baseline, so only the unaccepted count
+      // is compared; the case above holds a baseline that records it.
+      expect(result.regressions).toEqual([]);
+      const withFloor = ratchet({
+        baseline: {
+          ...baselineWithScanners,
+          osv: { vulnerabilities: 0, accepted: 0 },
+          meta: { fields: [...baselineWithScanners.meta.fields, 'osv.accepted'].sort() },
+        },
+        reports: {
+          ...scanReports(gitleaksSarif(0), osvJson(3, 1)),
+          '.testfortress/suppressions.json': ledgerAccepting(),
+        },
+      });
+      expect(withFloor.regressions.map((r) => [r.path, r.want, r.got, r.dir])).toEqual([
+        ['osv.accepted', 0, 1, 'lower'],
+      ]);
+      expect(withFloor.exitCode).toBe(1);
+    });
+
+    it('treats an unreadable ledger as unmeasured, never as "nothing accepted"', () => {
+      const result = ratchet({
+        baseline: baselineWithScanners,
+        reports: {
+          ...scanReports(gitleaksSarif(0), osvJson(3, 0)),
+          '.testfortress/suppressions.json': '{"entries": {}}',
+        },
+      });
+      expect(result.missing.map((m) => m.path)).toEqual(['osv.vulnerabilities']);
+      expect(result.exitCode).toBe(1);
+    });
+
+    it('refuses a STALE scan report, because it describes another tree', () => {
+      const result = ratchet({
+        baseline: baselineWithScanners,
+        reports: scanReports(gitleaksSarif(0), osvJson(3, 0)),
+        stale: ['.testfortress/reports/osv.json'],
+      });
+      expect(result.staleReports).toEqual(['.testfortress/reports/osv.json']);
+      expect(result.exitCode).toBe(1);
+    });
+
+    it('seeds both families by name, at their measured zero, with the lower-is-better direction', () => {
+      const result = ratchet({
+        baseline: HEALTHY_BASELINE,
+        reports: scanReports(gitleaksSarif(0), osvJson(3, 0)),
+        args: ['--accept', '--seed', 'gitleaks,osv', '--reason', 'register the two scanners'],
+      });
+      expect(result.exitCode).toBe(0);
+      expect(result.seeded).toEqual([
+        { path: 'gitleaks.unignored', value: 0, dir: 'lower' },
+        { path: 'osv.accepted', value: 0, dir: 'lower' },
+        { path: 'osv.vulnerabilities', value: 0, dir: 'lower' },
+      ]);
+      const after = JSON.parse(
+        readFileSync(path.join(result.dir, '.testfortress/baseline.json'), 'utf-8'),
+      ) as { gitleaks: unknown; osv: unknown; meta: { fields: string[] } };
+      expect(after.gitleaks).toEqual({ unignored: 0 });
+      expect(after.osv).toEqual({ accepted: 0, vulnerabilities: 0 });
+      // (d): once recorded, deleting any of them is a regression of its own.
+      expect(after.meta.fields).toEqual(
+        expect.arrayContaining(['gitleaks.unignored', 'osv.accepted', 'osv.vulnerabilities']),
+      );
+      // Nothing else was written as a seed: the package total is not a floor.
+      expect(Object.keys(after.osv as object).sort()).toEqual(['accepted', 'vulnerabilities']);
+    });
+  });
+
   describe('patch coverage, which is measured by a gate rather than by a suite', () => {
     const withDiff = (diff: number): Record<string, string> => ({
       ...HEALTHY_REPORTS,

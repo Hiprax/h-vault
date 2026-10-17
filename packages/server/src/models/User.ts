@@ -8,11 +8,18 @@ import {
   LOCK_ON_HIDDEN_DELAY_MINUTES,
   CLIPBOARD_CLEAR_SECONDS,
   DEFAULT_PASSWORD_LENGTH,
+  BACKUP_RECIPIENT_STATES,
   MAX_BACKUP_EMAILS,
   MAX_RELEASE_VERSION_LENGTH,
   SHOW_RELEASE_NOTES_DEFAULT,
+  SECURITY_NOTIFICATION_PREFERENCE_EVENTS,
 } from '@hvault/shared';
-import type { Theme, BackupStatus } from '@hvault/shared';
+import type {
+  Theme,
+  BackupStatus,
+  BackupRecipientState,
+  SecurityNotificationPreferenceEvent,
+} from '@hvault/shared';
 
 // ----- Sub-interfaces -----
 
@@ -29,10 +36,57 @@ interface IPasswordGenOptions {
   minSymbols: number;
 }
 
+/**
+ * One address mailed backups may go to (F-05). The rules that move an entry
+ * between states live in `utils/backupRecipients.ts` and nowhere else.
+ */
+export interface IBackupRecipientDoc {
+  email: string;
+  state: BackupRecipientState;
+  /** When the address confirmed, or was recognised as the account's own verified address. */
+  confirmedAt?: Date | null | undefined;
+  /**
+   * When the OWNER last approved this address with the master password. Null for
+   * an address carried over by migration v4 (the owner never approved it under
+   * these rules, and a recipient's click must not be what grandfathers it in) and
+   * for a suspended one.
+   */
+  approvedAt?: Date | null | undefined;
+  /** A confirmation mail is owed to this address (approved, pending, not yet mailed). */
+  confirmationDue?: boolean | undefined;
+  /** When the confirmation now outstanding was claimed for sending. */
+  confirmationSentAt?: Date | null | undefined;
+  /**
+   * How many times sending this entry's confirmation has FAILED since the owner
+   * last approved it. After a few the job stops retrying (each attempt spends the
+   * account's daily email budget), until the owner saves the list again.
+   */
+  confirmationAttempts?: number | undefined;
+  /**
+   * What the confirmation token is bound to, beside the account and the address.
+   * ROTATED on every state change, so a link minted before one (a confirmation
+   * already used, a recovery that suspended the entry) is refused afterwards.
+   */
+  nonce?: string | undefined;
+}
+
 interface IBackupSettingsDoc {
   enabled: boolean;
   scheduleHour: number;
-  backupEmails?: string[] | undefined;
+  backupRecipients?: IBackupRecipientDoc[] | undefined;
+  /**
+   * Bumped by EVERY write of {@link backupRecipients}. The owner's list update
+   * reads it and writes only while it has not moved, so a confirmation, a
+   * suspension or the confirmation job landing in between is never overwritten
+   * by a list computed from what came before it.
+   */
+  recipientsRevision?: number | undefined;
+  /**
+   * When the owner was last told that a backup was NOT mailed because nobody on the
+   * list has confirmed. Told once per such episode: cleared whenever the list is
+   * saved, a recipient confirms, recipients are suspended or a backup is delivered.
+   */
+  undeliverableNoticedAt?: Date | null | undefined;
   encryptedBWK?: string | undefined;
   bwkIv?: string | undefined;
   bwkTag?: string | undefined;
@@ -55,7 +109,25 @@ export interface IUserSettings {
   theme: Theme;
   language: string;
   showReleaseNotes: boolean;
+  /**
+   * Which security events the owner is emailed about (F-26). Stored only where the
+   * owner turned one OFF: an absent or `true` entry means "email me", and every
+   * reply fills the missing ones in (`withSettingsDefaults`).
+   */
+  notifications?: Partial<Record<SecurityNotificationPreferenceEvent, boolean>> | undefined;
   backup: IBackupSettingsDoc;
+}
+
+/**
+ * One factor's lockout state: the counter, the deadline, the episode the unlock
+ * link is bound to, and when that link was mailed. The password factor stores
+ * the same four facts in the legacy top-level fields.
+ */
+interface ISecondFactorLockout {
+  failedAttempts?: number | undefined;
+  until?: Date | undefined;
+  episodeId?: string | undefined;
+  notifiedAt?: Date | undefined;
 }
 
 // ----- Main Interface -----
@@ -107,6 +179,26 @@ export interface IUser {
    * lockout ends. Cleared with the rest of the episode.
    */
   lockoutNotifiedAt?: Date | undefined;
+  /**
+   * The SECOND factor's lockout state, kept apart from the four fields above.
+   *
+   * Those four are the PASSWORD factor's state and keep their names, because
+   * moving them would race live increments during a migration, orphan the
+   * pinned sparse `lockoutUntil` index, read as "no lockout" to an N-1 rollback
+   * and invalidate every unlock link in flight (its token is bound to
+   * `lockoutEpisodeId`). This sub-document is the same four facts for the second
+   * factor: written ONLY by a wrong TOTP or backup code (through the one verifier
+   * in `utils/secondFactor.ts`), read ONLY by the second-factor step, and cleared
+   * only by that factor's own discharges. A wrong password never touches it and a
+   * wrong code never touches the password's fields: one shared counter let ten
+   * wrong codes refuse the correct password with a distinct answer, which told a
+   * guesser the password was right.
+   *
+   * Absent means "no state". It is never stored as `null`: an `$inc` on a path
+   * below a `null` parent is refused by the server, so every discharge `$unset`s
+   * the whole sub-document instead.
+   */
+  secondFactorLockout?: ISecondFactorLockout | undefined;
   lastRotationKey?: string | undefined;
   lastRotationAt?: Date | undefined;
   rotationInProgress: boolean;
@@ -152,6 +244,56 @@ export interface IUser {
    */
   releaseNotesSeenVersion?: string | undefined;
   deletionPending?: boolean | undefined;
+  /**
+   * The bytes this account's vault rows occupy (F-24): every item and folder,
+   * trashed ones included until they are purged, each counted as its stored BSON
+   * size without its placement fields (`utils/vaultQuota.ts` defines the measure).
+   * Written ONLY through `utils/vaultQuota.ts`: a conditional reservation before a
+   * write that grows the vault, a correction after it, and the hourly recount.
+   *
+   * ABSENT means "not installed yet" (an account created before the quota existed),
+   * never zero and never "over quota": the first write that needs it installs it
+   * from the rows, and the recount and migration v3 install it for idle accounts.
+   */
+  vaultBytes?: number | undefined;
+  /**
+   * Bumped by every write of {@link vaultBytes}. The recount writes its total only
+   * if this has not moved since it read the counter, so a recount can never erase a
+   * reservation that landed while it was counting.
+   */
+  quotaEpoch?: number | undefined;
+  /** When the recount last wrote {@link vaultBytes}; it takes the oldest (and absent) first. */
+  quotaRecountedAt?: Date | undefined;
+  /** When {@link vaultBytes} was last written by a write path; the recount leaves a busy account alone. */
+  vaultBytesWrittenAt?: Date | undefined;
+  /**
+   * The number of vault item and folder rows the account owns, TRASHED ROWS
+   * INCLUDED, which is what `MAX_ITEMS_PER_USER` and `MAX_FOLDERS_PER_USER`
+   * count (F-15). Kept beside {@link vaultBytes} and moved by the same
+   * conditional update, so a cap is ONE write rather than a count followed by an
+   * insert. Absent (or either field absent) means "not installed yet", exactly as
+   * for {@link vaultBytes}; written only through `utils/vaultQuota.ts`, and by
+   * migration v6, which installs them where they are still absent.
+   */
+  counters?: { items?: number | undefined; folders?: number | undefined } | undefined;
+  /**
+   * The backup feature's emails sent for this account on one UTC day (F-05):
+   * `utils/outboundMailBudget.ts` claims each send here before it happens.
+   * Absent means none today.
+   */
+  outboundMail?: { day: string; count: number } | undefined;
+  /**
+   * The LAST security notice mailed to the owner (F-26): which one (`key`, the event
+   * and a digest of what it said) and when. A notice identical to it within the hour
+   * is not sent again; any other notice is, so the owner's latest mail is always
+   * true. `utils/securityNotifications.ts` claims it with one conditional update,
+   * written WITHOUT touching `updatedAt` (which the profile returns), before it
+   * sends. `select: false` and never in any reply: one of the events (a correct
+   * password presented during a lockout) must not be learnable through any API, and
+   * a field or a timestamp that moved only after a correct guess would be the very
+   * oracle the lockout's uniform answer exists to remove.
+   */
+  securityNotices?: { key: string; at: Date } | undefined;
   passwordChangedAt: Date;
   settings: IUserSettings;
   createdAt: Date;
@@ -234,18 +376,42 @@ const passwordGenOptionsCrossFieldValidator = {
   message: 'Password length must be at least the sum of the required character minimums',
 };
 
+const backupRecipientSchema = new Schema<IBackupRecipientDoc>(
+  {
+    email: { type: String, required: true, lowercase: true, trim: true, maxlength: 254 },
+    state: { type: String, required: true, enum: BACKUP_RECIPIENT_STATES },
+    confirmedAt: { type: Date, default: null },
+    approvedAt: { type: Date, default: null },
+    confirmationDue: { type: Boolean, default: false },
+    confirmationSentAt: { type: Date, default: null },
+    confirmationAttempts: { type: Number, default: 0, min: 0 },
+    // `select: false` because the profile, the settings replies and the list update
+    // all answer from reads of this document; every one of them also builds the
+    // recipient list it returns field by field, so this is the second of two
+    // things keeping the nonce off the wire, not the only one.
+    nonce: { type: String, select: false, maxlength: 128 },
+  },
+  { _id: false },
+);
+
 const backupSettingsSchema = new Schema<IBackupSettingsDoc>(
   {
     enabled: { type: Boolean, default: false },
     scheduleHour: { type: Number, default: 3, min: 0, max: 23 },
-    backupEmails: {
-      type: [{ type: String, maxlength: 254 }],
-      default: [],
+    // No default: ABSENT is "never configured", which `confirmedRecipientsFor`
+    // reads as the account's own verified address, and migration v4 converts only
+    // documents that do not carry the field yet.
+    backupRecipients: {
+      type: [backupRecipientSchema],
+      default: undefined,
       validate: {
-        validator: (v: string[]) => v.length <= MAX_BACKUP_EMAILS,
-        message: `backupEmails cannot exceed ${String(MAX_BACKUP_EMAILS)} entries`,
+        validator: (v: IBackupRecipientDoc[] | undefined) =>
+          v === undefined || v.length <= MAX_BACKUP_EMAILS,
+        message: `backupRecipients cannot exceed ${String(MAX_BACKUP_EMAILS)} entries`,
       },
     },
+    recipientsRevision: { type: Number, default: undefined },
+    undeliverableNoticedAt: { type: Date, default: undefined },
     encryptedBWK: { type: String, maxlength: 500 },
     bwkIv: { type: String, maxlength: 24 },
     bwkTag: { type: String, maxlength: 32 },
@@ -275,7 +441,28 @@ const userSettingsSchema = new Schema<IUserSettings>(
     theme: { type: String, enum: ['light', 'dark', 'system'], default: 'system' },
     language: { type: String, default: 'en' },
     showReleaseNotes: { type: Boolean, default: SHOW_RELEASE_NOTES_DEFAULT },
+    // One optional Boolean per event and NO default: absent is "email me", so an
+    // event added later is on for every account without a backfill.
+    notifications: {
+      type: new Schema<Partial<Record<SecurityNotificationPreferenceEvent, boolean>>>(
+        Object.fromEntries(
+          SECURITY_NOTIFICATION_PREFERENCE_EVENTS.map((event) => [event, { type: Boolean }]),
+        ),
+        { _id: false },
+      ),
+      default: undefined,
+    },
     backup: { type: backupSettingsSchema, default: () => ({}) },
+  },
+  { _id: false },
+);
+
+const secondFactorLockoutSchema = new Schema<ISecondFactorLockout>(
+  {
+    failedAttempts: { type: Number, default: undefined },
+    until: { type: Date, default: undefined },
+    episodeId: { type: String, default: undefined },
+    notifiedAt: { type: Date, default: undefined },
   },
   { _id: false },
 );
@@ -326,6 +513,10 @@ const userSchema = new Schema<IUser>(
     // link there is.
     lockoutEpisodeId: { type: String, select: false, default: undefined },
     lockoutNotifiedAt: { type: Date, select: false, default: undefined },
+    // `select: false` for the reasons its password twins above carry, and one
+    // more: every reader goes through `utils/lockout.ts`, which asks for it by
+    // name, so a projection that forgets it cannot silently read "not locked".
+    secondFactorLockout: { type: secondFactorLockoutSchema, select: false, default: undefined },
     lastRotationKey: { type: String, default: undefined },
     lastRotationAt: { type: Date, default: undefined },
     rotationInProgress: { type: Boolean, default: false },
@@ -352,6 +543,47 @@ const userSchema = new Schema<IUser>(
       default: undefined,
     },
     deletionPending: { type: Boolean, default: undefined },
+    // No schema default on any of the four: ABSENT is the state "not installed yet"
+    // that the quota helper installs from the rows, and a default would make every
+    // hydrated legacy account read as an empty vault (see the docblocks on `IUser`).
+    // The three bookkeeping fields are `select: false` because the profile answers
+    // with a spread of the whole document.
+    vaultBytes: { type: Number, default: undefined },
+    quotaEpoch: { type: Number, default: undefined, select: false },
+    quotaRecountedAt: { type: Date, default: undefined, select: false },
+    vaultBytesWrittenAt: { type: Date, default: undefined, select: false },
+    // The row counters behind the per-user caps (F-15), under the same rule: no
+    // default, because absent is "not installed yet" and a default would read as
+    // an empty vault. `select: false` keeps them out of the profile's spread; the
+    // quota module reads them through the driver.
+    counters: {
+      type: new Schema<{ items?: number; folders?: number }>(
+        { items: { type: Number }, folders: { type: Number } },
+        { _id: false },
+      ),
+      select: false,
+      default: undefined,
+    },
+    // No default and `select: false`: absent is "nothing sent today", and nothing
+    // but the budget helper reads it (the profile spreads the whole document).
+    outboundMail: {
+      type: new Schema<{ day: string; count: number }>(
+        { day: { type: String, maxlength: 10 }, count: { type: Number, min: 0 } },
+        { _id: false },
+      ),
+      default: undefined,
+      select: false,
+    },
+    // No default and `select: false`: see the interface. Nothing but the
+    // notification helper reads it.
+    securityNotices: {
+      type: new Schema<{ key: string; at: Date }>(
+        { key: { type: String, maxlength: 100 }, at: { type: Date } },
+        { _id: false },
+      ),
+      default: undefined,
+      select: false,
+    },
     passwordChangedAt: { type: Date, required: true, default: () => new Date(0) },
     settings: { type: userSettingsSchema, default: () => ({}) },
   },
@@ -376,7 +608,16 @@ const userSchema = new Schema<IUser>(
 
 // ----- Indexes -----
 // Note: email index is already created by `unique: true` on the field definition
-userSchema.index({ emailVerified: 1 });
+// The reaper of never-verified accounts (`utils/unverifiedAccounts.ts`) pages
+// through them by `_id` from this index: partial, so it holds only the unverified
+// accounts, and keyed on `_id` after the flag, so a page is one range scan from the
+// cursor with no sort, and a run reads each unverified account at most once. It replaced a single-field
+// `{emailVerified: 1}` index (every page fetched and sorted EVERY unverified
+// account); migration v7 builds this one and drops that one.
+userSchema.index(
+  { emailVerified: 1, _id: 1 },
+  { partialFilterExpression: { emailVerified: false } },
+);
 userSchema.index({ lockoutUntil: 1 }, { sparse: true });
 userSchema.index({
   'settings.backup.enabled': 1,
@@ -389,6 +630,16 @@ userSchema.index({
 // mid-deletion and is planner-eligible for the exact-equality query (avoiding a
 // full COLLSCAN of `users`).
 userSchema.index({ deletionPending: 1 }, { partialFilterExpression: { deletionPending: true } });
+// The hourly vault-quota recount takes the accounts recounted longest ago (and those
+// never recounted, which sort first) in bounded batches.
+userSchema.index({ quotaRecountedAt: 1 });
+// The hourly confirmation step (`jobs/maintenance.ts`) finds the accounts that owe a
+// recipient a confirmation mail. Partial, so it holds only those few accounts and the
+// step never walks `users`.
+userSchema.index(
+  { 'settings.backup.backupRecipients.confirmationDue': 1 },
+  { partialFilterExpression: { 'settings.backup.backupRecipients.confirmationDue': true } },
+);
 
 // ----- Model -----
 

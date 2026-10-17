@@ -2,11 +2,11 @@ import cron, { type ScheduledTask } from 'node-cron';
 import mongoose, { Types } from 'mongoose';
 import { createModuleLogger } from '../utils/logger.js';
 import { config, storageConfigured } from '../config/index.js';
-import { AuditLog } from '../models/AuditLog.js';
 import { Document } from '../models/Document.js';
 import { DocumentUpload } from '../models/DocumentUpload.js';
 import { acquireJobLock, releaseJobLock } from '../utils/jobLock.js';
 import { trackJob } from '../utils/jobTracker.js';
+import { recordJobAuditEntries } from '../services/auditService.js';
 import { getStorage, isStorageNotFound } from '../services/storage/index.js';
 import { parseObjectKey } from '../utils/documentObjects.js';
 import { createStorageBreaker, type StorageBreaker } from '../utils/storageBreaker.js';
@@ -330,14 +330,13 @@ async function finishPendingPurges(storage: StorageProvider, totals: CleanupTota
     // record of up to a full page of documents this job had already destroyed,
     // which is precisely the gap this audit row exists to close.
     if (finishedByUser.size > 0) {
-      await AuditLog.insertMany(
+      await recordJobAuditEntries(
         Array.from(finishedByUser.entries()).map(([userId, documentCount]) => ({
           userId,
           action: 'document_purge' as const,
           metadata: { action: 'gc_finish_interrupted', documentCount },
           ipAddress: 'system',
           userAgent: 'system/document-cleanup-job',
-          timestamp: new Date(),
         })),
       );
     }

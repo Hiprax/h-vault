@@ -177,8 +177,8 @@ describe('MEDIUM-3: atomic lockout email deduplication', () => {
     );
 
     // A wrong password on a locked account returns the SAME generic 401 as a
-    // non-existent email (the lockout is no longer surfaced as ACCOUNT_LOCKED
-    // unless the correct password is supplied — closing the enumeration oracle).
+    // non-existent email. Since F-03 a correct password from an unproven browser
+    // gets that answer too; the lockout is never surfaced as ACCOUNT_LOCKED here.
     const csrfN = await getCsrf(agent);
     const res = await withCsrf(
       agent.post(`${API}/auth/login`).send({
@@ -191,8 +191,9 @@ describe('MEDIUM-3: atomic lockout email deduplication', () => {
     expect(res.status).toBe(401);
 
     // Lockout state must remain untouched: failedLoginAttempts is NOT
-    // incremented and lockoutUntil is unchanged, so an unlock email already
-    // issued (its token bound to lockoutUntil) stays valid.
+    // incremented past the threshold, and a lockout started less than a minute
+    // ago is not extended (the deadline moves at most once a minute). The mailed
+    // link is bound to the lockout episode, which no attempt changes.
     const user = await User.findOne({ email: testUser.email });
     expect(user!.failedLoginAttempts).toBe(10);
     expect(user!.lockoutUntil).toBeDefined();

@@ -50,17 +50,24 @@ import { SANDBOX_PERMISSIONS_POLICY } from './permissionsPolicy.js';
  *     exact reach rather than the slogan. It blocks `fetch`, `XMLHttpRequest`,
  *     WebSockets, `EventSource` and `sendBeacon`, so a renderer can never READ
  *     a response; and no directive below names an external host, so nothing it
- *     emits reaches a third party. It does NOT stop every request: `script-src`,
- *     `style-src`, `img-src` and `font-src` allow `'self'`, and by (1) above
- *     `'self'` still names this server inside a sandboxed document, so an
- *     `<img src="/api/v1/…">` is a GET this server would see. Do not write
- *     "opens no socket of any kind" — the earlier wording here, and false. The
- *     bound is NO HOST BUT THIS ONE AND NO READABLE ANSWER, which is the same
- *     bound self-navigation already has (SECURITY.md's residual risk 1), so the
- *     document is not claiming an isolation the policy does not deliver. All of
- *     it is only affordable because there is no PDF renderer — pdf.js needs a
- *     worker and a WebAssembly decoder fetched by URL, and carrying it would
- *     have forced `connect-src` and `worker-src` open for every other format.
+ *     emits reaches a third party. Images and fonts name NO same-origin source
+ *     either: `img-src` is `blob:` and `data:` (the frame mints the former from
+ *     bytes it was handed, and a document carries the latter inline) and
+ *     `font-src` is `data:` (`sandbox.css` names no `url()` and uses the system
+ *     fonts), because by (1) `'self'` would name THIS server, and an
+ *     `<img src="/api/v1/…">` in a rendered document was a request the API
+ *     would answer. It does NOT stop every request: `script-src` and
+ *     `style-src` must keep `'self'` for the frame's own bundle, and nothing
+ *     stops a document navigating itself. Those requests carry
+ *     `Sec-Fetch-Site: cross-site` (an opaque origin is same-site with
+ *     nothing), and the API refuses every such request before any handler runs
+ *     (`middleware/fetchMetadata.ts`), which is the class control. Do not write
+ *     "opens no socket of any kind" — false. The bound is NO HOST BUT THIS ONE,
+ *     NO READABLE ANSWER, AND NO API HANDLER, and self-navigation away keeps
+ *     SECURITY.md's residual risk 1. All of it is only affordable because there
+ *     is no PDF renderer — pdf.js needs a worker and a WebAssembly decoder
+ *     fetched by URL, and carrying it would have forced `connect-src` and
+ *     `worker-src` open for every other format.
  *
  *  3. The `sandbox allow-scripts` DIRECTIVE repeats the iframe attribute inside
  *     the policy, so the document sandboxes ITSELF even if a future embedder
@@ -87,13 +94,16 @@ export const SANDBOX_CSP_DIRECTIVES = Object.freeze({
   'default-src': ["'none'"],
   'script-src': ["'self'"],
   'style-src': ["'self'"],
-  // `blob:` for media the sandbox mints itself from bytes it was handed;
+  // `blob:` for images the sandbox mints itself from bytes it was handed;
   // `data:` for inline images in a rendered markdown or HTML document. There is
-  // deliberately NO http/https source: that is what stops a markdown file
-  // reaching out for a remote `<img>`, which is shown to the user as a
-  // disabled-remote-content notice rather than repaired by widening this.
-  'img-src': ["'self'", 'blob:', 'data:'],
-  'font-src': ["'self'", 'data:'],
+  // deliberately NO http/https source and NO `'self'`: that is what stops a
+  // document reaching out for a remote `<img>` or one on this server, which is
+  // shown to the reader as a withheld-images notice rather than repaired by
+  // widening this.
+  'img-src': ['blob:', 'data:'],
+  // `sandbox.css` names no `url()` and uses the system fonts, so nothing the
+  // frame ships needs a font by URL; `data:` is all a document can carry inline.
+  'font-src': ['data:'],
   // Audio and video play from a blob URL the sandbox mints itself. A blob URL
   // minted by the application would not resolve in an opaque origin.
   'media-src': ['blob:'],

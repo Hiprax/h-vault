@@ -540,19 +540,20 @@ describe('the server in front of that engine', () => {
     await provider.abortMultipartUpload(seeded.objectKey, seeded.s3UploadId);
   });
 
-  it('lets the LAST part be short, down to a bare authentication tag', async () => {
+  it('lets the LAST part be short: exactly the size the declaration frames', async () => {
     // The other side of the rule, against the real engine: the final part is the
     // only one allowed to be short, and the engine takes it. A server that
     // refused short parts outright would make every document whose plaintext is
-    // not an exact multiple of the chunk size unstorable.
+    // not an exact multiple of the chunk size unstorable. The row declares one
+    // plaintext byte in its last segment, so its last part is that byte plus a tag.
     const seeded = await seedUpload(2);
-    const body = pattern(DOCUMENT_TAG_BYTES, 9);
+    const body = pattern(1 + DOCUMENT_TAG_BYTES, 9);
 
     const res = await putPart(seeded.id, 2, body);
 
     expect(res.status, JSON.stringify(res.body)).toBe(200);
     const ledger = await provider.listParts(seeded.objectKey, seeded.s3UploadId);
-    expect(ledger.map((part) => part.bytes)).toEqual([DOCUMENT_TAG_BYTES]);
+    expect(ledger.map((part) => part.bytes)).toEqual([1 + DOCUMENT_TAG_BYTES]);
 
     await provider.abortMultipartUpload(seeded.objectKey, seeded.s3UploadId);
   });

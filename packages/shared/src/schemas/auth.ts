@@ -1,5 +1,5 @@
 import { z } from '../zod.js';
-import { ENCRYPTION_VERSION } from '../constants/index.js';
+import { ENCRYPTION_VERSION, MAX_INVITATION_TOKEN_LENGTH } from '../constants/index.js';
 import { optionalVaultKeyVersionSchema } from './common.js';
 
 export const emailSchema = z
@@ -27,6 +27,16 @@ export const emailSchema = z
     'Must be a valid email address',
   );
 
+/**
+ * An invitation token as the link carries it: base64url, bounded. The server
+ * compares a keyed hash of it, so the exact length is not a secret, only a bound.
+ */
+export const invitationTokenSchema = z
+  .string()
+  .min(1)
+  .max(MAX_INVITATION_TOKEN_LENGTH)
+  .regex(/^[A-Za-z0-9_-]+$/, 'Invalid invitation');
+
 export const registerSchema = z.object({
   email: emailSchema,
   authHash: z.string().min(1).max(100),
@@ -36,6 +46,11 @@ export const registerSchema = z.object({
   kdfIterations: z.number().int().min(500_000).max(10_000_000),
   kdfAlgorithm: z.literal('PBKDF2-SHA256'),
   encryptionVersion: z.number().int().min(1).max(ENCRYPTION_VERSION).default(ENCRYPTION_VERSION),
+  // The invitation a registration presents on a server whose REGISTRATION_MODE is
+  // `invite`. Optional because the other two modes ignore it, and base64url because
+  // that is the only alphabet a minted token uses: anything else cannot be one, so
+  // it is refused here rather than hashed and looked up.
+  invitationToken: invitationTokenSchema.optional(),
 });
 
 export const loginSchema = z.object({
@@ -141,5 +156,15 @@ export const verifyUnlockSchema = z.object({
 });
 
 export const resendVerificationSchema = z.object({
+  email: emailSchema,
+});
+
+/**
+ * `POST /auth/invitations`: an inviting account mints an invitation for one
+ * address. `authHash` is the master-password proof every operation that lets data
+ * or access leave the account carries.
+ */
+export const createInvitationSchema = z.object({
+  authHash: z.string().min(1).max(100),
   email: emailSchema,
 });

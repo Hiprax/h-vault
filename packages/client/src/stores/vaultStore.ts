@@ -7,7 +7,6 @@
  */
 
 import { create } from 'zustand';
-import { cryptoService } from '../services/crypto/cryptoService.js';
 import { buildPasswordHistoryPayload } from '../services/crypto/passwordHistory.js';
 import {
   assertStoredUnder,
@@ -72,7 +71,6 @@ export interface DecryptedVaultItem {
   name: string;
   /** Decrypted structured data (JSON-parsed) */
   data: Record<string, unknown>;
-  searchHash?: string | undefined;
   createdAt: string;
   updatedAt: string;
   deletedAt?: string | undefined;
@@ -181,8 +179,7 @@ interface VaultState {
    */
   updateItemMeta: (id: string, meta: ItemMetaUpdate) => Promise<void>;
   /**
-   * NAME-ONLY update: re-encrypts the name (and its `searchHash`) and sends nothing
-   * else. The item's `encryptedData`/`dataIv`/`dataTag` are not in the payload at
+   * NAME-ONLY update: re-encrypts the name and sends nothing else. The item's `encryptedData`/`dataIv`/`dataTag` are not in the payload at
    * all, so its ciphertext is left byte-identical.
    *
    * This is the one write an UNDECODABLE item can safely take. See the action's
@@ -292,6 +289,63 @@ export function getHealthGeneration(): number {
 
 const inFlightDeletedItemIds = new Set<string>();
 const inFlightDeletedTrashIds = new Set<string>();
+
+/**
+ * Edits made while an item walk is in flight, for the rows it has not reloaded yet:
+ * a write applied to the list in memory only reaches a row the walk already put
+ * back, so if the walk then FAILS and the previous list is carried over (see
+ * {@link mergeAfterFailedWalk}), these replay the edits onto the rows they missed.
+ * Composed per row in the order they landed; cleared with the delete tracker.
+ */
+const inFlightItemPatches = new Map<string, (item: DecryptedVaultItem) => DecryptedVaultItem>();
+
+/**
+ * Folders deleted while an item walk is in flight, and what happened to their
+ * members: trashed (`delete`), or re-parented to the deleted folder's own parent
+ * (`move`, `parentId` undefined for the root).
+ */
+const inFlightFolderEffects = new Map<
+  string,
+  { action: 'delete' } | { action: 'move'; parentId: string | undefined }
+>();
+
+/** Records an edit of row `id` for {@link mergeAfterFailedWalk}, while a walk is in flight. */
+function recordItemPatch(
+  id: string,
+  patch: (item: DecryptedVaultItem) => DecryptedVaultItem,
+): void {
+  if (fetchItemsInFlight === null) return;
+  const earlier = inFlightItemPatches.get(id);
+  inFlightItemPatches.set(id, earlier ? (item) => patch(earlier(item)) : patch);
+}
+
+/**
+ * The list to show when a refresh of a POPULATED list fails part-way (refused by
+ * the list budget, the connection dropped): every row now in state (the walk's
+ * fresh rows and whatever was created, edited or restored meanwhile, each at least
+ * as fresh as the previous list), then each row of the previous list that is
+ * neither among them nor deleted during the walk, with the edits made during the
+ * walk applied. A failed refresh therefore changes nothing on screen and loses no
+ * change the user made while it ran.
+ */
+function mergeAfterFailedWalk(
+  current: DecryptedVaultItem[],
+  previous: DecryptedVaultItem[],
+): DecryptedVaultItem[] {
+  const present = new Set(current.map((item) => item.id));
+  const carried: DecryptedVaultItem[] = [];
+  for (const row of previous) {
+    if (present.has(row.id) || inFlightDeletedItemIds.has(row.id)) continue;
+    const folderEffect =
+      row.folderId === undefined ? undefined : inFlightFolderEffects.get(row.folderId);
+    if (folderEffect?.action === 'delete') continue;
+    const placed =
+      folderEffect?.action === 'move' ? { ...row, folderId: folderEffect.parentId } : row;
+    const patch = inFlightItemPatches.get(row.id);
+    carried.push(patch ? patch(placed) : placed);
+  }
+  return [...current, ...carried];
+}
 
 /**
  * Minimum number of decryption failures required to dispatch the
@@ -755,7 +809,6 @@ async function decryptItem(
     favorite: raw.favorite,
     name,
     data,
-    searchHash: raw.searchHash,
     createdAt: raw.createdAt,
     updatedAt: raw.updatedAt,
     deletedAt: raw.deletedAt,
@@ -810,7 +863,6 @@ function toUndecodableItem(raw: IVaultItemResponse): DecryptedVaultItem {
     favorite: raw.favorite,
     name: '',
     data: { _raw: null },
-    searchHash: raw.searchHash,
     createdAt: raw.createdAt,
     updatedAt: raw.updatedAt,
     deletedAt: raw.deletedAt,
@@ -918,6 +970,8 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
     fetchItemsGeneration += 1;
     const myGeneration = fetchItemsGeneration;
     inFlightDeletedItemIds.clear();
+    inFlightItemPatches.clear();
+    inFlightFolderEffects.clear();
 
     const doFetch = async (): Promise<void> => {
       try {
@@ -928,6 +982,11 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
         // onto this promise (see the assignment at the end of fetchItems for
         // why it cannot live in this block).
         const vaultKey = getVaultKey();
+        // The list the user is looking at, kept so a refresh that fails (refused
+        // by the list budget, the connection dropped) puts it back instead of
+        // leaving the screen empty or truncated. Nothing to keep on a first load.
+        const shown = get().items;
+        const kept = shown.length > 0 ? shown : null;
         // Reset items immediately so the progressive append doesn't blend with
         // a previous fetch's contents. itemsTotal is set from the first page's
         // pagination metadata.
@@ -946,6 +1005,9 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
           // Assigned from the first page's response inside the do-while body,
           // before the loop condition ever reads it — no initializer needed.
           let totalPages: number;
+          // What the server says the walk takes, uncapped: only a vault LONGER
+          // than the cap can have rows the walk did not reach.
+          let serverTotalPages = 0;
           const allResults: PromiseSettledResult<DecryptedVaultItem>[] = [];
 
           // Fetch and decrypt page-by-page. After each page is decrypted we
@@ -960,7 +1022,8 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
             // on the active generation's state).
             if (myGeneration !== fetchItemsGeneration) return;
             allRawItems = allRawItems.concat(result.data);
-            totalPages = Math.min(result.pagination.totalPages, MAX_PAGES);
+            serverTotalPages = result.pagination.totalPages;
+            totalPages = Math.min(serverTotalPages, MAX_PAGES);
             const totalForBadge = Math.min(result.pagination.total, MAX_PAGES * PAGE_SIZE);
 
             const pageResults = await mapWithConcurrency(
@@ -989,13 +1052,17 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
 
             currentPage++;
             if (currentPage > MAX_PAGES) {
-              logger.warn(
-                `fetchItems: page cap (${String(MAX_PAGES)}) reached; some items may be missing`,
-              );
-              set({
-                lastDecryptionError:
-                  'Vault item count exceeds expected limit; some items may be missing',
-              });
+              // A vault of exactly MAX_PAGES pages ends here whole; only a longer
+              // one leaves rows behind.
+              if (serverTotalPages > MAX_PAGES) {
+                logger.warn(
+                  `fetchItems: page cap (${String(MAX_PAGES)}) reached; some items may be missing`,
+                );
+                set({
+                  lastDecryptionError:
+                    'Vault item count exceeds expected limit; some items may be missing',
+                });
+              }
               break;
             }
           } while (currentPage <= totalPages);
@@ -1048,6 +1115,13 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
               itemsTotal: decrypted.length,
             });
           } else {
+            // Put back the list the user was looking at, merged with every change
+            // made while the walk ran, so a refused or failed refresh changes
+            // nothing on screen.
+            if (kept !== null && myGeneration === fetchItemsGeneration) {
+              const merged = mergeAfterFailedWalk(get().items, kept);
+              set({ items: merged, itemsLoaded: merged.length, itemsTotal: merged.length });
+            }
             throw error;
           }
         }
@@ -1057,6 +1131,8 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
         // mustn't trample it.
         if (myGeneration === fetchItemsGeneration) {
           inFlightDeletedItemIds.clear();
+          inFlightItemPatches.clear();
+          inFlightFolderEffects.clear();
           set((state) => ({ itemsLoading: false, loading: state.trashLoading }));
         }
       }
@@ -1096,6 +1172,9 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
         // Inside the try so a locked-vault throw still runs the `finally` that
         // resets the loading flags and the delete tracker (see fetchItems).
         const vaultKey = getVaultKey();
+        // Kept for a refresh that fails, exactly as `fetchItems` keeps the list.
+        const shownTrash = get().trashItems;
+        const keptTrash = shownTrash.length > 0 ? shownTrash : null;
         // Reset trashItems immediately so the progressive append below doesn't
         // blend with leftovers from a prior fetch.
         set({ trashLoading: true, loading: true, trashItems: [] });
@@ -1105,48 +1184,68 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
         // Assigned from the first page's response inside the do-while body,
         // before the loop condition ever reads it — no initializer needed.
         let totalPages: number;
+        // Uncapped, as in `fetchItems`: only a trash longer than the cap is cut.
+        let serverTotalPages = 0;
         const allResults: PromiseSettledResult<DecryptedVaultItem>[] = [];
 
-        do {
-          const response = await listTrashApi({ page: currentPage, limit: PAGE_SIZE });
-          const trashResult = response.data;
-          if (!trashResult.success) throw new Error('Failed to fetch trash items');
-          if (myGeneration !== fetchTrashGeneration) return;
-          totalPages = Math.min(trashResult.pagination.totalPages, MAX_PAGES);
+        try {
+          do {
+            const response = await listTrashApi({ page: currentPage, limit: PAGE_SIZE });
+            const trashResult = response.data;
+            if (!trashResult.success) throw new Error('Failed to fetch trash items');
+            if (myGeneration !== fetchTrashGeneration) return;
+            serverTotalPages = trashResult.pagination.totalPages;
+            totalPages = Math.min(serverTotalPages, MAX_PAGES);
 
-          const pageResults = await mapWithConcurrency(
-            trashResult.data,
-            DECRYPTION_CONCURRENCY,
-            (item) => decryptItem(item, vaultKey),
-          );
-          if (myGeneration !== fetchTrashGeneration) return;
-          allResults.push(...pageResults);
-
-          const decryptedPage = pageResults
-            .filter(
-              (r): r is PromiseFulfilledResult<DecryptedVaultItem> => r.status === 'fulfilled',
-            )
-            .map((r) => r.value)
-            // Filter out items the user permanently-deleted (or restored) from
-            // trash while this page was streaming.
-            .filter((item) => !inFlightDeletedTrashIds.has(item.id));
-
-          set((state) => ({
-            trashItems: [...state.trashItems, ...decryptedPage],
-          }));
-
-          currentPage++;
-          if (currentPage > MAX_PAGES) {
-            logger.warn(
-              `fetchTrashItems: page cap (${String(MAX_PAGES)}) reached; some items may be missing`,
+            const pageResults = await mapWithConcurrency(
+              trashResult.data,
+              DECRYPTION_CONCURRENCY,
+              (item) => decryptItem(item, vaultKey),
             );
-            set({
-              lastDecryptionError:
-                'Trash item count exceeds expected limit; some items may be missing',
-            });
-            break;
+            if (myGeneration !== fetchTrashGeneration) return;
+            allResults.push(...pageResults);
+
+            const decryptedPage = pageResults
+              .filter(
+                (r): r is PromiseFulfilledResult<DecryptedVaultItem> => r.status === 'fulfilled',
+              )
+              .map((r) => r.value)
+              // Filter out items the user permanently-deleted (or restored) from
+              // trash while this page was streaming.
+              .filter((item) => !inFlightDeletedTrashIds.has(item.id));
+
+            set((state) => ({
+              trashItems: [...state.trashItems, ...decryptedPage],
+            }));
+
+            currentPage++;
+            if (currentPage > MAX_PAGES) {
+              if (serverTotalPages > MAX_PAGES) {
+                logger.warn(
+                  `fetchTrashItems: page cap (${String(MAX_PAGES)}) reached; some items may be missing`,
+                );
+                set({
+                  lastDecryptionError:
+                    'Trash item count exceeds expected limit; some items may be missing',
+                });
+              }
+              break;
+            }
+          } while (currentPage <= totalPages);
+        } catch (error) {
+          // The trash's twin of `mergeAfterFailedWalk`: the rows now in state (what
+          // was trashed meanwhile included), then the previous rows that are
+          // neither among them nor purged or restored during the walk.
+          if (keptTrash !== null && myGeneration === fetchTrashGeneration) {
+            const current = get().trashItems;
+            const present = new Set(current.map((item) => item.id));
+            const carried = keptTrash.filter(
+              (item) => !present.has(item.id) && !inFlightDeletedTrashIds.has(item.id),
+            );
+            set({ trashItems: [...current, ...carried] });
           }
-        } while (currentPage <= totalPages);
+          throw error;
+        }
 
         const { errorMessage } = reportDecryptionFailures(allResults, 'trash items');
         set((state) => ({
@@ -1296,7 +1395,6 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
     // so bail out early with a user-friendly error instead of round-tripping
     // to receive a cryptic 400.
     assertEncryptedSizes(encryptedName, encryptedData);
-    const searchHash = await cryptoService.generateSearchHash(name, vaultKey);
 
     // `vaultKeyVersion` names the generation the six ciphertext fields above
     // were sealed under. The server refuses the row rather than storing one
@@ -1311,7 +1409,6 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
         encryptedData: encryptedData.encrypted,
         dataIv: encryptedData.iv,
         dataTag: encryptedData.tag,
-        searchHash,
         ...(options?.folderId != null ? { folderId: options.folderId } : {}),
         tags: options?.tags ?? [],
         favorite: options?.favorite ?? false,
@@ -1376,7 +1473,6 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
     );
     // Pre-flight size check: same rationale as createItem.
     assertEncryptedSizes(encryptedName, encryptedData);
-    const searchHash = await cryptoService.generateSearchHash(name, vaultKey);
 
     // Build password history for login items when the password changes. The
     // detection + payload construction is shared with the import flow via
@@ -1402,7 +1498,6 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
         encryptedData: encryptedData.encrypted,
         dataIv: encryptedData.iv,
         dataTag: encryptedData.tag,
-        searchHash,
         ...(options?.folderId !== undefined ? { folderId: options.folderId } : {}),
         ...(options?.tags !== undefined ? { tags: options.tags } : {}),
         ...(options?.favorite !== undefined ? { favorite: options.favorite } : {}),
@@ -1424,14 +1519,15 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
       set((state) => ({
         items: state.items.map((item) => (item.id === id ? decrypted : item)),
       }));
+      recordItemPatch(id, () => decrypted);
     }
   },
 
   // -----------------------------------------------------------------------
   // Metadata-only update (favorite / folder / tags)
   //
-  // Sends ONLY the plaintext metadata fields — never encryptedName,
-  // encryptedData or searchHash — so the item's ciphertext is left untouched.
+  // Sends ONLY the plaintext metadata fields — never encryptedName or
+  // encryptedData — so the item's ciphertext is left untouched.
   //
   // This is not merely an optimization. When an item's decrypted payload fails
   // schema validation or JSON parsing, decryptItem() keeps a PLACEHOLDER in
@@ -1478,35 +1574,34 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
 
     const { updatedAt } = metaResult.data;
 
+    const applyMeta = (item: DecryptedVaultItem): DecryptedVaultItem => {
+      const favorite = meta.favorite ?? item.favorite;
+      const tags = meta.tags ?? item.tags;
+      const folderId = meta.folderId === undefined ? item.folderId : (meta.folderId ?? undefined);
+      return {
+        ...item,
+        favorite,
+        tags,
+        folderId,
+        updatedAt,
+        // Mirror the new metadata into _raw so a later edit-and-save starts
+        // from consistent state. Every encrypted field is carried over
+        // byte-for-byte — that is the whole point of this path.
+        _raw: { ...item._raw, favorite, tags, folderId, updatedAt },
+      };
+    };
     set((state) => ({
-      items: state.items.map((item) => {
-        if (item.id !== id) return item;
-        const favorite = meta.favorite ?? item.favorite;
-        const tags = meta.tags ?? item.tags;
-        const folderId = meta.folderId === undefined ? item.folderId : (meta.folderId ?? undefined);
-        return {
-          ...item,
-          favorite,
-          tags,
-          folderId,
-          updatedAt,
-          // Mirror the new metadata into _raw so a later edit-and-save starts
-          // from consistent state. Every encrypted field is carried over
-          // byte-for-byte — that is the whole point of this path.
-          _raw: { ...item._raw, favorite, tags, folderId, updatedAt },
-        };
-      }),
+      items: state.items.map((item) => (item.id === id ? applyMeta(item) : item)),
     }));
+    recordItemPatch(id, applyMeta);
   },
 
   // -----------------------------------------------------------------------
   // Name-only update
   //
-  // Sends the `encryptedName`/`nameIv`/`nameTag` trio plus the `searchHash` derived
-  // from it, and NOTHING else. `updateVaultItemSchema` permits exactly this: the
-  // name trio must travel together, the data trio may be omitted entirely, and
-  // `searchHash` is optional — it is an HMAC of the NAME, so it has to be refreshed
-  // or the server's duplicate detection would still be keyed to the old one.
+  // Sends the `encryptedName`/`nameIv`/`nameTag` trio and NOTHING else.
+  // `updateVaultItemSchema` permits exactly this: the name trio must travel
+  // together, and the data trio may be omitted entirely.
   //
   // This exists because renaming was the one safe operation an UNDECODABLE item
   // could not be offered. `updateItem` re-encrypts `JSON.stringify(item.data)`
@@ -1525,7 +1620,6 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
 
     const encryptedName = await encryptVaultField(name, { role: 'item.name', rowId: id }, vaultKey);
     assertEncryptedNameSize(encryptedName);
-    const searchHash = await cryptoService.generateSearchHash(name, vaultKey);
 
     // Name-only, but still ciphertext: a rename sealed under a superseded key
     // strands the one field this path exists to repair.
@@ -1534,7 +1628,6 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
         encryptedName: encryptedName.encrypted,
         nameIv: encryptedName.iv,
         nameTag: encryptedName.tag,
-        searchHash,
         vaultKeyVersion,
       }),
     );
@@ -1547,27 +1640,24 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
 
     const { updatedAt } = renameResult.data;
 
+    const applyRename = (item: DecryptedVaultItem): DecryptedVaultItem => ({
+      ...item,
+      name,
+      updatedAt,
+      // Only the NAME ciphertext is replaced. `encryptedData`/`dataIv`/`dataTag`
+      // are carried over byte-for-byte — that is the whole point of this path.
+      _raw: {
+        ...item._raw,
+        encryptedName: encryptedName.encrypted,
+        nameIv: encryptedName.iv,
+        nameTag: encryptedName.tag,
+        updatedAt,
+      },
+    });
     set((state) => ({
-      items: state.items.map((item) => {
-        if (item.id !== id) return item;
-        return {
-          ...item,
-          name,
-          searchHash,
-          updatedAt,
-          // Only the NAME ciphertext is replaced. `encryptedData`/`dataIv`/`dataTag`
-          // are carried over byte-for-byte — that is the whole point of this path.
-          _raw: {
-            ...item._raw,
-            encryptedName: encryptedName.encrypted,
-            nameIv: encryptedName.iv,
-            nameTag: encryptedName.tag,
-            searchHash,
-            updatedAt,
-          },
-        };
-      }),
+      items: state.items.map((item) => (item.id === id ? applyRename(item) : item)),
     }));
+    recordItemPatch(id, applyRename);
   },
 
   // -----------------------------------------------------------------------
@@ -1788,6 +1878,16 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
     // the local rows needs to know what that parent was.
     const deleted = get().folders.find((f) => f.id === id);
     await deleteFolderApi(id, action);
+    // For `mergeAfterFailedWalk`: rows of this folder the walk in flight has not
+    // reloaded yet must leave the list (delete) or the folder (move) as well.
+    if (fetchItemsInFlight !== null) {
+      inFlightFolderEffects.set(
+        id,
+        action === 'delete'
+          ? { action: 'delete' }
+          : { action: 'move', parentId: deleted?.parentId ?? undefined },
+      );
+    }
     set((state) => {
       const base = {
         folders: state.folders.filter((f) => f.id !== id),
@@ -1803,11 +1903,14 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
         };
       }
 
-      // Default/move: clear folderId so items appear in root
+      // Default/move: the server re-parents the members to the deleted folder's
+      // OWN parent (the root when it had none), so the local rows go there too,
+      // exactly as the document store's rows do below.
+      const parentId = deleted?.parentId ?? undefined;
       return {
         ...base,
         items: state.items.map((item) =>
-          item.folderId === id ? { ...item, folderId: undefined } : item,
+          item.folderId === id ? { ...item, folderId: parentId } : item,
         ),
       };
     });
@@ -1864,6 +1967,8 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
     healthGeneration += 1;
     inFlightDeletedItemIds.clear();
     inFlightDeletedTrashIds.clear();
+    inFlightItemPatches.clear();
+    inFlightFolderEffects.clear();
     // Drop cached password-strength scores (keyed by item id + version). They hold
     // no secret, but a fresh session must not reuse the previous vault's scores.
     clearScoreCache();

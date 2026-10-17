@@ -81,6 +81,60 @@ describe('the defect-injection registry', () => {
   });
 });
 
+/**
+ * The two scanner cases, whose evidence has to be narrower than "the gate's
+ * output mentions the package or the file". Both gates fail in the self-test's
+ * workspace for a reason nobody planted as well: the workspace is a fresh
+ * repository whose one baseline commit re-introduces every fixture line
+ * `.gitleaksignore` pins to its ORIGINAL commit, and `osv-scanner
+ * --all-packages` lists every package it read, vulnerable or not. So each
+ * predicate must be satisfied by the planted defect's own finding line and by
+ * nothing else in a run that did not plant it.
+ */
+describe('the scanner cases attribute a failure to the planted defect alone', () => {
+  const gitleaks = DEFECTS['audit:secrets:gitleaks'];
+  const osv = DEFECTS['audit:deps:osv'];
+
+  it('buries the gitleaks plant in history, so it proves the history scan', () => {
+    expect(gitleaks?.requires).toEqual(['gitleaks']);
+    expect(gitleaks?.buryInHistory).toBe(true);
+    const planted = Object.keys(gitleaks?.create ?? {});
+    expect(planted).toHaveLength(1);
+    // A fixture finding from the workspace's baseline commit is not the plant.
+    const fixtureOnly =
+      '  generic-api-key | packages/server/tests/email.test.ts:932 | 0123abc\n' +
+      '✖ gitleaks: 1 unignored finding(s)';
+    expect(gitleaks?.evidence?.(fixtureOnly)).toBe(false);
+    // The plant's own finding line, as `gitleaks-gate.mjs` prints it.
+    const plantedRun = `${fixtureOnly}\n  aws-access-token | ${planted[0] ?? ''}:1 | 4567def`;
+    expect(gitleaks?.evidence?.(plantedRun)).toBe(true);
+  });
+
+  it('plants a vulnerable lockfile entry and accepts only its advisory line', () => {
+    expect(osv?.requires).toEqual(['osv-scanner']);
+    const lockPath = path.join(repoRoot, 'package-lock.json');
+    const lock = JSON.parse(readFileSync(lockPath, 'utf-8')) as {
+      packages: Record<string, { version?: string }>;
+    };
+    // The real lockfile does not carry the package, so the plant is the only copy.
+    expect(Object.keys(lock.packages).filter((key) => key.endsWith('/minimist'))).toEqual([]);
+    const planted = JSON.parse(
+      osv!.mutate!['package-lock.json']!(readFileSync(lockPath, 'utf-8')),
+    ) as {
+      packages: Record<string, { version?: string }>;
+    };
+    expect(planted.packages['node_modules/minimist']?.version).toBe('1.2.5');
+    // Listed as a scanned package is not a finding.
+    const listedOnly =
+      '{"results":[{"packages":[{"package":{"name":"minimist","version":"1.2.5"}}]}]}';
+    expect(osv?.evidence?.(listedOnly)).toBe(false);
+    // `osv-gate.mjs`'s finding line is.
+    expect(osv?.evidence?.('  minimist@1.2.5  GHSA-xvch-5gv4-984h  Prototype Pollution')).toBe(
+      true,
+    );
+  });
+});
+
 describe('the runner', () => {
   it('is a hard error, naming the task, when a registered gate has no defect case', () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'hv-selftest-'));

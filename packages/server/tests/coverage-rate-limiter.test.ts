@@ -14,7 +14,7 @@
  * error message, and the counter documents the limiter actually wrote.
  *
  * Deliberately NOT duplicated here (already covered elsewhere, as pure helpers):
- * `resolveClientKey`/`buildAccountKey`/`buildRefreshKey` unit semantics
+ * `resolveClientKey`/`buildRefreshKey` unit semantics
  * (rate-limit-client-key, account-limiter-key, refresh-limiter-key) and the store
  * internals (rate-limit-store). What is new is that those helpers are exercised
  * THROUGH the real, production-configured limiters end to end.
@@ -352,76 +352,6 @@ describe('production rate limiters (real limiter bodies + real Mongo store)', ()
       const ok = await request(app).get('/t').set('x-forwarded-for', '203.0.113.5');
       expect(ok.status).toBe(200);
       expect(await storedKeys()).toEqual(['csrf:203.0.113.5']);
-    });
-  });
-
-  describe('accountLimiter (email-keyed)', () => {
-    it('a bodyless POST does not throw — it is skipped and counts nothing', async () => {
-      // Express 5 / body-parser 2.x leave `req.body === undefined` here, and
-      // accountLimiter is the first middleware on POST /login to touch the body.
-      // An unguarded read would surface as a 500 instead of Zod's clean 400.
-      const app = createApp(limiters.accountLimiter as RequestHandler);
-
-      const res = await request(app).post('/t').set('x-forwarded-for', '203.0.113.60');
-
-      expect(res.status).toBe(200);
-      expect(await storedKeys()).toEqual([]);
-    });
-
-    it('a text/plain body (not JSON) is likewise skipped without a 500', async () => {
-      const app = createApp(limiters.accountLimiter as RequestHandler);
-
-      const res = await request(app)
-        .post('/t')
-        .set('Content-Type', 'text/plain')
-        .set('x-forwarded-for', '203.0.113.61')
-        .send('email=someone@example.com');
-
-      expect(res.status).toBe(200);
-      expect(await storedKeys()).toEqual([]);
-    });
-
-    it('counts 20 attempts per email then 429s, case-insensitively, on one bucket', async () => {
-      const app = createApp(limiters.accountLimiter as RequestHandler);
-      // Alternate casing AND rotate the source IP: the bucket is the account, so
-      // neither dodge buys the attacker an extra attempt.
-      for (let i = 0; i < 20; i++) {
-        const res = await request(app)
-          .post('/t')
-          .set('x-forwarded-for', `203.0.113.${String(i + 1)}`)
-          .send({ email: i % 2 === 0 ? 'Victim@Example.COM' : 'victim@example.com' });
-        expect(res.status).toBe(200);
-      }
-
-      const blocked = await request(app)
-        .post('/t')
-        .set('x-forwarded-for', '198.51.100.99')
-        .send({ email: 'VICTIM@example.com' });
-
-      expect(blocked.status).toBe(429);
-      expect((blocked.body as { message: string }).message).toBe(
-        'Too many login attempts for this account, please try again later',
-      );
-      expect(await storedKeys()).toEqual(['account:email:victim@example.com']);
-      expect(await counterFor('account:email:victim@example.com')).toBe(21);
-    });
-
-    it('a different email keeps its own budget once another account is exhausted', async () => {
-      const app = createApp(limiters.accountLimiter as RequestHandler);
-      for (let i = 0; i < 21; i++) {
-        await request(app)
-          .post('/t')
-          .set('x-forwarded-for', '203.0.113.70')
-          .send({ email: 'burned@example.com' });
-      }
-
-      const other = await request(app)
-        .post('/t')
-        .set('x-forwarded-for', '203.0.113.70')
-        .send({ email: 'innocent@example.com' });
-
-      expect(other.status).toBe(200);
-      expect(await counterFor('account:email:innocent@example.com')).toBe(1);
     });
   });
 

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import mongoose from 'mongoose';
 
-// `config/index.ts` calls `dotenv.config()` at module scope. Stub it so a
+// `config/envFile.ts` (loaded by `config/index.ts`) calls `dotenv.config()` at module scope. Stub it so a
 // developer's root `.env` cannot leak into (and flip the outcome of) the
 // config-loading cases below — same convention as `tests/config.test.ts`.
 vi.mock('dotenv', () => ({ default: { config: vi.fn() } }));

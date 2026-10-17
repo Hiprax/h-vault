@@ -106,6 +106,13 @@ interface SeedOptions {
   chunks?: number;
   multipart?: boolean;
   expiresAt?: Date;
+  /**
+   * The plaintext bytes the declaration puts in the LAST segment, so the final part
+   * this transfer accepts is exactly this plus one tag. Defaults to 0 for a single
+   * segment (an empty file, whose one part is a bare tag: `putPart`'s default body)
+   * and to 1 for several (the smallest last segment a consistent declaration has).
+   */
+  finalPlaintextBytes?: number;
 }
 
 interface Seeded {
@@ -137,7 +144,9 @@ async function seedUpload(user: TestUser, options: SeedOptions = {}): Promise<Se
     objectKey,
     ...(s3UploadId === undefined ? {} : { s3UploadId }),
     ...FRAMING,
-    declaredPlaintextBytes: (chunks - 1) * DOCUMENT_PLAINTEXT_CHUNK_BYTES + 1,
+    declaredPlaintextBytes:
+      (chunks - 1) * DOCUMENT_PLAINTEXT_CHUNK_BYTES +
+      (options.finalPlaintextBytes ?? (chunks === 1 ? 0 : 1)),
     declaredChunkCount: chunks,
     chunkPlaintextBytes: DOCUMENT_PLAINTEXT_CHUNK_BYTES,
     vaultKeyVersion: 0,
@@ -257,7 +266,7 @@ beforeEach(async () => {
 
 describe('storing a part', () => {
   it('stores a single-segment transfer as ONE whole object, with no engine receipt', async () => {
-    const seeded = await seedUpload(user, { chunks: 1 });
+    const seeded = await seedUpload(user, { chunks: 1, finalPlaintextBytes: 4096 });
     const body = pattern(4096 + DOCUMENT_TAG_BYTES);
 
     const res = await putPart(user, seeded.id, 1, { body });
@@ -308,16 +317,24 @@ describe('storing a part', () => {
     expect(storage.storedKeys()).toEqual([]);
   });
 
-  it('lets the LAST part be short, down to a bare authentication tag', async () => {
-    // A zero-byte final segment seals to exactly one tag. It is legal, and it is
-    // the boundary the non-final rule must not be allowed to swallow.
-    const seeded = await seedUpload(user, { chunks: 2 });
+  it("lets an empty file's one part be a bare authentication tag, the smallest legal part", async () => {
+    // A zero-byte file seals to exactly one tag in one segment. It is legal, and it
+    // is the boundary the exact-size rule must not be allowed to swallow.
+    const seeded = await seedUpload(user, { chunks: 1, finalPlaintextBytes: 0 });
     const body = Buffer.alloc(DOCUMENT_TAG_BYTES, 9);
 
-    const res = await putPart(user, seeded.id, 2, { body });
+    const res = await putPart(user, seeded.id, 1, { body });
 
     expect(res.status, JSON.stringify(res.body)).toBe(200);
     expect((await stateOf(seeded)).receivedBytes).toBe(DOCUMENT_TAG_BYTES);
+
+    // A bare tag as the LAST of several parts is a phantom empty segment no
+    // consistent declaration frames (completion refuses one too), so it is refused
+    // here, before it is stored.
+    const several = await seedUpload(user, { chunks: 2 });
+    const phantom = await putPart(user, several.id, 2, { body });
+    expect(phantom.status, JSON.stringify(phantom.body)).toBe(400);
+    expect(await stateOf(several)).toEqual({ ...UNTOUCHED, storedKeys: [seeded.objectKey] });
   });
 
   it('replaces a re-sent part instead of counting it twice', async () => {
@@ -484,7 +501,7 @@ describe('refusing a part', () => {
   });
 
   it('refuses a part whose bytes do not match the digest the client declared', async () => {
-    const seeded = await seedUpload(user, { chunks: 1 });
+    const seeded = await seedUpload(user, { chunks: 1, finalPlaintextBytes: 2048 });
     const body = pattern(2048 + DOCUMENT_TAG_BYTES);
 
     const res = await putPart(user, seeded.id, 1, {
@@ -543,7 +560,10 @@ describe('refusing a part', () => {
 
   it("refuses another account's upload id and leaves that transfer untouched", async () => {
     const intruder = await createTestUser({ email: 'document-parts-intruder@example.com' });
-    const seeded = await seedUpload(user, { chunks: 1 });
+    const seeded = await seedUpload(user, {
+      chunks: 1,
+      finalPlaintextBytes: 1024 - DOCUMENT_TAG_BYTES,
+    });
 
     const res = await putPart(intruder, seeded.id, 1, { body: pattern(1024) });
 
@@ -594,7 +614,10 @@ describe('refusing a part', () => {
   async function partWhoseRowVanishes(
     before: (seeded: Seeded) => Promise<void>,
   ): Promise<{ seeded: Seeded; res: request.Response }> {
-    const seeded = await seedUpload(user, { chunks: 1 });
+    const seeded = await seedUpload(user, {
+      chunks: 1,
+      finalPlaintextBytes: 1024 - DOCUMENT_TAG_BYTES,
+    });
     const base = storageRef.current!;
     storageRef.current = {
       ...base,
@@ -705,7 +728,10 @@ describe('refusing a part', () => {
     // fire. It is worth having: the ledger entry, `receivedBytes` and the quota are
     // all computed from a length, so a parser, a proxy or a transfer coding that
     // ever broke that correspondence would corrupt every one of them silently.
-    const seeded = await seedUpload(user, { chunks: 1 });
+    const seeded = await seedUpload(user, {
+      chunks: 1,
+      finalPlaintextBytes: 1024 - DOCUMENT_TAG_BYTES,
+    });
     const body = pattern(1024);
     const req = {
       user: { _id: user.id },
@@ -733,6 +759,64 @@ describe('refusing a part', () => {
 // ---------------------------------------------------------------------------
 // The concurrency budget, and where it is mounted
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// I-17: the final part is held to the declaration, exactly
+// ---------------------------------------------------------------------------
+
+describe('the final part is exactly what the declaration frames (I-17)', () => {
+  /** What the declaration of `finalPlaintextBytes` in the last segment requires. */
+  const finalPartFor = (finalPlaintextBytes: number): number =>
+    finalPlaintextBytes + DOCUMENT_TAG_BYTES;
+
+  it('refuses a 900 KB part on a single-part transfer that declared 10 KB', async () => {
+    // Measured during the audit: stored with 200. Completion measures the real size
+    // against the size cap and the quota, but until then the bytes sat in the bucket
+    // beyond the in-flight budget init reserved for the transfer.
+    const seeded = await seedUpload(user, { chunks: 1, finalPlaintextBytes: 10_000 });
+
+    const res = await putPart(user, seeded.id, 1, { body: pattern(900_000) });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(400);
+    expect(String(res.body.message)).toContain(`exactly ${String(finalPartFor(10_000))} bytes`);
+    expect(await stateOf(seeded)).toEqual(UNTOUCHED);
+  });
+
+  it('refuses a full-chunk final part on a two-part transfer whose last segment is short', async () => {
+    const seeded = await seedUpload(user, { chunks: 2, finalPlaintextBytes: 10_000 });
+
+    const res = await putPart(user, seeded.id, 2, { body: fullPart() });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(400);
+    expect(String(res.body.message)).toMatch(/last part/i);
+    expect(await stateOf(seeded)).toEqual(UNTOUCHED);
+  });
+
+  it('refuses a final part one byte SHORT of the declaration, and one byte OVER it', async () => {
+    const seeded = await seedUpload(user, { chunks: 2, finalPlaintextBytes: 10_000 });
+
+    for (const bytes of [finalPartFor(10_000) - 1, finalPartFor(10_000) + 1]) {
+      const res = await putPart(user, seeded.id, 2, { body: pattern(bytes) });
+      expect(res.status, JSON.stringify(res.body)).toBe(400);
+    }
+    expect(await stateOf(seeded)).toEqual(UNTOUCHED);
+  });
+
+  it('accepts the exact final part, of a short last segment and of a full one', async () => {
+    const short = await seedUpload(user, { chunks: 2, finalPlaintextBytes: 10_000 });
+    const res = await putPart(user, short.id, 2, { body: pattern(finalPartFor(10_000)) });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect((await stateOf(short)).receivedBytes).toBe(finalPartFor(10_000));
+
+    // A file that is an exact multiple of the chunk size ends on a FULL segment.
+    const full = await seedUpload(user, {
+      chunks: 2,
+      finalPlaintextBytes: DOCUMENT_PLAINTEXT_CHUNK_BYTES,
+    });
+    const last = await putPart(user, full.id, 2, { body: fullPart() });
+    expect(last.status, JSON.stringify(last.body)).toBe(200);
+  });
+});
 
 describe('the in-flight budget', () => {
   it('holds a slot ACROSS the storage call, and takes it BEFORE the body is parsed', async () => {
@@ -776,7 +860,10 @@ describe('the in-flight budget', () => {
         const holder = await createTestUser({
           email: `document-parts-slot-${String(i)}@example.com`,
         });
-        const seeded = await seedUpload(holder, { chunks: 1 });
+        const seeded = await seedUpload(holder, {
+          chunks: 1,
+          finalPlaintextBytes: 512 + i - DOCUMENT_TAG_BYTES,
+        });
         occupying.push(putPart(holder, seeded.id, 1, { body: pattern(512 + i) }));
       }
       await vi.waitFor(

@@ -6,6 +6,7 @@ import {
   heavyOpLimiter,
   passwordVerifyLimiter,
   vaultItemWriteLimiter,
+  vaultListLimiter,
 } from '../middleware/rateLimiter.js';
 import {
   LARGE_JSON_BODY_LIMIT_BYTES,
@@ -55,8 +56,8 @@ router.use(authenticate);
 
 // ── Item CRUD ────────────────────────────────────────────────────────
 
-router.get('/items', validate(listVaultItemsSchema, 'query'), listItems);
-router.get('/items/trash', validate(listTrashSchema, 'query'), listTrash);
+router.get('/items', vaultListLimiter, validate(listVaultItemsSchema, 'query'), listItems);
+router.get('/items/trash', vaultListLimiter, validate(listTrashSchema, 'query'), listTrash);
 router.get('/items/:id', validateObjectId(), getItem);
 // Every item mutation writes an audit row that is kept for 365 days, so each one
 // carries `vaultItemWriteLimiter` (per user; see its docblock for why it is not
@@ -82,7 +83,8 @@ router.post('/items/bulk-delete', heavyOpLimiter, validate(bulkDeleteSchema, 'bo
 router.post('/items/bulk-move', heavyOpLimiter, validate(bulkMoveSchema, 'body'), bulkMove);
 // The limiter and the admission slot run BEFORE the 30 MB body is read, or they
 // bound nothing (see `middleware/largeBodyAdmission.ts`). The sanitizer runs
-// straight AFTER the parser, because the app-level one ran before this body existed.
+// straight AFTER the parser, because the app-level one ran before this body existed
+// (it filtered only the query).
 router.post(
   '/items/bulk-reencrypt',
   passwordVerifyLimiter,

@@ -96,13 +96,14 @@ function dropRawTextElements(parent: Root | Element): void {
 export interface MarkupRender {
   readonly fragment: DocumentFragment;
   /**
-   * True when the document asks for an image from the network.
+   * True when the document asks for an image by address rather than carrying it.
    *
-   * The policy this document is served under has no http or https source for
-   * `img-src`, so the request never happens — which is INTENDED, because a
-   * remote fetch from a preview is a read receipt for a private file, sent to
-   * whoever wrote the document. It is reported rather than repaired: a reader
-   * who is not told sees only a broken image and blames the viewer.
+   * The policy this document is served under admits only `blob:` and `data:` for
+   * `img-src`, so the request never happens — which is INTENDED: a remote fetch
+   * from a preview is a read receipt for a private file, sent to whoever wrote
+   * the document, and one to this server reached its API. It is reported rather
+   * than repaired: a reader who is not told sees only a broken image and blames
+   * the viewer.
    */
   readonly remoteContent: boolean;
 }
@@ -138,74 +139,129 @@ function hasHighlightableCode(node: Root | Element): boolean {
 }
 
 /**
- * A reference the browser would fetch from an origin other than this document's.
+ * A reference the frame's policy refuses: anything a browser would FETCH.
  *
- * RESOLVED rather than prefix-matched, and that is a correction rather than a
- * refinement. The three `startsWith` calls this replaces read `//`, `http://`
- * and `https://`, which is not the grammar the URL parser implements: after a
- * special scheme's colon, ANY two characters drawn from `/` and `\` enter the
- * authority, so `https:\\host/x` and `https:/\host/x` are the same request as
- * `https://host/x`. `hast-util-sanitize` passes all three, because its protocol
- * check reads only as far as the colon (measured against the installed
- * library), so those spellings survived into the document and the sweep did not
- * see them — the reader got a broken image and no sentence. ONE slash is a
- * relative path and stays local, which is the boundary both spellings sit a
- * single character from, and which is why a wider prefix list would have been
- * another guess rather than a fix.
+ * F-10 made this the whole rule. `img-src` (`server/src/config/sandboxCsp.ts`)
+ * is `blob:` and `data:` and nothing else, so every other address a rendered
+ * document names is withheld — a third party's, this server's own, and a
+ * relative path alike. The predicate used to report a DIFFERENT origin only,
+ * because `img-src 'self'` once fetched the rest; inside a sandboxed document
+ * `'self'` names this server, which is how `![](/api/v1/…)` reached the API.
+ * A stored file has no files beside it, so a relative image was a broken one
+ * then too; now it is refused, and the reader is told.
  *
- * Asking `URL` is exact where any prefix list is an approximation, and it needs
- * no regular expression — which is what the note this replaces was really about
- * (the obvious pattern is flagged by `eslint-plugin-security` as potentially
- * super-linear, and arguing with an analyzer over an input this document does
- * not control is a bad trade).
+ * RESOLVED rather than prefix-matched, because a prefix list is not the grammar
+ * the URL parser implements: after a special scheme's colon ANY two characters
+ * drawn from `/` and `\` enter the authority (`https:\\host/x` is
+ * `https://host/x`), and `hast-util-sanitize` passes those spellings, because its
+ * protocol check reads only as far as the colon (measured against the installed
+ * library). Resolving needs no regular expression either, which the obvious
+ * pattern would (flagged by `eslint-plugin-security` as potentially
+ * super-linear).
  *
- * Scoped to `http:`/`https:` and to a DIFFERENT origin, because the notice is
- * about a third party learning you opened your copy. The document's own origin
- * is what `img-src 'self'` admits, and tells nobody anything; a value `URL`
- * refuses is not a request either.
- *
- * `data:` and `blob:` are excluded for the same reason and NOT because they are
- * blocked — but which mechanism spares them depends on the attribute, and only
- * one of the two ever reaches this function. On `src`, `hast-util-sanitize`'s
- * default schema pins `protocols.src = ['http','https']`, so a `data:` or `blob:`
- * value is STRIPPED before any DOM exists (measured against the installed
- * library) and there is nothing here to classify. On `srcSet` that schema names
- * no protocols at all, so such a candidate survives whole — and `img-src`
- * (`server/src/config/sandboxCsp.ts`) admits both, so it renders. Announcing THAT
- * as blocked would be a lie, which is why the exclusion is stated over the value
- * rather than over the attribute it came from.
+ * Three values make no request and are NOT reported. An empty value fetches
+ * nothing (HTML's image update steps stop there) although it would resolve to
+ * this document's own address. A value `URL` refuses (`http://`) is not a
+ * request. And `data:` and `blob:` are what the policy admits — though which
+ * mechanism spares them depends on the attribute: on `src`, the default sanitize
+ * schema pins `protocols.src = ['http','https']`, so such a value is STRIPPED
+ * before any DOM exists; on `srcSet` that schema names no protocols, so the
+ * candidate survives whole and RENDERS, and announcing it as withheld would be a
+ * lie.
  */
-function isRemoteUrl(value: string, base: URL): boolean {
+function isWithheldReference(value: string, base: URL): boolean {
+  if (value === '') return false;
   let resolved: URL;
   try {
     resolved = new URL(value, base);
   } catch {
     return false;
   }
-  if (resolved.protocol !== 'http:' && resolved.protocol !== 'https:') return false;
-  return resolved.origin !== base.origin;
+  return resolved.protocol !== 'blob:' && resolved.protocol !== 'data:';
+}
+
+/** HTML's ASCII whitespace: tab, line feed, form feed, carriage return, space. */
+function isAsciiWhitespace(character: string): boolean {
+  return (
+    character === ' ' ||
+    character === '\t' ||
+    character === '\n' ||
+    character === '\f' ||
+    character === '\r'
+  );
 }
 
 /**
- * What separates one `srcset` candidate from the next, and a candidate from its
- * descriptor.
+ * The URL of every candidate in a `srcset` value, found the way HTML's own
+ * "parse a srcset attribute" algorithm finds them.
  *
- * A candidate URL may not contain whitespace — that is what makes `srcset`
- * parseable at all — so splitting on runs of whitespace and commas together
- * yields every URL, plus the descriptors (`2x`, `640w`), and a descriptor can
- * never be mistaken for an absolute URL. A URL containing a comma splits into
- * pieces, and the first piece still carries the scheme, which is all
- * {@link isRemoteUrl} reads.
+ * The parse matters more now that EVERY non-inline reference is reported: a
+ * DESCRIPTOR (`2x`, `640w`) mistaken for a URL resolves as a relative path, and
+ * the banner would sit beside every responsive image there is. So, exactly as a
+ * browser does: skip whitespace and commas; take the run of non-whitespace
+ * characters as the URL (a `data:` URL keeps its commas); if that run ends in
+ * commas they end the candidate and are dropped from it, with no descriptors;
+ * otherwise skip the
+ * descriptors up to the next comma that is not inside parentheses. Linear, one
+ * pass, and no regular expression.
  */
-const SRCSET_SEPARATOR = /[\s,]+/;
+function srcsetUrls(value: string): string[] {
+  const urls: string[] = [];
+  let position = 0;
+  while (position < value.length) {
+    while (
+      position < value.length &&
+      (isAsciiWhitespace(value.charAt(position)) || value.charAt(position) === ',')
+    ) {
+      position += 1;
+    }
+    if (position >= value.length) break;
+
+    const start = position;
+    while (position < value.length && !isAsciiWhitespace(value.charAt(position))) position += 1;
+    let end = position;
+    if (value.charAt(end - 1) === ',') {
+      // Trailing commas end the candidate, with no descriptors, and are NOT part
+      // of the URL: kept, they would make `https://host:8443,` or `http://[::1],`
+      // unparseable, and an image the browser does request would go unreported.
+      // The run cannot be ALL commas: the skip above stopped on a character that
+      // is neither a comma nor a space.
+      while (value.charAt(end - 1) === ',') end -= 1;
+      urls.push(value.slice(start, end));
+      continue;
+    }
+    urls.push(value.slice(start, end));
+
+    let inParentheses = false;
+    while (position < value.length) {
+      const character = value.charAt(position);
+      position += 1;
+      if (inParentheses) {
+        if (character === ')') inParentheses = false;
+      } else if (character === '(') {
+        inParentheses = true;
+      } else if (character === ',') {
+        break;
+      }
+    }
+  }
+  return urls;
+}
 
 /**
- * Does this element ask the browser for something off the network?
+ * Does this element ask the browser for something the policy will refuse?
  *
  * Both attributes on every element, rather than one attribute per tag name,
  * because the pairing is what a per-tag rule keeps getting wrong: `srcset` is a
- * LIST, and its remote candidate is very often not the first one, so testing the
- * whole attribute value finds nothing for `srcset="local.png 1x, https://… 2x"`.
+ * LIST, and its fetched candidate is very often not the first one, so testing the
+ * whole attribute value finds nothing for `srcset="inline 1x, https://… 2x"`. An
+ * ABSENT attribute is no reference; `getAttribute` says so with `null`.
+ *
+ * It can over-report one shape: a `<picture>` whose `<source>` the browser
+ * selects, beside an `<img src>` fallback that is therefore never fetched. Which
+ * candidate a browser picks depends on media queries and formats the frame
+ * cannot evaluate here, and the fallback IS an image this document refers to and
+ * that is not loaded, so the sentence stays true.
  *
  * `HTMLElement` and not `Element`: this module imports `Element` FROM HAST, so
  * the bare name means a syntax tree node here — the same trap
@@ -213,10 +269,11 @@ const SRCSET_SEPARATOR = /[\s,]+/;
  * vitest suite never could.
  */
 function referencesRemoteContent(element: HTMLElement, base: URL): boolean {
-  if (isRemoteUrl(element.getAttribute('src') ?? '', base)) return true;
-  return (element.getAttribute('srcset') ?? '')
-    .split(SRCSET_SEPARATOR)
-    .some((candidate) => isRemoteUrl(candidate, base));
+  const src = element.getAttribute('src');
+  if (src !== null && isWithheldReference(src, base)) return true;
+  return srcsetUrls(element.getAttribute('srcset') ?? '').some((url) =>
+    isWithheldReference(url, base),
+  );
 }
 
 /**
@@ -401,16 +458,15 @@ export async function renderSanitizedMarkup(doc: Document, tree: Root): Promise<
   // the thing that decides which elements can carry these and it is not ours: it
   // allows `source[srcSet]` today and admits nothing else, but a version that
   // also allowed `source[src]`, or `img[srcSet]`, would silently reopen this. The
-  // sweep costs one pass. `blob:`, `data:`, every relative path and the
-  // document's OWN origin all fail {@link isRemoteUrl}, so an ordinary README
-  // raises nothing. The one shape it can over-report is a `data:` candidate in a
-  // `srcset` whose payload carries a raw comma — which is not a legal candidate,
-  // and which a browser splits the same way, so the banner would sit beside an
-  // image it had already failed to select.
+  // sweep costs one pass. `blob:`, `data:`, an empty value and one `URL` refuses
+  // all fail {@link isWithheldReference}, so a document carrying its pictures
+  // inline raises nothing; every address it would have to FETCH raises the
+  // notice, this server's own included.
   //
-  // Telling the reader is the ENTIRE fix. `img-src` in
-  // `packages/server/src/config/sandboxCsp.ts` names no host and must not gain
-  // one; the request is already blocked, and what was missing was the sentence.
+  // Telling the reader is the ENTIRE fix here. `img-src` in
+  // `packages/server/src/config/sandboxCsp.ts` names no host and no `'self'`, and
+  // must not gain either; the request is already blocked, and what was missing
+  // was the sentence.
   // Parsed once. Every candidate is resolved against it, and that resolution is
   // the only per-element cost in this loop.
   const base = new URL(doc.baseURI);
@@ -421,6 +477,6 @@ export async function renderSanitizedMarkup(doc: Document, tree: Root): Promise<
   return { fragment, remoteContent };
 }
 
-/** The sentence a reader sees when a document asks for something off the network. */
+/** The sentence a reader sees when a document refers to images it does not carry. */
 export const REMOTE_CONTENT_NOTICE =
-  'This document links to images stored somewhere else on the internet. They are not loaded: fetching one would tell whoever wrote the document that you opened your copy.';
+  'This document refers to images that are not stored inside it. They are not loaded: a preview fetches no image from the network, so nobody, including whoever wrote the document, learns that you opened your copy.';

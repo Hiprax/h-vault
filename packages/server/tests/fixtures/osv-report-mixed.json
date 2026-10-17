@@ -1,0 +1,174 @@
+{
+  "results": [
+    {
+      "source": { "path": "/recorded/package-lock.json", "type": "lockfile" },
+      "packages": [
+        {
+          "package": { "name": "braces", "version": "3.0.3", "ecosystem": "npm" },
+          "dependency_groups": ["dev"],
+          "groups": [
+            {
+              "ids": ["GHSA-vfj7-8cjw-p6xm"],
+              "aliases": ["CVE-2026-93687", "GHSA-vfj7-8cjw-p6xm"],
+              "max_severity": "8.7"
+            }
+          ],
+          "vulnerabilities": [
+            {
+              "affected": [
+                {
+                  "database_specific": {
+                    "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2026/09/GHSA-vfj7-8cjw-p6xm/GHSA-vfj7-8cjw-p6xm.json"
+                  },
+                  "package": { "ecosystem": "npm", "name": "braces", "purl": "pkg:npm/braces" },
+                  "ranges": [
+                    {
+                      "events": [{ "introduced": "0" }, { "last_affected": "3.0.3" }],
+                      "type": "SEMVER"
+                    }
+                  ]
+                }
+              ],
+              "aliases": ["CVE-2026-93687"],
+              "database_specific": {
+                "cwe_ids": ["CWE-674"],
+                "github_reviewed": true,
+                "github_reviewed_at": "2026-10-02T22:36:33Z",
+                "nvd_published_at": "2026-09-18T16:17:15Z",
+                "severity": "HIGH"
+              },
+              "details": "braces through 3.0.3 contains a stack overflow vulnerability in the recursive AST walkers that lack depth guards. Attackers can supply deeply nested brace patterns under the character limit to exhaust the call stack and terminate the Node.js process with an uncaught RangeError.",
+              "id": "GHSA-vfj7-8cjw-p6xm",
+              "modified": "2026-10-02T22:45:04.328737432Z",
+              "published": "2026-09-18T18:31:41Z",
+              "references": [
+                { "type": "ADVISORY", "url": "https://nvd.nist.gov/vuln/detail/CVE-2026-93687" },
+                { "type": "WEB", "url": "https://github.com/micromatch/braces/issues/70" },
+                { "type": "PACKAGE", "url": "https://github.com/micromatch/braces" },
+                {
+                  "type": "WEB",
+                  "url": "https://github.com/micromatch/braces/blob/3.0.3/lib/compile.js#L49-L53"
+                },
+                {
+                  "type": "WEB",
+                  "url": "https://github.com/micromatch/braces/blob/3.0.3/lib/expand.js#L102-L105"
+                },
+                {
+                  "type": "WEB",
+                  "url": "https://github.com/micromatch/braces/blob/3.0.3/lib/parse.js#L38-L40"
+                },
+                {
+                  "type": "WEB",
+                  "url": "https://www.vulncheck.com/advisories/braces-through-3.0.3-stack-overflow-via-deeply-nested-patterns"
+                }
+              ],
+              "schema_version": "1.9.0",
+              "severity": [
+                { "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H", "type": "CVSS_V3" },
+                {
+                  "score": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N",
+                  "type": "CVSS_V4"
+                }
+              ],
+              "summary": "braces vulnerable to stack-exhaustion denial of service through deeply nested patterns"
+            }
+          ]
+        },
+        {
+          "package": { "name": "minimist", "version": "1.2.5", "ecosystem": "npm" },
+          "dependency_groups": ["dev"],
+          "groups": [
+            {
+              "ids": ["GHSA-xvch-5gv4-984h"],
+              "aliases": ["CVE-2021-44906", "GHSA-xvch-5gv4-984h"],
+              "max_severity": "9.8"
+            }
+          ],
+          "vulnerabilities": [
+            {
+              "affected": [
+                {
+                  "database_specific": {
+                    "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2022/03/GHSA-xvch-5gv4-984h/GHSA-xvch-5gv4-984h.json"
+                  },
+                  "package": { "ecosystem": "npm", "name": "minimist", "purl": "pkg:npm/minimist" },
+                  "ranges": [
+                    {
+                      "events": [{ "introduced": "1.0.0" }, { "fixed": "1.2.6" }],
+                      "type": "SEMVER"
+                    }
+                  ]
+                },
+                {
+                  "database_specific": {
+                    "source": "https://github.com/github/advisory-database/blob/main/advisories/github-reviewed/2022/03/GHSA-xvch-5gv4-984h/GHSA-xvch-5gv4-984h.json"
+                  },
+                  "package": { "ecosystem": "npm", "name": "minimist", "purl": "pkg:npm/minimist" },
+                  "ranges": [
+                    { "events": [{ "introduced": "0" }, { "fixed": "0.2.4" }], "type": "SEMVER" }
+                  ]
+                }
+              ],
+              "aliases": ["CVE-2021-44906"],
+              "database_specific": {
+                "cwe_ids": ["CWE-1321"],
+                "github_reviewed": true,
+                "github_reviewed_at": "2022-03-18T23:13:40Z",
+                "nvd_published_at": "2022-03-17T16:15:00Z",
+                "severity": "CRITICAL"
+              },
+              "details": "Minimist prior to 1.2.6 and 0.2.4 is vulnerable to Prototype Pollution via file `index.js`, function `setKey()` (lines 69-95).",
+              "id": "GHSA-xvch-5gv4-984h",
+              "modified": "2026-03-13T22:11:59.523514Z",
+              "published": "2022-03-18T00:01:09Z",
+              "references": [
+                { "type": "ADVISORY", "url": "https://nvd.nist.gov/vuln/detail/CVE-2021-44906" },
+                { "type": "WEB", "url": "https://github.com/minimistjs/minimist/issues/11" },
+                { "type": "WEB", "url": "https://github.com/substack/minimist/issues/164" },
+                { "type": "WEB", "url": "https://github.com/minimistjs/minimist/pull/24" },
+                {
+                  "type": "WEB",
+                  "url": "https://github.com/minimistjs/minimist/commit/34e20b8461118608703d6485326abbb8e35e1703"
+                },
+                {
+                  "type": "WEB",
+                  "url": "https://github.com/minimistjs/minimist/commit/bc8ecee43875261f4f17eb20b1243d3ed15e70eb"
+                },
+                {
+                  "type": "WEB",
+                  "url": "https://github.com/minimistjs/minimist/commit/c2b981977fa834b223b408cfb860f933c9811e4d"
+                },
+                {
+                  "type": "WEB",
+                  "url": "https://github.com/minimistjs/minimist/commit/ef9153fc52b6cea0744b2239921c5dcae4697f11"
+                },
+                {
+                  "type": "WEB",
+                  "url": "https://github.com/Marynk/JavaScript-vulnerability-detection/blob/main/minimist%20PoC.zip"
+                },
+                { "type": "WEB", "url": "https://github.com/minimistjs/minimist/commits/v0.2.4" },
+                { "type": "PACKAGE", "url": "https://github.com/substack/minimist" },
+                {
+                  "type": "WEB",
+                  "url": "https://github.com/substack/minimist/blob/master/index.js#L69"
+                },
+                { "type": "WEB", "url": "https://security.netapp.com/advisory/ntap-20240621-0006" },
+                { "type": "WEB", "url": "https://snyk.io/vuln/SNYK-JS-MINIMIST-559764" },
+                {
+                  "type": "WEB",
+                  "url": "https://stackoverflow.com/questions/8588563/adding-custom-properties-to-a-function/20278068#20278068"
+                }
+              ],
+              "schema_version": "1.9.0",
+              "severity": [
+                { "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H", "type": "CVSS_V3" }
+              ],
+              "summary": "Prototype Pollution in minimist"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "experimental_config": { "licenses": { "summary": false, "allowlist": null } }
+}

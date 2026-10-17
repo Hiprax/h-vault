@@ -25,6 +25,10 @@ import { APPLICATION_PERMISSIONS_POLICY } from './config/permissionsPolicy.js';
 import { doubleCsrfProtection, csrfTokenHandler } from './middleware/csrf.js';
 import { csrfLimiter, metricsLimiter } from './middleware/rateLimiter.js';
 import { sanitizeRequestBody } from './middleware/sanitizeBody.js';
+import { refuseParameterLimitErrors } from './middleware/parameterLimits.js';
+import { apiNoStore } from './middleware/apiCacheControl.js';
+import { refuseCrossSiteRequests } from './middleware/fetchMetadata.js';
+import { createProxyTrustDetector } from './utils/deploymentChecks.js';
 import swaggerUi from 'swagger-ui-express';
 import { swaggerSpec } from './config/swagger.js';
 import { warnIfSwaggerEnabledInProduction } from './utils/swaggerWarning.js';
@@ -51,6 +55,17 @@ const app = express();
 if (config.TRUST_PROXY) {
   app.set('trust proxy', config.TRUST_PROXY);
 }
+
+// Says so, once, when a production server receives proxied requests while trusting
+// no proxy (every client would share the proxy's rate-limit bucket and audit
+// address). Changes nothing about the request. `utils/deploymentChecks.ts`.
+app.use(
+  createProxyTrustDetector({
+    nodeEnv: config.NODE_ENV,
+    trustProxy: config.TRUST_PROXY,
+    logger: createModuleLogger('app'),
+  }),
+);
 
 // Generate per-request CSP nonce
 app.use((_req: Request, res: Response, next: NextFunction) => {
@@ -145,6 +160,23 @@ app.use((_req: Request, res: Response, next: NextFunction) => {
   next();
 });
 
+// Nothing the API answers may be kept by a cache (`middleware/apiCacheControl.ts`).
+// Mounted HERE, ahead of CORS, the body parsers, CSRF and every router, so an answer
+// produced by any of them (a preflight, a malformed-JSON 400, a CSRF 403, the error
+// handler) carries it. ETags are deliberately LEFT ON (no `app.set('etag', false)`):
+// that switch is app-wide, so it would also strip the SPA shell (sent with no
+// lifetime, so revalidated) and the sandbox document (`no-cache`) of the validator
+// that makes their revalidation cheap, while an ETag on a `no-store` answer is simply
+// never used.
+app.use('/api/v1', apiNoStore);
+
+// No API handler runs for a request a browser marks `Sec-Fetch-Site: cross-site`,
+// which is what every request from the isolated document's opaque origin is
+// (`middleware/fetchMetadata.ts`). After `apiNoStore`, so the refusal is never
+// cached; ahead of CORS, the parsers, CSRF and every router, so a cross-site
+// preflight is refused rather than answered and nothing is parsed for it.
+app.use('/api/v1', refuseCrossSiteRequests);
+
 app.use(
   cors({
     origin: config.CORS_ORIGIN,
@@ -190,22 +222,30 @@ app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 // Cookie parsing
 app.use(cookieParser());
 
-// MongoDB operator injection and prototype-pollution prevention, over every body the
-// global parser above produced. This mount does NOT cover the routes in
-// `CUSTOM_BODY_LIMIT_PATHS`: their body is still unparsed here, so each of them
-// mounts the same middleware again straight after its own parser, and
-// `tests/route-table.test.ts` fails any route-level JSON parser that is not followed
-// by it. See `middleware/sanitizeBody.ts` for why only the body is filtered.
-app.use(sanitizeRequestBody);
-
-// HTTP Parameter Pollution protection
+// HTTP Parameter Pollution protection. Besides collapsing a repeated parameter to its
+// last value, `hppx` EXPANDS dotted and bracketed keys (`a[b]=`, `a.b=`) into nested
+// objects, in the query and in a urlencoded body. Past its bounds (20 levels, 5,000
+// keys) it throws; `refuseParameterLimitErrors` answers exactly those as the 400 they
+// are and passes every other error on (`middleware/parameterLimits.ts`).
 app.use(
-  hppx({
-    whitelist: ['tags', 'ids'],
-    mergeStrategy: 'keepLast',
-    sources: ['query', 'body'],
-  }),
+  refuseParameterLimitErrors(
+    hppx({
+      whitelist: ['tags', 'ids'],
+      mergeStrategy: 'keepLast',
+      sources: ['query', 'body'],
+    }),
+  ),
 );
+
+// MongoDB operator injection and prototype-pollution prevention, over the query and
+// every body the global parsers produced. It runs AFTER `hppx`, never before: the
+// expansion above is what turns `folderId[$ne]=x` into an operator, and a filter
+// that ran first judged the flat key and let it through. This mount does NOT cover
+// the routes in `CUSTOM_BODY_LIMIT_PATHS`: their body is still unparsed here, so
+// each of them mounts the same middleware again straight after its own parser, and
+// `tests/route-table.test.ts` fails any route-level JSON parser that is not followed
+// by it. `tests/input-filter-order.test.ts` pins this order over the wire.
+app.use(sanitizeRequestBody);
 
 // Passport
 app.use(passport.initialize());
@@ -255,6 +295,8 @@ app.use(
       'token',
       'tempToken',
       'code',
+      // An invitation to register: it admits its address on its own, once.
+      'invitationToken',
       // A restore's entire backup file, as ONE JSON string. It carries
       // `encryptedVaultKey`, `encryptedBWK` and `bwkEncryptedVaultKey` inside it,
       // near the start, where key-by-key masking cannot reach: the string is masked

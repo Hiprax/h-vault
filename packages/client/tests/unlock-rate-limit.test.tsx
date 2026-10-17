@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
+import { ACCOUNT_LOCKED_MESSAGE } from '../src/services/auth/sessionFailure';
 import { AxiosError, AxiosHeaders } from 'axios';
 import { UnlockScreen } from '../src/components/auth/UnlockScreen';
 import { useAuthStore } from '../src/stores/authStore';
@@ -482,13 +483,14 @@ describe('unlock — transient failures must not cost the user their session', (
     expect(mockLogout).not.toHaveBeenCalled();
   });
 
-  it('a LOCKED account on the REFRESH keeps the session and explains itself', async () => {
-    // The one authoritative refusal that is not a dead session. The refresh
-    // handler evaluates the account before it claims the presented token, so the
-    // refresh cookie is untouched and the lockout lifts by its own deadline or by
-    // the emailed unlock link. `endSession()` here would call `POST /auth/logout`
-    // and delete that row — the client finishing the destruction the server was
-    // careful to avoid.
+  it('an ACCOUNT_LOCKED answer on the REFRESH keeps the session and explains itself', async () => {
+    // The one authoritative refusal that is never a dead session. The server no
+    // longer refuses a refresh for a locked factor (F-03), so this pins the
+    // client invariant `isSessionGone` keeps: were the code to arrive,
+    // `endSession()` would call `POST /auth/logout` and delete a session nobody
+    // ended. The sentence now comes from `getApiErrorMessage` (the lockout branch
+    // of `describeTransientFailure` was removed as dead), and still names the
+    // unlock link.
     vi.mocked(performTokenRefresh).mockRejectedValueOnce(
       axiosStatusError(403, {}, { success: false, message: 'ACCOUNT_LOCKED' }),
     );
@@ -501,7 +503,7 @@ describe('unlock — transient failures must not cost the user their session', (
     submit();
 
     await waitFor(() => {
-      expect(screen.getByText(/temporarily locked/i)).toBeInTheDocument();
+      expect(screen.getByText(ACCOUNT_LOCKED_MESSAGE)).toBeInTheDocument();
     });
 
     expect(mockLogout).not.toHaveBeenCalled();

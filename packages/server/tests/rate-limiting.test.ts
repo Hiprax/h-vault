@@ -5,7 +5,6 @@ import app from '../src/app.js';
 import {
   authLimiter,
   refreshLimiter,
-  accountLimiter,
   tokenVerifyLimiter,
   heavyOpLimiter,
   importLimiter,
@@ -324,14 +323,16 @@ describe('Rate limiting middleware chain (Phase 7 fixes)', () => {
     });
   });
 
-  // ── 7.7 — accountLimiter skips when email missing ─────────────
+  // ── 7.7 — POST /login without an email ──────────────────────────
+  // (Once the per-account limiter's email-missing fallback; that limiter was
+  // removed by F-04 and the route must still answer these cleanly.)
 
-  describe('7.7 — accountLimiter email-missing fallback', () => {
+  describe('7.7 — POST /login email-missing and wrong-password paths', () => {
     it('should still process login without email (validation rejects it)', async () => {
       const { csrfToken, csrfCookie } = await getCsrf(agent);
 
-      // Send login without email — accountLimiter skips, request reaches
-      // validation middleware which rejects it with 400.
+      // Send login without email — the request reaches validation, which
+      // rejects it with 400.
       const res = await agent
         .post('/api/v1/auth/login')
         .set('x-csrf-token', csrfToken)
@@ -342,7 +343,7 @@ describe('Rate limiting middleware chain (Phase 7 fixes)', () => {
       expect(res.status).toBe(400);
     });
 
-    it('should still process login with valid email through accountLimiter', async () => {
+    it('should still process login with a valid email', async () => {
       const { csrfToken, csrfCookie } = await getCsrf(agent);
 
       const res = await agent
@@ -624,7 +625,6 @@ describe('Rate limiter route wiring (structural)', () => {
   // [describe-label, HTTP method, router-relative path, limiter reference]
   const wirings: [string, string, string, unknown][] = [
     ['authLimiter on POST /auth/login', 'post', '/login', authLimiter],
-    ['accountLimiter on POST /auth/login', 'post', '/login', accountLimiter],
     ['refreshLimiter on POST /auth/refresh', 'post', '/refresh', refreshLimiter],
     ['authLimiter on POST /auth/login/2fa', 'post', '/login/2fa', authLimiter],
     ['tokenVerifyLimiter on POST /auth/login/2fa', 'post', '/login/2fa', tokenVerifyLimiter],

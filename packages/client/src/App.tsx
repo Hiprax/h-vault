@@ -33,6 +33,7 @@ const VaultHealthPage = lazy(() => import('./pages/VaultHealthPage'));
 const VerifyEmailPage = lazy(() => import('./pages/VerifyEmailPage'));
 const ResetPasswordPage = lazy(() => import('./pages/ResetPasswordPage'));
 const UnlockAccountPage = lazy(() => import('./pages/UnlockAccountPage'));
+const ConfirmRecipientPage = lazy(() => import('./pages/ConfirmRecipientPage'));
 const NotFoundPage = lazy(() => import('./pages/NotFoundPage'));
 
 /**
@@ -138,6 +139,7 @@ export function App() {
               <Route path="/verify-email" element={<VerifyEmailPage />} />
               <Route path="/reset-password" element={<ResetPasswordPage />} />
               <Route path="/unlock-account" element={<UnlockAccountPage />} />
+              <Route path="/backup/confirm-recipient" element={<ConfirmRecipientPage />} />
 
               {/* Catch-all */}
               <Route path="*" element={<NotFoundPage />} />

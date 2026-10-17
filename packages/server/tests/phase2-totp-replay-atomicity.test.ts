@@ -19,7 +19,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import request from 'supertest';
 import bcrypt from 'bcryptjs';
-import jwt from 'jsonwebtoken';
 import { TOTP, Secret } from 'otpauth';
 import { CryptoManager } from '@hiprax/crypto';
 import app from '../src/app.js';
@@ -28,9 +27,9 @@ import { RefreshToken } from '../src/models/RefreshToken.js';
 import {
   createTestUser,
   authHeader,
-  deriveTestPurposeKey,
   getCsrf,
   type TestUser,
+  signTwoFactorChallenge,
 } from './helpers.js';
 
 const API = '/api/v1';
@@ -55,10 +54,8 @@ async function enable2faForUser(userId: string): Promise<Secret> {
 }
 
 /** Mints a 2fa_temp token (no device binding) for login/2fa. */
-function makeTempToken(userId: string): string {
-  return jwt.sign({ userId, purpose: '2fa_temp' }, deriveTestPurposeKey('2fa_temp'), {
-    expiresIn: '5m',
-  });
+async function makeTempToken(userId: string): Promise<string> {
+  return signTwoFactorChallenge({ userId, purpose: '2fa_temp' });
 }
 
 /** Generates the current valid TOTP for a secret. */
@@ -104,7 +101,7 @@ describe('Phase 2 — Atomic TOTP replay guard', () => {
           .post(`${API}/auth/login/2fa`)
           .set('x-csrf-token', csrf.token)
           .set('Cookie', csrf.cookie)
-          .send({ tempToken: makeTempToken(user.id), code });
+          .send({ tempToken: await makeTempToken(user.id), code });
       };
 
       const [first, second] = await Promise.all([fire(), fire()]);
@@ -144,7 +141,7 @@ describe('Phase 2 — Atomic TOTP replay guard', () => {
           .post(`${API}/auth/login/2fa`)
           .set('x-csrf-token', csrf.token)
           .set('Cookie', csrf.cookie)
-          .send({ tempToken: makeTempToken(user.id), code });
+          .send({ tempToken: await makeTempToken(user.id), code });
       };
 
       const first = await login();

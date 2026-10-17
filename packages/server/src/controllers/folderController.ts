@@ -14,13 +14,16 @@ import {
   resolveVaultKeyVersion,
 } from '../utils/controllerHelpers.js';
 import { createdRowId, isDuplicateIdError, ROW_ID_TAKEN_MESSAGE } from '../utils/rowIds.js';
+import {
+  createCountedRow,
+  deleteCountedRow,
+  reserveVaultWrite,
+  settleVaultWrite,
+  updateCountedRow,
+} from '../utils/vaultQuota.js';
 import { getAncestorChain, hasCycle } from '../utils/folderGraph.js';
 import { supportsTransactions } from '../utils/transactionSupport.js';
-import {
-  deleteFolderQuerySchema,
-  MAX_FOLDERS_PER_USER,
-  MAX_FOLDER_NESTING_DEPTH,
-} from '@hvault/shared';
+import { deleteFolderQuerySchema, MAX_FOLDER_NESTING_DEPTH } from '@hvault/shared';
 import type { CreateFolderInput, UpdateFolderInput, ReorderFolderInput } from '@hvault/shared';
 
 const logger = createModuleLogger('folder-controller');
@@ -33,7 +36,6 @@ const ALLOWED_CREATE_FOLDER_FIELDS = new Set([
   'encryptedName',
   'nameIv',
   'nameTag',
-  'searchHash',
   'parentId',
   'icon',
   'color',
@@ -44,12 +46,18 @@ const ALLOWED_UPDATE_FOLDER_FIELDS = new Set([
   'encryptedName',
   'nameIv',
   'nameTag',
-  'searchHash',
   'parentId',
   'icon',
   'color',
   'sortOrder',
 ]);
+
+/**
+ * The folder update fields that carry ciphertext: a rename. An update without them changed only where the folder sits or how it
+ * looks, and its audit row says so (`contentChanged: false`) — see
+ * `vaultController`'s `ITEM_CONTENT_FIELDS` for why.
+ */
+const FOLDER_CONTENT_FIELDS = ['encryptedName', 'nameIv', 'nameTag'] as const;
 
 /**
  * Validates that adding a folder under `parentId` would not exceed
@@ -117,7 +125,7 @@ export const listFolders = catchAsync(async (req: Request, res: Response): Promi
   const userId = getUserId(req);
 
   const folders = await Folder.find({ userId })
-    .select('-userId -sourceRefId')
+    .select('-userId -sourceRefId -searchHash')
     .sort({ sortOrder: 1 })
     .lean();
 
@@ -142,14 +150,6 @@ export const createFolder = catchAsync(async (req: Request, res: Response): Prom
   // full is in `vaultController.createItem`.
   if ((await resolveVaultKeyVersion(res, userId, body.vaultKeyVersion)) === null) return;
 
-  // Enforce per-user folder count limit
-  const folderCount = await Folder.countDocuments({ userId });
-  if (folderCount >= MAX_FOLDERS_PER_USER) {
-    throw httpErrors.badRequest(
-      `Folder limit reached. You can have a maximum of ${String(MAX_FOLDERS_PER_USER)} folders.`,
-    );
-  }
-
   // Validate parentId belongs to the authenticated user (IDOR prevention)
   if (body.parentId) {
     const parentExists = await Folder.exists({ _id: body.parentId, userId });
@@ -164,21 +164,18 @@ export const createFolder = catchAsync(async (req: Request, res: Response): Prom
   // Spread in by name, past the allowlist, for the reason `createdRowId` gives.
   const rowId = await createdRowId(userId, body.idNonce);
 
+  // Counted against the account's byte quota (F-24) and the per-user folder cap
+  // (F-15) in one conditional reservation before the insert, like an item: the
+  // cap is never a count read here and trusted by the insert after it.
+  const folderData = { ...filteredBody, ...rowId, userId };
   let folder;
   try {
-    folder = await Folder.create({
-      ...filteredBody,
-      ...rowId,
-      userId,
-    });
+    folder = await createCountedRow('folder', userId, folderData, () => Folder.create(folderData));
   } catch (err: unknown) {
-    // Two unique indexes can refuse this insert, and they mean different things:
-    // the derived `_id` (a retried create) and `(userId, searchHash)` (a name this
-    // account already uses). The id is told apart by the index it violated.
+    // The derived `_id` is the one unique index a folder insert can violate (a
+    // retried create). Two folders may share a name: no keyed hash of it is
+    // stored (F-12), so there is nothing to compare names by.
     if (isDuplicateIdError(err)) throw httpErrors.conflict(ROW_ID_TAKEN_MESSAGE);
-    if (err instanceof Error && 'code' in err && (err as { code?: number }).code === 11000) {
-      throw httpErrors.conflict('A folder with this name already exists');
-    }
     throw err;
   }
 
@@ -258,6 +255,7 @@ export const updateFolder = catchAsync(async (req: Request, res: Response): Prom
   }
 
   const filteredBody = pickAllowedFields(body, ALLOWED_UPDATE_FOLDER_FIELDS);
+  const contentChanged = FOLDER_CONTENT_FIELDS.some((field) => Object.hasOwn(filteredBody, field));
 
   // When parentId is explicitly null, use $unset so the field is removed from the
   // document entirely — matching the behaviour of deleteFolder's child-folder
@@ -272,24 +270,16 @@ export const updateFolder = catchAsync(async (req: Request, res: Response): Prom
     updateOp.$set = filteredBody;
   }
 
-  let folder;
-  try {
-    folder = await Folder.findOneAndUpdate({ _id: id, userId }, updateOp, {
-      returnDocument: 'after',
-      runValidators: true,
-    })
-      .select('-userId -sourceRefId')
-      .lean();
-  } catch (err: unknown) {
-    if (err instanceof Error && 'code' in err && (err as { code?: number }).code === 11000) {
-      throw httpErrors.conflict('A folder with this name already exists');
-    }
-    throw err;
-  }
+  // Through the quota (F-24): a rename that grows the row is reserved first, the
+  // write is pinned on the row it measured, and the change is settled. No unique
+  // index covers a field an update can write, so a rename never conflicts.
+  const updated = await updateCountedRow({ kind: 'folder', userId, id, update: updateOp });
 
-  if (!folder) {
+  if (!updated) {
     throw httpErrors.notFound('Folder not found');
   }
+  // Without its owner, its restore provenance and a residual name hash (F-12).
+  const { userId: _owner, sourceRefId: _sourceRefId, searchHash: _searchHash, ...folder } = updated;
 
   // The pre-write circular check above and this write are not atomic. Two
   // concurrent re-parents (A → B and B → A) can each pass their own check
@@ -325,7 +315,7 @@ export const updateFolder = catchAsync(async (req: Request, res: Response): Prom
   await createAuditLog(
     userId,
     'folder_update',
-    { folderId: id },
+    { folderId: id, contentChanged },
     updateCtx.ip,
     updateCtx.userAgent,
   );
@@ -362,11 +352,23 @@ export const deleteFolder = catchAsync(async (req: Request, res: Response): Prom
   // `tests/topology-predicate.test.ts`).
   const useTransaction = supportsTransactions(mongoose.connection);
 
+  // Touch first (F-24): the folder row is counted, so its removal is subtracted
+  // once it is gone, by the bytes the database measured on the row it removed,
+  // and from the folder cap's count (F-15): without that, the count only grew and
+  // `MAX_FOLDERS_PER_USER` folders would become a lifetime limit.
+  const reservation = await reserveVaultWrite(userId, { bytes: 0 });
+  let folderBytes = 0;
+  let foldersRemoved = 0;
+
   const session = useTransaction ? await mongoose.startSession() : null;
   const sessionOpt = session ? { session } : {};
 
   try {
     const execute = async (): Promise<void> => {
+      // Reset per attempt: `withTransaction` may run this again after a transient
+      // error, and the aborted attempt removed nothing.
+      folderBytes = 0;
+      foldersRemoved = 0;
       // The folder's MEMBERS are vault items and documents, and both are treated
       // identically: `action=delete` trashes them, `action=move` re-parents them
       // to this folder's parent or to the root. Writing the filter and the update
@@ -398,8 +400,14 @@ export const deleteFolder = catchAsync(async (req: Request, res: Response): Prom
         : { $unset: { parentId: 1 } };
       await Folder.updateMany({ parentId: id, userId }, parentUpdate, sessionOpt);
 
-      // Delete the folder itself
-      await Folder.deleteOne({ _id: id, userId }, sessionOpt);
+      // Delete the folder itself, measured by the database as it goes.
+      const gone = await deleteCountedRow(
+        'folder',
+        { _id: new mongoose.Types.ObjectId(id), userId: new mongoose.Types.ObjectId(userId) },
+        session ?? undefined,
+      );
+      folderBytes = gone?.counted ?? 0;
+      foldersRemoved = gone ? 1 : 0;
     };
 
     if (session) {
@@ -407,6 +415,11 @@ export const deleteFolder = catchAsync(async (req: Request, res: Response): Prom
     } else {
       await execute();
     }
+    // Only now is the removal certain: the transaction committed (or, standalone,
+    // the folder's delete, the last step, ran). A transaction that threw removed
+    // nothing, or nothing anyone can be sure of, so it subtracts nothing; an
+    // overcount is what the hourly recount corrects.
+    await settleVaultWrite(reservation, -folderBytes, { folders: -foldersRemoved });
   } finally {
     if (session) {
       await session.endSession();
@@ -480,23 +493,27 @@ export const reorderFolder = catchAsync(async (req: Request, res: Response): Pro
   const { id } = req.params as { id: string };
   const { sortOrder } = req.body as ReorderFolderInput;
 
-  const folder = await Folder.findOneAndUpdate(
-    { _id: id, userId },
-    { $set: { sortOrder } },
-    { returnDocument: 'after', runValidators: true },
-  )
-    .select('-userId -sourceRefId')
-    .lean();
+  // A position is a counted field (F-24): through the quota like any other change.
+  const updated = await updateCountedRow({
+    kind: 'folder',
+    userId,
+    id,
+    update: { $set: { sortOrder } },
+  });
 
-  if (!folder) {
+  if (!updated) {
     throw httpErrors.notFound('Folder not found');
   }
+  // Without its owner, its restore provenance and a residual name hash (F-12).
+  const { userId: _owner, sourceRefId: _sourceRefId, searchHash: _searchHash, ...folder } = updated;
 
   const reorderCtx = getRequestContext(req);
   await createAuditLog(
     userId,
     'folder_reorder',
-    { folderId: id, sortOrder },
+    // The stored id, not the route's spelling: `validateObjectId` accepts either
+    // case, and the audit service coalesces a run of reorders by this value.
+    { folderId: String(folder._id), sortOrder },
     reorderCtx.ip,
     reorderCtx.userAgent,
   );

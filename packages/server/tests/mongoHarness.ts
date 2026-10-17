@@ -327,9 +327,9 @@ export function getStandaloneUri(): string {
  * after a connection swap it resolves instantly having built nothing on the new
  * database. Several behaviours under test are enforced BY these indexes and not
  * by application code — `acquireJobLock`'s mutual exclusion is the unique
- * `jobName` index, and the duplicate-folder 409 is the `(userId, searchHash)`
- * partial index — so a block running against an index-less database asserts the
- * wrong thing rather than failing.
+ * `jobName` index, and a retried create's 409 is the derived `_id` colliding —
+ * so a block running against an index-less database asserts the wrong thing
+ * rather than failing.
  */
 export async function buildModelIndexes(): Promise<void> {
   await Promise.all(Object.values(mongoose.models).map((model) => model.createIndexes()));

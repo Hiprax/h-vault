@@ -8,6 +8,7 @@
 import type { AxiosResponse } from 'axios';
 import type {
   ApiResponse,
+  CreatedInvitation,
   LoginResponse,
   SuccessfulLoginResponse,
   RegisterResponse,
@@ -28,6 +29,13 @@ export interface RegisterPayload {
   kdfIterations: number;
   kdfAlgorithm: string;
   encryptionVersion: number;
+  /** The invitation, on a server that registers by invitation. */
+  invitationToken?: string;
+}
+
+export interface CreateInvitationPayload {
+  authHash: string;
+  email: string;
 }
 
 export interface LoginPayload {
@@ -78,6 +86,13 @@ export function registerApi(
   data: RegisterPayload,
 ): Promise<AxiosResponse<ApiResponse<RegisterResponse>>> {
   return api.post('/auth/register', data);
+}
+
+/** `POST /auth/invitations`: mint an invitation link (listed inviters, invite mode). */
+export function createInvitationApi(
+  data: CreateInvitationPayload,
+): Promise<AxiosResponse<ApiResponse<CreatedInvitation>>> {
+  return api.post('/auth/invitations', data);
 }
 
 export function loginApi(data: LoginPayload): Promise<AxiosResponse<ApiResponse<LoginResponse>>> {

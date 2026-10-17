@@ -44,7 +44,7 @@ export const TEST_PASSWORD = 'E2E-Test-P@ssword-2025!';
  * that is slow is not a bug the assertion should catch; a genuinely broken sign-in
  * fails on the ASSERTION (wrong URL, visible error), not on the clock.
  */
-const PBKDF2_STEP_TIMEOUT_MS = 90_000;
+export const PBKDF2_STEP_TIMEOUT_MS = 90_000;
 
 /**
  * Budget for an assertion that gates the FIRST mount of a lazily-loaded route.
@@ -312,14 +312,11 @@ export function sampleVaultItem(overrides: Record<string, unknown> = {}) {
 }
 
 /**
- * Creates one `operations.inserts` entry for `POST /tools/import`.
- *
- * The import contract requires a `searchHash` on every operation — the client
- * recomputes it alongside the encrypted name — so a plain {@link sampleVaultItem}
- * would be rejected by the schema before the endpoint ever runs.
+ * Creates one `operations.inserts` entry for `POST /tools/import`: the item shape,
+ * which is exactly what an insert carries (no keyed name hash is sent or stored).
  */
 export function sampleImportInsert(overrides: Record<string, unknown> = {}) {
-  return { ...sampleVaultItem(), searchHash: 'a'.repeat(64), ...overrides };
+  return { ...sampleVaultItem(), ...overrides };
 }
 
 /** Creates a sample folder payload for API tests. */
@@ -1257,11 +1254,12 @@ export async function openNext(page: Page, fixture: string): Promise<void> {
  *
  * `startSandbox` posts `{ kind: 'ready' }` to `win.parent`, and at top level that
  * IS the window itself; its window listener accepts only a message CARRYING A
- * TRANSFERRED PORT and does not remove itself for one without. So an init script
- * registered before the module — which is what `addInitScript` guarantees — can
- * answer the frame's own announcement with a port and complete the real
- * handshake. There is no race and no sleep: the listener exists before the
- * message can be posted.
+ * TRANSFERRED PORT, posted BY `win.parent` (F-22: an opener or a sibling frame is
+ * ignored), and does not remove itself for one without. At top level the parent
+ * is the window itself, so an init script registered before the module — which
+ * is what `addInitScript` guarantees — can answer the frame's own announcement
+ * with a port posted to its own window and complete the real handshake. There is
+ * no race and no sleep: the listener exists before the message can be posted.
  *
  * WHY THIS IS AVAILABLE AT ALL, stated because it is a dev-server property and
  * not a claim about production. `test:e2e` and `test:a11y` drive `npm run dev`,

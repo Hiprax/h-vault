@@ -1,12 +1,14 @@
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import crypto from 'node:crypto';
+import mongoose from 'mongoose';
 import type request from 'supertest';
 import { User } from '../src/models/User.js';
 import { RefreshToken } from '../src/models/RefreshToken.js';
 import { Folder } from '../src/models/Folder.js';
 import { VaultItem } from '../src/models/VaultItem.js';
 import { hashToken, derivePurposeKey } from '../src/utils/token.js';
+import { issueTwoFactorChallenge } from '../src/utils/twoFactorChallenge.js';
 
 export const JWT_SECRET =
   process.env['JWT_ACCESS_SECRET'] ?? 'test-access-secret-for-testing-only-32chars!';
@@ -22,6 +24,24 @@ export function deriveTestPurposeKey(purpose: string): string {
   return derivePurposeKey(JWT_PURPOSE_SECRET, purpose);
 }
 const BCRYPT_ROUNDS = 4;
+
+/**
+ * Signs a second-factor challenge token exactly as `login` does: a single-use
+ * challenge row is written first and the token names it (`jti`) and expires with
+ * it. `claims` is what the token carries besides (`userId`, `purpose`,
+ * `deviceHash`, `rememberMe`), so a test can still shape every other claim.
+ *
+ * A token signed without a challenge row is refused by `login2fa` before the code
+ * is read; tests of a dead token sign one with `jwt.sign` directly.
+ */
+export async function signTwoFactorChallenge(
+  claims: { userId: string } & Record<string, unknown>,
+): Promise<string> {
+  const challenge = await issueTwoFactorChallenge(new mongoose.Types.ObjectId(claims.userId));
+  return jwt.sign({ ...claims, ...challenge }, deriveTestPurposeKey('2fa_temp'), {
+    algorithm: 'HS256',
+  });
+}
 
 export interface TestUser {
   id: string;
@@ -200,7 +220,7 @@ export async function getCsrf(agent: request.Agent, extraCookies?: string): Prom
 
 /**
  * Seeds a folder directly in the DB for a user. `overrides` may include an
- * explicit `_id`, `parentId`, `searchHash`, `encryptedName`, etc. Returns the
+ * explicit `_id`, `parentId`, `encryptedName`, etc. Returns the
  * created document as a plain object (with its real `_id`).
  */
 export async function seedFolder(

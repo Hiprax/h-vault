@@ -5,13 +5,27 @@
  *
  * Design principle: every estimate MUST be >= the actual JSON byte length so
  * the incremental size guard cannot be bypassed. All overhead constants are
- * set conservatively higher than measured actuals.
+ * set conservatively higher than measured actuals, and every string is counted
+ * at its JSON-ESCAPED length (see {@link jsonStringBytes}): the ciphertext fields
+ * and tags accept any character, and JSON writes a control character as a
+ * six-byte escape, so counting raw UTF-8 let a vault of such rows stream several
+ * times the limit behind an estimate that admitted it.
  *
  * Used by both the export endpoint (`toolsController.exportData`) and the
  * backup collection paths (`backupController.collectBackupData`,
  * `backupScheduler.processUserBackup`). Centralizing the helpers prevents
  * drift across those three call sites.
  */
+
+/**
+ * The bytes `value` occupies inside JSON, WITHOUT its two quotes (the per-field
+ * overheads cover those): what `JSON.stringify` writes for it, escapes included.
+ * A string with nothing to escape costs one scan; one with escapes is measured
+ * exactly.
+ */
+function jsonStringBytes(value: string): number {
+  return Buffer.byteLength(JSON.stringify(value), 'utf-8') - 2;
+}
 
 // Fixed JSON overhead per vault item: covers _id, userId, itemType, folderId,
 // favorite, createdAt, updatedAt, empty tags, JSON braces/colons/commas, and
@@ -49,12 +63,11 @@ export function estimateItemJsonSize(item: Record<string, unknown>): number {
     'dataTag',
     'nameIv',
     'nameTag',
-    'searchHash',
   ];
   for (const field of stringFields) {
     const value = item[field];
     if (typeof value === 'string') {
-      size += Buffer.byteLength(value, 'utf-8');
+      size += jsonStringBytes(value);
     }
   }
 
@@ -62,7 +75,7 @@ export function estimateItemJsonSize(item: Record<string, unknown>): number {
   if (Array.isArray(item.tags)) {
     for (const tag of item.tags) {
       if (typeof tag === 'string') {
-        size += Buffer.byteLength(tag, 'utf-8') + PER_TAG_JSON_OVERHEAD;
+        size += jsonStringBytes(tag) + PER_TAG_JSON_OVERHEAD;
       }
     }
   }
@@ -77,7 +90,7 @@ export function estimateItemJsonSize(item: Record<string, unknown>): number {
         for (const fieldName of fieldNames) {
           const value = e[fieldName];
           if (typeof value === 'string') {
-            size += Buffer.byteLength(value, 'utf-8');
+            size += jsonStringBytes(value);
           }
         }
         size += PER_PASSWORD_HISTORY_JSON_OVERHEAD;
@@ -94,18 +107,11 @@ export function estimateItemJsonSize(item: Record<string, unknown>): number {
  */
 export function estimateFolderJsonSize(folder: Record<string, unknown>): number {
   let size = PER_FOLDER_JSON_OVERHEAD;
-  const stringFields: readonly string[] = [
-    'encryptedName',
-    'nameIv',
-    'nameTag',
-    'searchHash',
-    'icon',
-    'color',
-  ];
+  const stringFields: readonly string[] = ['encryptedName', 'nameIv', 'nameTag', 'icon', 'color'];
   for (const field of stringFields) {
     const value = folder[field];
     if (typeof value === 'string') {
-      size += Buffer.byteLength(value, 'utf-8');
+      size += jsonStringBytes(value);
     }
   }
   return size;

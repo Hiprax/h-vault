@@ -5,16 +5,23 @@ import {
   heavyOpLimiter,
   passwordVerifyLimiter,
   generalAuthLimiter,
+  tokenVerifyLimiter,
 } from '../middleware/rateLimiter.js';
 import {
   holdLargeBodySlot,
   holdingLargeBodySlot,
   parseLargeJsonBody,
 } from '../middleware/largeBodyAdmission.js';
+import {
+  holdHeavyResponseSlot,
+  holdingHeavyResponseSlot,
+} from '../middleware/heavyResponseAdmission.js';
 import { sanitizeRequestBody } from '../middleware/sanitizeBody.js';
 import {
   backupSetupSchema,
   backupSettingsSchema,
+  backupRecipientsSchema,
+  confirmBackupRecipientSchema,
   backupChangePasswordSchema,
   backupHistorySchema,
   restoreBackupSchema,
@@ -22,6 +29,8 @@ import {
 import {
   setupBackup,
   updateBackupSettings,
+  updateBackupRecipients,
+  confirmBackupRecipient,
   triggerBackup,
   downloadBackup,
   getBackupHistory,
@@ -31,7 +40,18 @@ import {
 
 const router = Router();
 
-// All backup routes require authentication
+// A recipient following its confirmation link (F-05). PUBLIC, and therefore
+// mounted ABOVE `authenticate`: the person at that address usually has no account
+// here, and the single-use token is the whole credential. Token-verification
+// budget per address, like the other emailed-link endpoints.
+router.post(
+  '/recipients/confirm',
+  tokenVerifyLimiter,
+  validate(confirmBackupRecipientSchema, 'body'),
+  confirmBackupRecipient,
+);
+
+// Every other backup route requires authentication
 router.use(authenticate);
 
 router.post('/setup', passwordVerifyLimiter, validate(backupSetupSchema, 'body'), setupBackup);
@@ -45,8 +65,29 @@ router.put(
   validate(backupSettingsSchema, 'body'),
   updateBackupSettings,
 );
-router.post('/trigger', heavyOpLimiter, triggerBackup);
-router.get('/download', heavyOpLimiter, downloadBackup);
+// Where mailed backups go (F-05): the master-password proof on every change, on
+// the budget every such proof shares.
+router.put(
+  '/recipients',
+  passwordVerifyLimiter,
+  validate(backupRecipientsSchema, 'body'),
+  updateBackupRecipients,
+);
+// The two routes that build a whole backup: each takes one heavy-response slot
+// after its limiter (two per process, one per account) and keeps it until the
+// response has closed and the handler has settled.
+router.post(
+  '/trigger',
+  heavyOpLimiter,
+  holdHeavyResponseSlot,
+  holdingHeavyResponseSlot(triggerBackup),
+);
+router.get(
+  '/download',
+  heavyOpLimiter,
+  holdHeavyResponseSlot,
+  holdingHeavyResponseSlot(downloadBackup),
+);
 router.get(
   '/history',
   generalAuthLimiter,
@@ -63,7 +104,7 @@ router.put(
 // (see `middleware/largeBodyAdmission.ts`): the limiter and the admission slot run
 // BEFORE the body is read, or they bound nothing. The sanitizer runs straight AFTER
 // the parser: the global parser in `app.ts` skips this path, so the app-level
-// sanitizer ran before this body existed and filtered nothing.
+// sanitizer ran before this body existed and filtered only the query.
 router.post(
   '/restore',
   passwordVerifyLimiter,

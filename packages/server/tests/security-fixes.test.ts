@@ -22,7 +22,8 @@ import { Folder } from '../src/models/Folder.js';
 import { VaultItem } from '../src/models/VaultItem.js';
 import { AuditLog } from '../src/models/AuditLog.js';
 import { derivePurposeKey } from '../src/utils/token.js';
-import { findMatchingBackupCodeIndex } from '../src/controllers/authController.js';
+// The helper moved with every other second-factor check into the one verifier.
+import { findMatchingBackupCodeIndex } from '../src/utils/secondFactor.js';
 import {
   createTestUser,
   authHeader,
@@ -33,6 +34,7 @@ import {
   generateStateHash,
   getCsrf as getCsrfBase,
   JWT_PURPOSE_SECRET,
+  signTwoFactorChallenge,
 } from './helpers.js';
 import type { TestUser } from './helpers.js';
 import { advanceClockBy, installTestClock, uninstallTestClock, withTestClock } from './clock.js';
@@ -186,7 +188,8 @@ describe('Import operations: server-side execution without matching', () => {
     expect(persisted).not.toBeNull();
     expect(persisted!.encryptedName).toBe('rewritten-name');
     expect(persisted!.encryptedData).toBe('rewritten-data');
-    expect(persisted!.searchHash).toBe('b'.repeat(64));
+    // F-12: the update's name hash (an older client's) is not stored.
+    expect(persisted).not.toHaveProperty('searchHash');
     expect(persisted!.tags).toEqual(['keep-me']);
     expect(persisted!.favorite).toBe(true);
     expect(persisted!.itemType).toBe('login');
@@ -512,11 +515,7 @@ describe('Task 3.2: Reduced TOTP validation window', () => {
       $set: { twoFactorEnabled: true, twoFactorSecret: encryptedSecret },
     });
     const { csrfToken, csrfCookie } = await getCsrf(agent);
-    const tempToken = jwt.sign(
-      { userId: user.id, purpose: '2fa_temp' },
-      deriveTestPurposeKey('2fa_temp'),
-      { expiresIn: '5m' },
-    );
+    const tempToken = await signTwoFactorChallenge({ userId: user.id, purpose: '2fa_temp' });
     const totp = new TOTP({ algorithm: 'SHA1', digits: 6, period: 30, secret: secretObj });
     return { totp, tempToken, csrfToken, csrfCookie };
   };
@@ -599,11 +598,7 @@ describe('Task 3.3: TOTP replay protection', () => {
     });
 
     const { csrfToken, csrfCookie } = await getCsrf(agent);
-    const tempToken = jwt.sign(
-      { userId: user.id, purpose: '2fa_temp' },
-      deriveTestPurposeKey('2fa_temp'),
-      { expiresIn: '5m' },
-    );
+    const tempToken = await signTwoFactorChallenge({ userId: user.id, purpose: '2fa_temp' });
 
     const totp = new TOTP({
       algorithm: 'SHA1',
@@ -640,11 +635,7 @@ describe('Task 3.3: TOTP replay protection', () => {
     });
 
     const { csrfToken, csrfCookie } = await getCsrf(agent);
-    const tempToken = jwt.sign(
-      { userId: user.id, purpose: '2fa_temp' },
-      deriveTestPurposeKey('2fa_temp'),
-      { expiresIn: '5m' },
-    );
+    const tempToken = await signTwoFactorChallenge({ userId: user.id, purpose: '2fa_temp' });
 
     const totp = new TOTP({
       algorithm: 'SHA1',
@@ -698,11 +689,7 @@ describe('Task 3.3: TOTP replay protection', () => {
     });
 
     const { csrfToken, csrfCookie } = await getCsrf(agent);
-    const tempToken = jwt.sign(
-      { userId: user.id, purpose: '2fa_temp' },
-      deriveTestPurposeKey('2fa_temp'),
-      { expiresIn: '5m' },
-    );
+    const tempToken = await signTwoFactorChallenge({ userId: user.id, purpose: '2fa_temp' });
 
     const res = await agent
       .post('/api/v1/auth/login/2fa')

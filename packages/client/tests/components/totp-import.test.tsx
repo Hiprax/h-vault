@@ -753,3 +753,49 @@ describe('saving to Documents', () => {
     expect(mockStartUpload).not.toHaveBeenCalled();
   });
 });
+
+describe('loading the vault the attach picker reads', () => {
+  it('reads the vault on a cold load of the page, when the list is empty', async () => {
+    vaultState.items = [];
+
+    await renderFlow();
+
+    expect(mockFetchItems).toHaveBeenCalledTimes(1);
+  });
+
+  it('a refused cold load leaves the picker empty and rejects nothing unhandled', async () => {
+    // A PLAIN function, never a `vi.fn`: Vitest subscribes to every promise a
+    // mock returns, which would handle this rejection for the page.
+    vaultState.items = [];
+    let loads = 0;
+    vaultState.fetchItems = (() => {
+      loads += 1;
+      return Promise.reject(new Error('Request failed with status code 429'));
+    }) as unknown as typeof mockFetchItems;
+    const unhandled: unknown[] = [];
+    const listener = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', listener);
+    try {
+      await renderFlow();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    } finally {
+      process.off('unhandledRejection', listener);
+      vaultState.fetchItems = mockFetchItems;
+    }
+
+    expect(loads).toBe(1);
+    expect(unhandled).toEqual([]);
+    expect(mockToast).not.toHaveBeenCalled();
+  });
+
+  it('does not re-read an already loaded vault on every visit', async () => {
+    // The store applies every write to the list it holds, so a loaded list is
+    // current; re-reading every page on each visit spent the account's list budget.
+    vaultState.items = [{ id: 'login-1', itemType: 'login', name: 'Loaded', data: {} }];
+
+    await renderFlow();
+
+    expect(mockFetchItems).not.toHaveBeenCalled();
+  });
+});

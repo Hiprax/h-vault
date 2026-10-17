@@ -127,7 +127,11 @@ interface AuthState {
   isLoading: boolean;
 
   // Actions
-  register: (email: string, masterPassword: string) => Promise<{ emailSent: boolean }>;
+  register: (
+    email: string,
+    masterPassword: string,
+    invitationToken?: string,
+  ) => Promise<{ emailSent: boolean }>;
   login: (email: string, masterPassword: string, rememberMe?: boolean) => Promise<void>;
   verify2fa: (code: string) => Promise<void>;
   unlock: (masterPassword: string, preDerivedMek?: CryptoKey) => Promise<void>;
@@ -212,7 +216,11 @@ export const useAuthStore = create<AuthState>()(
       // -------------------------------------------------------------------
       // Register
       // -------------------------------------------------------------------
-      register: async (email: string, masterPassword: string): Promise<{ emailSent: boolean }> => {
+      register: async (
+        email: string,
+        masterPassword: string,
+        invitationToken?: string,
+      ): Promise<{ emailSent: boolean }> => {
         const { masterEncryptionKey, authKey } = await cryptoService.deriveKeys(
           masterPassword,
           email,
@@ -236,6 +244,9 @@ export const useAuthStore = create<AuthState>()(
           kdfIterations: KDF_ITERATIONS,
           kdfAlgorithm: KDF_ALGORITHM,
           encryptionVersion: ENCRYPTION_VERSION,
+          // Only on a server that registers by invitation; the others ignore it,
+          // but a token has no business travelling where it is not needed.
+          ...(invitationToken === undefined ? {} : { invitationToken }),
         });
 
         // Clear sensitive material after registration

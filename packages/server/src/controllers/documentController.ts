@@ -4,13 +4,12 @@ import type { Request, Response } from 'express';
 import mongoose, { type HydratedDocument } from 'mongoose';
 import { catchAsync, httpErrors } from '@hiprax/errors';
 import {
-  DOCUMENT_CIPHERTEXT_CHUNK_BYTES,
   DOCUMENT_FRAMING_MISMATCH_MESSAGE,
   DOCUMENT_PLAINTEXT_CHUNK_BYTES,
-  DOCUMENT_TAG_BYTES,
   MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER,
   MAX_DOCUMENTS_PER_USER,
   documentChunkCountFor,
+  documentCiphertextBytesFor,
   documentPlaintextBytesFor,
 } from '@hvault/shared';
 import type {
@@ -23,6 +22,7 @@ import type {
   UpdateDocumentInput,
 } from '@hvault/shared';
 import { config } from '../config/index.js';
+import { SESSION_INVALID_MESSAGE } from '../constants/index.js';
 import { createModuleLogger } from '../utils/logger.js';
 import { Document, type IDocument } from '../models/Document.js';
 import { DocumentUpload, type IDocumentUpload } from '../models/DocumentUpload.js';
@@ -1005,18 +1005,16 @@ export const abortUpload = catchAsync(async (req: Request, res: Response): Promi
  * Refusing parts as well would abort an 800 MB transfer for a rotation the
  * completion step can already recover from with a single retried request.
  *
- * Neither size cap is re-checked here, and the honest reason is a BOUND rather
- * than an equality. A part number is bounded by `declaredChunkCount`, each part by
- * one segment, and a re-sent part replaces its ledger entry rather than adding one,
- * so the received total cannot exceed `declaredChunkCount` whole chunks. That is
- * not the same as the size init reserved: a transfer declaring one plaintext byte
- * gets a `declaredChunkCount` of 1 and may then legally send a full 8 MiB final
- * part. The overshoot is at most one chunk per transfer, times
- * `MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER`, and completion re-checks BOTH the
- * per-document cap and the quota against the bytes actually received before
- * anything is committed. Re-checking here instead would mean refusing a part
- * mid-transfer for a total the client can still bring back under the cap by
- * finishing, and would not remove the need for the check at completion anyway.
+ * Neither size cap is re-checked here, and it need not be: every part, the final
+ * one included, is held to the exact size the declaration frames, and a re-sent
+ * part replaces its ledger entry rather than adding one, so the staged total can
+ * never exceed the ciphertext of exactly `declaredPlaintextBytes`, which init
+ * checked against both the per-document cap and the quota. (The final part used to
+ * be allowed anything up to a full chunk, so a transfer declaring one byte could
+ * stage 8 MiB; I-17.) Completion still re-checks BOTH against the bytes actually
+ * received before anything is committed, because a part can reach the engine by
+ * another route and a staging row opened by an earlier release was held to the
+ * looser rule.
  *
  * What completion's re-check guarantees, and on what it rests. The per-document cap
  * is measured on one transfer's own bytes, which nothing else can move, so it holds
@@ -1068,7 +1066,9 @@ export const uploadPart = catchAsync(async (req: Request, res: Response): Promis
   // handler needs none of them — the ledger is rewritten server-side by the pipeline
   // below rather than read, merged and written back.
   const upload = await DocumentUpload.findOne({ _id: id, userId })
-    .select('objectKey s3UploadId declaredChunkCount expiresAt')
+    .select(
+      'objectKey s3UploadId declaredChunkCount declaredPlaintextBytes chunkPlaintextBytes expiresAt',
+    )
     .lean();
   // A foreign id and an id that never existed are the same answer, so neither
   // enumerates another account's transfers.
@@ -1108,22 +1108,34 @@ export const uploadPart = catchAsync(async (req: Request, res: Response): Promis
     );
   }
 
+  // Every part, the LAST one included, must be exactly the size the declaration
+  // frames: a full ciphertext chunk for every part but the last, and for the last
+  // `declaredPlaintextBytes - (declaredChunkCount - 1) * chunkPlaintextBytes` plus
+  // its tag. Init's schema has already made the declared pair consistent
+  // (`declaredChunkCount === documentChunkCountFor(declaredPlaintextBytes, …)`), so
+  // the required size is never below a bare tag nor above a full chunk.
+  //
+  // The final part used to be allowed anything from one tag to a full chunk, which
+  // let a transfer that declared one byte stage a whole 8 MiB part (I-17).
+  // Completion re-measures the real bytes against the size cap and the quota, so
+  // neither was ever bypassed, but until completion (or the upload's expiry) the
+  // bucket held up to one chunk per transfer beyond the in-flight budget init
+  // reserved. Holding the final part to the
+  // declaration closes that here, before a byte reaches the storage engine, through
+  // the SAME helper completion verifies the engine's ledger with.
   const isFinalPart = partNumber === upload.declaredChunkCount;
-  if (!isFinalPart && partBytes !== DOCUMENT_CIPHERTEXT_CHUNK_BYTES) {
+  const requiredBytes = expectedPartSize(
+    partNumber,
+    upload.declaredChunkCount,
+    upload.chunkPlaintextBytes,
+    documentCiphertextBytesFor(upload.declaredPlaintextBytes, upload.declaredChunkCount),
+  );
+  if (partBytes !== requiredBytes) {
     throw httpErrors.badRequest(
-      `Part ${String(partNumber)} is not the last part of this transfer and must be exactly ` +
-        `${String(DOCUMENT_CIPHERTEXT_CHUNK_BYTES)} bytes; it was ${String(partBytes)}.`,
-    );
-  }
-  // The final part is the only one allowed to be short, and it still cannot be
-  // empty: the smallest sealed segment is a bare authentication tag.
-  if (
-    isFinalPart &&
-    (partBytes < DOCUMENT_TAG_BYTES || partBytes > DOCUMENT_CIPHERTEXT_CHUNK_BYTES)
-  ) {
-    throw httpErrors.badRequest(
-      `The last part of this transfer must be between ${String(DOCUMENT_TAG_BYTES)} and ` +
-        `${String(DOCUMENT_CIPHERTEXT_CHUNK_BYTES)} bytes; it was ${String(partBytes)}.`,
+      (isFinalPart
+        ? 'The last part of this transfer'
+        : `Part ${String(partNumber)} is not the last part of this transfer and`) +
+        ` must be exactly ${String(requiredBytes)} bytes; it was ${String(partBytes)}.`,
     );
   }
 
@@ -1555,9 +1567,10 @@ async function completeUnderLock(
 
   // Each of the three is derived independently, and that is NOT enough to make them
   // agree. A transfer of n >= 2 parts whose last part is exactly one authentication
-  // tag — a sealed EMPTY final segment, which the part handler permits because only
-  // a NON-final part must be a full chunk, and which the storage engine permits
-  // because the last part may be short — yields a `plaintextBytes` of (n-1) whole
+  // tag — a sealed EMPTY final segment, which no consistent declaration frames, so
+  // the part handler now refuses it (I-17), but which a staging row opened by an
+  // earlier release could hold, and which the storage engine permits because the
+  // last part may be short — yields a `plaintextBytes` of (n-1) whole
   // chunks against a `chunkCount` of n. Nothing downstream survives that:
   // `documentResponseSchema` refuses such a row on every read, so the document
   // would list, count against the quota, and never open. The client is supposed
@@ -1600,13 +1613,14 @@ async function completeUnderLock(
   }
 
   // The PER-DOCUMENT cap, re-measured on the bytes that actually arrived. Init
-  // checked `declaredPlaintextBytes`, and a client is not held to that number: only
-  // a NON-final part must be a full chunk, so a transfer that declared one byte gets
-  // a `declaredChunkCount` of 1 and may then legally send a final part of a whole
-  // 8 MiB chunk. That slack is one chunk in absolute terms and therefore harmless
-  // against a large cap and an eight-fold breach against a small one — at
-  // `MAX_DOCUMENT_SIZE_MB=1` the row committed would be eight times the limit
-  // `GET /documents/usage` advertises to the very client that just wrote it.
+  // checked `declaredPlaintextBytes`, and the part handler now holds every part,
+  // the final one included, to exactly what that declaration frames; this is the
+  // layer behind it. A part that reached the engine by any other route, or a
+  // staging row opened by an earlier release (whose final part could be anything up
+  // to a whole 8 MiB chunk however little it declared), is measured here, and that
+  // slack was one chunk in absolute terms: harmless against a large cap and an
+  // eight-fold breach against a small one — at `MAX_DOCUMENT_SIZE_MB=1` the row
+  // committed would be eight times the limit `GET /documents/usage` advertises.
   //
   // Refused the same way the quota is refused below, and for the same reason: the
   // bytes in the bucket are precisely the bytes this deployment will not store, so
@@ -1842,16 +1856,31 @@ async function completeUnderLock(
       // here rather than leaving the collector to find it an hour later: until it
       // does, the user is charged bucket space for a document that does not exist and
       // cannot be seen, let alone removed.
-      try {
-        await getStorage().deleteObject(upload.objectKey);
-      } catch (deleteError) {
-        logger.error('Failed to delete the object of a document row that was not written', {
-          userId,
-          uploadId: id,
-          error: deleteError instanceof Error ? deleteError.message : String(deleteError),
-        });
-      }
+      await discardUnnamedObject(
+        upload.objectKey,
+        { userId, uploadId: id },
+        'Failed to delete the object of a document row that was not written',
+      );
       throw error;
+    }
+
+    // The account may have been erased while this completion waited on the engine:
+    // the guard above is a read, the erasure takes no lock, and it sweeps only the
+    // objects that were finished when it listed them. A row and an object written
+    // after it would belong to nobody and nothing would ever remove them (the
+    // clean-up of interrupted erasures needs an account row, and the orphan sweep
+    // spares every object a documents row names). Checked AFTER the insert, so the
+    // erasure, whose first write is the account's `deletionPending`, either began
+    // before this read (and the row and object are taken back here) or begins after
+    // it (and finds both).
+    if (!(await User.exists({ _id: userId, deletionPending: { $ne: true } }).read('primary'))) {
+      await Document.deleteOne({ _id: document._id, userId });
+      await discardUnnamedObject(
+        upload.objectKey,
+        { userId, uploadId: id },
+        'Failed to delete the object of a document whose account was erased during its completion',
+      );
+      throw httpErrors.unauthorized(SESSION_INVALID_MESSAGE);
     }
 
     const completeCtx = getRequestContext(req);
@@ -1868,6 +1897,26 @@ async function completeUnderLock(
     return { kind: 'document', document };
   } finally {
     await releaseVaultRotationLock(userId, rotationLockId);
+  }
+}
+
+/**
+ * Deletes a stored object no row names, logging (never throwing) when the engine
+ * refuses: the caller is already answering for the failure that left it unnamed,
+ * and the hourly collector removes what this could not.
+ */
+async function discardUnnamedObject(
+  objectKey: string,
+  context: { userId: string; uploadId: string },
+  failure: string,
+): Promise<void> {
+  try {
+    await getStorage().deleteObject(objectKey);
+  } catch (deleteError) {
+    logger.error(failure, {
+      ...context,
+      error: deleteError instanceof Error ? deleteError.message : String(deleteError),
+    });
   }
 }
 

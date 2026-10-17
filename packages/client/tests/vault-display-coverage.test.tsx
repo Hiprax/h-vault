@@ -96,7 +96,6 @@ vi.mock('../src/services/crypto/cryptoService', () => ({
     decryptVaultKey: vi.fn(),
     encryptData: vi.fn(),
     decryptData: vi.fn().mockResolvedValue('decrypted-password'),
-    generateSearchHash: vi.fn(),
     clearKey: vi.fn(),
     clearCryptoKey: vi.fn().mockResolvedValue(undefined),
   },
@@ -358,7 +357,6 @@ function makeDecryptedItem(
       notes: '',
       customFields: [],
     },
-    searchHash: 'abc',
     createdAt: created,
     updatedAt: now,
     _raw: {
@@ -2949,6 +2947,106 @@ describe('VaultItemPage', () => {
 
     expect(screen.queryByTestId('vault-item-form')).not.toBeInTheDocument();
     expect(mockFetchItems).toHaveBeenCalled();
+  });
+
+  // The re-read after a save (and the page's own first load) are refused when the
+  // list budget is spent, or fail when the network does. Each is fire-and-forget,
+  // so a missing `.catch` would be an unhandled rejection, which the browser
+  // reports and nothing on the page handles; the page must simply keep showing
+  // what it has.
+  //
+  // The refusing fetch is a PLAIN function, never a `vi.fn`: Vitest subscribes to
+  // every promise a mock returns (to record its settled result), which handles the
+  // rejection and would keep these tests green with the page's `.catch` deleted.
+  function refusingFetch(calls: { count: number }) {
+    return () => {
+      calls.count += 1;
+      return Promise.reject(new Error('Request failed with status code 429'));
+    };
+  }
+  async function withUnhandledRejections(run: () => Promise<void>): Promise<unknown[]> {
+    const seen: unknown[] = [];
+    const listener = (reason: unknown) => seen.push(reason);
+    process.on('unhandledRejection', listener);
+    try {
+      await run();
+      // Two macrotask turns: Node reports an unhandled rejection after the
+      // microtask queue drains.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    } finally {
+      process.off('unhandledRejection', listener);
+    }
+    return seen;
+  }
+
+  it('a refused re-read after Save leaves the saved item on screen and rejects nothing unhandled', async () => {
+    useVaultStore.setState({
+      items: [makeDecryptedItem({ id: 'save-2', name: 'Kept After Save' })] as never[],
+      loading: false,
+      itemsLoading: false,
+      trashLoading: false,
+    });
+    const { default: VaultItemPage } = await import('../src/pages/VaultItemPage');
+    // Set before the render: the list is not empty, so the page does not load on
+    // mount, and the one call counted is the re-read after the save.
+    const reReads = { count: 0 };
+    useVaultStore.setState({ fetchItems: refusingFetch(reReads) } as never);
+
+    const unhandled = await withUnhandledRejections(async () => {
+      await act(async () => {
+        render(
+          <MemoryRouter initialEntries={['/vault/save-2']}>
+            <Routes>
+              <Route path="/vault/:id" element={<VaultItemPage />} />
+            </Routes>
+          </MemoryRouter>,
+        );
+      });
+      fireEvent.click(screen.getByText('Edit'));
+      await act(async () => {
+        fireEvent.click(screen.getByText('Save Form'));
+      });
+    });
+
+    expect(reReads.count).toBe(1);
+    expect(unhandled).toEqual([]);
+    expect(screen.queryByTestId('vault-item-form')).not.toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Kept After Save');
+  });
+
+  it('a refused first load leaves the not-found page and rejects nothing unhandled', async () => {
+    useVaultStore.setState({
+      items: [],
+      trashItems: [],
+      loading: false,
+      itemsLoading: false,
+      trashLoading: false,
+    });
+    const { default: VaultItemPage } = await import('../src/pages/VaultItemPage');
+    const itemLoads = { count: 0 };
+    const trashLoads = { count: 0 };
+    useVaultStore.setState({
+      fetchItems: refusingFetch(itemLoads),
+      fetchTrashItems: refusingFetch(trashLoads),
+    } as never);
+
+    const unhandled = await withUnhandledRejections(async () => {
+      await act(async () => {
+        render(
+          <MemoryRouter initialEntries={['/vault/missing-1']}>
+            <Routes>
+              <Route path="/vault/:id" element={<VaultItemPage />} />
+            </Routes>
+          </MemoryRouter>,
+        );
+      });
+    });
+
+    expect(unhandled).toEqual([]);
+    expect(itemLoads.count).toBe(1);
+    expect(trashLoads.count).toBe(1);
+    expect(screen.getByRole('heading', { level: 1, name: 'Item Not Found' })).toBeInTheDocument();
   });
 
   // -------------------------------------------------------------------------

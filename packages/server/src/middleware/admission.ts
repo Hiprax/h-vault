@@ -1,4 +1,4 @@
-import type { NextFunction, Request, Response } from 'express';
+import type { NextFunction, Request, RequestHandler, Response } from 'express';
 import { httpErrors } from '@hiprax/errors';
 import type { KeyedQuota, Semaphore } from '../utils/partSemaphore.js';
 
@@ -168,6 +168,66 @@ export function createHandlerSettledRelease(): HandlerSettledRelease {
         ticket.inHandler = false;
         ticket.releaseWhenSettled?.();
       }
+    },
+  };
+}
+
+/** What {@link createSlotHolder} needs to build one holder and its handler wrapper. */
+export interface SlotHolderSpec {
+  readonly semaphore: Semaphore;
+  readonly quota: KeyedQuota;
+  /** The 409 a request past its account's share gets. Remedy first, no `data`. */
+  readonly busyMessage: string;
+  /** Logs a refusal. The identity is deliberately never logged, as the limiters omit their key. */
+  readonly logRefusal: () => void;
+  /** The name the wrapped handler carries, which is how the route table finds it. */
+  readonly handlerName: string;
+  /** The 500 a handler reached without a slot answers with. */
+  readonly unadmittedMessage: string;
+}
+
+/** A slot holder and the wrapper its route's handler must be mounted through, last. */
+export interface SlotHolder {
+  readonly hold: (req: Request, res: Response, next: NextFunction) => void;
+  readonly holding: (handler: SlotHandler) => RequestHandler;
+}
+
+/**
+ * Builds the holder/wrapper pair for a budget that answers a request past its share
+ * with 409 and arms nothing when a slot is granted: the large-body routes and the
+ * heavy responses. ONE copy of that pair, because two would be two places for the
+ * release rule to drift. The part-upload holder is not one of these: it answers 503
+ * with `Retry-After` and arms a body deadline.
+ *
+ * The identity is `req.user._id`: every route these guard sits behind a
+ * router-level `authenticate`. The shared `'anonymous'` fallback fails CLOSED.
+ */
+export function createSlotHolder(spec: SlotHolderSpec): SlotHolder {
+  const settled = createHandlerSettledRelease();
+  return {
+    hold(req, res, next) {
+      admitWithinBudget(res, next, {
+        semaphore: spec.semaphore,
+        quota: spec.quota,
+        identity: req.user?._id ?? 'anonymous',
+        refuse(_refused, fail) {
+          spec.logRefusal();
+          fail(httpErrors.conflict(spec.busyMessage));
+        },
+        granted() {
+          settled.admit(res);
+        },
+        closed(release) {
+          settled.closed(res, release);
+        },
+      });
+    },
+    holding(handler) {
+      const wrapped: RequestHandler = async (req, res, next): Promise<void> => {
+        await settled.run(handler, req, res, next, spec.unadmittedMessage);
+      };
+      Object.defineProperty(wrapped, 'name', { value: spec.handlerName });
+      return wrapped;
     },
   };
 }

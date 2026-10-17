@@ -5,7 +5,8 @@
  * backoff (retry then success, and retry-exhaustion), batch chunking, progress,
  * abort, and the k-anonymity guarantee (only 5-char prefixes are ever sent).
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { HIBP_MISS_BUDGET_WINDOW_MINUTES } from '@hvault/shared';
 
 const { mockCheckBreachBatchApi } = vi.hoisted(() => ({ mockCheckBreachBatchApi: vi.fn() }));
 
@@ -139,6 +140,68 @@ describe('runBreachCheck', () => {
     expect(mockCheckBreachBatchApi).toHaveBeenCalledTimes(4);
     expect(result.failedCount).toBe(1);
     expect(result.checkedCount).toBe(0);
+  });
+
+  describe('a Retry-After longer than one budget window is not waited out', () => {
+    const WINDOW_S = HIBP_MISS_BUDGET_WINDOW_MINUTES * 60;
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    /** Runs a one-password scan whose first answer is a 429 asking for `seconds`. */
+    async function scanRefusedFor(seconds: number, advanceMs: number) {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      const hash = await sha1HexUpper('p1');
+      mockCheckBreachBatchApi
+        .mockRejectedValueOnce({
+          response: { status: 429, headers: { 'retry-after': String(seconds) } },
+        })
+        .mockResolvedValue(body({ [hash.slice(0, 5)]: `${hash.slice(5)}:2` }));
+      let settled = false;
+      const scan = runBreachCheck([loginItem('a', 'p1')]).then((result) => {
+        settled = true;
+        return result;
+      });
+      // Hashing resolves on real time, not on the faked clock: wait until the scan
+      // has had its 429 and either answered or started to wait, then move time.
+      await until(() => settled || vi.getTimerCount() > 0);
+      await vi.advanceTimersByTimeAsync(advanceMs);
+      return { scan, settled: () => settled };
+    }
+
+    /** Yields to the real event loop (`setImmediate` is not faked) until `done()`. */
+    async function until(done: () => boolean): Promise<void> {
+      while (!done()) {
+        await new Promise<void>((resolve) => {
+          setImmediate(resolve);
+        });
+      }
+    }
+
+    it('reports the batch as not checked at once when the server asks for longer', async () => {
+      // The daily fetch budget answers with up to a day.
+      const { scan, settled } = await scanRefusedFor(WINDOW_S + 1, 1_000);
+
+      expect(settled()).toBe(true);
+      const result = await scan;
+      expect(mockCheckBreachBatchApi).toHaveBeenCalledTimes(1);
+      expect(result.failedCount).toBe(1);
+      expect(result.checkedCount).toBe(0);
+      // Nothing is left waiting behind the answer.
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('still waits out a Retry-After of exactly one window, then retries', async () => {
+      const { scan, settled } = await scanRefusedFor(WINDOW_S, WINDOW_S * 1000 - 1);
+
+      expect(settled()).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      const result = await scan;
+      expect(mockCheckBreachBatchApi).toHaveBeenCalledTimes(2);
+      expect(result.checkedCount).toBe(1);
+      expect(result.breached).toHaveLength(1);
+    });
   });
 
   it('splits into multiple batches beyond the prefix cap', async () => {

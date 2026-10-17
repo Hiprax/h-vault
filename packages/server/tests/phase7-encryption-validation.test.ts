@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import request from 'supertest';
+import mongoose from 'mongoose';
 import app from '../src/app.js';
 import { MAX_ENCRYPTED_DATA_LENGTH, MAX_ENCRYPTED_NAME_LENGTH } from '@hvault/shared';
 import { createTestUser, authHeader, sampleVaultItem, getCsrf, type TestUser } from './helpers.js';
@@ -143,43 +144,34 @@ describe('Encryption Field Validation', () => {
     });
   });
 
-  // ── searchHash validation ──────────────────────────────────────────
+  // ── searchHash: accepted and dropped, whatever its shape (F-12) ─────
+  //
+  // No keyed hash of a name is stored any more, so the schemas no longer
+  // validate one: an older client's value is dropped before any handler runs.
+  // These used to pin each malformed shape refusing the item with 400.
 
-  describe('searchHash validation', () => {
-    it('should accept valid lowercase hex searchHash (64 chars)', async () => {
-      const validHash = 'a'.repeat(64);
-      const res = await postItem({ searchHash: validHash });
+  describe('searchHash is accepted and dropped, whatever its shape (F-12)', () => {
+    const shapes: [string, string][] = [
+      ['valid lowercase hex (64 chars)', 'a'.repeat(64)],
+      ['uppercase hex characters', 'A'.repeat(64)],
+      ['wrong length (too short)', 'a'.repeat(63)],
+      ['wrong length (too long)', 'a'.repeat(65)],
+      ['non-hex characters', 'g'.repeat(64)],
+      [
+        'mixed valid/invalid chars',
+        ('abcdef1234567890'.repeat(3) + 'zz' + 'ab'.repeat(7)).slice(0, 64),
+      ],
+    ];
+
+    it.each(shapes)('creates the item and stores no hash: %s', async (_label, searchHash) => {
+      const res = await postItem({ searchHash });
       expect(res.status).toBe(201);
-    });
-
-    it('should reject searchHash with uppercase hex characters', async () => {
-      const uppercaseHash = 'A'.repeat(64);
-      const res = await postItem({ searchHash: uppercaseHash });
-      // objectIdSchema transforms to lowercase, but searchHash is its own regex /^[a-f0-9]{64}$/
-      expect(res.status).toBe(400);
-    });
-
-    it('should reject searchHash with wrong length (too short)', async () => {
-      const res = await postItem({ searchHash: 'a'.repeat(63) });
-      expect(res.status).toBe(400);
-    });
-
-    it('should reject searchHash with wrong length (too long)', async () => {
-      const res = await postItem({ searchHash: 'a'.repeat(65) });
-      expect(res.status).toBe(400);
-    });
-
-    it('should reject searchHash with non-hex characters', async () => {
-      const invalidHash = 'g'.repeat(64); // 'g' is not valid hex
-      const res = await postItem({ searchHash: invalidHash });
-      expect(res.status).toBe(400);
-    });
-
-    it('should reject searchHash with mixed valid/invalid chars', async () => {
-      const mixedHash = 'abcdef1234567890'.repeat(3) + 'zz' + 'ab'.repeat(7);
-      const res = await postItem({ searchHash: mixedHash.slice(0, 64) });
-      // The 'z' chars make this invalid
-      expect(res.status).toBe(400);
+      expect(res.body.data.searchHash).toBeUndefined();
+      const stored = await mongoose.connection
+        .collection('vault_items')
+        .findOne({ _id: new mongoose.Types.ObjectId(String(res.body.data._id)) });
+      expect(stored).not.toBeNull();
+      expect(stored).not.toHaveProperty('searchHash');
     });
   });
 
@@ -305,14 +297,20 @@ describe('Encryption Field Validation', () => {
       expect(res.status).toBe(400);
     });
 
-    it('should reject folder searchHash with uppercase hex', async () => {
+    // F-12: these used to pin a malformed folder hash refusing the folder.
+    it('accepts a folder whose searchHash is uppercase hex, and stores none', async () => {
       const res = await postFolder({ searchHash: 'A'.repeat(64) });
-      expect(res.status).toBe(400);
+      expect(res.status).toBe(201);
+      expect(res.body.data.searchHash).toBeUndefined();
     });
 
-    it('should reject folder searchHash with wrong length', async () => {
+    it('accepts a folder whose searchHash is the wrong length, and stores none', async () => {
       const res = await postFolder({ searchHash: 'a'.repeat(32) });
-      expect(res.status).toBe(400);
+      expect(res.status).toBe(201);
+      const stored = await mongoose.connection
+        .collection('folders')
+        .findOne({ _id: new mongoose.Types.ObjectId(String(res.body.data._id)) });
+      expect(stored).not.toHaveProperty('searchHash');
     });
   });
 });

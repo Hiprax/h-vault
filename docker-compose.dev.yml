@@ -22,10 +22,10 @@ name: hvault-dev
 
 services:
   hvault-db:
-    # Same major as production (docker/mongo.Dockerfile), so a behaviour difference
-    # between the two can never be a MongoDB version difference. No auth and no
-    # replica set here, though — see the header.
-    image: mongo:8.0
+    # The very image production builds on (docker/mongo.Dockerfile), digest and all,
+    # so a behaviour difference between the two can never be a MongoDB version
+    # difference. No auth and no replica set here, though — see the header.
+    image: mongo:8.0@sha256:6657bf2413fefc5be649390318f5b4cd7328e982722f8ce2ac6dfa6f0a42cb03
     container_name: hvault-db-dev
     restart: unless-stopped
     ports:
@@ -115,6 +115,10 @@ services:
     environment:
       NODE_ENV: development
       PORT: '5000'
+      # The server listens on loopback unless told otherwise; the published port
+      # above arrives on eth0 (Docker DNATs to it), so the container listens on
+      # every interface. The publish itself stays bound to the host's 127.0.0.1.
+      HOST: 0.0.0.0
       # Bind Vite to every container interface so the published port reaches it —
       # Docker DNATs to eth0, not loopback. Outside Docker, vite.config.ts defaults
       # to 127.0.0.1.

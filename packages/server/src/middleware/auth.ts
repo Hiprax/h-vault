@@ -6,6 +6,7 @@ import { httpErrors } from '@hiprax/errors';
 import { createModuleLogger, errorMessage } from '../utils/logger.js';
 import { config } from '../config/index.js';
 import { User } from '../models/User.js';
+import { SESSION_INVALID_MESSAGE } from '../constants/index.js';
 import { evaluateAccountStatus } from '../utils/accountStatus.js';
 
 const logger = createModuleLogger('auth-middleware');
@@ -56,12 +57,12 @@ passport.use(
         // the refresh handler and this site cannot drift apart again — `login`
         // used to be the one door with no `deletionPending` check.
         //
-        // The fields are passed EXPLICITLY, and the third condition is absent on
-        // purpose: `lockoutUntil` is not projected above and a lockout is not a
-        // JWT-rejection reason here. An access token lives fifteen minutes and the
-        // refresh handler is where a lockout ends the session; tearing down a live
-        // session mid-request would be a different policy, not a stricter spelling
-        // of this one. Passing only what is projected keeps that visible at the
+        // The fields are passed EXPLICITLY, and the lockouts are absent on
+        // purpose: neither factor's lockout state is projected above, and a lockout
+        // is not a JWT-rejection reason here or anywhere else a session is checked.
+        // A lockout brakes GUESSING at the sign-in steps; a live session is proof
+        // of a prior authentication, so the refresh handler does not consult a
+        // lockout either. Passing only what is projected keeps that visible at the
         // call site instead of hiding it behind a field that reads as `undefined`.
         const status = evaluateAccountStatus({
           emailVerified: dbUser.emailVerified,
@@ -157,7 +158,7 @@ export function authenticate(req: Request, res: Response, next: NextFunction): v
           const message =
             info && typeof info === 'object' && 'message' in info
               ? (info as { message: string }).message
-              : 'Invalid or expired token';
+              : SESSION_INVALID_MESSAGE;
 
           next(httpErrors.unauthorized(message));
           return;

@@ -43,7 +43,10 @@ import {
  *     own scripts run. A preview of a benign document must raise NONE — a refused
  *     `blob:` source, `data:` image, module or stylesheet is precisely the failure
  *     an HTTP assertion cannot see — and a hostile document's refusals must all be
- *     its remote images, on `img-src`.
+ *     images it names by address, on `img-src`. Since F-10 that includes this
+ *     server's own addresses: the policy gives images no same-origin source, so a
+ *     document pointing an `<img>` at `/api/v1/…` is refused in the browser and
+ *     the request never reaches the API.
  *  3. **The service worker controls the page.** The production build installs one
  *     and the dev server never does, so the previews are opened from a page the
  *     worker controls — the state every returning user is in. State what that
@@ -82,6 +85,7 @@ type PolicyDocument = Document & { featurePolicy?: { allowsFeature(feature: stri
 const AUDIO = 'tone.wav';
 const SVG = 'badge.svg';
 const INLINE_IMAGE = 'inline-image.md';
+const SAME_ORIGIN_IMAGE = 'same-origin-image.md';
 const SOURCE = 'deploy.sh';
 const HOSTILE_MARKDOWN = 'hostile.md';
 const HOSTILE_PAGE = 'hostile.html';
@@ -156,21 +160,32 @@ async function previewUnderPolicy(
 
 /**
  * (2) for a hostile document: at least one refusal (the corpus asks for remote
- * images, so none at all would mean the policy never applied), and every one of
- * them is a remote image on `img-src`. Polled, because the refusal is raised when
- * the image REQUEST starts, which is a moment after the element is inserted.
+ * images, so none at all would mean the policy never applied), every one of them
+ * an image on `img-src`, and every one addressed either to the corpus's third
+ * party or to this server — the corpus also names relative images (`<img src="x">`),
+ * which since F-10 are refused rather than fetched from here. Polled, because the
+ * refusal is raised when the image REQUEST starts, a moment after the element is
+ * inserted.
  */
-async function expectOnlyRemoteImagesRefused(frame: Frame): Promise<void> {
+async function expectOnlyImagesRefused(page: Page, frame: Frame): Promise<void> {
   await expect
     .poll(async () => (await violationsIn(frame))?.length ?? 0, { timeout: PREVIEW_TIMEOUT_MS })
     .toBeGreaterThan(0);
   const refused = await violationsIn(frame);
+  const own = new URL(page.url()).origin;
   expect(
     refused?.every((v) => v.directive === 'img-src'),
     JSON.stringify(refused),
   ).toBe(true);
   expect(
-    refused?.every((v) => v.blockedURI.startsWith('https://example.invalid/')),
+    refused?.every(
+      (v) =>
+        v.blockedURI.startsWith('https://example.invalid/') || v.blockedURI.startsWith(`${own}/`),
+    ),
+    JSON.stringify(refused),
+  ).toBe(true);
+  expect(
+    refused?.some((v) => v.blockedURI.startsWith('https://example.invalid/')),
     JSON.stringify(refused),
   ).toBe(true);
 }
@@ -179,7 +194,7 @@ test.describe('the isolated document under the production policy', () => {
   test('renders every preview mode and the hostile corpus, refusing only what the policy is for', async ({
     page,
   }) => {
-    // Six uploads and six previews, after a sign-in and an unlock that cost three
+    // Seven uploads and seven previews, after a sign-in and an unlock that cost three
     // 600,000-iteration derivations between them, on a single worker.
     test.setTimeout(600_000);
     await page.addInitScript(recordPolicyViolations);
@@ -239,7 +254,7 @@ test.describe('the isolated document under the production policy', () => {
     });
 
     await gotoDocuments(page);
-    for (const fixture of [AUDIO, SVG, INLINE_IMAGE, SOURCE]) {
+    for (const fixture of [AUDIO, SVG, INLINE_IMAGE, SAME_ORIGIN_IMAGE, SOURCE]) {
       await uploadDocument(page, fixture);
     }
     for (const fixture of [HOSTILE_MARKDOWN, HOSTILE_PAGE]) {
@@ -326,9 +341,77 @@ test.describe('the isolated document under the production policy', () => {
           { timeout: PREVIEW_TIMEOUT_MS },
         )
         .toEqual({ width: 8, scheme: 'data' });
-      // Nothing about it is remote, so the reader is told nothing was withheld.
+      // Nothing about it is fetched, so the reader is told nothing was withheld.
       await expect(previewFrame(page).getByText(/not loaded/)).toHaveCount(0);
       expect(await violationsIn(frame)).toEqual([]);
+    });
+
+    await test.step('an image addressed to this server’s API is refused in the browser, and a request from the frame by the API (F-10)', async () => {
+      const frame = await previewUnderPolicy(page, SAME_ORIGIN_IMAGE, 'markdown', openNext);
+      await expect(previewFrame(page).getByText('Text after the picture')).toBeVisible();
+      // The element survived sanitising, address intact: what refuses it is the
+      // POLICY, which gives images no same-origin source.
+      await expect(
+        previewFrame(page).locator('img[alt="a picture addressed to the API"]'),
+      ).toHaveAttribute('src', '/api/v1/csrf-token?x');
+      const own = new URL(page.url()).origin;
+      await expect
+        .poll(async () => (await violationsIn(frame)) ?? [], { timeout: PREVIEW_TIMEOUT_MS })
+        .toEqual([{ blockedURI: `${own}/api/v1/csrf-token?x`, directive: 'img-src' }]);
+      // And the reader is told, rather than left looking at a broken image.
+      await expect(previewFrame(page).getByText(/They are not loaded/)).toBeVisible();
+      // The floor, observed from the REAL frame rather than with a synthetic header.
+      // A module import is admitted by `script-src 'self'` (the frame's own bundle
+      // needs it), so it does reach this server: the browser marks it cross-site,
+      // because the frame's origin is opaque, and the API refuses it unread. The
+      // import then fails CORS either way, so Playwright reports a failed request
+      // with neither its Fetch Metadata nor a status; both are read off the raw
+      // network events instead, on the frame's own session when it runs in a
+      // process of its own and on the page's otherwise.
+      const network = await page
+        .context()
+        .newCDPSession(frame)
+        .catch(() => page.context().newCDPSession(page));
+      const probeIds = new Set<string>();
+      const fetchSite = new Map<string, string>();
+      const statusOf = new Map<string, number>();
+      network.on('Network.requestWillBeSent', (event) => {
+        if (event.request.url.endsWith('?from-frame')) probeIds.add(event.requestId);
+      });
+      network.on('Network.requestWillBeSentExtraInfo', (event) => {
+        for (const [name, value] of Object.entries(event.headers)) {
+          if (name.toLowerCase() === 'sec-fetch-site')
+            fetchSite.set(event.requestId, String(value));
+        }
+      });
+      network.on('Network.responseReceivedExtraInfo', (event) => {
+        statusOf.set(event.requestId, event.statusCode);
+      });
+      await network.send('Network.enable');
+      const outcome = await frame.evaluate(
+        (url) =>
+          import(url).then(
+            () => 'loaded',
+            () => 'refused',
+          ),
+        '/api/v1/config?from-frame',
+      );
+      expect(outcome).toBe('refused');
+      await expect
+        .poll(
+          () =>
+            [...probeIds].map((id) => ({
+              site: fetchSite.get(id) ?? null,
+              status: statusOf.get(id) ?? null,
+            })),
+          { timeout: PREVIEW_TIMEOUT_MS },
+        )
+        .toEqual([{ site: 'cross-site', status: 403 }]);
+      await network.detach();
+      // The API itself is untouched: the application's own request still answers.
+      const csrf = await page.request.get('/api/v1/csrf-token');
+      expect(csrf.status()).toBe(200);
+      expect(((await csrf.json()) as { success?: unknown }).success).toBe(true);
     });
 
     await test.step('source code is highlighted by a grammar loaded into the frame', async () => {
@@ -370,10 +453,10 @@ test.describe('the isolated document under the production policy', () => {
       await expect(rendered.getByText('this must not be readable text')).toHaveCount(0);
       expect(await frame.evaluate(() => '__pwned' in window)).toBe(false);
 
-      // The remote images were refused BY THE ENGINE, on `img-src`, and the reader
-      // was told; nothing else was refused.
+      // The images it names by address were refused BY THE ENGINE, on `img-src`,
+      // and the reader was told; nothing else was refused.
       await expect(previewFrame(page).getByText(/They are not loaded/)).toBeVisible();
-      await expectOnlyRemoteImagesRefused(frame);
+      await expectOnlyImagesRefused(page, frame);
 
       // Nothing navigated this page or opened another.
       expect(page.url()).toBe(settled);
@@ -397,7 +480,7 @@ test.describe('the isolated document under the production policy', () => {
       await expect(rendered.locator('a[href^="javascript:"]')).toHaveCount(0);
       expect(await frame.evaluate(() => '__pwned' in window)).toBe(false);
 
-      await expectOnlyRemoteImagesRefused(frame);
+      await expectOnlyImagesRefused(page, frame);
       expect(page.url()).toBe(settled);
       expect(page.context().pages()).toHaveLength(1);
     });

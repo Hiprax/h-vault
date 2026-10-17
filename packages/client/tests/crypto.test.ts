@@ -415,51 +415,6 @@ describe('encryptData / decryptData', () => {
 });
 
 // ---------------------------------------------------------------------------
-// HMAC Search Hash Generation
-// ---------------------------------------------------------------------------
-
-describe('generateSearchHash', () => {
-  let vaultKey: CryptoKey;
-
-  beforeAll(async () => {
-    const rawVk = await crypto.generateVaultKey();
-    vaultKey = await crypto.importVaultKey(rawVk);
-  });
-
-  it('returns a 64-char lowercase hex string', async () => {
-    const hash = await crypto.generateSearchHash('My Login', vaultKey);
-    expect(typeof hash).toBe('string');
-    expect(hash).toMatch(/^[a-f0-9]{64}$/);
-  });
-
-  it('is deterministic — same name and key produce the same hash', async () => {
-    const h1 = await crypto.generateSearchHash('GitHub', vaultKey);
-    const h2 = await crypto.generateSearchHash('GitHub', vaultKey);
-    expect(h1).toBe(h2);
-  });
-
-  it('normalises name — case and whitespace insensitive', async () => {
-    const h1 = await crypto.generateSearchHash('  GitHub  ', vaultKey);
-    const h2 = await crypto.generateSearchHash('github', vaultKey);
-    expect(h1).toBe(h2);
-  });
-
-  it('produces different hashes for different names', async () => {
-    const h1 = await crypto.generateSearchHash('GitHub', vaultKey);
-    const h2 = await crypto.generateSearchHash('GitLab', vaultKey);
-    expect(h1).not.toBe(h2);
-  });
-
-  it('produces different hashes with different vault keys', async () => {
-    const rawOtherKey = await crypto.generateVaultKey();
-    const otherKey = await crypto.importVaultKey(rawOtherKey);
-    const h1 = await crypto.generateSearchHash('test', vaultKey);
-    const h2 = await crypto.generateSearchHash('test', otherKey);
-    expect(h1).not.toBe(h2);
-  });
-});
-
-// ---------------------------------------------------------------------------
 // Backup Key Derivation
 // ---------------------------------------------------------------------------
 
@@ -764,32 +719,6 @@ describe('arrayBufferToBase64 / base64ToArrayBuffer', () => {
   });
 });
 
-describe('generateBackupCodes', () => {
-  it('generates the requested number of codes', () => {
-    const codes = crypto.generateBackupCodes(8);
-    expect(codes).toHaveLength(8);
-  });
-
-  it('each code is 16 hex characters', () => {
-    const codes = crypto.generateBackupCodes(10);
-    for (const code of codes) {
-      expect(code).toMatch(/^[0-9a-f]{16}$/);
-    }
-  });
-
-  it('generates unique codes (statistically)', () => {
-    const codes = crypto.generateBackupCodes(20);
-    const unique = new Set(codes);
-    // With 8 bytes of entropy per code, collisions in 20 codes are extremely unlikely
-    expect(unique.size).toBe(20);
-  });
-
-  it('returns an empty array when count is 0', () => {
-    const codes = crypto.generateBackupCodes(0);
-    expect(codes).toHaveLength(0);
-  });
-});
-
 // ---------------------------------------------------------------------------
 // End-to-End Crypto Flow
 // ---------------------------------------------------------------------------
@@ -817,9 +746,8 @@ describe('end-to-end flow', () => {
     });
     const encData = await crypto.encryptData(secretData, vaultKey);
 
-    // 4. Generate search hash for the item name
-    const searchHash = await crypto.generateSearchHash('Example Login', vaultKey);
-    expect(typeof searchHash).toBe('string');
+    // 4. No keyed hash of the item name is computed any more (F-12).
+    expect('generateSearchHash' in crypto).toBe(false);
 
     // 5. Later: user logs in — derive the same keys
     const { masterEncryptionKey: mek2 } = await crypto.deriveKeys(
@@ -1274,10 +1202,10 @@ describe('computeBackupHmac / verifyBackupHmac', () => {
 // ---------------------------------------------------------------------------
 // Backup HKDF Subkey Derivation (Task 4.7)
 //
-// Verifies key separation per NIST SP 800-108: the HMAC subkey and the
-// encryption subkey are independently derived via HKDF-SHA256 with distinct
-// `info` labels. Also verifies backwards compatibility: legacy backups that
-// were signed with the raw BWK still validate via the fallback path.
+// Verifies key separation per NIST SP 800-108: the HMAC subkey is derived via
+// HKDF-SHA256 with its own `info` label rather than using the BWK directly.
+// Also verifies backwards compatibility: legacy backups that were signed with
+// the raw BWK still validate via the fallback path.
 // ---------------------------------------------------------------------------
 
 describe('Backup HKDF subkey derivation (Task 4.7)', () => {
@@ -1348,41 +1276,5 @@ describe('Backup HKDF subkey derivation (Task 4.7)', () => {
     const newHmac = await crypto.computeBackupHmac(data, bwk);
     const valid = await crypto.verifyBackupHmac(data, newHmac, bwk);
     expect(valid).toBe(true);
-  });
-
-  it('deriveBackupEncSubkey returns an AES-GCM CryptoKey distinct from BWK', async () => {
-    const encKey = await crypto.deriveBackupEncSubkey(bwk);
-    expect(encKey.algorithm).toEqual({ name: 'AES-GCM', length: 256 });
-    expect(encKey.usages).toEqual(expect.arrayContaining(['encrypt', 'decrypt']));
-
-    // Encrypting with the derived subkey produces ciphertext that does NOT
-    // decrypt with the raw BWK — confirming the subkey is materially different.
-    const iv = globalThis.crypto.getRandomValues(new Uint8Array(12));
-    const plaintext = new TextEncoder().encode('hello');
-    const ct = await globalThis.crypto.subtle.encrypt({ name: 'AES-GCM', iv }, encKey, plaintext);
-
-    const rawBwkKey = await globalThis.crypto.subtle.importKey(
-      'raw',
-      bwk,
-      { name: 'AES-GCM', length: 256 },
-      false,
-      ['decrypt'],
-    );
-
-    await expect(
-      globalThis.crypto.subtle.decrypt({ name: 'AES-GCM', iv }, rawBwkKey, ct),
-    ).rejects.toBeDefined();
-  });
-
-  it('HKDF subkeys are deterministic per BWK and differ between info labels', async () => {
-    const enc1 = await crypto.deriveBackupEncSubkey(bwk);
-    const enc2 = await crypto.deriveBackupEncSubkey(bwk);
-
-    // Same BWK + same info label → same subkey → same ciphertext under same IV.
-    const iv = globalThis.crypto.getRandomValues(new Uint8Array(12));
-    const pt = new TextEncoder().encode('determinism check');
-    const c1 = await globalThis.crypto.subtle.encrypt({ name: 'AES-GCM', iv }, enc1, pt);
-    const c2 = await globalThis.crypto.subtle.encrypt({ name: 'AES-GCM', iv }, enc2, pt);
-    expect(new Uint8Array(c1)).toEqual(new Uint8Array(c2));
   });
 });

@@ -36,6 +36,7 @@ import { bulkDeleteApi, bulkMoveApi, permanentDeleteApi } from '../../services/a
 import { useToast } from '../ui/Toast';
 import { useInlineDialog } from '../ui/Dialog';
 import type { ItemType } from '@hvault/shared';
+import { refreshInBackground } from '../../lib/backgroundRefresh';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -676,7 +677,7 @@ export function VaultList({ onCreateNew }: VaultListProps) {
                             await bulkMoveApi([...selectedItems], null);
                             toast({ title: 'Items moved', type: 'success' });
                             setSelectedItems(new Set());
-                            void fetchItems();
+                            refreshInBackground(fetchItems());
                           } catch {
                             toast({ title: 'Failed to move items', type: 'error' });
                           } finally {
@@ -701,7 +702,7 @@ export function VaultList({ onCreateNew }: VaultListProps) {
                               await bulkMoveApi([...selectedItems], folder.id);
                               toast({ title: `Items moved to ${folder.name}`, type: 'success' });
                               setSelectedItems(new Set());
-                              void fetchItems();
+                              refreshInBackground(fetchItems());
                             } catch {
                               toast({ title: 'Failed to move items', type: 'error' });
                             } finally {
@@ -1030,12 +1031,12 @@ export function VaultList({ onCreateNew }: VaultListProps) {
                           type: 'success',
                         });
                         setSelectedItems(new Set());
-                        void fetchTrashItems();
+                        refreshInBackground(fetchTrashItems());
                       } else {
                         await bulkDeleteApi([...selectedItems]);
                         toast({ title: `${selectedItems.size} items deleted`, type: 'success' });
                         setSelectedItems(new Set());
-                        void fetchItems();
+                        refreshInBackground(fetchItems());
                       }
                     } catch {
                       toast({ title: 'Failed to delete items', type: 'error' });

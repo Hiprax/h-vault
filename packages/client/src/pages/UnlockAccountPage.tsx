@@ -1,8 +1,9 @@
 import { useEffect, useState, useRef } from 'react';
-import { Link, useSearchParams } from 'react-router';
+import { Link } from 'react-router';
 import { CheckCircle, XCircle, ArrowLeft, Loader2 } from 'lucide-react';
 import { unlockAccountApi } from '../services/api/authApi';
 import { getApiErrorMessage } from '../lib/utils';
+import { useLinkToken } from '../lib/linkToken';
 import {
   Card,
   CardContent,
@@ -14,16 +15,26 @@ import {
 import { StandalonePage } from '../components/layout/StandalonePage';
 
 export default function UnlockAccountPage() {
-  const [searchParams] = useSearchParams();
-  const token = searchParams.get('token');
+  // From the link's fragment (or, for one release, a query from an older email),
+  // and removed from the address bar once read. `lib/linkToken.ts`.
+  const token = useLinkToken({ acceptQuery: true });
 
   const [status, setStatus] = useState<'loading' | 'success' | 'error'>('loading');
   const [message, setMessage] = useState('');
-  const calledRef = useRef(false);
+  // Every token already handled: each is sent once (StrictMode runs this effect
+  // twice), and a SECOND link opened in the same tab, which changes the token
+  // without a reload, is sent too.
+  const handledRef = useRef(new Set<string | null>());
+  // Which request is current: an answer for a token a later link superseded is
+  // dropped, so it cannot overwrite the newer link's result.
+  const requestRef = useRef<object | null>(null);
 
   useEffect(() => {
-    if (calledRef.current) return;
-    calledRef.current = true;
+    if (handledRef.current.has(token)) return;
+    handledRef.current.add(token);
+    // A fresh object per request: identity, not arithmetic, tells them apart.
+    const request = {};
+    requestRef.current = request;
 
     if (!token) {
       setStatus('error');
@@ -31,13 +42,16 @@ export default function UnlockAccountPage() {
       return;
     }
 
+    setStatus('loading');
     void unlockAccountApi({ token })
       .then((res) => {
+        if (request !== requestRef.current) return;
         setStatus('success');
         const msg = res.data.success ? res.data.message : undefined;
         setMessage(msg ?? 'Account unlocked successfully. You can now log in.');
       })
       .catch((err: unknown) => {
+        if (request !== requestRef.current) return;
         setStatus('error');
         setMessage(getApiErrorMessage(err, 'Account unlock failed. The link may have expired.'));
       });

@@ -631,7 +631,6 @@ test.describe('Authenticated Export & Import', () => {
             encryptedData: 'e2e-new-data',
             dataIv: 'e2e-data-iv',
             dataTag: 'e2e-data-tag',
-            searchHash: 'b'.repeat(64),
           },
         ],
       },
@@ -685,7 +684,7 @@ test.describe('Authenticated Export & Import', () => {
       format: 'json',
       conflictStrategy: 'keep_both',
       operations: {
-        inserts: exportBody.data.items.map((item) => ({ ...item, searchHash: 'a'.repeat(64) })),
+        inserts: exportBody.data.items,
       },
     });
     expect(importRes.ok()).toBe(true);

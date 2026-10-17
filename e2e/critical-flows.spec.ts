@@ -157,16 +157,12 @@ test.describe('Import/Export Flow', () => {
     const user2 = await createAuthenticatedUser(request);
 
     // An export row carries fields the import contract does not accept (`_id`,
-    // `userId`, timestamps); they are stripped by the schema, and the client
-    // supplies the required `searchHash` from the name it just decrypted.
+    // `userId`, timestamps); they are stripped by the schema.
     const importRes = await authMutate(request, user2, 'post', '/api/v1/tools/import', {
       format: 'json',
       conflictStrategy: 'keep_both',
       operations: {
-        inserts: exportBody.data.items.map((item) => ({
-          ...item,
-          searchHash: 'a'.repeat(64),
-        })),
+        inserts: exportBody.data.items,
       },
     });
     expect(importRes.ok()).toBe(true);

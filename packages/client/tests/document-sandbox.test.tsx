@@ -73,6 +73,31 @@ function postFromFrame(source: unknown, data: unknown, origin = 'null'): void {
   });
 }
 
+/**
+ * Dispatch, on `target`, the window `message` that hands the frame its port.
+ *
+ * `source` defaults to `target.parent`, which is who sends it in production: the
+ * embedder transfers the port from its own window. At top level `parent` IS the
+ * window, which is also how the a11y harness drives the document directly. Both
+ * `ports` and `source` are defined on the event rather than passed to the
+ * constructor, because jsdom's `MessageEvent` init refuses a port or a window it
+ * did not create itself.
+ */
+function dispatchPortMessage(
+  target: Window,
+  port: MessagePort | null,
+  source: unknown = target.parent,
+  data: unknown = null,
+): void {
+  const event = new (target as Window & typeof globalThis).MessageEvent('message', { data });
+  Object.defineProperty(event, 'ports', {
+    configurable: true,
+    get: () => (port === null ? [] : [port]),
+  });
+  Object.defineProperty(event, 'source', { configurable: true, get: () => source });
+  target.dispatchEvent(event);
+}
+
 /** The port the host transferred, if it transferred one. */
 function transferredPort(stub: StubWindow): MessagePort | undefined {
   const call = stub.postMessage.mock.calls[0];
@@ -986,9 +1011,7 @@ describe('the frame’s program', () => {
     expect(ready.mock.calls[0]?.[1]).toBe('*');
 
     const channel = new MessageChannel();
-    const event = new MessageEvent('message', { data: { kind: 'channel' } });
-    Object.defineProperty(event, 'ports', { configurable: true, get: () => [channel.port2] });
-    window.dispatchEvent(event);
+    dispatchPortMessage(window, channel.port2, window.parent, { kind: 'channel' });
     channel.port1.start();
     return { host: channel.port1, ready };
   }
@@ -1030,9 +1053,7 @@ describe('the frame’s program', () => {
    */
   function releaseStaleProgram(): void {
     const spare = new MessageChannel();
-    const event = new MessageEvent('message', { data: null });
-    Object.defineProperty(event, 'ports', { configurable: true, get: () => [spare.port2] });
-    window.dispatchEvent(event);
+    dispatchPortMessage(window, spare.port2, window.parent, null);
     spare.port1.close();
     spare.port2.close();
   }
@@ -1056,9 +1077,7 @@ describe('the frame’s program', () => {
     try {
       await import('../src/sandbox/sandbox');
       const channel = new MessageChannel();
-      const event = new MessageEvent('message', { data: { kind: 'channel' } });
-      Object.defineProperty(event, 'ports', { configurable: true, get: () => [channel.port2] });
-      window.dispatchEvent(event);
+      dispatchPortMessage(window, channel.port2, window.parent, { kind: 'channel' });
       channel.port1.start();
 
       const reply = nextReply(channel.port1);
@@ -1183,9 +1202,7 @@ describe('the frame’s program', () => {
     try {
       await import('../src/sandbox/sandbox');
       const channel = new MessageChannel();
-      const event = new MessageEvent('message', { data: { kind: 'channel' } });
-      Object.defineProperty(event, 'ports', { configurable: true, get: () => [channel.port2] });
-      window.dispatchEvent(event);
+      dispatchPortMessage(window, channel.port2, window.parent, { kind: 'channel' });
       channel.port1.start();
 
       const reply = nextReply(channel.port1);
@@ -1608,15 +1625,13 @@ describe('the frame’s program', () => {
     vi.resetModules();
     const mod = await import('../src/sandbox/sandbox');
 
-    window.dispatchEvent(new MessageEvent('message', { data: { kind: 'channel' } }));
+    dispatchPortMessage(window, null, window.parent, { kind: 'channel' });
     expect(mod.sandboxChannel()).toBeNull();
 
     // ...and the real reply is still accepted afterwards, so the refusal above
     // did not consume the one-shot.
     const channel = new MessageChannel();
-    const event = new MessageEvent('message', { data: null });
-    Object.defineProperty(event, 'ports', { configurable: true, get: () => [channel.port2] });
-    window.dispatchEvent(event);
+    dispatchPortMessage(window, channel.port2, window.parent, null);
     expect(mod.sandboxChannel()).not.toBeNull();
   });
 
@@ -1668,9 +1683,7 @@ describe('the frame’s program', () => {
     const first = mod.sandboxChannel();
 
     const second = new MessageChannel();
-    const event = new MessageEvent('message', { data: null });
-    Object.defineProperty(event, 'ports', { configurable: true, get: () => [second.port2] });
-    window.dispatchEvent(event);
+    dispatchPortMessage(window, second.port2, window.parent, null);
 
     // The mirror of the host's one-shot rule: with the window listener gone, a
     // second attempt to hand this document a channel reaches nobody.
@@ -1678,5 +1691,94 @@ describe('the frame’s program', () => {
     host.close();
     second.port1.close();
     second.port2.close();
+  });
+
+  /** A second window in this document, standing in for an opener or a sibling frame. */
+  function otherWindow(): Window {
+    const frame = document.createElement('iframe');
+    document.body.append(frame);
+    const win = frame.contentWindow;
+    if (win === null) throw new Error('jsdom created no window for the iframe');
+    return win;
+  }
+
+  it('ignores a port posted from a window other than its parent, and stays unbooted (F-22)', async () => {
+    // A page that OPENS `/sandbox.html` holds a handle to it and can post it a
+    // port; so can any other window holding one. Only the embedder may drive the
+    // frame, so a port is accepted from `win.parent` alone. Here the document is
+    // at top level, where `parent` is the window itself, which is exactly how an
+    // opener's port arrives: from a window that is NOT the parent.
+    document.body.innerHTML = '<div id="root"></div>';
+    vi.spyOn(window, 'postMessage').mockImplementation(vi.fn() as never);
+    vi.resetModules();
+    const mod = await import('../src/sandbox/sandbox');
+    const stranger = otherWindow();
+
+    for (const source of [stranger, null]) {
+      const channel = new MessageChannel();
+      const replies: unknown[] = [];
+      channel.port1.addEventListener('message', (event: MessageEvent) => replies.push(event.data));
+      channel.port1.start();
+      dispatchPortMessage(window, channel.port2, source, { kind: 'channel' });
+
+      // Unbooted: no channel, and a render request on the port reaches nobody.
+      // Compared as a boolean: a failure would otherwise print the whole port,
+      // whose window graph is circular.
+      expect(mod.sandboxChannel() === null, 'a port from a non-parent was accepted').toBe(true);
+      channel.port1.postMessage({
+        kind: 'render',
+        mode: 'text',
+        ext: 'txt',
+        theme: 'light',
+        bytes: bytesOf('hello'),
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(replies).toEqual([]);
+      expect(document.getElementById('root')?.textContent).toBe('');
+      channel.port1.close();
+    }
+
+    // The refusals did not consume the one-shot: the parent's port is accepted.
+    const real = new MessageChannel();
+    dispatchPortMessage(window, real.port2, window.parent, null);
+    expect(mod.sandboxChannel() === real.port2).toBe(true);
+    real.port1.close();
+  });
+
+  it('takes its port from its parent when framed, never from its own window (F-22)', async () => {
+    // The discriminating case for "the parent", as opposed to "this window": at
+    // top level the two are the same object, so only a FRAMED document tells a
+    // rule that reads `win.parent` from one that reads `win`.
+    document.body.innerHTML = '';
+    vi.spyOn(window, 'postMessage').mockImplementation(vi.fn() as never);
+    vi.resetModules();
+    const mod = await import('../src/sandbox/sandbox');
+    // The module-scope boot above listens on THIS window; the framed one under
+    // test listens on the child's. Its parent is the jsdom window behind the test
+    // realm's global (under vitest the global is its own `parent`, and a frame's
+    // `parent` is the window it forwards to), so it is read off the child.
+    const child = otherWindow();
+    const parent = child.parent;
+    expect(parent === child).toBe(false);
+    const announce = vi.fn();
+    vi.spyOn(parent, 'postMessage').mockImplementation(announce as never);
+    mod.startSandbox(child);
+    // It announced itself to its parent, which is how the embedder learns of it.
+    expect(announce).toHaveBeenCalledWith({ kind: 'ready' }, '*');
+
+    const fromItself = new MessageChannel();
+    dispatchPortMessage(child, fromItself.port2, child, null);
+    const fromSibling = new MessageChannel();
+    dispatchPortMessage(child, fromSibling.port2, otherWindow(), null);
+    expect(mod.sandboxChannel() === null, 'a port from a non-parent was accepted').toBe(true);
+
+    const fromParent = new MessageChannel();
+    dispatchPortMessage(child, fromParent.port2, parent, null);
+    expect(mod.sandboxChannel() === fromParent.port2).toBe(true);
+
+    for (const channel of [fromItself, fromSibling, fromParent]) {
+      channel.port1.close();
+      channel.port2.close();
+    }
   });
 });

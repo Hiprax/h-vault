@@ -1,5 +1,5 @@
 /**
- * The three account-level conditions that bar a user from being served, in ONE
+ * The account-level conditions that bar a user from being served, in ONE
  * definition.
  *
  * They are evaluated at four entry points — `authController.login`,
@@ -12,27 +12,30 @@
  *
  * ## Why this returns flags instead of throwing
  *
- * The three policies genuinely differ, and flattening them would be a
- * regression in each case:
+ * The policies genuinely differ, and flattening them would be a regression in
+ * each case:
  *
- *  - `login` must evaluate the lockout BEFORE the verification check and must
- *    answer `ACCOUNT_LOCKED` only to a caller that supplied the correct password
- *    — telling a wrong-password caller that the account is locked is an
- *    enumeration oracle, and the surrounding branches equalize their timing by
- *    hand.
+ *  - `login` reads ONLY the password factor. During a password lockout it answers
+ *    every UNPROVEN client exactly as it answers a wrong password, whether or not
+ *    the password was right, so a lockout can never confirm a guess; a client
+ *    holding a valid device proof for the account proceeds.
+ *  - `login2fa` reads ONLY the second factor, and answers its lockout with a
+ *    distinct `ACCOUNT_LOCKED`: the password is already proven at that step, so
+ *    the distinct answer carries no oracle.
  *  - the refresh handler collapses the deletion and verification refusals into
- *    `TOKEN_INVALID` and answers the lockout with a 403 `ACCOUNT_LOCKED`.
+ *    `TOKEN_INVALID` and does NOT consult either lockout: the refresh cookie is
+ *    itself proof of a prior authentication, and refusing it would freeze the
+ *    owner's live sessions (including the one they would use to change the
+ *    password) for as long as a stranger kept guessing.
  *  - the Passport strategy answers every refusal identically (`done(null, false)`)
- *    and deliberately does NOT consult the lockout at all: an access token lives
- *    fifteen minutes and the refresh gate is where a lockout ends the session.
- *    That site therefore passes only the two fields it projects, which is why
- *    those fields are individually optional here.
+ *    and consults no lockout either. That site passes only the two fields it
+ *    projects, which is why those fields are individually optional here.
  *
- * So the shared thing is the PREDICATE, not the response, and this returns three
+ * So the shared thing is the PREDICATE, not the response, and this returns
  * named booleans rather than one verdict: a single ordered answer would have to
- * pick a precedence, and no two of the four callers share one. What an absent
- * field means is set out on {@link AccountStatusFields}, and it is not the same
- * for all three.
+ * pick a precedence, and no two of the callers share one. What an absent field
+ * means is set out on {@link AccountStatusFields}, and it is not the same for
+ * all of them.
  */
 
 /**
@@ -42,9 +45,9 @@
  * What an ABSENT field means differs per condition, and the difference is
  * deliberate rather than an oversight, so it is stated rather than generalised:
  *
- *  - `deletionPending` and `lockoutUntil` read as "this condition does not
- *    apply". Both are markers written only when the condition starts, so their
- *    absence and their falsehood are the same state.
+ *  - `deletionPending`, `lockoutUntil` and `secondFactorLockout` read as "this
+ *    condition does not apply". Each is a marker written only when the condition
+ *    starts, so its absence and its falsehood are the same state.
  *  - `emailVerified` reads as UNVERIFIED, because it is a positive assertion and
  *    its absence is the absence of that assertion. A caller that does not project
  *    it is therefore refused rather than waved through, which is the fail-closed
@@ -52,14 +55,17 @@
  *    the field" is a real rule, not a stylistic preference. `middleware/auth.ts`
  *    projects it for exactly this reason.
  *
- * The lockout is the one a caller may legitimately leave out entirely, and that
- * caller must simply not read `lockedOut`, which cannot distinguish "not locked"
- * from "not asked for".
+ * The two lockouts are the ones a caller may legitimately leave out entirely, and
+ * that caller must simply not read `passwordLocked`/`secondFactorLocked`, which
+ * cannot distinguish "not locked" from "not asked for". `secondFactorLockout` is
+ * `select: false` on the model, so a caller that reads `secondFactorLocked` must
+ * have projected it by name (`login2fa` does; the one verifier re-reads it).
  */
 export interface AccountStatusFields {
   deletionPending?: boolean | undefined;
   emailVerified?: boolean | undefined;
   lockoutUntil?: Date | null | undefined;
+  secondFactorLockout?: { until?: Date | null | undefined } | null | undefined;
 }
 
 export interface AccountStatus {
@@ -71,12 +77,25 @@ export interface AccountStatus {
   deletionPending: boolean;
   /** The address has never been confirmed, so the account is not usable yet. */
   emailUnverified: boolean;
-  /** A lockout deadline exists and has not yet passed. */
-  lockedOut: boolean;
+  /** The PASSWORD factor's lockout deadline exists and has not yet passed. */
+  passwordLocked: boolean;
+  /** The SECOND factor's lockout deadline exists and has not yet passed. */
+  secondFactorLocked: boolean;
 }
 
 /**
- * Evaluates the three conditions against one user record.
+ * Whether a lockout deadline is still running at `now`.
+ *
+ * Strictly greater: a deadline that has arrived has been SERVED, and each factor
+ * discharges a served lockout at its own step. `>=` would hold the account one
+ * request longer for no reason and would make the boundary untestable.
+ */
+function isLockoutRunning(until: Date | null | undefined, now: Date): boolean {
+  return until != null && until.getTime() > now.getTime();
+}
+
+/**
+ * Evaluates the conditions against one user record.
  *
  * `now` is injectable so a caller that has already fixed an instant (or a test
  * that needs a deterministic boundary) evaluates the lockout against that
@@ -91,10 +110,8 @@ export function evaluateAccountStatus(
   // must not be read as "pending".
   const deletionPending = user.deletionPending === true;
   const emailUnverified = user.emailVerified !== true;
-  // Strictly greater: a deadline that has arrived has been SERVED, and `login`
-  // discharges it on the next correct password. `>=` would hold the account one
-  // request longer for no reason and would make the boundary untestable.
-  const lockedOut = user.lockoutUntil != null && user.lockoutUntil.getTime() > now.getTime();
+  const passwordLocked = isLockoutRunning(user.lockoutUntil, now);
+  const secondFactorLocked = isLockoutRunning(user.secondFactorLockout?.until, now);
 
-  return { deletionPending, emailUnverified, lockedOut };
+  return { deletionPending, emailUnverified, passwordLocked, secondFactorLocked };
 }

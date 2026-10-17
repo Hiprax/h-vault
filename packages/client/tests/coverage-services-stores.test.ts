@@ -756,6 +756,7 @@ vi.mock('../src/pages/AuditLogPage', () => pageStub('audit'));
 vi.mock('../src/pages/VerifyEmailPage', () => pageStub('verify-email'));
 vi.mock('../src/pages/ResetPasswordPage', () => pageStub('reset-password'));
 vi.mock('../src/pages/UnlockAccountPage', () => pageStub('unlock-account'));
+vi.mock('../src/pages/ConfirmRecipientPage', () => pageStub('confirm-recipient'));
 vi.mock('../src/pages/NotFoundPage', () => pageStub('not-found'));
 
 import type { DocumentUploadProgress } from '../src/stores/documentsStore';
@@ -880,6 +881,8 @@ describe('App route table', () => {
     ['/verify-email', 'page-verify-email'],
     ['/reset-password', 'page-reset-password'],
     ['/unlock-account', 'page-unlock-account'],
+    // F-05: a backup recipient usually has no account here.
+    ['/backup/confirm-recipient', 'page-confirm-recipient'],
   ])('renders the token-link route %s with no auth wrapper at all', async (path, testId) => {
     await renderAppAt(path);
 

@@ -1,5 +1,5 @@
 import { z } from '../zod.js';
-import { MAX_DOCUMENT_EXT_LENGTH } from '../constants/index.js';
+import { MAX_DOCUMENT_EXT_LENGTH, REGISTRATION_MODES } from '../constants/index.js';
 
 // Runtime validation for the public (unauthenticated) GET /config response.
 // Mirrors the `PublicConfig` interface in `types/index.ts` and the success
@@ -46,6 +46,10 @@ export const publicConfigDataSchema = z.object({
   // Encryption cap changes for a reason no one can see. The `upgrade` gate is what
   // would catch a required field here, one release too late.
   documents: documentsConfigSchema.optional(),
+  // Who may register (`REGISTRATION_MODE`). OPTIONAL for the reason `documents`
+  // is: an older server sends no such block, and the register page then shows the
+  // form it always showed.
+  registration: z.object({ mode: z.enum(REGISTRATION_MODES) }).optional(),
 });
 
 export const publicConfigResponseSchema = z.object({
@@ -92,4 +96,17 @@ export const fileEncryptionConfigResponseSchema = publicConfigResponseSchema.ext
  */
 export const documentsConfigResponseSchema = publicConfigResponseSchema.extend({
   data: publicConfigDataSchema.pick({ documents: true }),
+});
+
+/**
+ * The same envelope a third time, narrowed to the block the REGISTER PAGE reads.
+ *
+ * Narrow for the reason the two above are: the page must not lose the File
+ * Encryption cap or the document store to a mode it does not recognise, and must
+ * not lose its own block to a malformed `documents` one. A mode this client does
+ * not know fails THIS parse only, and the page then falls back to the plain form,
+ * which the server still refuses or admits by its own rule.
+ */
+export const registrationConfigResponseSchema = publicConfigResponseSchema.extend({
+  data: publicConfigDataSchema.pick({ registration: true }),
 });

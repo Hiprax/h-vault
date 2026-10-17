@@ -1,12 +1,12 @@
-import { fileURLToPath } from 'node:url';
-import path from 'node:path';
-import fs from 'node:fs';
-import dotenv from 'dotenv';
+import { X509Certificate } from 'node:crypto';
+import net from 'node:net';
 import { z } from 'zod';
 import {
   DOCUMENT_CIPHERTEXT_CHUNK_BYTES,
   MAX_DOCUMENT_EXT_LENGTH,
+  MAX_REGISTRATION_INVITERS,
   MIN_SUSTAINED_UPLOAD_BYTES_PER_SECOND,
+  REGISTRATION_MODES,
   emailSchema,
 } from '@hvault/shared';
 import {
@@ -15,32 +15,16 @@ import {
   MAX_UPDATE_NOTIFY_EMAILS,
 } from '../constants/index.js';
 import { createModuleLogger } from '../utils/logger.js';
-
-// Resolve .env from the monorepo root (4 levels up from packages/server/src/config/).
-// When using npm workspaces, process.cwd() points to the package directory, not the
-// monorepo root. This caused dotenv to load packages/server/.env (test config with
-// empty SMTP values) instead of the root .env (actual user config).
-const configDir = path.dirname(fileURLToPath(import.meta.url));
-const rootDir = path.resolve(configDir, '..', '..', '..', '..');
-const rootEnvPath = path.join(rootDir, '.env');
-
-// Every option that decides WHAT is loaded, pinned. dotenv also reads its options
-// from `DOTENV_*` (and `DOTENV_CONFIG_*`) environment variables on every
-// `config()` call, with the options passed here taking precedence, so anything
-// left unpinned is something an ambient variable can change. `override: false` is
-// the load-bearing one: a variable the environment already holds must win over
-// the file (the server suite's pinned `test.env` beats a developer's root .env
-// only because of it, the E2E harness points storage at its own engine that way,
-// and a process-manager or shell export is expected to beat the file). The encoding and
-// the parser are pinned so the file is read the one way it has always been read.
-const DOTENV_LOAD_OPTIONS = { override: false, encoding: 'utf8', fast: false } as const;
-
-// The root .env when there is one, else the one in CWD (a standalone deployment
-// without .env at the monorepo root, e.g. inside a Docker container). The
-// fallback is named explicitly rather than left to dotenv's default, which
-// `DOTENV_PATH` would otherwise redirect.
-const envPath = fs.existsSync(rootEnvPath) ? rootEnvPath : path.resolve(process.cwd(), '.env');
-dotenv.config({ ...DOTENV_LOAD_OPTIONS, path: envPath });
+// The `.env` load (once per process, shared with the index bootstrap's
+// configuration) and the secret-free keys that configuration declares, composed
+// into the schema below so both read them identically.
+import './envFile.js';
+import {
+  INDEX_CONFIG_SHAPE,
+  POOL_SIZE_ORDER_ISSUE,
+  invalidEnvironmentConfiguration,
+  poolSizesAreOrdered,
+} from './indexConfigSchema.js';
 
 // NOTE: previously this used `dotenv-safe` to enforce the presence of
 // `.env.example` keys at boot. That guard is now redundant: the Zod schema
@@ -114,6 +98,28 @@ function urlHostname(value: string): string | undefined {
 }
 
 /**
+ * A plain dotted host name: two or more labels of letters, digits and inner
+ * hyphens, 63 characters a label, 253 in all. Checked label by label, with a flat
+ * character class and the edge rules spelled out, rather than one pattern with a
+ * nested quantifier. Internationalised domains are written in their `xn--` form.
+ */
+function isPlainDomainName(domain: string): boolean {
+  if (domain.length > 253) return false;
+  const labels = domain.split('.');
+  return (
+    labels.length >= 2 &&
+    labels.every(
+      (label) =>
+        // One character at least: the `+` of the class, which also refuses `..`.
+        label.length <= 63 &&
+        /^[a-z0-9-]+$/.test(label) &&
+        !label.startsWith('-') &&
+        !label.endsWith('-'),
+    )
+  );
+}
+
+/**
  * Whether an `S3_ENDPOINT` is acceptable for a PRODUCTION deployment. `https://`
  * always is. A plain `http://` one is accepted only for a host the traffic never
  * leaves (see `isLocalOrPrivateStorageHost`), which is what makes the in-stack
@@ -131,6 +137,30 @@ function isProductionStorageEndpoint(endpoint: string): boolean {
   return isLocalOrPrivateStorageHost(hostname);
 }
 
+/** One PEM certificate block. */
+const PEM_CERTIFICATE_BLOCK = /-----BEGIN CERTIFICATE-----[^-]+-----END CERTIFICATE-----/g;
+
+/**
+ * Whether `value` is a bundle of PEM certificates and nothing else: at least one
+ * block, every block a certificate Node can parse, and no other text but
+ * whitespace between them. A private key pasted in by mistake is refused rather
+ * than kept in the process's configuration, and a truncated certificate refuses
+ * boot instead of failing every send later.
+ */
+function isCertificateBundle(value: string): boolean {
+  const blocks = value.match(PEM_CERTIFICATE_BLOCK);
+  if (blocks === null) return false;
+  if (value.replace(PEM_CERTIFICATE_BLOCK, '').trim() !== '') return false;
+  return blocks.every((block) => {
+    try {
+      new X509Certificate(block);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+}
+
 /**
  * The document part route's body deadline when `DOCUMENT_PART_BODY_TIMEOUT_MS` is
  * not set: one sealed segment at the slowest sustained uplink this deployment
@@ -143,7 +173,29 @@ export const DEFAULT_DOCUMENT_PART_BODY_TIMEOUT_MS =
 const envSchema = z
   .object({
     PORT: z.coerce.number().int().min(1).max(65535).default(5000),
-    NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
+    // The address the HTTP server listens on (`utils/listenAddress.ts`). Loopback by
+    // default, because on the PM2 path the only intended client is the host Nginx on
+    // the same machine: listening on every interface would let anyone who can reach
+    // the machine's address go round the proxy (and, with a numeric TRUST_PROXY,
+    // choose the client address every rate limit and audit row is keyed on). The
+    // containers are reached over a bridge network and set 0.0.0.0 in Compose. An IP
+    // literal only: a NAME binds whichever address the resolver lists first
+    // (`localhost` can be ::1 alone), and some shells export HOST as the machine's
+    // name, which must refuse boot rather than bind somewhere nobody chose.
+    HOST: z.preprocess(
+      (v) => (v === '' ? undefined : v),
+      z
+        .string()
+        .refine((host) => net.isIP(host) !== 0, {
+          message:
+            'HOST must be an IP address to listen on (127.0.0.1, the default; 0.0.0.0 or :: for every interface). If your shell exports HOST as the machine name, unset it or set HOST in the environment the server is started from',
+        })
+        .default('127.0.0.1'),
+    ),
+    // NODE_ENV, the database connection and pool, and the three retention
+    // settings: declared once in `indexConfigSchema.ts`, the secret-free subset the
+    // index bootstrap reads (F-20).
+    ...INDEX_CONFIG_SHAPE,
 
     // How long the server will spend RECEIVING one request, and how long it will
     // spend on that request's headers alone. Both are applied to the HTTP server
@@ -189,11 +241,6 @@ const envSchema = z
       .min(5_000)
       .max(600_000)
       .default(DEFAULT_DOCUMENT_PART_BODY_TIMEOUT_MS),
-
-    // Database
-    MONGODB_URI: z.string().min(1).default('mongodb://localhost:27017/hvault'),
-    MONGO_MAX_POOL_SIZE: z.coerce.number().int().min(1).max(100).default(10),
-    MONGO_MIN_POOL_SIZE: z.coerce.number().int().min(0).max(50).default(2),
 
     // JWT
     JWT_ACCESS_SECRET: z
@@ -247,6 +294,35 @@ const envSchema = z
       .string()
       .optional()
       .transform((v) => (v === '' ? undefined : v)),
+    // Whether SMTP must be encrypted (STARTTLS, when SMTP_SECURE's implicit TLS is
+    // not in use). TRI-STATE, read by `utils/email.ts`: `true` requires it for every
+    // relay, a loopback one included; `false` turns the requirement off, for a
+    // plaintext relay the operator controls; unset (or empty) requires it for every
+    // relay except one whose SMTP_HOST is a loopback IP LITERAL (127.0.0.1, ::1); a
+    // name, `localhost` included, is resolved through DNS and so is never exempt. Anything else
+    // refuses boot rather than guessing which of the three was meant.
+    SMTP_REQUIRE_TLS: z
+      .enum(['true', 'false', ''])
+      .optional()
+      .transform((val) => (val === 'true' ? true : val === 'false' ? false : undefined)),
+    // The certificate authority (PEM, one or more certificates) to trust for the
+    // SMTP relay, for an operator whose relay has a certificate from a private CA.
+    // The PEM itself rather than a path, so the value travels in the one root
+    // `.env` like every other setting (a literal `\n` is accepted for a newline).
+    // Set, it REPLACES the public roots for the SMTP connection (Node's `ca`): only
+    // what is named is trusted. Unset: the platform's public roots, as for every
+    // other outbound connection. Verification is never turned off. Not used with
+    // EMAIL_PROVIDER=gmail. Read ONLY by `utils/email.ts`.
+    SMTP_TLS_CA: z.preprocess(
+      (v) => (v === '' ? undefined : typeof v === 'string' ? v.replaceAll('\\n', '\n') : v),
+      z
+        .string()
+        .refine(isCertificateBundle, {
+          message:
+            'SMTP_TLS_CA must be one or more PEM certificates (-----BEGIN CERTIFICATE----- blocks) and nothing else',
+        })
+        .optional(),
+    ),
     SMTP_PASS: z
       .string()
       .optional()
@@ -304,7 +380,6 @@ const envSchema = z
 
     // Backup
     BACKUP_MAX_SIZE_MB: z.coerce.number().int().min(1).max(100).default(25),
-    BACKUP_RETENTION_DAYS: z.coerce.number().int().min(1).max(365).default(30),
 
     // Export
     EXPORT_MAX_SIZE_MB: z.coerce.number().int().min(1).max(100).default(25),
@@ -378,6 +453,24 @@ const envSchema = z
     // at least MAX_DOCUMENT_SIZE_MB, so a configuration cannot advertise a size cap
     // it must always reject.
     DOCUMENT_STORAGE_QUOTA_MB_PER_USER: z.coerce.number().int().min(1).max(1_048_576).default(2048),
+    // Per-account quota over the VAULT, in MB (F-24): the bytes every vault item and
+    // folder row occupies, trashed rows included until they are purged. Documents
+    // have their own quota above. A write that would cross it is refused; nothing
+    // that does not grow the vault (a delete, a purge, a rotation) ever is. The
+    // default fits the largest vault the per-account row caps allow at typical item
+    // sizes many times over.
+    VAULT_STORAGE_QUOTA_MB_PER_USER: z.coerce.number().int().min(1).max(1_048_576).default(512),
+    // How long an account whose address was never verified is kept (F-21). Such an
+    // account cannot sign in, but it holds its address: whoever registered first,
+    // by a typo or on purpose, keeps the address's owner out of it. The token
+    // cleanup job erases one this many days after it was created, unless it owns a
+    // vault, folder or document row. Bounded below at a day so a link mailed at
+    // registration (valid 24 hours) can always be used.
+    UNVERIFIED_ACCOUNT_TTL_DAYS: z.preprocess(
+      // An empty assignment keeps the default, as for HOST: coercing '' would read 0.
+      (v) => (v === '' ? undefined : v),
+      z.coerce.number().int().min(1).max(365).default(7),
+    ),
     // How long a staging upload row survives before its TTL index removes it.
     // Bounded at a week: the row pins quota against the user's budget, and the
     // stored object and the engine-side multipart upload are only reclaimed after
@@ -426,16 +519,8 @@ const envSchema = z
         return kept;
       }),
 
-    // Audit
-    AUDIT_LOG_RETENTION_DAYS: z.coerce.number().int().min(1).max(3650).default(365),
-
-    // Breach range cache (persistent, cross-account HIBP range cache)
-    // On-demand (`source: 'hibp'`) entries are re-fetched once older than this
-    // many days; seed-imported entries are exempt (refreshed by re-running the
-    // seed). The HIBP corpus is additive, so a stale entry can only miss a very
-    // recently added breach, never wrongly clear a known one — set 7 for a
-    // stricter freshness posture.
-    BREACH_CACHE_TTL_DAYS: z.coerce.number().int().min(1).max(365).default(30),
+    // Breach range cache (persistent, cross-account HIBP range cache):
+    // BREACH_CACHE_TTL_DAYS is in `indexConfigSchema.ts`.
     // When true, the refresh cron below fetches missing/stale ranges from HIBP
     // (tens of GB over a full corpus). Off by default.
     BREACH_SEED_AUTO: z
@@ -512,6 +597,60 @@ const envSchema = z
         .transform((list) => [...new Set(list)]),
     ),
 
+    // Registration (F-24): who may create an account on this server. `open`, the
+    // default, is kept for compatibility and warned about at boot in production;
+    // `invite` admits only an address holding an invitation minted for it; `closed`
+    // admits nobody. An empty assignment keeps the default and anything else
+    // refuses to boot, like the other enums here, rather than guessing.
+    REGISTRATION_MODE: z.preprocess(
+      (v) => (v === '' ? undefined : v),
+      z.enum(REGISTRATION_MODES).default('open'),
+    ),
+    // Comma-separated e-mail DOMAINS an address must belong to, exactly (a
+    // subdomain is a different domain), in every mode that registers anyone. Empty
+    // means any domain. Normalised before validation: blanks and empty entries
+    // dropped, a leading `@` removed, lower-cased, duplicates collapsed. A domain
+    // that is not a plain dotted host name refuses to boot: an allowlist entry that
+    // can never match would silently refuse every registration.
+    REGISTRATION_ALLOWED_DOMAINS: z.preprocess(
+      (v) =>
+        typeof v === 'string'
+          ? v
+              .split(',')
+              .map((entry) => entry.trim().toLowerCase().replace(/^@/, ''))
+              .filter((entry) => entry !== '')
+          : v,
+      z
+        .array(
+          z.string().refine(isPlainDomainName, {
+            message:
+              'REGISTRATION_ALLOWED_DOMAINS entries must be plain domain names such as example.org',
+          }),
+        )
+        .default([])
+        .transform((list) => [...new Set(list)]),
+    ),
+    // Comma-separated account e-mails that may mint invitations from the app
+    // (`POST /auth/invitations`) while the mode is `invite`. The operator's CLI
+    // (`npm run invite`) mints without being listed. Normalised like
+    // UPDATE_NOTIFY_EMAILS.
+    REGISTRATION_INVITERS: z.preprocess(
+      (v) =>
+        typeof v === 'string'
+          ? v
+              .split(',')
+              .map((entry) => entry.trim())
+              .filter((entry) => entry !== '')
+          : v,
+      z
+        .array(emailSchema)
+        .max(MAX_REGISTRATION_INVITERS, {
+          message: `REGISTRATION_INVITERS accepts at most ${String(MAX_REGISTRATION_INVITERS)} addresses`,
+        })
+        .default([])
+        .transform((list) => [...new Set(list)]),
+    ),
+
     // Metrics authentication token (min 16 chars when set).
     // When set, the /metrics endpoint requires an `x-metrics-token` header matching this value.
     // When not set (or set to an empty value), the /metrics endpoint is disabled (returns 404).
@@ -543,12 +682,7 @@ const envSchema = z
         },
       ),
   })
-  .refine((data) => data.MONGO_MIN_POOL_SIZE <= data.MONGO_MAX_POOL_SIZE, {
-    // An inverted pool config (min > max) otherwise passes per-field validation
-    // and only fails at MongoDB connect time, masked behind the retry loop.
-    message: 'MONGO_MIN_POOL_SIZE cannot be greater than MONGO_MAX_POOL_SIZE',
-    path: ['MONGO_MIN_POOL_SIZE'],
-  })
+  .refine(poolSizesAreOrdered, POOL_SIZE_ORDER_ISSUE)
   .refine((data) => data.HTTP_HEADERS_TIMEOUT_MS <= data.HTTP_REQUEST_TIMEOUT_MS, {
     // NOT a tidiness rule. Node SWAPS the two when the headers timeout is the
     // larger (`ConnectionsList::Expired` does it in C++, silently), so a
@@ -621,12 +755,7 @@ type EnvConfig = z.infer<typeof envSchema>;
 function loadConfig(): EnvConfig {
   const result = envSchema.safeParse(process.env);
 
-  if (!result.success) {
-    const formatted = result.error.issues
-      .map((issue) => `  ${issue.path.join('.')}: ${issue.message}`)
-      .join('\n');
-    throw new Error(`Invalid environment configuration:\n${formatted}`);
-  }
+  if (!result.success) throw invalidEnvironmentConfiguration(result.error.issues);
 
   const data = result.data;
 
@@ -754,6 +883,16 @@ function loadConfig(): EnvConfig {
           'This combination exposes data in transit. Use HTTPS or connect to a local database.',
       );
     }
+  }
+
+  // Open registration on a production server is a decision the operator should
+  // be making knowingly: anyone who can reach it can create accounts, each with its
+  // own storage quota. It stays the default for compatibility, so say so once.
+  if (data.NODE_ENV === 'production' && data.REGISTRATION_MODE === 'open') {
+    logger.warn(
+      'REGISTRATION_MODE is open: anyone who can reach this server can create an account. ' +
+        'Set REGISTRATION_MODE=invite or closed (and REGISTRATION_ALLOWED_DOMAINS) to restrict it.',
+    );
   }
 
   // Warn if TWO_FACTOR_ENCRYPTION_KEY is not set (falls back to SESSION_SECRET)

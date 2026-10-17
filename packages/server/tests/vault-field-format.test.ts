@@ -124,7 +124,7 @@ describe('A created row is stored under the id its nonce derives', () => {
     expect(theirs.body.data._id).not.toBe(mine.body.data._id);
   });
 
-  it('stores a FOLDER under the derived id, and tells an id collision apart from a name collision', async () => {
+  it('stores a FOLDER under the derived id, refuses only an id collision, and never a shared name', async () => {
     const expected = await deriveRowId(user.id, NONCE_A);
     const created = await send(
       user,
@@ -145,16 +145,18 @@ describe('A created row is stored under the id its nonce derives', () => {
     expect(sameId.status).toBe(409);
     expect(sameId.body.message).toMatch(/row with this id already exists/);
 
-    // Fresh nonce, same name hash: the name's unique index, and its own sentence.
+    // Fresh nonce, the same (older client's) name hash: before F-12 the name's
+    // unique index refused this with its own 409; no hash is stored now, so it is
+    // simply a second folder.
     const sameName = await send(
       user,
       'post',
       '/folders',
       sampleFolder({ idNonce: NONCE_B, searchHash: 'a'.repeat(64) }),
     );
-    expect(sameName.status).toBe(409);
-    expect(sameName.body.message).toBe('A folder with this name already exists');
-    expect(await Folder.countDocuments({ userId: user.id })).toBe(1);
+    expect(sameName.status).toBe(201);
+    expect(sameName.body.data._id).toBe(await deriveRowId(user.id, NONCE_B));
+    expect(await Folder.countDocuments({ userId: user.id })).toBe(2);
   });
 });
 
@@ -279,9 +281,7 @@ describe('A duplicate id is told apart from any other unique-index violation', (
       true,
     );
     // Another unique index, another code, a compound pattern, garbage.
-    expect(isDuplicateIdError({ code: 11000, keyPattern: { userId: 1, searchHash: 1 } })).toBe(
-      false,
-    );
+    expect(isDuplicateIdError({ code: 11000, keyPattern: { email: 1 } })).toBe(false);
     expect(isDuplicateIdError({ code: 11000, keyPattern: { _id: 1, userId: 1 } })).toBe(false);
     expect(isDuplicateIdError({ code: 121, keyPattern: { _id: 1 } })).toBe(false);
     // A bulk write names the index only in each error's server message.
@@ -303,8 +303,7 @@ describe('A duplicate id is told apart from any other unique-index violation', (
         writeErrors: [
           {
             err: {
-              errmsg:
-                'E11000 duplicate key error collection: t.f index: userId_1_searchHash_1 dup key: {}',
+              errmsg: 'E11000 duplicate key error collection: t.u index: email_1 dup key: {}',
             },
           },
         ],

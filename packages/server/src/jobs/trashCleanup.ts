@@ -3,11 +3,17 @@ import type mongoose from 'mongoose';
 import { createModuleLogger } from '../utils/logger.js';
 import { storageConfigured } from '../config/index.js';
 import { VaultItem } from '../models/VaultItem.js';
-import { AuditLog } from '../models/AuditLog.js';
 import { Document } from '../models/Document.js';
 import { TRASH_AUTO_PURGE_DAYS } from '@hvault/shared';
 import { acquireJobLock, releaseJobLock } from '../utils/jobLock.js';
 import { trackJob } from '../utils/jobTracker.js';
+import {
+  deleteCountedItems,
+  reserveVaultWrite,
+  settleVaultWrite,
+  type VaultWriteReservation,
+} from '../utils/vaultQuota.js';
+import { recordJobAuditEntries } from '../services/auditService.js';
 import { getStorage } from '../services/storage/index.js';
 import { createStorageBreaker } from '../utils/storageBreaker.js';
 
@@ -20,7 +26,8 @@ const TRASH_CLEANUP_LOCK_TTL_MS = 15 * 60 * 1000; // 15 minutes
  *
  * ## A document is a row beside an object, so this is not the item loop
  *
- * The item loop above is one `deleteMany` per user per batch. A document also owns
+ * The item loop deletes each user's batch row by row through `deleteCountedItems`,
+ * keeping the account's counters in step. A document also owns
  * a stored object, and the row holds the only wrapped copy of the key that
  * decrypts it, so each row is the same three ordered steps `purgeDocument`
  * performs for a user-initiated purge: mark `purgePending`, delete the OBJECT,
@@ -128,7 +135,7 @@ async function purgeTrashedDocuments(
         await storage.deleteObject(row.objectKey);
         breaker.recordSuccess();
         // `userId` in the delete filter as well as `_id`, the same
-        // defense-in-depth the item loop applies to its own `deleteMany`. No
+        // defense-in-depth the item loop applies to its own deletes. No
         // `deletedAt` here: the claim above already won the row, and re-testing a
         // predicate that this loop is now the sole owner of would only add a way
         // to leave a marked row behind.
@@ -160,20 +167,48 @@ async function purgeTrashedDocuments(
     }
 
     if (purgedByUser.size > 0) {
-      await AuditLog.insertMany(
+      await recordJobAuditEntries(
         Array.from(purgedByUser.entries()).map(([userId, documentCount]) => ({
           userId,
           action: 'trash_auto_purge' as const,
           metadata: { documentCount, cutoffDays: TRASH_AUTO_PURGE_DAYS },
           ipAddress: 'system',
           userAgent: 'system/trash-cleanup-job',
-          timestamp: new Date(),
         })),
       );
     }
   }
 
   return { purged, failed: breaker.failures, gaveUp: breaker.isRefusing() };
+}
+
+/**
+ * Purges one account's expired trash rows from a batch, through the vault byte
+ * quota (F-24): touch first, then row by row with the trash predicate RE-STATED
+ * (F-29: a row restored since the batch was read is neither deleted nor counted),
+ * and the bytes that went settled in a `finally`, so a failure part-way still
+ * subtracts exactly the rows it removed. A row whose account no longer exists
+ * (being erased) is purged without accounting: there is no counter to keep.
+ */
+async function purgeAccountItems(
+  userId: string,
+  ids: mongoose.Types.ObjectId[],
+  cutoffDate: Date,
+): Promise<{ deleted: number; bytes: number }> {
+  const tally = { deleted: 0, bytes: 0 };
+  let reservation: VaultWriteReservation | null = null;
+  try {
+    reservation = await reserveVaultWrite(userId, { bytes: 0 });
+  } catch (error: unknown) {
+    if ((error as { statusCode?: unknown }).statusCode !== 404) throw error;
+  }
+  try {
+    await deleteCountedItems(userId, { deletedAt: { $lte: cutoffDate } }, tally, ids);
+  } finally {
+    // The purged rows leave the item cap's count too (F-15): a hard delete.
+    if (reservation) await settleVaultWrite(reservation, -tally.bytes, { items: -tally.deleted });
+  }
+  return tally;
 }
 
 export function startTrashCleanupJob(): ScheduledTask {
@@ -196,11 +231,13 @@ export function startTrashCleanupJob(): ScheduledTask {
           const BATCH_SIZE = 500;
           let totalDeleted = 0;
           let deletedCount: number;
+          let readCount: number;
           do {
             const items = await VaultItem.find({ deletedAt: { $lte: cutoffDate } })
               .select('_id userId')
               .limit(BATCH_SIZE)
               .lean();
+            readCount = items.length;
             if (items.length === 0) break;
 
             // Group items by userId for defense-in-depth delete filtering
@@ -215,38 +252,53 @@ export function startTrashCleanupJob(): ScheduledTask {
               }
             }
 
-            // Delete per-user with userId in filter for defense-in-depth
+            // Delete per-user with userId in filter for defense-in-depth, and with
+            // the trash predicate RE-STATED. The batch was read a moment ago, and
+            // in between the owner may have restored one of these items
+            // (`restoreItem` unsets `deletedAt`); a delete by `_id` alone would then
+            // destroy a live item for good. With the predicate in the filter, a row
+            // restored (or re-trashed later than the cutoff) since the read is
+            // simply not deleted.
             deletedCount = 0;
+            const purgedByUser = new Map<string, number>();
             for (const [userId, userItems] of itemsByUser) {
-              const result = await VaultItem.deleteMany({
-                _id: { $in: userItems.map((i) => i._id) },
+              const tally = await purgeAccountItems(
                 userId,
-              });
-              deletedCount += result.deletedCount;
+                userItems.map((i) => i._id),
+                cutoffDate,
+              );
+              deletedCount += tally.deleted;
+              if (tally.deleted > 0) {
+                purgedByUser.set(userId, tally.deleted);
+              }
             }
             totalDeleted += deletedCount;
 
-            // Create audit log entries immediately after each batch
-            // so deleted items are always audited even if a later batch fails
-            const auditEntries = Array.from(itemsByUser.entries()).map(([userId, userItems]) => ({
+            // Create audit log entries immediately after each batch so deleted
+            // items are always audited even if a later batch fails. Each counts
+            // what was actually deleted for that account (a restored row is not a
+            // purge), and nothing else: no account's entry carries a number about
+            // other accounts.
+            const auditEntries = Array.from(purgedByUser.entries()).map(([userId, itemCount]) => ({
               userId,
               action: 'trash_auto_purge' as const,
-              metadata: {
-                itemCount: userItems.length,
-                cutoffDays: TRASH_AUTO_PURGE_DAYS,
-                batchSize: deletedCount,
-              },
+              metadata: { itemCount, cutoffDays: TRASH_AUTO_PURGE_DAYS },
               ipAddress: 'system',
               userAgent: 'system/trash-cleanup-job',
-              timestamp: new Date(),
             }));
 
-            await AuditLog.insertMany(auditEntries);
+            // Through the audit service, so these rows count toward the
+            // account's activity cap like any other.
+            await recordJobAuditEntries(auditEntries);
 
             logger.info(
               `Trash cleanup batch: deleted ${String(deletedCount)} items for ${String(itemsByUser.size)} user(s)`,
             );
-          } while (deletedCount === BATCH_SIZE);
+            // Another batch while this one was full AND made progress. A restored
+            // row makes a full batch delete fewer than it read, which must not end
+            // the walk early; a full batch that deleted NOTHING would be read again
+            // for ever, so it does end it (and the rest waits for the next night).
+          } while (readCount === BATCH_SIZE && deletedCount > 0);
 
           if (totalDeleted > 0) {
             logger.info(

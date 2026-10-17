@@ -1,7 +1,12 @@
+import crypto from 'node:crypto';
+import mongoose from 'mongoose';
+import { MAX_BACKUP_EMAILS, maskEmail } from '@hvault/shared';
+import { z } from 'zod';
 import { createModuleLogger } from './logger.js';
 import { Migration } from '../models/Migration.js';
 import { JobLock } from '../models/JobLock.js';
 import { acquireJobLock, releaseJobLock } from './jobLock.js';
+import { installVaultCounters } from './vaultQuota.js';
 
 const logger = createModuleLogger('migrations');
 
@@ -42,7 +47,663 @@ const migrations: MigrationDefinition[] = [
       return Promise.resolve();
     },
   },
+  {
+    version: 2,
+    name: 'audit-log-bounds',
+    async up() {
+      await migrateAuditLogIndexTiebreak();
+      await maskLegacyErasureRecords();
+    },
+  },
+  // v3 landed after v4. Versions are applied by set membership, never by "greater
+  // than the highest applied", so it still runs on a database that has v4.
+  {
+    version: 3,
+    name: 'vault-quota-counter',
+    up: migrateVaultQuotaCounter,
+  },
+  {
+    version: 4,
+    name: 'backup-recipients',
+    up: migrateBackupRecipients,
+  },
+  {
+    version: 5,
+    name: 'remove-search-hash',
+    up: removeSearchHash,
+  },
+  {
+    version: 6,
+    name: 'vault-row-counters',
+    up: backfillVaultRowCounters,
+  },
+  {
+    version: 7,
+    name: 'unverified-reaper-index',
+    up: migrateUnverifiedReaperIndex,
+  },
 ];
+
+/** How long migration v3 may spend installing counters before it leaves the rest. */
+const VAULT_QUOTA_BACKFILL_BUDGET_MS = 30_000;
+/**
+ * The longest each of the two aggregates of one account's total may take in that
+ * backfill: 30 s plus one account's 2 x 10 s stays far inside the migration lock.
+ */
+const VAULT_QUOTA_BACKFILL_AGGREGATE_MAX_TIME_MS = 10_000;
+
+/**
+ * v3 — the per-account vault byte counter (F-24).
+ *
+ * Builds the `{quotaRecountedAt: 1}` index the hourly recount walks (production
+ * runs with `autoIndex` off, and a deployment that has not run `create-indexes`
+ * yet must not have that step scan `users` every hour), then installs the counter
+ * on as many accounts as fit in {@link VAULT_QUOTA_BACKFILL_BUDGET_MS}.
+ *
+ * Correctness does not depend on the backfill, which is why it is bounded rather
+ * than complete: a missing counter is installed by the account's first counted
+ * write (every write path reserves, and so installs, before it touches a row),
+ * and the recount takes accounts never recounted first. The budget only keeps a
+ * large deployment's boot from waiting on it. One account whose total fails is
+ * logged and passed over. The index spec is a literal, the one `models/User.ts`
+ * declares; the counted measure is the quota module's own, since the counter must
+ * agree with what the write paths add to it.
+ */
+async function migrateVaultQuotaCounter(): Promise<void> {
+  const users = mongoose.connection.collection('users');
+  try {
+    await users.createIndex({ quotaRecountedAt: 1 });
+  } catch (error: unknown) {
+    if (!hasCode(error, INDEX_OPTIONS_CONFLICT) && !hasCode(error, INDEX_KEY_SPECS_CONFLICT)) {
+      throw error;
+    }
+  }
+  const startedAt = Date.now();
+  const cursor = users.find(
+    { deletionPending: { $ne: true }, vaultBytes: { $not: { $gte: Number.NEGATIVE_INFINITY } } },
+    { projection: { _id: 1 }, sort: { _id: 1 } },
+  );
+  let installed = 0;
+  let failures = 0;
+  let complete = true;
+  try {
+    for await (const { _id } of cursor) {
+      if (Date.now() - startedAt >= VAULT_QUOTA_BACKFILL_BUDGET_MS) {
+        complete = false;
+        break;
+      }
+      try {
+        await installVaultCounters(String(_id), {
+          maxTimeMS: VAULT_QUOTA_BACKFILL_AGGREGATE_MAX_TIME_MS,
+        });
+        installed += 1;
+      } catch (error: unknown) {
+        failures += 1;
+        logger.warn("Migration v3: could not install an account's vault byte counter", {
+          userId: String(_id),
+          error: error instanceof Error ? error.message : 'Unknown error',
+        });
+      }
+    }
+  } finally {
+    await cursor.close();
+  }
+  logger.info(
+    complete
+      ? 'Migration v3: vault byte counters installed'
+      : 'Migration v3: vault byte counters installed until the time budget; the rest are ' +
+          'installed by their first write or the hourly recount',
+    { installed, failures },
+  );
+}
+
+/** How many accounts one round of migration v6 counts and installs. */
+const ROW_COUNTER_BACKFILL_BATCH = 500;
+/** How long migration v6 may spend installing counters before it leaves the rest. */
+const ROW_COUNTER_BACKFILL_BUDGET_MS = 30_000;
+/** The longest each count aggregate of one round of migration v6 may take. */
+const ROW_COUNTER_BACKFILL_AGGREGATE_MAX_TIME_MS = 10_000;
+/** A stored number of any numeric BSON type; its negation matches an absent counter. */
+const NOT_A_NUMBER = { $not: { $gte: Number.NEGATIVE_INFINITY } };
+
+/**
+ * How many rows of `collection` each of `owners` has, from one grouped
+ * aggregate (an account with none is absent from the map). Reads only.
+ */
+async function countRowsByOwner(
+  collection: mongoose.mongo.Collection,
+  owners: mongoose.Types.ObjectId[],
+): Promise<Map<string, number>> {
+  const rows = await collection
+    .aggregate<{ _id: mongoose.Types.ObjectId; rows: number }>(
+      [{ $match: { userId: { $in: owners } } }, { $group: { _id: '$userId', rows: { $sum: 1 } } }],
+      { maxTimeMS: ROW_COUNTER_BACKFILL_AGGREGATE_MAX_TIME_MS },
+    )
+    .toArray();
+  return new Map(rows.map((row) => [String(row._id), row.rows]));
+}
+
+/**
+ * v6 — the row counters behind the per-user caps (F-15).
+ *
+ * Installs `counters.items` and `counters.folders` on accounts that have neither
+ * or one of them, in rounds of {@link ROW_COUNTER_BACKFILL_BATCH} accounts: one
+ * grouped count per collection per round, then one conditional write per missing
+ * counter, so an account costs two index-served counts shared with 499 others
+ * rather than two aggregates of its own. Bounded by
+ * {@link ROW_COUNTER_BACKFILL_BUDGET_MS}; a round that fails stops it the same way
+ * (logged), and it is recorded as applied either way.
+ *
+ * Correctness does not depend on it, exactly as for v3: every write path
+ * reserves before it touches a row, and a reservation installs whichever counter
+ * is missing from the rows (`installVaultCounters`), while the hourly recount
+ * rewrites all three. Safe against a write racing it for the same reason the
+ * inline install is: no row of an account is created or removed until all three
+ * of its counters exist, and each write here applies only while its counter is
+ * still absent, so a count taken before it is still the count when it lands.
+ * Accounts being erased are skipped (their counters go with the user row).
+ */
+async function backfillVaultRowCounters(): Promise<void> {
+  const users = mongoose.connection.collection('users');
+  // Counted, never written: the only writes v6 makes are to `users`.
+  const itemRows = mongoose.connection.collection('vault_items');
+  const folderRows = mongoose.connection.collection('folders');
+  const startedAt = Date.now();
+  let after: mongoose.Types.ObjectId | undefined;
+  let installed = 0;
+  let stoppedBy: 'budget' | 'failure' | null = null;
+  for (;;) {
+    if (Date.now() - startedAt >= ROW_COUNTER_BACKFILL_BUDGET_MS) {
+      stoppedBy = 'budget';
+      break;
+    }
+    let round: { owners: mongoose.Types.ObjectId[]; installed: number };
+    try {
+      round = await installRowCountersRound(users, itemRows, folderRows, after);
+    } catch (error: unknown) {
+      // A round that fails (a count past its time limit, a refused write) stops
+      // the backfill, never the boot: every account it did not reach is installed
+      // by its first write or the hourly recount, exactly as one past the budget.
+      logger.warn('Migration v6: a round failed', {
+        error: error instanceof Error ? error.message : 'Unknown error',
+      });
+      stoppedBy = 'failure';
+      break;
+    }
+    installed += round.installed;
+    after = round.owners.at(-1);
+    if (round.owners.length < ROW_COUNTER_BACKFILL_BATCH) break;
+  }
+  logger.info(
+    stoppedBy === null
+      ? 'Migration v6: vault row counters installed'
+      : 'Migration v6: vault row counters installed until the ' +
+          (stoppedBy === 'budget' ? 'time budget' : 'failure above') +
+          '; the rest are installed by their first write or the hourly recount',
+    { installed },
+  );
+}
+
+/**
+ * One round of migration v6: the next {@link ROW_COUNTER_BACKFILL_BATCH} accounts
+ * after `after` that miss a row counter, counted and installed. Resolves to the
+ * accounts it read and how many counters it wrote.
+ */
+async function installRowCountersRound(
+  users: mongoose.mongo.Collection,
+  itemRows: mongoose.mongo.Collection,
+  folderRows: mongoose.mongo.Collection,
+  after: mongoose.Types.ObjectId | undefined,
+): Promise<{ owners: mongoose.Types.ObjectId[]; installed: number }> {
+  const batch = await users
+    .find(
+      {
+        deletionPending: { $ne: true },
+        $or: [{ 'counters.items': NOT_A_NUMBER }, { 'counters.folders': NOT_A_NUMBER }],
+        ...(after ? { _id: { $gt: after } } : {}),
+      },
+      { projection: { _id: 1 }, sort: { _id: 1 }, limit: ROW_COUNTER_BACKFILL_BATCH },
+    )
+    .toArray();
+  const owners = batch.map((row) => row._id);
+  if (owners.length === 0) return { owners, installed: 0 };
+  const items = await countRowsByOwner(itemRows, owners);
+  const folders = await countRowsByOwner(folderRows, owners);
+  const result = await users.bulkWrite(
+    owners.flatMap((owner) =>
+      (
+        [
+          ['counters.items', items],
+          ['counters.folders', folders],
+        ] as const
+      ).map(([path, counts]) => ({
+        updateOne: {
+          filter: { _id: owner, [path]: NOT_A_NUMBER },
+          update: { $set: { [path]: counts.get(String(owner)) ?? 0 }, $inc: { quotaEpoch: 1 } },
+        },
+      })),
+    ),
+    { ordered: false },
+  );
+  return { owners, installed: result.modifiedCount };
+}
+
+/**
+ * v7 — the index the reaper of never-verified accounts pages through (F-21).
+ *
+ * Builds the partial `{emailVerified: 1, _id: 1}` index on `{emailVerified: false}`
+ * that `utils/unverifiedAccounts.ts` hints, then drops the single-field
+ * `{emailVerified: 1}` index it replaces: the reaper was that index's only reader,
+ * and over it every page fetched and sorted EVERY unverified account. Built here as
+ * v3 and v4 build theirs, because production runs with `autoIndex` off and a
+ * deployment that has not run `create-indexes` must not have the reaper fail every
+ * run. The spec is a literal, the one `models/User.ts` declares; an existing index
+ * on these keys under another name (85/86) is left to `create-indexes` to report.
+ * The old index is found by its KEY, never by its name, and only an index on
+ * exactly `{emailVerified: 1}` is dropped; one dropped meanwhile (27) is gone
+ * already.
+ */
+async function migrateUnverifiedReaperIndex(): Promise<void> {
+  const users = mongoose.connection.collection('users');
+  try {
+    await users.createIndex(
+      { emailVerified: 1, _id: 1 },
+      { partialFilterExpression: { emailVerified: false } },
+    );
+  } catch (error: unknown) {
+    if (!hasCode(error, INDEX_OPTIONS_CONFLICT) && !hasCode(error, INDEX_KEY_SPECS_CONFLICT)) {
+      throw error;
+    }
+  }
+  for (const index of await users.indexes()) {
+    const [only, ...rest] = Object.entries(index.key as Record<string, unknown>);
+    const replaced = only?.[0] === 'emailVerified' && only[1] === 1 && rest.length === 0;
+    if (index.name === undefined || !replaced) continue;
+    try {
+      await users.dropIndex(index.name);
+      logger.info(`Migration v7: dropped users.${index.name}`);
+    } catch (error: unknown) {
+      if (!hasCode(error, INDEX_NOT_FOUND)) throw error;
+    }
+  }
+}
+
+/** How many accounts one write batch of migration v4 converts. */
+const BACKUP_RECIPIENT_MIGRATION_BATCH = 500;
+/** A recipient address as the recipient schema accepts it. */
+const MIGRATED_RECIPIENT_EMAIL = z.email().max(254);
+
+/**
+ * v4 — backup recipients become entries that must confirm (F-05).
+ *
+ * Every account that stored a plain `settings.backup.backupEmails` list gets
+ * `settings.backup.backupRecipients` instead: its own verified address
+ * `confirmed`, every other address `pending` and NOT approved (invalid entries
+ * dropped, duplicates merged, at most MAX_BACKUP_EMAILS kept), and the old field
+ * removed. The older single `backupEmail` is REMOVED WITHOUT BEING COPIED: no
+ * release this one replaces ever mailed it (only the list was read), so copying
+ * it would bring back an address its owner had replaced, and would stop the
+ * backups an account with no list receives at its own address today. It sends NO
+ * mail and owes none: a
+ * confirmation is only ever mailed for an address the OWNER approves with the
+ * master password, because the recipient's click proves the recipient agrees,
+ * never that the owner put the address there. Until the owner approves the list
+ * those addresses receive nothing, the account's own address keeps receiving, and
+ * a run with neither tells the owner.
+ *
+ * Raw collection reads and writes (the model no longer declares the old fields),
+ * in batches, each write conditioned on the account not having a recipient list
+ * yet, so a re-run, or a list the owner saved meanwhile, is left alone.
+ */
+async function migrateBackupRecipients(): Promise<void> {
+  const users = mongoose.connection.collection('users');
+  // The index the hourly confirmation step is HINTED onto, built here as v2 builds
+  // its own: production runs with `autoIndex` off, and a deployment that has not
+  // run `create-indexes` yet must not have that step throw every hour. The spec is
+  // a literal, the same one `models/User.ts` declares; an existing identical index
+  // is a no-op, and one of the same name built differently is left to
+  // `create-indexes` to report.
+  try {
+    await users.createIndex(
+      { 'settings.backup.backupRecipients.confirmationDue': 1 },
+      { partialFilterExpression: { 'settings.backup.backupRecipients.confirmationDue': true } },
+    );
+  } catch (error: unknown) {
+    if (!hasCode(error, INDEX_OPTIONS_CONFLICT) && !hasCode(error, INDEX_KEY_SPECS_CONFLICT)) {
+      throw error;
+    }
+  }
+  // No recipient list yet, or an EMPTY one nobody chose (a hydrated save of the new
+  // schema cannot write one, but nothing else guarantees it), beside an old list.
+  // Never a list the OWNER saved: every save bumps `recipientsRevision` (absent =
+  // never saved), and a worker that lost the migration lock serves requests while
+  // this runs, so an owner can empty the list before this reaches the account.
+  // Converting it then would bring back the addresses they had just removed.
+  const noRecipients = {
+    'settings.backup.recipientsRevision': { $exists: false },
+    $or: [
+      { 'settings.backup.backupRecipients': { $exists: false } },
+      { 'settings.backup.backupRecipients': { $size: 0 } },
+    ],
+  };
+  const cursor = users.find(
+    { ...noRecipients, 'settings.backup.backupEmails.0': { $exists: true } },
+    { projection: { email: 1, emailVerified: 1, 'settings.backup.backupEmails': 1 } },
+  );
+  let batch: mongoose.mongo.AnyBulkWriteOperation[] = [];
+  let converted = 0;
+  const now = new Date();
+  for await (const account of cursor) {
+    // The query guarantees `settings.backup.backupEmails.0` exists, so the path is
+    // there; the value is still raw data, and anything but an array lists nobody.
+    const { backupEmails } = (account.settings as { backup: { backupEmails: unknown } }).backup;
+    const listed: unknown[] = Array.isArray(backupEmails) ? backupEmails : [];
+    const email = String(account.email);
+    const verified = account.emailVerified === true;
+    // The same rules the recipient schema applies, because every later hydrated
+    // save of the account re-validates these entries: one bad entry would make
+    // that save fail.
+    const addresses = [
+      ...new Set(
+        listed
+          .filter((value): value is string => typeof value === 'string')
+          .map((value) => value.trim().toLowerCase())
+          .filter((value) => MIGRATED_RECIPIENT_EMAIL.safeParse(value).success),
+      ),
+    ].slice(0, MAX_BACKUP_EMAILS);
+    const recipients = addresses.map((address) =>
+      address === email && verified
+        ? {
+            email: address,
+            state: 'confirmed',
+            confirmedAt: now,
+            approvedAt: now,
+            confirmationDue: false,
+            confirmationSentAt: null,
+            confirmationAttempts: 0,
+            nonce: crypto.randomBytes(32).toString('hex'),
+          }
+        : {
+            email: address,
+            state: 'pending',
+            confirmedAt: null,
+            approvedAt: null,
+            confirmationDue: false,
+            confirmationSentAt: null,
+            confirmationAttempts: 0,
+            nonce: crypto.randomBytes(32).toString('hex'),
+          },
+    );
+    batch.push({
+      updateOne: {
+        filter: { _id: account._id, ...noRecipients },
+        update: {
+          $set: {
+            'settings.backup.backupRecipients': recipients,
+            'settings.backup.recipientsRevision': 1,
+          },
+          $unset: { 'settings.backup.backupEmails': '', 'settings.backup.backupEmail': '' },
+        },
+      },
+    });
+    if (batch.length >= BACKUP_RECIPIENT_MIGRATION_BATCH) {
+      converted += (await users.bulkWrite(batch, { ordered: false })).modifiedCount;
+      batch = [];
+    }
+  }
+  if (batch.length > 0) {
+    converted += (await users.bulkWrite(batch, { ordered: false })).modifiedCount;
+  }
+  // Every other account carries only the old schema's EMPTY default (`[]`) and
+  // perhaps a stale single `backupEmail` nothing ever read, or a list its owner
+  // has saved since: nothing to convert, so both just go. An account with no list
+  // keeps mailing its own verified address, as it always did. A non-empty old list
+  // is kept only on an account it has not been converted for yet (a batch that
+  // failed), so the next run still finds it.
+  const cleared = await users.updateMany(
+    {
+      $and: [
+        {
+          $or: [
+            { 'settings.backup.backupEmails': { $exists: true } },
+            { 'settings.backup.backupEmail': { $exists: true } },
+          ],
+        },
+        {
+          $or: [
+            { 'settings.backup.backupEmails.0': { $exists: false } },
+            { 'settings.backup.backupRecipients.0': { $exists: true } },
+            { 'settings.backup.recipientsRevision': { $exists: true } },
+          ],
+        },
+      ],
+    },
+    { $unset: { 'settings.backup.backupEmails': '', 'settings.backup.backupEmail': '' } },
+  );
+  logger.info(
+    `Migration v4: converted the backup recipients of ${String(converted)} account(s); cleared the empty legacy field on ${String(cleared.modifiedCount)}`,
+  );
+}
+
+/** How many rows one write of migration v5 clears. */
+const SEARCH_HASH_MIGRATION_BATCH = 1_000;
+
+/**
+ * v5 — no keyed hash of a name is stored any more (F-12).
+ *
+ * Items and folders carried `searchHash`, an HMAC of the decrypted name under a
+ * subkey of the vault key. Nothing read it, and it made every entry of one name
+ * linkable, so the models no longer declare it and no write path stores it.
+ * This removes what an existing database still holds: every index whose key
+ * names the field first (the folder compound one is UNIQUE, and an unset under
+ * an index is index work for nothing), then the field,
+ * in batches of {@link SEARCH_HASH_MIGRATION_BATCH} ids named explicitly, each
+ * write re-stating `searchHash: {$exists: true}`.
+ *
+ * Raw collection writes, deliberately leaving `__v` and `updatedAt` alone: the
+ * unset is not an edit, and a vault write racing it (the migration lock does not
+ * stop the workers that lost it from serving) is pinned on `__v`, so bumping it
+ * would refuse that write for nothing. The per-account byte counter is NOT
+ * adjusted: each row shrinks by the field's size, so the counter OVERCOUNTS by
+ * that much (the safe direction) until the hourly recount measures the account
+ * again; subtracting here instead could subtract a row twice when a racing write
+ * has already settled the shrink as part of its own difference.
+ *
+ * Idempotent: a missing index (27) or collection (26) is what a second run, or a
+ * database that never had them, looks like, and a row already cleared no longer
+ * matches. Any other failure leaves the migration unrecorded, so the next boot
+ * runs it again. The field name is a literal; the indexes are found by listing.
+ * It is not time-boxed: a large collection is cleared in one run (its count is
+ * logged), and a run the migration lock outlives is harmless because it repeats.
+ */
+async function removeSearchHash(): Promise<void> {
+  const collections = [
+    mongoose.connection.collection('vault_items'),
+    mongoose.connection.collection('folders'),
+  ];
+  for (const collection of collections) {
+    await dropSearchHashIndexes(collection);
+  }
+  for (const collection of collections) {
+    const cleared = await unsetSearchHashInBatches(collection);
+    if (cleared > 0) {
+      logger.info(
+        `Migration v5: removed the name hash from ${String(cleared)} row(s) of ${collection.collectionName}`,
+      );
+    }
+  }
+}
+
+/**
+ * Drop every index of one collection whose key names `searchHash`.
+ *
+ * Found by LISTING, not by name: an earlier release built more than the compound
+ * `userId_1_searchHash_1` it declared, because the folder model's `sparse: true`
+ * path option made a single-field `searchHash_1` index of its own, and an operator
+ * may have built one under another name. A collection that does not exist (26)
+ * has none; an index dropped meanwhile by another process (27) is gone already.
+ */
+async function dropSearchHashIndexes(collection: mongoose.mongo.Collection): Promise<void> {
+  let indexes: { name?: string; key: Record<string, unknown> }[];
+  try {
+    indexes = await collection.indexes();
+  } catch (error: unknown) {
+    if (hasCode(error, NAMESPACE_NOT_FOUND)) return;
+    throw error;
+  }
+  for (const index of indexes) {
+    if (index.name === undefined || !('searchHash' in index.key)) continue;
+    try {
+      await collection.dropIndex(index.name);
+      logger.info(`Migration v5: dropped ${collection.collectionName}.${index.name}`);
+    } catch (error: unknown) {
+      if (!hasCode(error, INDEX_NOT_FOUND) && !hasCode(error, NAMESPACE_NOT_FOUND)) throw error;
+    }
+  }
+}
+
+/** Clear `searchHash` from every row of one collection, a batch of ids at a time. */
+async function unsetSearchHashInBatches(collection: mongoose.mongo.Collection): Promise<number> {
+  const hasHash = { searchHash: { $exists: true } };
+  const cursor = collection.find(hasHash, { projection: { _id: 1 }, sort: { _id: 1 } });
+  let cleared = 0;
+  let pending: mongoose.mongo.ObjectId[] = [];
+  const flush = async (): Promise<void> => {
+    if (pending.length === 0) return;
+    const ids = pending;
+    pending = [];
+    const result = await collection.updateMany(
+      { _id: { $in: ids }, ...hasHash },
+      { $unset: { searchHash: '' } },
+    );
+    cleared += result.modifiedCount;
+  };
+  try {
+    for await (const { _id } of cursor) {
+      pending.push(_id);
+      if (pending.length >= SEARCH_HASH_MIGRATION_BATCH) await flush();
+    }
+    await flush();
+  } finally {
+    await cursor.close();
+  }
+  return cleared;
+}
+
+/** `IndexNotFound`: dropping an index that is not there. */
+const INDEX_NOT_FOUND = 27;
+/** `NamespaceNotFound`: dropping an index of a collection that does not exist. */
+const NAMESPACE_NOT_FOUND = 26;
+/** `IndexOptionsConflict`: an index on these keys exists with other options or name. */
+const INDEX_OPTIONS_CONFLICT = 85;
+/** `IndexKeySpecsConflict`: an index of this name exists on other keys. */
+const INDEX_KEY_SPECS_CONFLICT = 86;
+
+function hasCode(error: unknown, code: number): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === code;
+}
+
+/**
+ * v2 — the audit log's two page indexes gain `_id` (F-02), and the two they
+ * replace are dropped.
+ *
+ * `GET /user/audit-log` sorts `{timestamp: -1, _id: -1}`, a total order its
+ * `skip`/`limit` pages need; the old `{userId, timestamp}` and `{userId, action,
+ * timestamp}` cannot serve the `_id` half, so every page was a blocking sort over
+ * every row the account had. `models/AuditLog.ts` now declares the extended pair,
+ * but `create-indexes` never removes an index the schema stopped declaring (the
+ * only index it drops is a declared expiry index it rebuilds), so without this
+ * the two superseded indexes would linger on every existing deployment and cost
+ * every audit insert for nothing.
+ *
+ * The new pair is built FIRST, here, and only then are the old ones dropped: a
+ * deployment that boots before its operator has run `create-indexes` (PM2, where
+ * that step is manual) must never pass through a moment with neither, and
+ * `createIndex` of an index that already exists is a no-op. The specs are written
+ * out rather than read from the model, because a migration records what one
+ * version of the schema needed and must not change meaning when the model does.
+ * Only these two indexes are named: building the model's whole index set here
+ * could fail the boot on an operator's own TTL (a changed retention is an options
+ * conflict until `create-indexes` rebuilds that index; see `ttlIndexReconcile.ts`).
+ *
+ * Idempotent: every step tolerates having already happened, and a collection
+ * that does not exist yet is simply created with the right indexes.
+ */
+async function migrateAuditLogIndexTiebreak(): Promise<void> {
+  const auditLogs = mongoose.connection.collection('audit_logs');
+  for (const keys of [
+    { userId: 1, timestamp: -1, _id: -1 },
+    { userId: 1, action: 1, timestamp: -1, _id: -1 },
+  ] as const) {
+    try {
+      await auditLogs.createIndex(keys);
+    } catch (error: unknown) {
+      // An operator who built one by hand under another name or options already
+      // has what the page needs; refusing the boot over it would help nobody.
+      if (!hasCode(error, INDEX_OPTIONS_CONFLICT) && !hasCode(error, INDEX_KEY_SPECS_CONFLICT)) {
+        throw error;
+      }
+      logger.warn('Migration v2: an audit index on these keys already exists as built', { keys });
+    }
+  }
+  for (const name of ['userId_1_timestamp_-1', 'userId_1_action_1_timestamp_-1']) {
+    try {
+      await auditLogs.dropIndex(name);
+      logger.info(`Migration v2: dropped superseded audit index ${name}`);
+    } catch (error: unknown) {
+      if (!hasCode(error, INDEX_NOT_FOUND) && !hasCode(error, NAMESPACE_NOT_FOUND)) throw error;
+    }
+  }
+}
+
+/**
+ * v2, second step — the erasure records written before this version name the
+ * erased account's address in clear (`metadata.deletedEmail`), for a year. Each
+ * is rewritten to the masked form the cascade now writes (`metadata.maskedEmail`,
+ * `maskEmail` from shared), and the plaintext field removed.
+ *
+ * Idempotent because the field is RENAMED: a row already rewritten no longer
+ * carries `deletedEmail`, so it is never masked twice (and `maskEmail` is not
+ * idempotent on a one-character local part). Each update is conditioned on the
+ * value it read.
+ */
+async function maskLegacyErasureRecords(): Promise<void> {
+  const auditLogs = mongoose.connection.collection('audit_logs');
+  const legacy = auditLogs.find(
+    {
+      userId: null,
+      action: { $in: ['account_delete', 'deletion_cleanup'] },
+      'metadata.deletedEmail': { $type: 'string' },
+    },
+    { projection: { 'metadata.deletedEmail': 1 } },
+  );
+  let pending: mongoose.mongo.AnyBulkWriteOperation[] = [];
+  let masked = 0;
+  const flush = async (): Promise<void> => {
+    if (pending.length === 0) return;
+    const result = await auditLogs.bulkWrite(pending, { ordered: false });
+    masked += result.modifiedCount;
+    pending = [];
+  };
+  for await (const row of legacy) {
+    const plain = (row as { metadata?: { deletedEmail?: unknown } }).metadata?.deletedEmail;
+    if (typeof plain !== 'string') continue;
+    pending.push({
+      updateOne: {
+        filter: { _id: row._id, 'metadata.deletedEmail': plain },
+        update: {
+          $set: { 'metadata.maskedEmail': maskEmail(plain) },
+          $unset: { 'metadata.deletedEmail': '' },
+        },
+      },
+    });
+    if (pending.length >= 500) await flush();
+  }
+  await flush();
+  if (masked > 0) {
+    logger.info(`Migration v2: masked the address in ${String(masked)} erasure record(s)`);
+  }
+}
 
 /**
  * Build the `JobLock.jobName` and `Migration.version` unique indexes before the

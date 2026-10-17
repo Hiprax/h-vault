@@ -194,7 +194,6 @@ async function seedCrashAccount(): Promise<CrashAccount> {
       encryptedName: sealedName.encrypted,
       nameIv: sealedName.iv,
       nameTag: sealedName.tag,
-      searchHash: await searchHashOf(name, oldRawKey),
     });
     itemIds.push(String(item._id));
   }
@@ -717,10 +716,12 @@ describe('Crash consistency — sequential path (standalone mongod)', () => {
     const imported = rows.filter((row) => !account.itemIds.includes(String(row._id)));
     expect(imported).toHaveLength(5);
     for (const row of imported) {
-      // Complete rows, not half-written ones: each opens and carries its hash.
+      // Complete rows, not half-written ones: each opens. The import body still
+      // carries a name hash per row, as an older client's does, and none is
+      // stored (F-12; this used to assert each row carried its hash).
       const plaintext = await openText(sealedOf(row, 'data'), account.oldKey);
       expect(plaintext).toMatch(/"password":"imported"/);
-      expect(row.searchHash).toMatch(/^[a-f0-9]{64}$/);
+      expect(row).not.toHaveProperty('searchHash');
     }
 
     // BOTH locks are released in a `finally` that runs BEFORE the audit row is

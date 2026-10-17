@@ -1,6 +1,7 @@
 import type { z } from 'zod';
 import type {
   registerSchema,
+  createInvitationSchema,
   loginSchema,
   login2faSchema,
   forgotPasswordSchema,
@@ -33,11 +34,14 @@ import type {
 } from '../schemas/folder.js';
 import type {
   updateSettingsSchema,
+  updateNotificationPreferencesSchema,
   passwordGenOptionsSchema,
   checkBreachSchema,
   checkBreachBatchSchema,
   backupSetupSchema,
   backupSettingsSchema,
+  backupRecipientsSchema,
+  confirmBackupRecipientSchema,
   backupChangePasswordSchema,
   restoreBackupSchema,
   auditLogQuerySchema,
@@ -71,11 +75,14 @@ import type { paginationSchema } from '../schemas/common.js';
 import type {
   ItemType,
   AuditAction,
+  BackupRecipientState,
   BackupStatus,
   ErrorCode,
   ReleaseAudience,
   ReleaseChangeKind,
   ReleaseIcon,
+  RegistrationMode,
+  SecurityNotificationPreferences,
   Theme,
 } from '../constants/index.js';
 import type {
@@ -90,6 +97,7 @@ import type {
 
 // Auth types
 export type RegisterInput = z.infer<typeof registerSchema>;
+export type CreateInvitationInput = z.infer<typeof createInvitationSchema>;
 export type LoginInput = z.infer<typeof loginSchema>;
 export type Login2faInput = z.infer<typeof login2faSchema>;
 export type ForgotPasswordInput = z.infer<typeof forgotPasswordSchema>;
@@ -124,11 +132,16 @@ export type ReorderFolderInput = z.infer<typeof reorderFolderSchema>;
 
 // User/Settings types
 export type UpdateSettingsInput = z.infer<typeof updateSettingsSchema>;
+export type UpdateNotificationPreferencesInput = z.infer<
+  typeof updateNotificationPreferencesSchema
+>;
 export type PasswordGenOptions = z.infer<typeof passwordGenOptionsSchema>;
 export type CheckBreachInput = z.infer<typeof checkBreachSchema>;
 export type CheckBreachBatchInput = z.infer<typeof checkBreachBatchSchema>;
 export type BackupSetupInput = z.infer<typeof backupSetupSchema>;
 export type BackupSettingsInput = z.infer<typeof backupSettingsSchema>;
+export type BackupRecipientsInput = z.infer<typeof backupRecipientsSchema>;
+export type ConfirmBackupRecipientInput = z.infer<typeof confirmBackupRecipientSchema>;
 export type BackupChangePasswordInput = z.infer<typeof backupChangePasswordSchema>;
 export type RestoreBackupInput = z.infer<typeof restoreBackupSchema>;
 export type AuditLogQueryInput = z.infer<typeof auditLogQuerySchema>;
@@ -236,7 +249,6 @@ export interface IVaultItemResponse {
   encryptedName: string;
   nameIv: string;
   nameTag: string;
-  searchHash?: string | undefined;
   passwordHistory?: IPasswordHistoryEntry[] | undefined;
   createdAt: string;
   updatedAt: string;
@@ -256,7 +268,6 @@ export interface IFolderResponse {
   encryptedName: string;
   nameIv: string;
   nameTag: string;
-  searchHash?: string | undefined;
   parentId?: string | undefined;
   icon?: string | undefined;
   color?: string | undefined;
@@ -337,6 +348,21 @@ export interface IUserProfile {
   pendingEncryptedVaultKey?: string;
   pendingVaultKeyIv?: string;
   pendingVaultKeyTag?: string;
+  /**
+   * Whether this account may mint invitations to register: the server's
+   * `REGISTRATION_MODE` is `invite` and the account is listed in
+   * `REGISTRATION_INVITERS`. Optional (an older server sends none, which reads as
+   * "no"); the minting endpoint decides it again.
+   */
+  canInvite?: boolean;
+  /**
+   * The bytes this account's vault items and folders occupy, trashed ones
+   * included, as the storage quota counts them; `null` until the counter has been
+   * installed (an account that has not written since the quota arrived).
+   */
+  vaultBytes?: number | null;
+  /** The storage quota in bytes (`VAULT_STORAGE_QUOTA_MB_PER_USER`). */
+  vaultQuotaBytes?: number;
   settings: IUserSettings;
   createdAt: string;
   updatedAt: string;
@@ -360,15 +386,38 @@ export interface IUserSettings {
   language: string;
   /** Whether the release notes open by themselves after an update. */
   showReleaseNotes: boolean;
+  /** Which security emails the owner receives (F-26): every event they may choose. */
+  notifications: SecurityNotificationPreferences;
   backup: IBackupSettings;
+}
+
+/**
+ * One backup recipient as the server reports it. Never carries the entry's
+ * confirmation nonce: only the mailed link does, inside a signed token.
+ */
+export interface IBackupRecipient {
+  email: string;
+  state: BackupRecipientState;
+  /** When the address confirmed (or was recognised as the account's own); null while it has not. */
+  confirmedAt: string | null;
+  /**
+   * Whether the owner has approved this address with the master password since
+   * it last changed state. False for an address carried over from before
+   * recipients were confirmed, and for a suspended one: both wait for the owner.
+   */
+  approved: boolean;
 }
 
 export interface IBackupSettings {
   enabled: boolean;
   scheduleHour: number;
-  /** @deprecated Use backupEmails instead. Kept for backward compat reading old data. */
-  backupEmail?: string;
+  /**
+   * @deprecated Always empty. The recipients are {@link backupRecipients}; this
+   * field stays in the response only so older clients reading it keep working.
+   */
   backupEmails?: string[];
+  /** Where mailed backups go, and whether each address has confirmed. */
+  backupRecipients?: IBackupRecipient[];
   encryptedBWK?: string;
   bwkIv?: string;
   bwkTag?: string;
@@ -416,6 +465,15 @@ export interface IAuditLogEntry {
   ipAddress: string;
   userAgent: string;
   timestamp: string;
+  /**
+   * How many events the row stands for: 1, except for a coalesced row. The
+   * sign-in attempts made during a password lockout are counted into one row a
+   * minute (its time is the first attempt's); an uninterrupted run of identical
+   * metadata-only edits of one item or folder by one actor (same address and user
+   * agent, each within a minute of the last) is counted into one row (its time is
+   * the latest edit's). Absent on rows written before the field existed (read as 1).
+   */
+  count?: number;
 }
 
 // Backup restore response
@@ -436,31 +494,41 @@ export interface IItemSkipReason {
    *   aborting the whole restore. Note: `_id` duplicate-key collisions no longer
    *   occur here — non-owned items are inserted with a fresh server-minted `_id`,
    *   so a backup's foreign/duplicate `_id` can never collide.
+   * - `storage_limit` — storing the item would take the account past its vault
+   *   storage quota (`VAULT_STORAGE_QUOTA_MB_PER_USER`), or past the item limit
+   *   when another request took the last place while the restore ran (the limit
+   *   is decided per row, atomically). The rest of the restore goes on: a later
+   *   row may fit, or shrink an existing one.
    */
   reason:
     | 'invalid_item_type'
     | 'missing_encryption_fields'
     | 'conflict_skipped'
     | 'trashed_auto_restored'
-    | 'invalid_item_data';
+    | 'invalid_item_data'
+    | 'storage_limit';
 }
 
 export interface IFolderSkipReason {
   folderId: string;
   /**
    * Why the folder was not stored as-requested:
-   * - `conflict_skipped` — already exists, conflictStrategy was `skip` (or a
-   *   keep_both duplicate whose searchHash still collided after the strip).
+   * - `conflict_skipped` — already exists, conflictStrategy was `skip`.
    * - `invalid_folder_data` — the folder passed the structural checks but a
    *   persistence-layer validator rejected it (e.g. a missing/over-length
    *   required field or an un-castable field). The folder is skipped instead of
    *   aborting the whole restore, mirroring the item loop's `invalid_item_data`.
    *   Note: non-owned folders are inserted with a fresh server-minted `_id`, so a
-   *   backup's foreign/duplicate `_id` never collides; a residual `(userId,
-   *   searchHash)` collision is resolved by retrying without the hash, so E11000
-   *   only reaches this skip path in a rare concurrent-write race.
+   *   backup's foreign/duplicate `_id` never collides, and folders have no other
+   *   unique index, so E11000 only reaches this skip path in a rare race.
+   * - `storage_limit` — storing the folder would take the account past its vault
+   *   storage quota, or past the folder limit when another request took the last
+   *   place while the restore ran. When the backup's folder matched one the account already has
+   *   (an overwrite, or the duplicate a keep-both would have added), the items the
+   *   backup filed in it are restored into that existing folder; only a folder
+   *   that would have been new leaves them unfiled.
    */
-  reason: 'conflict_skipped' | 'invalid_folder_data';
+  reason: 'conflict_skipped' | 'invalid_folder_data' | 'storage_limit';
 }
 
 export interface IRestoreBackupResponse {
@@ -633,13 +701,25 @@ export interface PublicConfig {
     /** Advisory only — the server sees ciphertext and cannot enforce it. */
     allowedExtensions?: string[];
   };
+  /**
+   * Who may register here (`REGISTRATION_MODE`). Optional for the same N-1 reason
+   * as `documents`: an older server sends none, and the client then shows the
+   * form it always showed.
+   */
+  registration?: {
+    mode: RegistrationMode;
+  };
+}
+
+/** What `POST /auth/invitations` answers: the link to hand over, once. */
+export interface CreatedInvitation {
+  link: string;
+  expiresAt: string;
 }
 
 // Health check
 export interface HealthCheckResponse {
   status: 'ok' | 'error';
-  uptime: number;
-  version: string;
   timestamp: string;
   database: 'connected' | 'disconnected';
 }

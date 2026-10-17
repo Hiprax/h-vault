@@ -827,7 +827,11 @@ describe('Task 5.7 — Utility function edge cases', () => {
 // ---------------------------------------------------------------------------
 // Task 5.8: searchHash format validation
 // ---------------------------------------------------------------------------
-describe('Task 5.8 — searchHash format validation', () => {
+// Task 5.8 validated the searchHash format. F-12 removed the field: no keyed
+// name hash is stored, so the schemas accept an older client's value in ANY
+// shape and drop it. Every case below used to pin a refusal or an acceptance of
+// the field itself; each now pins that it is accepted and absent from the output.
+describe('Task 5.8, superseded by F-12 — searchHash is accepted and dropped', () => {
   const validItem = {
     itemType: 'login' as const,
     encryptedData: 'abc',
@@ -837,76 +841,39 @@ describe('Task 5.8 — searchHash format validation', () => {
     nameIv: 'iv12345678901234',
     nameTag: 'tag12345678901234567890',
   };
-  const validHash = 'a'.repeat(64);
 
   describe('createVaultItemSchema', () => {
-    it('should accept a valid 64-char hex searchHash', () => {
-      const result = createVaultItemSchema.safeParse({
-        ...validItem,
-        searchHash: validHash,
-      });
+    it.each([
+      ['a valid 64-char hex hash', 'a'.repeat(64)],
+      ['a hash shorter than 64 chars', 'a'.repeat(63)],
+      ['a hash longer than 64 chars', 'a'.repeat(65)],
+      ['uppercase hex', 'A'.repeat(64)],
+      ['non-hex characters', 'g'.repeat(64)],
+      [
+        'a real HMAC-SHA256 hex hash',
+        'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+      ],
+    ])('accepts %s and drops it', (_label, searchHash) => {
+      const result = createVaultItemSchema.safeParse({ ...validItem, searchHash });
       expect(result.success).toBe(true);
+      expect(result.data).not.toHaveProperty('searchHash');
+      expect(result.data?.encryptedName).toBe('name');
     });
 
     it('should accept omitted searchHash', () => {
       const result = createVaultItemSchema.safeParse(validItem);
       expect(result.success).toBe(true);
     });
-
-    it('should reject searchHash shorter than 64 chars', () => {
-      const result = createVaultItemSchema.safeParse({
-        ...validItem,
-        searchHash: 'a'.repeat(63),
-      });
-      expect(result.success).toBe(false);
-    });
-
-    it('should reject searchHash longer than 64 chars', () => {
-      const result = createVaultItemSchema.safeParse({
-        ...validItem,
-        searchHash: 'a'.repeat(65),
-      });
-      expect(result.success).toBe(false);
-    });
-
-    it('should reject searchHash with uppercase hex', () => {
-      const result = createVaultItemSchema.safeParse({
-        ...validItem,
-        searchHash: 'A'.repeat(64),
-      });
-      expect(result.success).toBe(false);
-    });
-
-    it('should reject searchHash with non-hex characters', () => {
-      const result = createVaultItemSchema.safeParse({
-        ...validItem,
-        searchHash: 'g'.repeat(64),
-      });
-      expect(result.success).toBe(false);
-    });
-
-    it('should accept a real HMAC-SHA256 hex hash', () => {
-      const result = createVaultItemSchema.safeParse({
-        ...validItem,
-        searchHash: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
-      });
-      expect(result.success).toBe(true);
-    });
   });
 
   describe('updateVaultItemSchema', () => {
-    it('should accept a valid searchHash in updates', () => {
-      const result = updateVaultItemSchema.safeParse({
-        searchHash: validHash,
-      });
+    it.each([
+      ['a valid hash', 'a'.repeat(64)],
+      ['an invalid hash', 'not-a-valid-hash'],
+    ])('accepts %s in an update and drops it', (_label, searchHash) => {
+      const result = updateVaultItemSchema.safeParse({ favorite: true, searchHash });
       expect(result.success).toBe(true);
-    });
-
-    it('should reject invalid searchHash in updates', () => {
-      const result = updateVaultItemSchema.safeParse({
-        searchHash: 'not-a-valid-hash',
-      });
-      expect(result.success).toBe(false);
+      expect(result.data).not.toHaveProperty('searchHash');
     });
 
     it('should allow omitting searchHash in updates', () => {

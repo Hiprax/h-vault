@@ -68,6 +68,7 @@ const SERVER_ROUTES = new Set<string>([
   'POST /auth/lock',
   'POST /auth/logout',
   'POST /auth/logout-all',
+  'POST /auth/invitations',
   'POST /auth/verify-unlock',
   'POST /auth/verify-email',
   'POST /auth/resend-verification',
@@ -77,6 +78,7 @@ const SERVER_ROUTES = new Set<string>([
   // routes/user.ts
   'GET /user/profile',
   'PUT /user/settings',
+  'PUT /user/notifications',
   'PUT /user/change-password',
   'POST /user/2fa/setup',
   'POST /user/2fa/verify',
@@ -89,9 +91,11 @@ const SERVER_ROUTES = new Set<string>([
   'DELETE /user/trusted-devices/:id',
   'GET /user/audit-log',
   'DELETE /user',
-  // routes/backup.ts — only the read this module wraps so far; the rest of the
-  // backup calls are still inline in `BackupSettingsPage` and belong here too.
+  // routes/backup.ts — the calls this module wraps so far; the rest of the backup
+  // calls are still inline in `BackupSettingsPage` and belong here too.
   'GET /backup/history',
+  'PUT /backup/recipients',
+  'POST /backup/recipients/confirm',
   // routes/vault.ts
   'GET /vault/items',
   'GET /vault/items/trash',
@@ -176,6 +180,12 @@ describe('authApi wire contract', () => {
     };
     await authApi.registerApi(payload);
     expectCall(mockPost, 'POST', '/auth/register', payload);
+  });
+
+  it('POSTs an invitation request to /auth/invitations with the proof and the address', async () => {
+    const payload = { authHash: 'auth-hash', email: 'invitee@example.com' };
+    await authApi.createInvitationApi(payload);
+    expectCall(mockPost, 'POST', '/auth/invitations', payload);
   });
 
   it('POSTs login to /auth/login carrying deviceInfo when supplied', async () => {
@@ -319,6 +329,12 @@ describe('userApi wire contract', () => {
     expectCall(mockPut, 'PUT', '/user/change-password', pw);
   });
 
+  it('PUTs the security-email preferences, with the master-password proof, to their own route', async () => {
+    const body = { authHash: 'proof', notifications: { password_changed: false } };
+    await userApi.updateNotificationPreferencesApi(body);
+    expectCall(mockPut, 'PUT', '/user/notifications', body);
+  });
+
   it('POSTs 2FA setup / verify / regenerate-backup-codes to their own routes', async () => {
     await userApi.setup2faApi({ password: 'pw' });
     expectCall(mockPost, 'POST', '/user/2fa/setup', { password: 'pw' });
@@ -414,7 +430,6 @@ describe('userApi wire contract', () => {
             encryptedData: 'ed',
             dataIv: 'di',
             dataTag: 'dt',
-            searchHash: 'a'.repeat(64),
             tags: [],
             favorite: false,
           },
@@ -581,6 +596,24 @@ describe('backupApi wire contract', () => {
     await backupApi.getBackupHistoryApi();
     expectCall(mockGet, 'GET', '/backup/history', { params: undefined });
   });
+
+  it('replaces the recipients with a PUT carrying the proof and the whole list as the body', async () => {
+    mockPut.mockResolvedValue({ data: { success: true, data: {} } });
+    await backupApi.updateBackupRecipientsApi({
+      authHash: 'proof',
+      backupEmails: ['a@example.com'],
+    });
+    expectCall(mockPut, 'PUT', '/backup/recipients', {
+      authHash: 'proof',
+      backupEmails: ['a@example.com'],
+    });
+  });
+
+  it('confirms a recipient with a POST whose body is the token alone', async () => {
+    mockPost.mockResolvedValue({ data: { success: true } });
+    await backupApi.confirmBackupRecipientApi({ token: 'aaa.bbb.ccc' });
+    expectCall(mockPost, 'POST', '/backup/recipients/confirm', { token: 'aaa.bbb.ccc' });
+  });
 });
 
 describe('API surface', () => {
@@ -597,6 +630,7 @@ describe('API surface', () => {
     // Every function exercised above, by name.
     const covered = new Set([
       'registerApi',
+      'createInvitationApi',
       'loginApi',
       'login2faApi',
       'refreshTokenApi',
@@ -609,6 +643,7 @@ describe('API surface', () => {
       'unlockAccountApi',
       'getProfileApi',
       'updateSettingsApi',
+      'updateNotificationPreferencesApi',
       'changePasswordApi',
       'setup2faApi',
       'verify2faApi',
@@ -642,6 +677,8 @@ describe('API surface', () => {
       'reorderFolderApi',
       'deleteFolderApi',
       'getBackupHistoryApi',
+      'updateBackupRecipientsApi',
+      'confirmBackupRecipientApi',
     ]);
 
     const untested = exported.filter((name) => !covered.has(name));

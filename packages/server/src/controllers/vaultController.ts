@@ -25,8 +25,31 @@ import {
 } from '../utils/controllerHelpers.js';
 import { carriesBoundField } from '../utils/vaultFieldFormat.js';
 import { supportsTransactions } from '../utils/transactionSupport.js';
+import {
+  ROW_CURSOR_BATCH_SIZE,
+  closingMembers,
+  jsonArrayOf,
+  sendJsonStream,
+} from '../utils/jsonStream.js';
 import { createdRowId, isDuplicateIdError, ROW_ID_TAKEN_MESSAGE } from '../utils/rowIds.js';
-import { MAX_ITEMS_PER_USER } from '@hvault/shared';
+import {
+  addVaultBytes,
+  createCountedRow,
+  deleteCountedItems,
+  deleteCountedRow,
+  deltaOfPinnedUpdate,
+  isDefiniteWriteFailure,
+  measureAfter,
+  measureImage,
+  measureStoredRows,
+  reserveVaultWrite,
+  sameIncarnation,
+  settleVaultWrite,
+  storedVaultBytes,
+  updateCountedRow,
+  versionPin,
+  type RowMeasure,
+} from '../utils/vaultQuota.js';
 import type {
   ListVaultItemsInput,
   ListTrashInput,
@@ -80,7 +103,6 @@ const ALLOWED_CREATE_FIELDS = new Set([
   'encryptedName',
   'nameIv',
   'nameTag',
-  'searchHash',
 ]);
 
 const ALLOWED_UPDATE_FIELDS = new Set([
@@ -93,9 +115,25 @@ const ALLOWED_UPDATE_FIELDS = new Set([
   'encryptedName',
   'nameIv',
   'nameTag',
-  'searchHash',
   'passwordHistory',
 ]);
+
+/**
+ * The update fields that carry ciphertext. An update
+ * that sends none of them changed only an item's metadata — favourite, tags,
+ * folder — and its audit row says so (`contentChanged: false`), which is what
+ * lets `auditService` count a run of such edits into one row. An update that
+ * sends any of them keeps a row of its own.
+ */
+const ITEM_CONTENT_FIELDS = [
+  'encryptedData',
+  'dataIv',
+  'dataTag',
+  'encryptedName',
+  'nameIv',
+  'nameTag',
+  'passwordHistory',
+] as const;
 
 /**
  * What a re-seal is told when the vault key it sealed under is no longer the
@@ -105,6 +143,18 @@ const ALLOWED_UPDATE_FIELDS = new Set([
 const RESEAL_KEY_MOVED_MESSAGE =
   'Reload the app, then re-seal again: the vault key this page holds is no longer the ' +
   "account's current one.";
+
+/**
+ * The rotation's transaction reads at `snapshot`, so the two account totals it
+ * takes (before its first write and after its last) see ONE snapshot plus its own
+ * writes, and their difference is exactly the rotation's own change (F-24); at
+ * `local` a transaction only "might" read from one snapshot. The write concern is
+ * the deployment's default, deliberately: forcing `majority` without a time limit
+ * could hold a degraded replica set's commit (and the raised fence) indefinitely.
+ */
+const ROTATION_TRANSACTION_OPTIONS = {
+  readConcern: { level: 'snapshot' },
+} as const;
 
 /**
  * Lifts the rotation fence, and NOTHING ELSE.
@@ -131,6 +181,57 @@ const RESEAL_KEY_MOVED_MESSAGE =
  */
 async function lowerRotationFence(userId: string): Promise<void> {
   await User.updateOne({ _id: userId }, { $set: { rotationInProgress: false } });
+}
+
+/**
+ * Sends one page of vault items, serialized from the cursor a row at a time.
+ *
+ * A page is up to 200 rows of up to half a megabyte each, and building it as a lean
+ * array, then a string, then a buffer held it three times over. The rows now go
+ * from the cursor to the socket with backpressure (`utils/jsonStream.ts`). What does
+ * NOT change is the contract the client's walk depends on: the same query (filter,
+ * sort with its `_id` tiebreak, `skip`, `limit`), so the same rows in the same
+ * order and never fewer per page, and the same `pagination` with `totalPages =
+ * ceil(total / limit)`. The client requests page N and trusts `totalPages`, so a
+ * short page would move its next `skip` past rows it never saw.
+ *
+ * The count is read first, so `pagination` is known before the first byte. A
+ * failure after that point destroys the connection rather than appending an error
+ * to a half-sent page.
+ */
+async function sendItemPage(
+  res: Response,
+  filter: Record<string, unknown>,
+  sort: Record<string, 1 | -1>,
+  page: number,
+  limit: number,
+): Promise<void> {
+  const total = await VaultItem.countDocuments(filter);
+  const rows = VaultItem.find(filter)
+    .select('-userId -sourceRefId -searchHash')
+    .sort(sort)
+    .skip((page - 1) * limit)
+    .limit(limit)
+    // Small driver batches, or the cursor would hold the first 101 rows at once
+    // (the server's default first batch): up to ~50 MB of half-megabyte rows before
+    // the first byte is written.
+    .batchSize(ROW_CURSOR_BATCH_SIZE)
+    .lean()
+    .cursor();
+
+  res.status(200);
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  await sendJsonStream(
+    res,
+    (async function* itemPage() {
+      yield '{"success":true,"data":';
+      yield* jsonArrayOf(rows);
+      yield closingMembers({
+        pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+      });
+    })(),
+    { label: 'Vault list page' },
+  );
 }
 
 // ── Handlers ─────────────────────────────────────────────────────────
@@ -161,7 +262,6 @@ export const listItems = catchAsync(async (req: Request, res: Response): Promise
     filter.deletedAt = null;
   }
 
-  const skip = (page - 1) * limit;
   const sortDirection = sortOrder === 'asc' ? 1 : -1;
   const safeSortBy = resolveSortField(ALLOWED_SORT_FIELDS, sortBy, 'updatedAt');
 
@@ -196,39 +296,20 @@ export const listItems = catchAsync(async (req: Request, res: Response): Promise
   //
   // It is accepted rather than bought off with indexes because the cheaper fix is
   // not cheap here: `_id` would have to be appended to every sort-serving compound
-  // index, and `scripts/create-indexes.ts` only ever calls `createIndexes()` — it
-  // never drops — so each superseded prefix would linger until a drop migration
+  // index, and `scripts/create-indexes.ts` never removes an index the schema
+  // stopped declaring, so each superseded prefix would linger until a drop migration
   // retired it. It is also the same cost the document list already pays
   // (`documentController`'s `sendDocumentPage`).
-  const [items, total] = await Promise.all([
-    VaultItem.find(filter)
-      .select('-userId -sourceRefId')
-      .sort({ [safeSortBy]: sortDirection, _id: sortDirection })
-      .skip(skip)
-      .limit(limit)
-      .lean(),
-    VaultItem.countDocuments(filter),
-  ]);
-
-  const totalPages = Math.ceil(total / limit);
-
-  res.status(200).json({
-    success: true,
-    data: items,
-    pagination: {
-      page,
-      limit,
-      total,
-      totalPages,
-    },
-  });
+  await sendItemPage(res, filter, { [safeSortBy]: sortDirection, _id: sortDirection }, page, limit);
 });
 
 export const getItem = catchAsync(async (req: Request, res: Response): Promise<void> => {
   const userId = getUserId(req);
   const { id } = req.params as { id: string };
 
-  const item = await VaultItem.findOne({ _id: id, userId }).select('-userId -sourceRefId').lean();
+  const item = await VaultItem.findOne({ _id: id, userId })
+    .select('-userId -sourceRefId -searchHash')
+    .lean();
 
   if (!item) {
     throw httpErrors.notFound('Vault item not found');
@@ -258,14 +339,6 @@ export const createItem = catchAsync(async (req: Request, res: Response): Promis
   // generation has already been answered.
   if ((await resolveVaultKeyVersion(res, userId, body.vaultKeyVersion)) === null) return;
 
-  // Enforce per-user vault item count limit
-  const itemCount = await VaultItem.countDocuments({ userId });
-  if (itemCount >= MAX_ITEMS_PER_USER) {
-    throw httpErrors.badRequest(
-      `Item limit reached. You can have a maximum of ${String(MAX_ITEMS_PER_USER)} items.`,
-    );
-  }
-
   if (body.folderId) {
     const folderExists = await Folder.exists({ _id: body.folderId, userId });
     if (!folderExists) {
@@ -280,13 +353,15 @@ export const createItem = catchAsync(async (req: Request, res: Response): Promis
   // `createdRowId`.
   const rowId = await createdRowId(userId, body.idNonce);
 
+  // Counted against the account's byte quota (F-24) AND the per-user item cap
+  // (F-15) in ONE conditional reservation before the insert, refused with 400
+  // when either has no room, settled with the stored size after. The cap is no
+  // longer a `countDocuments` read here: N concurrent creates each read one below
+  // the cap and all inserted, while the reservation admits exactly one.
+  const rowData = { ...sanitizedBody, ...rowId, userId };
   let item;
   try {
-    item = await VaultItem.create({
-      ...sanitizedBody,
-      ...rowId,
-      userId,
-    });
+    item = await createCountedRow('item', userId, rowData, () => VaultItem.create(rowData));
   } catch (err: unknown) {
     // Only a derived id can collide: its tail is bound to this account, so the row
     // holding it is this account's own, almost always the first delivery of a
@@ -339,22 +414,34 @@ export const updateItem = catchAsync(async (req: Request, res: Response): Promis
   // the two cannot come to disagree about what an unfiled row looks like.
   const updateOp = buildFolderAwareUpdate(sanitizedUpdate);
 
-  const item = await VaultItem.findOneAndUpdate({ _id: id, userId }, updateOp, {
-    returnDocument: 'after',
-    runValidators: true,
-  })
-    .select('-userId -sourceRefId')
-    .lean();
+  // Through the quota (F-24): a growing update is reserved and refused past the
+  // quota, the write is pinned on the row it measured, and the change is settled.
+  const updated = await updateCountedRow({ kind: 'item', userId, id, update: updateOp });
 
-  if (!item) {
+  if (!updated) {
     throw httpErrors.notFound('Vault item not found');
   }
+  // The response's shape is what it always was: the row without its owner and its
+  // restore provenance, and without a name hash a row an earlier release wrote may
+  // still carry (F-12).
+  const {
+    userId: _owner,
+    sourceRefId: _sourceRefId,
+    searchHash: _searchHash,
+    ...item
+  } = updated as Record<string, unknown> & { _id: unknown; itemType: string };
 
   const updateCtx = getRequestContext(req);
   await createAuditLog(
     userId,
     'item_update',
-    { itemId: id, itemType: item.itemType },
+    {
+      // The stored id, not the route's spelling: `validateObjectId` accepts either
+      // case, and the audit service coalesces a run of edits by this value.
+      itemId: String(item._id),
+      itemType: item.itemType,
+      contentChanged: ITEM_CONTENT_FIELDS.some((field) => Object.hasOwn(sanitizedUpdate, field)),
+    },
     updateCtx.ip,
     updateCtx.userAgent,
   );
@@ -402,15 +489,23 @@ export const permanentDelete = catchAsync(async (req: Request, res: Response): P
   const userId = getUserId(req);
   const { id } = req.params as { id: string };
 
-  const item = await VaultItem.findOneAndDelete({
-    _id: id,
-    userId,
-    deletedAt: { $ne: null },
-  }).lean();
+  // Touch first (F-24): the zero reservation installs a missing counter and marks
+  // the account busy BEFORE the row goes, so the removal is counted exactly once.
+  const reservation = await reserveVaultWrite(userId, { bytes: 0 });
+  const gone = mongoose.isObjectIdOrHexString(id)
+    ? await deleteCountedRow('item', {
+        _id: new mongoose.Types.ObjectId(id),
+        userId: new mongoose.Types.ObjectId(userId),
+        deletedAt: { $ne: null },
+      })
+    : null;
 
-  if (!item) {
+  if (!gone) {
     throw httpErrors.notFound('Vault item not found in trash');
   }
+  // A hard delete: the row leaves the item cap's count too (F-15).
+  await settleVaultWrite(reservation, -gone.counted, { items: -1 });
+  const item = gone.row as { itemType?: string };
 
   const permanentDeleteCtx = getRequestContext(req);
   await createAuditLog(
@@ -438,7 +533,7 @@ export const restoreItem = catchAsync(async (req: Request, res: Response): Promi
     { $unset: { deletedAt: 1 } },
     { returnDocument: 'after' },
   )
-    .select('-userId -sourceRefId')
+    .select('-userId -sourceRefId -searchHash')
     .lean();
 
   if (!item) {
@@ -548,35 +643,13 @@ export const listTrash = catchAsync(async (req: Request, res: Response): Promise
     deletedAt: { $exists: true, $ne: null },
   };
 
-  const skip = (page - 1) * limit;
   const sortDirection = sortOrder === 'asc' ? 1 : -1;
   const safeSortBy = resolveSortField(ALLOWED_TRASH_SORT_FIELDS, sortBy, 'deletedAt');
 
   // The same `_id` tiebreak `listItems` carries, and the tie is the NORMAL case
   // here rather than an unlucky one: a bulk delete stamps one `deletedAt` across
   // every row it touches. See the note above for what this does and does not buy.
-  const [items, total] = await Promise.all([
-    VaultItem.find(filter)
-      .select('-userId -sourceRefId')
-      .sort({ [safeSortBy]: sortDirection, _id: sortDirection })
-      .skip(skip)
-      .limit(limit)
-      .lean(),
-    VaultItem.countDocuments(filter),
-  ]);
-
-  const totalPages = Math.ceil(total / limit);
-
-  res.status(200).json({
-    success: true,
-    data: items,
-    pagination: {
-      page,
-      limit,
-      total,
-      totalPages,
-    },
-  });
+  await sendItemPage(res, filter, { [safeSortBy]: sortDirection, _id: sortDirection }, page, limit);
 });
 
 export const emptyTrash = catchAsync(async (req: Request, res: Response): Promise<void> => {
@@ -585,11 +658,22 @@ export const emptyTrash = catchAsync(async (req: Request, res: Response): Promis
   // Bound deletion to items trashed before the operation started so that
   // concurrent soft-deletes arriving mid-request are not swept up.
   const startTime = new Date();
-  const result = await VaultItem.deleteMany({
-    userId,
-    deletedAt: { $exists: true, $ne: null, $lte: startTime },
-  });
-  const totalDeleted = result.deletedCount;
+  // Row by row through the quota (F-24): each row's bytes are subtracted by the one
+  // call that removed it, so a concurrent permanent delete or a second empty-trash
+  // can never have the same row subtracted twice. Touch first, settle what went
+  // (in a `finally`: a failure part-way still settles the rows it removed).
+  const reservation = await reserveVaultWrite(userId, { bytes: 0 });
+  const purged = { deleted: 0, bytes: 0 };
+  try {
+    await deleteCountedItems(
+      userId,
+      { deletedAt: { $exists: true, $ne: null, $lte: startTime } },
+      purged,
+    );
+  } finally {
+    await settleVaultWrite(reservation, -purged.bytes, { items: -purged.deleted });
+  }
+  const totalDeleted = purged.deleted;
 
   const emptyTrashCtx = getRequestContext(req);
   await createAuditLog(
@@ -849,7 +933,14 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
     `${String(rotationDocumentErrors.length)} document(s) could not be updated. ` +
     `The vault key was not changed. Please retry.`;
 
+  // The byte quota's touch (F-24): installs a missing counter and marks the account
+  // busy for the recount BEFORE any row is rewritten. A rotation is never refused
+  // for size (its growth is bounded by one request body, which the completeness
+  // check makes cover every row); its exact change is counted below.
+  let quotaDelta = 0;
   try {
+    await reserveVaultWrite(userId, { bytes: 0 });
+
     // ── The outstanding-rotation guard ───────────────────────────────
     //
     // While `pendingEncryptedVaultKey` is set, a crash has left rows sealed under
@@ -909,7 +1000,6 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
       encryptedData: item.encryptedData,
       dataIv: item.dataIv,
       dataTag: item.dataTag,
-      ...(item.searchHash !== undefined ? { searchHash: item.searchHash } : {}),
       ...(item.passwordHistory !== undefined ? { passwordHistory: item.passwordHistory } : {}),
     });
 
@@ -1024,11 +1114,20 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
         const txnSession = await mongoose.startSession();
         session = txnSession;
         await txnSession.withTransaction(async () => {
-          // Update all vault items with new encrypted data
+          // The account's counted bytes as this transaction's snapshot sees them,
+          // before its first write: the difference to the total after its last
+          // one is exactly this rotation's own change (F-24). Snapshot read
+          // concern (below) is what makes the two totals one snapshot apart.
+          const quotaBefore = await storedVaultBytes(userId, { session: txnSession });
+
+          // Update all vault items with new encrypted data. Each write bumps the
+          // row's `__v`, so an update elsewhere that measured the row before this
+          // commit misses its pin and re-measures, instead of counting this
+          // rotation's change a second time.
           for (const item of items) {
             const result = await VaultItem.updateOne(
               { _id: item.id, userId },
-              { $set: buildItemSet(item) },
+              { $set: buildItemSet(item), $inc: { __v: 1 } },
               { session: txnSession },
             );
 
@@ -1047,6 +1146,7 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
                   nameIv: folder.nameIv,
                   nameTag: folder.nameTag,
                 },
+                $inc: { __v: 1 },
               },
               { session: txnSession },
             );
@@ -1077,6 +1177,16 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
           // rewritten ciphertext behind, and so a bogus id still surfaces as the
           // 404 the loops above raise rather than as a coverage complaint.
           await assertRotationCoversEveryRow(txnSession);
+
+          // The counter moves in this transaction, with the rows: committed or
+          // aborted together. Guarded on an installed counter (the touch above
+          // installed it), so a missing one is never installed as the delta.
+          const rotationDelta =
+            (await storedVaultBytes(userId, { session: txnSession })) - quotaBefore;
+          // A counter that is not there (nothing removes one once the touch above
+          // installed it) is not a failure: the next install measures the true
+          // total, this rotation's rows included.
+          await addVaultBytes(userId, rotationDelta, txnSession);
 
           if (resealing) {
             // No key, no generation, no markers: the key did not change. What is
@@ -1148,7 +1258,7 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
             });
             throw httpErrors.conflict(credentialMovedMessage);
           }
-        });
+        }, ROTATION_TRANSACTION_OPTIONS);
       } finally {
         // Lower the fence on BOTH outcomes — a committed rotation and an aborted
         // one (e.g. a missing item id). `withTransaction` has already committed
@@ -1182,13 +1292,13 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
       const itemIds = items.map((i) => i.id);
       const folderIds = folders.map((f) => f.id);
       const documentIds = documents.map((d) => d.id);
+      // Whole rows, from the primary: the rollback restores their ciphertext, and
+      // the byte quota measures each against exactly this image (F-24).
       const itemSnapshots = await VaultItem.find({ _id: { $in: itemIds }, userId })
-        .select(
-          '_id encryptedName nameIv nameTag encryptedData dataIv dataTag searchHash passwordHistory',
-        )
+        .read('primary')
         .lean();
       const folderSnapshots = await Folder.find({ _id: { $in: folderIds }, userId })
-        .select('_id encryptedName nameIv nameTag')
+        .read('primary')
         .lean();
       // Documents are snapshotted for the same reason, and the reason is sharper
       // here: a document whose DEK is rewrapped under a vault key that is then
@@ -1229,6 +1339,13 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
       const writtenItemIds: string[] = [];
       const writtenFolderIds: string[] = [];
       const writtenDocumentIds: string[] = [];
+      /**
+       * The IVs this rotation wrote into each row (`item:<id>` / `folder:<id>`).
+       * Every IV is fresh, so a row that still carries them still holds exactly
+       * this rotation's ciphertext: the rollback restores such a row and leaves
+       * one a writer that raced the fence has rewritten since.
+       */
+      const rotationIvs = new Map<string, Record<string, string>>();
 
       // Set rotation state marker before starting sequential updates so that a
       // crash mid-way can be detected on the next login. Store the pending new
@@ -1268,6 +1385,175 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
       const itemSnapshotById = new Map(itemSnapshots.map((s) => [String(s._id), s]));
       const folderSnapshotById = new Map(folderSnapshots.map((s) => [String(s._id), s]));
       const documentSnapshotById = new Map(documentSnapshots.map((s) => [String(s._id), s]));
+
+      // ── The byte quota's view of each rewritten row (F-24) ──────────────
+      //
+      // Every row write below is pinned on the image it was measured from
+      // (`__v` and `createdAt`) and bumps `__v`, so its change in counted bytes is
+      // exact, and a rollback is pinned on the image the rotation wrote. The sum
+      // is settled once, in the `finally` that releases the lock.
+      const rotatedItemMeasures = new Map<string, RowMeasure>();
+      const rotatedFolderMeasures = new Map<string, RowMeasure>();
+
+      /** What restores a snapshot's ciphertext: absent fields are removed, so it is faithful. */
+      const itemRollbackUpdate = (snap: (typeof itemSnapshots)[number]) => {
+        const restoreSet: Record<string, unknown> = {
+          encryptedName: snap.encryptedName,
+          nameIv: snap.nameIv,
+          nameTag: snap.nameTag,
+          encryptedData: snap.encryptedData,
+          dataIv: snap.dataIv,
+          dataTag: snap.dataTag,
+        };
+        const restoreUnset: Record<string, ''> = {};
+        if (snap.passwordHistory !== undefined) {
+          restoreSet.passwordHistory = snap.passwordHistory;
+        } else {
+          restoreUnset.passwordHistory = '';
+        }
+        return Object.keys(restoreUnset).length > 0
+          ? { $set: restoreSet, $unset: restoreUnset }
+          : { $set: restoreSet };
+      };
+
+      /** A folder's three name fields, as both the rotation and its rollback write them. */
+      const folderRotationUpdate = (row: {
+        encryptedName: string;
+        nameIv: string;
+        nameTag: string;
+      }) => ({
+        $set: { encryptedName: row.encryptedName, nameIv: row.nameIv, nameTag: row.nameTag },
+      });
+
+      /**
+       * The fields a rotation row is measured for: the ones its write sets AND the
+       * ones its rollback would set or remove, so the image recorded after the
+       * write can price the rollback too.
+       */
+      const measuredFields = (
+        update: { $set: Record<string, unknown> },
+        rollback: { $set: Record<string, unknown>; $unset?: Record<string, unknown> },
+      ) => ({
+        $set: { ...update.$set, ...rollback.$set },
+        ...(rollback.$unset ? { $unset: rollback.$unset } : {}),
+      });
+
+      /**
+       * One pinned row write of this rotation or of its rollback. A write whose
+       * outcome is unknown (a dropped connection) may have applied: what it could
+       * have added is kept in `quotaDelta`, an overcount the recount corrects
+       * rather than an undercount, and the error goes on to the caller as before.
+       */
+      const pinnedRotationWrite = async (
+        kind: 'item' | 'folder',
+        filter: Record<string, unknown>,
+        update: { $set: Record<string, unknown>; $unset?: Record<string, unknown> },
+        measure: RowMeasure,
+      ): Promise<{ matchedCount: number }> => {
+        const change = { ...update, $inc: { __v: 1 } };
+        try {
+          return kind === 'item'
+            ? await VaultItem.updateOne(filter, change)
+            : await Folder.updateOne(filter, change);
+        } catch (err: unknown) {
+          if (!isDefiniteWriteFailure(err)) {
+            quotaDelta += Math.max(0, deltaOfPinnedUpdate(kind, measure, update));
+          }
+          throw err;
+        }
+      };
+
+      /**
+       * One rotation write, pinned on `first`. A row another writer changed since
+       * it was measured (a folder reorder, which no fence stops, bumps `__v`) is
+       * measured again and retried, at most three times; a row that is gone, or
+       * is ANOTHER incarnation of the id (a different `createdAt`: deleted and
+       * created again), is `null`, the existing "not found" abort, because the
+       * ciphertext this rotation carries belongs to the row that was enumerated.
+       */
+      const writePinnedRow = async (
+        kind: 'item' | 'folder',
+        id: string,
+        update: { $set: Record<string, unknown> },
+        first: RowMeasure,
+      ): Promise<RowMeasure | null> => {
+        let measure: RowMeasure | undefined = first;
+        for (let attempt = 0; attempt < 3 && measure !== undefined; attempt += 1) {
+          const filter = { _id: id, userId, ...versionPin(measure) };
+          const result = await pinnedRotationWrite(kind, filter, update, measure);
+          if (result.matchedCount === 1) {
+            quotaDelta += deltaOfPinnedUpdate(kind, measure, update);
+            if (kind === 'item') {
+              const snap = itemSnapshotById.get(id);
+              if (snap) {
+                rotatedItemMeasures.set(
+                  id,
+                  measureAfter(kind, measure, update, itemRollbackUpdate(snap)),
+                );
+              }
+            } else {
+              const snap = folderSnapshotById.get(id);
+              if (snap) {
+                rotatedFolderMeasures.set(
+                  id,
+                  measureAfter(kind, measure, update, folderRotationUpdate(snap)),
+                );
+              }
+            }
+            return measure;
+          }
+          const itemSnap = kind === 'item' ? itemSnapshotById.get(id) : undefined;
+          const [again] = await measureStoredRows(
+            kind,
+            {
+              _id: new mongoose.Types.ObjectId(id),
+              userId: new mongoose.Types.ObjectId(userId),
+            },
+            itemSnap ? measuredFields(update, itemRollbackUpdate(itemSnap)) : update,
+          );
+          measure = sameIncarnation(again, first) ? again : undefined;
+        }
+        return null;
+      };
+
+      /**
+       * One rollback write: `restoreOp` over a row this rotation wrote, pinned on
+       * the image the rotation left (`rotated`) AND on the rotation's own IVs. A
+       * row a writer no fence stops has changed since (a folder reorder bumps
+       * `__v` and touches no ciphertext) is measured again and retried, at most
+       * three times, so the reorder does not leave the folder's name sealed under
+       * a key the account never adopted. A row that is gone, another incarnation,
+       * or no longer carries this rotation's ciphertext (a writer that raced the
+       * fence rewrote it) is left as it is: `false`.
+       */
+      const rollbackPinnedRow = async (
+        kind: 'item' | 'folder',
+        id: string,
+        restoreOp: { $set: Record<string, unknown>; $unset?: Record<string, unknown> },
+        rotated: RowMeasure,
+      ): Promise<boolean> => {
+        const ivs = rotationIvs.get(`${kind}:${id}`) ?? {};
+        let measure: RowMeasure | undefined = rotated;
+        for (let attempt = 0; attempt < 3 && measure !== undefined; attempt += 1) {
+          const filter = { _id: id, userId, ...ivs, ...versionPin(measure) };
+          const result = await pinnedRotationWrite(kind, filter, restoreOp, measure);
+          if (result.matchedCount === 1) {
+            quotaDelta += deltaOfPinnedUpdate(kind, measure, restoreOp);
+            return true;
+          }
+          const [again] = await measureStoredRows(
+            kind,
+            {
+              _id: new mongoose.Types.ObjectId(id),
+              userId: new mongoose.Types.ObjectId(userId),
+              ...ivs,
+            },
+            restoreOp,
+          );
+          measure = sameIncarnation(again, rotated) ? again : undefined;
+        }
+        return false;
+      };
 
       /**
        * True when undoing the rewritten ciphertext would DESTROY the account
@@ -1314,6 +1600,11 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
       };
 
       const rollbackPartialWrites = async (): Promise<void> => {
+        // Nothing written, or already rolled back (the lists are cleared below,
+        // and the orderly abort reaches this twice): nothing to read or log.
+        if (writtenItemIds.length + writtenFolderIds.length + writtenDocumentIds.length === 0) {
+          return;
+        }
         // Asked HERE rather than at either call site, so the rule covers both the
         // orderly abort above and the exception path below with one statement. On
         // the orderly abort the answer is always false — that path is reached
@@ -1340,35 +1631,19 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
 
         for (const id of writtenItemIds) {
           const snap = itemSnapshotById.get(id);
-          if (!snap) continue;
+          const rotated = rotatedItemMeasures.get(id);
+          if (!snap || !rotated) continue;
           try {
-            // Build a deterministic $set/$unset pair: fields that existed in the
-            // snapshot are restored; fields that didn't exist (searchHash,
-            // passwordHistory) are removed so the rollback is faithful.
-            const restoreSet: Record<string, unknown> = {
-              encryptedName: snap.encryptedName,
-              nameIv: snap.nameIv,
-              nameTag: snap.nameTag,
-              encryptedData: snap.encryptedData,
-              dataIv: snap.dataIv,
-              dataTag: snap.dataTag,
-            };
-            const restoreUnset: Record<string, ''> = {};
-            if (snap.searchHash !== undefined) {
-              restoreSet.searchHash = snap.searchHash;
-            } else {
-              restoreUnset.searchHash = '';
+            // A row another writer rewrote since (it raced the fence) is left as
+            // that writer left it, and that writer's own pinned write already
+            // counted its change.
+            if (!(await rollbackPinnedRow('item', id, itemRollbackUpdate(snap), rotated))) {
+              logger.warn('Rotation rollback left a row another request changed meanwhile', {
+                userId,
+                itemId: id,
+              });
+              continue;
             }
-            if (snap.passwordHistory !== undefined) {
-              restoreSet.passwordHistory = snap.passwordHistory;
-            } else {
-              restoreUnset.passwordHistory = '';
-            }
-            const restoreOp: Record<string, unknown> = { $set: restoreSet };
-            if (Object.keys(restoreUnset).length > 0) {
-              restoreOp.$unset = restoreUnset;
-            }
-            await VaultItem.updateOne({ _id: id, userId }, restoreOp);
             rolledBackItems++;
           } catch (rollbackErr) {
             rollbackFailures++;
@@ -1382,18 +1657,16 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
 
         for (const id of writtenFolderIds) {
           const snap = folderSnapshotById.get(id);
-          if (!snap) continue;
+          const rotated = rotatedFolderMeasures.get(id);
+          if (!snap || !rotated) continue;
           try {
-            await Folder.updateOne(
-              { _id: id, userId },
-              {
-                $set: {
-                  encryptedName: snap.encryptedName,
-                  nameIv: snap.nameIv,
-                  nameTag: snap.nameTag,
-                },
-              },
-            );
+            if (!(await rollbackPinnedRow('folder', id, folderRotationUpdate(snap), rotated))) {
+              logger.warn('Rotation rollback left a folder another request changed meanwhile', {
+                userId,
+                folderId: id,
+              });
+              continue;
+            }
             rolledBackFolders++;
           } catch (rollbackErr) {
             rollbackFailures++;
@@ -1410,7 +1683,7 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
           if (!snap) continue;
           try {
             // All three columns are required on the model, so unlike an item's
-            // `searchHash` there is no absent-field case to `$unset`: the
+            // `passwordHistory` there is no absent-field case to `$unset`: the
             // snapshot always carries a full wrap to restore.
             await Document.updateOne(
               { _id: id, userId },
@@ -1440,6 +1713,11 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
           rolledBackDocuments,
           rollbackFailures,
         });
+        // Done once: the orderly abort throws into the catch below, which calls
+        // this again, and a second pass would only miss every pin it just moved.
+        writtenItemIds.length = 0;
+        writtenFolderIds.length = 0;
+        writtenDocumentIds.length = 0;
       };
 
       try {
@@ -1456,16 +1734,23 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
         // failure, no item carries NEW ciphertext while the vault key is OLD.
         for (const item of items) {
           try {
-            const result = await VaultItem.updateOne(
-              { _id: item.id, userId },
-              { $set: buildItemSet(item) },
-            );
+            const update = { $set: buildItemSet(item) };
+            const snap = itemSnapshotById.get(item.id);
+            const written = snap
+              ? await writePinnedRow(
+                  'item',
+                  item.id,
+                  update,
+                  measureImage('item', snap, measuredFields(update, itemRollbackUpdate(snap))),
+                )
+              : null;
 
-            if (result.matchedCount === 0) {
+            if (written === null) {
               rotationItemErrors.push({ id: item.id, error: 'Vault item not found' });
               break;
             }
             writtenItemIds.push(item.id);
+            rotationIvs.set(`item:${item.id}`, { dataIv: item.dataIv, nameIv: item.nameIv });
           } catch (err) {
             const message = err instanceof Error ? err.message : 'Unknown error';
             rotationItemErrors.push({ id: item.id, error: message });
@@ -1482,22 +1767,23 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
         if (rotationItemErrors.length === 0) {
           for (const folder of folders) {
             try {
-              const folderResult = await Folder.updateOne(
-                { _id: folder.id, userId },
-                {
-                  $set: {
-                    encryptedName: folder.encryptedName,
-                    nameIv: folder.nameIv,
-                    nameTag: folder.nameTag,
-                  },
-                },
-              );
+              const update = folderRotationUpdate(folder);
+              const snap = folderSnapshotById.get(folder.id);
+              const written = snap
+                ? await writePinnedRow(
+                    'folder',
+                    folder.id,
+                    update,
+                    measureImage('folder', snap, update),
+                  )
+                : null;
 
-              if (folderResult.matchedCount === 0) {
+              if (written === null) {
                 rotationFolderErrors.push({ id: folder.id, error: 'Folder not found' });
                 break;
               }
               writtenFolderIds.push(folder.id);
+              rotationIvs.set(`folder:${folder.id}`, { nameIv: folder.nameIv });
             } catch (err) {
               const message = err instanceof Error ? err.message : 'Unknown error';
               rotationFolderErrors.push({ id: folder.id, error: message });
@@ -1650,6 +1936,11 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
       }
     }
   } finally {
+    // The sequential branch's rewritten rows (and any rollback), counted once. The
+    // transactional branch moved its count inside its own transaction.
+    if (quotaDelta !== 0) {
+      await settleVaultWrite({ userId, bytes: 0, items: 0, folders: 0 }, quotaDelta);
+    }
     await releaseVaultRotationLock(userId, lockId);
   }
 

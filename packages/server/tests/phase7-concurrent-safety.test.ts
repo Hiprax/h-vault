@@ -373,8 +373,13 @@ describe('Concurrent Operations Safety', () => {
       expect(await Folder.countDocuments({ userId: user.id })).toBe(5);
     });
 
-    it('deduplicates concurrent folder creates that share a searchHash (one 201, rest 409)', async () => {
-      const searchHash = 'a'.repeat(64); // valid /^[a-f0-9]{64}$/
+    // F-12 removed the folder name-hash index this used to race (five creates
+    // sharing a `searchHash`). The one unique index a folder create can still
+    // collide on is its derived `_id`, which is how a RETRIED create is
+    // deduplicated, so the same race is run on that: five creates sending one
+    // `idNonce`, plus a hash each to show it no longer decides anything.
+    it('deduplicates concurrent folder creates that share an idNonce (one 201, rest 409)', async () => {
+      const idNonce = `${'5'.repeat(8)}${'00112233445566778899aabbccddeeff'}`;
       const attempts = await Promise.all(
         Array.from({ length: 5 }, (_, i) =>
           (async () => {
@@ -385,7 +390,13 @@ describe('Concurrent Operations Safety', () => {
               .set('Authorization', authHeader(user.accessToken))
               .set('Cookie', csrf.cookie)
               .set('x-csrf-token', csrf.token)
-              .send(sampleFolder({ encryptedName: `dup-folder-${String(i)}`, searchHash }));
+              .send(
+                sampleFolder({
+                  encryptedName: `dup-folder-${String(i)}`,
+                  idNonce,
+                  searchHash: 'a'.repeat(64),
+                }),
+              );
           })(),
         ),
       );
@@ -393,11 +404,15 @@ describe('Concurrent Operations Safety', () => {
       const created = attempts.filter((r) => r.status === 201);
       const conflicts = attempts.filter((r) => r.status === 409);
 
-      // The unique (userId, searchHash) partial index admits exactly one row;
-      // the losers surface as 409 (E11000 → conflict), never 500 or a dupe.
+      // The `_id` index admits exactly one row; the losers surface as 409 naming
+      // the id (E11000 -> conflict), never 500 or a duplicate.
       expect(created).toHaveLength(1);
       expect(conflicts).toHaveLength(4);
+      for (const conflict of conflicts) {
+        expect(conflict.body.message).toMatch(/row with this id already exists/);
+      }
       expect(await Folder.countDocuments({ userId: user.id })).toBe(1);
+      expect(await Folder.countDocuments({ searchHash: { $exists: true } })).toBe(0);
     });
   });
 

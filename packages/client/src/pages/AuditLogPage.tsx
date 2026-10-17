@@ -67,6 +67,7 @@ import { AUDIT_ACTIONS } from '@hvault/shared';
 const ACTION_COLORS: Record<string, string> = {
   login: 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400',
   login_failed: 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400',
+  token_reuse_detected: 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400',
   logout: 'bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-400',
   password_change: 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400',
   '2fa_enable': 'bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400',
@@ -90,6 +91,12 @@ const ACTION_COLORS: Record<string, string> = {
   // is the same kind of event, so it shares the colour rather than staying grey.
   '2fa_backup_code_used': 'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400',
   '2fa_backup_codes_regenerated':
+    'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400',
+  // Where mailed backups go: a changed list and suspended recipients are things the
+  // owner should notice (amber); an address confirming is the expected next step.
+  backup_recipients_update: 'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400',
+  backup_recipient_confirmed: 'bg-cyan-100 text-cyan-800 dark:bg-cyan-900/30 dark:text-cyan-400',
+  backup_recipients_suspended:
     'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400',
 };
 
@@ -119,12 +126,33 @@ const ACTION_LABELS: Record<string, string> = {
   trusted_device_grant: 'Trusted Device Added',
   trusted_device_revoke: 'Trusted Device Revoked',
   trusted_device_rejected: 'Trusted Device Rejected',
+  token_reuse_detected: 'Stolen Session Detected',
+  device_proof_revoked: 'Sign-in Proof Revoked',
   document_create: 'Document Uploaded',
   document_update: 'Document Updated',
   document_delete: 'Document Trashed',
   document_restore: 'Document Restored',
   document_purge: 'Document Deleted Permanently',
+  invitation_create: 'Invitation Created',
+  backup_recipients_update: 'Backup Recipients Changed',
+  backup_recipient_confirmed: 'Backup Recipient Confirmed',
+  backup_recipients_suspended: 'Backup Recipients Suspended',
 };
+
+/**
+ * How many events a coalesced row stands for, when it stands for more than one.
+ *
+ * Sign-in attempts made while the password is locked are recorded one row per
+ * minute with a count, so a stranger hammering the account does not bury the
+ * page; a run of identical metadata-only edits (a favourite toggled, a folder
+ * moved or reordered) by one browser is recorded as one row with a count, for
+ * the same reason. Showing the count is what keeps such a row honest: "Failed
+ * Login" alone would hide that it was a hundred of them. A row without the field,
+ * or with 1, is a single event and shows nothing extra.
+ */
+function attemptCount(entry: IAuditLogEntry): number | null {
+  return typeof entry.count === 'number' && entry.count > 1 ? entry.count : null;
+}
 
 /**
  * The count of backup codes still available, for the one action that carries it.
@@ -282,6 +310,7 @@ export default function AuditLogPage() {
               <tbody className="divide-y divide-[hsl(var(--border))]">
                 {entries.map((entry) => {
                   const remaining = remainingBackupCodes(entry);
+                  const attempts = attemptCount(entry);
                   return (
                     <tr
                       key={entry._id}
@@ -300,6 +329,11 @@ export default function AuditLogPage() {
                         {remaining !== null && (
                           <span className="ml-2 text-xs text-[hsl(var(--muted-foreground))]">
                             {remaining} left
+                          </span>
+                        )}
+                        {attempts !== null && (
+                          <span className="ml-2 text-xs text-[hsl(var(--muted-foreground))]">
+                            × {attempts}
                           </span>
                         )}
                       </td>

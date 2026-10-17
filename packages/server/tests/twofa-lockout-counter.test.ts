@@ -1,48 +1,51 @@
 /**
- * A1 — the shared lockout counter must survive a replayed password step.
+ * A1 — the second factor's lockout counter must survive a replayed password step.
  *
- * `User.failedLoginAttempts` is ONE counter serving BOTH authentication steps:
- * `POST /auth/login` increments it on a wrong password, and `POST /auth/login/2fa`
- * increments it on a wrong code. It is also the ONLY per-account brake on the 2FA
- * step — `routes/auth.ts` gives `/login/2fa` `authLimiter` + `tokenVerifyLimiter`,
- * both of which are keyed by IP, never by account.
+ * Rewritten for F-03/F-28 (two factors, two states). This file used to pin ONE
+ * shared `failedLoginAttempts` counter serving both authentication steps; that
+ * sharing is exactly what let ten wrong TOTP codes refuse the CORRECT password
+ * with a distinct `ACCOUNT_LOCKED` (a password oracle), so the counter is now
+ * split: the password factor keeps the legacy fields, and the second factor
+ * counts on its own `secondFactorLockout` state through the one verifier
+ * (`utils/secondFactor.ts`). What this file still pins is the property A1 was
+ * written for, restated per factor: a successful PASSWORD step is not a
+ * completed authentication, so it must reset nothing on the second factor —
+ * otherwise a password holder could replay it between batches of wrong codes
+ * and reset the second factor's only per-account brake for ever.
  *
- * `login` used to clear that counter (and `lockoutUntil`) the moment bcrypt
- * agreed, BEFORE the `if (user.twoFactorEnabled)` branch — that is, on a login
- * that had NOT completed, because a second factor was still owed. An attacker
- * holding the master password could therefore replay the password step between
- * batches of wrong codes and reset the only brake on the second factor: nine
- * guesses, one `/auth/login`, nine more, for ever. The residual bound was
- * `accountLimiter` at 20 requests per email per 15 minutes on `/login` — roughly
- * 180 TOTP guesses per quarter hour instead of ten per half hour.
- *
- * The reset now happens only where an authentication actually COMPLETES:
+ * The resets happen only where an authentication actually COMPLETES:
  *
  *   • `finishLogin` — the ordinary non-2FA completion, and the trusted-device
- *     2FA-skip that shares it (a skip still presents two factors: the password,
- *     and a device-bound trust token that only a prior successful 2FA can mint,
- *     and which `findOneAndDelete` burns as it is used);
+ *     2FA-skip that shares it;
  *   • `login2fa`, once the code verifies.
  *
- * A 2FA challenge that is issued and abandoned resets nothing.
+ * and only for a factor whose lockout is not running at that moment.
  *
  * The process-local per-email throttle (`utils/loginThrottle.ts`) deliberately
  * keeps its old behaviour and is still cleared as soon as the password verifies:
- * it drives ONLY the progressive sleep on the password step, it is not consulted
- * anywhere in `login2fa`, and a verified password is proof that the password
- * guessing this counter exists to slow has ended. That is asserted below so the
- * two counters cannot be conflated by a later change.
+ * it drives ONLY the progressive sleep on the password step.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 // The unlock mail is stubbed so "did the threshold crossing mail exactly once?"
 // is directly observable; the real sender is an inert no-op in the test
 // environment (no SMTP configured), which makes the question unanswerable.
+// One unlock-link sender serves both factors since F-26 (`sendAccountUnlockEmail(email,
+// token, factor)`); the second factor's alert left the email module for the security
+// notice helper. Each factor's link is still observed on a spy of its own, so every
+// assertion below keeps its meaning: `password` for the password factor's link,
+// `secondFactor` for the two-factor step's.
+const unlockMails = vi.hoisted(() => ({
+  password: vi.fn().mockResolvedValue({ success: true, message: 'sent' }),
+  secondFactor: vi.fn().mockResolvedValue({ success: true, message: 'sent' }),
+}));
+
 vi.mock('../src/utils/email.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/utils/email.js')>();
   return {
     ...actual,
-    sendAccountUnlockEmail: vi.fn().mockResolvedValue({ success: true, message: 'sent' }),
+    sendAccountUnlockEmail: (email: string, token: string, factor = 'password') =>
+      (factor === 'second_factor' ? unlockMails.secondFactor : unlockMails.password)(email, token),
   };
 });
 
@@ -56,7 +59,6 @@ import { User } from '../src/models/User.js';
 import { RefreshToken } from '../src/models/RefreshToken.js';
 import { AuditLog } from '../src/models/AuditLog.js';
 import { TrustedDevice } from '../src/models/TrustedDevice.js';
-import { sendAccountUnlockEmail } from '../src/utils/email.js';
 import { hashToken } from '../src/utils/token.js';
 import { peekLoginAttempts } from '../src/utils/loginThrottle.js';
 import { createTestUser, getCsrf, type TestUser } from './helpers.js';
@@ -71,7 +73,8 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  */
 const UA = 'A1LockoutCounter/1.0';
 
-const mockedUnlockEmail = vi.mocked(sendAccountUnlockEmail);
+const mockedUnlockEmail = unlockMails.password;
+const mockedSecondFactorEmail = unlockMails.secondFactor;
 const cm = new CryptoManager();
 const encKey = process.env['SESSION_SECRET'] ?? 'TestSessionSecret4Testing!!12345';
 
@@ -162,6 +165,7 @@ async function challenge(agent: request.Agent, user: TestUser): Promise<string> 
   return res.body.data.tempToken as string;
 }
 
+/** The PASSWORD factor's state (the legacy top-level fields). */
 async function counterOf(userId: string): Promise<{ attempts: number; lockoutUntil?: Date }> {
   const row = await User.findById(userId);
   expect(row).not.toBeNull();
@@ -171,7 +175,18 @@ async function counterOf(userId: string): Promise<{ attempts: number; lockoutUnt
   };
 }
 
-describe('A1 — the shared lockout counter across the two authentication steps', () => {
+/** The SECOND factor's state (`secondFactorLockout`, `select: false`). */
+async function secondFactorOf(userId: string): Promise<{ attempts: number; lockoutUntil?: Date }> {
+  const row = await User.findById(userId).select('+secondFactorLockout');
+  expect(row).not.toBeNull();
+  const state = row!.secondFactorLockout;
+  return {
+    attempts: state?.failedAttempts ?? 0,
+    ...(state?.until ? { lockoutUntil: state.until } : {}),
+  };
+}
+
+describe('A1 — each factor keeps its own lockout counter across the two steps', () => {
   let agent: request.Agent;
 
   beforeEach(() => {
@@ -180,11 +195,13 @@ describe('A1 — the shared lockout counter across the two authentication steps'
     // (`void send(...).then(...)`), so it must keep returning a promise.
     mockedUnlockEmail.mockReset();
     mockedUnlockEmail.mockResolvedValue({ success: true, message: 'sent' });
+    mockedSecondFactorEmail.mockReset();
+    mockedSecondFactorEmail.mockResolvedValue({ success: true, message: 'sent' });
   });
 
   it(
-    'still locks the account after MAX_LOGIN_ATTEMPTS total 2FA failures even when a successful ' +
-      'password step is replayed between them',
+    'still locks the second factor after MAX_LOGIN_ATTEMPTS total 2FA failures even when a ' +
+      'successful password step is replayed between them',
     async () => {
       const { user, secret } = await create2faUser();
       const half = MAX_LOGIN_ATTEMPTS / 2;
@@ -196,15 +213,15 @@ describe('A1 — the shared lockout counter across the two authentication steps'
         expect(res.status).toBe(401);
         expect(res.body.message).toBe('TWO_FA_INVALID');
       }
-      expect((await counterOf(user.id)).attempts).toBe(half);
+      expect((await secondFactorOf(user.id)).attempts).toBe(half);
 
       // ── The replay: a SUCCESSFUL password step, mid-attack ─────────────────
-      // This is the whole finding. The password is correct, so the request
-      // returns 200 — but it completes no authentication, because the account
-      // still owes a second factor. It must therefore reset nothing.
+      // The password is correct, so the request returns 200 — but it completes
+      // no authentication, because the account still owes a second factor. It
+      // must therefore reset nothing.
       const secondToken = await challenge(agent, user);
 
-      const afterReplay = await counterOf(user.id);
+      const afterReplay = await secondFactorOf(user.id);
       expect(afterReplay.attempts).toBe(half);
       expect(afterReplay.lockoutUntil).toBeUndefined();
 
@@ -215,27 +232,33 @@ describe('A1 — the shared lockout counter across the two authentication steps'
         expect(res.body.message).toBe('TWO_FA_INVALID');
       }
 
-      // MAX_LOGIN_ATTEMPTS wrong codes in total — the account is locked.
-      const locked = await counterOf(user.id);
+      // MAX_LOGIN_ATTEMPTS wrong codes in total — the SECOND factor is locked,
+      // and the password factor (proven every time) is not.
+      const locked = await secondFactorOf(user.id);
       expect(locked.attempts).toBe(MAX_LOGIN_ATTEMPTS);
       expect(locked.lockoutUntil).toBeDefined();
       expect(locked.lockoutUntil!.getTime()).toBeGreaterThan(Date.now());
+      expect(await counterOf(user.id)).toEqual({ attempts: 0 });
 
-      // The threshold was crossed exactly once, so exactly one unlock mail.
-      expect(mockedUnlockEmail).toHaveBeenCalledTimes(1);
-      expect(mockedUnlockEmail.mock.calls[0]![0]).toBe(user.email);
+      // The threshold was crossed exactly once, so exactly one mail, and it is
+      // the second-factor one (it tells the owner the password was entered).
+      expect(mockedSecondFactorEmail).toHaveBeenCalledTimes(1);
+      expect(mockedSecondFactorEmail.mock.calls[0]![0]).toBe(user.email);
+      expect(mockedUnlockEmail).not.toHaveBeenCalled();
 
-      // Both doors are now shut. The second step refuses before the code is read...
+      // The second step refuses before the code is read (the password is proven
+      // there, so the distinct answer is no oracle)...
       const blocked2fa = await post2fa(agent, secondToken, wrongCode(secret));
       expect(blocked2fa.status).toBe(403);
       expect(blocked2fa.body.message).toBe('ACCOUNT_LOCKED');
 
-      // ...and the password step, with the CORRECT password, reports the lockout
-      // to the owner rather than handing out another challenge to replay.
-      const blockedLogin = await postLogin(agent, user.email, user.rawPassword);
-      expect(blockedLogin.status).toBe(403);
-      expect(blockedLogin.body.message).toBe('ACCOUNT_LOCKED');
-      expect(blockedLogin.body.data?.tempToken).toBeUndefined();
+      // ...while the password step, which reads only the password factor, keeps
+      // answering the correct password with a challenge. It used to answer 403
+      // ACCOUNT_LOCKED here, which confirmed the password to whoever sent it.
+      const passwordStep = await postLogin(agent, user.email, user.rawPassword);
+      expect(passwordStep.status).toBe(200);
+      expect(passwordStep.body.data.twoFactorRequired).toBe(true);
+      expect(passwordStep.body.data.accessToken).toBeUndefined();
 
       // Negatives: no authentication ever completed, so no session and no
       // `login` audit row exists — only the seeded refresh token remains.
@@ -266,8 +289,8 @@ describe('A1 — the shared lockout counter across the two authentication steps'
     // The throttle drives only the progressive sleep on the password step, and
     // a correct password is proof that guessing has ended, so it clears here...
     expect(peekLoginAttempts(user.email)).toBe(0);
-    // ...while the durable counter, which is also the 2FA step's only
-    // per-account brake, survives an authentication that has not completed.
+    // ...while the PASSWORD factor's durable counter survives an authentication
+    // that has not completed (only a completed sign-in clears it).
     const after = await counterOf(user.id);
     expect(after.attempts).toBe(1);
     expect(after.lockoutUntil).toBeUndefined();
@@ -280,13 +303,13 @@ describe('A1 — the shared lockout counter across the two authentication steps'
     for (let i = 0; i < 4; i++) {
       expect((await post2fa(agent, tempToken, wrongCode(secret))).status).toBe(401);
     }
-    expect((await counterOf(user.id)).attempts).toBe(4);
+    expect((await secondFactorOf(user.id)).attempts).toBe(4);
 
     const res = await post2fa(agent, tempToken, totpFor(secret).generate());
     expect(res.status).toBe(200);
     expect(res.body.data.accessToken).toBeDefined();
 
-    const after = await counterOf(user.id);
+    const after = await secondFactorOf(user.id);
     expect(after.attempts).toBe(0);
     expect(after.lockoutUntil).toBeUndefined();
   }, 30_000);
@@ -321,35 +344,35 @@ describe('A1 — the shared lockout counter across the two authentication steps'
     }
 
     it(
-      'is discharged by the password step, so a 2FA account gets the same fresh budget a ' +
-        'passwordless-second-factor account has always had',
+      'is discharged by the password step, and the second factor then keeps its own budget ' +
+        'and its own mail',
       async () => {
         const { user, secret } = await create2faUser();
         await expireLockout(user.id);
 
-        // The thirty minutes were actually served — the only way to arrive here,
-        // since a LIVE lockout 403s this very request (asserted below).
+        // The thirty minutes were actually served, so the correct password
+        // discharges the PASSWORD factor's state at this step.
         const tempToken = await challenge(agent, user);
 
         const discharged = await counterOf(user.id);
         expect(discharged.attempts).toBe(0);
         expect(discharged.lockoutUntil).toBeUndefined();
 
-        // The budget restored is the designed one: ten guesses, then a lock —
-        // not one guess, which is what an undischarged counter of ten would give.
+        // Ten wrong codes now spend the SECOND factor's own budget of ten, and
+        // lock that factor alone.
         for (let i = 0; i < MAX_LOGIN_ATTEMPTS; i++) {
           expect((await post2fa(agent, tempToken, wrongCode(secret))).status).toBe(401);
         }
 
-        const relocked = await counterOf(user.id);
+        const relocked = await secondFactorOf(user.id);
         expect(relocked.attempts).toBe(MAX_LOGIN_ATTEMPTS);
         expect(relocked.lockoutUntil!.getTime()).toBeGreaterThan(Date.now());
+        expect(await counterOf(user.id)).toEqual({ attempts: 0 });
 
-        // The threshold was crossed cleanly, so a FRESH unlock link was mailed.
-        // Under an undischarged counter this crossing reads 11, never 10, and
-        // the user is left with no live recovery link at all.
-        expect(mockedUnlockEmail).toHaveBeenCalledTimes(1);
-        expect(mockedUnlockEmail.mock.calls[0]![0]).toBe(user.email);
+        // The crossing was clean, so a fresh second-factor link was mailed.
+        expect(mockedSecondFactorEmail).toHaveBeenCalledTimes(1);
+        expect(mockedSecondFactorEmail.mock.calls[0]![0]).toBe(user.email);
+        expect(mockedUnlockEmail).not.toHaveBeenCalled();
       },
       60_000,
     );
@@ -361,13 +384,16 @@ describe('A1 — the shared lockout counter across the two authentication steps'
         $set: { failedLoginAttempts: MAX_LOGIN_ATTEMPTS, lockoutUntil },
       });
 
+      // F-03: an unproven browser gets the wrong-password answer during a
+      // running lockout, right password or not (this pinned 403 ACCOUNT_LOCKED).
       const res = await postLogin(agent, user.email, user.rawPassword);
-      expect(res.status).toBe(403);
-      expect(res.body.message).toBe('ACCOUNT_LOCKED');
+      expect(res.status).toBe(401);
+      expect(res.body.message).toBe('Invalid email or password');
       expect(res.body.data?.tempToken).toBeUndefined();
 
-      // Nothing moved: not the count, and not the deadline — the outstanding
-      // unlock link's `stateHash` is bound to that exact timestamp.
+      // Nothing moved: not the count, and not the deadline (the lockout is fresh,
+      // and the outstanding unlock link names the lock episode, which a password
+      // alone never discharges while the lockout runs).
       const after = await counterOf(user.id);
       expect(after.attempts).toBe(MAX_LOGIN_ATTEMPTS);
       expect(after.lockoutUntil!.getTime()).toBe(lockoutUntil.getTime());
@@ -394,7 +420,7 @@ describe('A1 — the shared lockout counter across the two authentication steps'
       for (let i = 0; i < 4; i++) {
         expect((await post2fa(agent, tempToken, wrongCode(secret))).status).toBe(401);
       }
-      expect((await counterOf(user.id)).attempts).toBe(4);
+      expect((await secondFactorOf(user.id)).attempts).toBe(4);
 
       // The cookie is a possession factor a prior successful 2FA minted, and it
       // is burned as it is spent — so this IS a completed authentication, and it
@@ -404,7 +430,7 @@ describe('A1 — the shared lockout counter across the two authentication steps'
       expect(res.body.data.twoFactorRequired).toBeUndefined();
       expect(res.body.data.accessToken).toBeDefined();
 
-      const after = await counterOf(user.id);
+      const after = await secondFactorOf(user.id);
       expect(after.attempts).toBe(0);
       expect(after.lockoutUntil).toBeUndefined();
     }, 30_000);
@@ -416,7 +442,7 @@ describe('A1 — the shared lockout counter across the two authentication steps'
       for (let i = 0; i < 4; i++) {
         expect((await post2fa(agent, tempToken, wrongCode(secret))).status).toBe(401);
       }
-      expect((await counterOf(user.id)).attempts).toBe(4);
+      expect((await secondFactorOf(user.id)).attempts).toBe(4);
 
       // No matching grant exists, so the branch fails closed to the 2FA prompt.
       // An unrecognised cookie must not become the reset oracle the replayed
@@ -431,7 +457,7 @@ describe('A1 — the shared lockout counter across the two authentication steps'
       expect(res.body.data.twoFactorRequired).toBe(true);
       expect(res.body.data.accessToken).toBeUndefined();
 
-      const after = await counterOf(user.id);
+      const after = await secondFactorOf(user.id);
       expect(after.attempts).toBe(4);
       expect(after.lockoutUntil).toBeUndefined();
 

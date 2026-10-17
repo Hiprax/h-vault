@@ -33,9 +33,10 @@ import './sandbox.css';
  *
  * So a vulnerability in any parser this document runs lands somewhere holding no
  * key, no token, no cookie and no storage, that can reach no host but this one
- * and read no answer back from it. (Not "no socket at all": `script-src`,
- * `style-src`, `img-src` and `font-src` allow `'self'`, which a sandboxed
- * document resolves from the response URL — see the same-origin note in
+ * and read no answer back from it. (Not "no socket at all": `script-src` and
+ * `style-src` keep `'self'` for this document's own code, which a sandboxed
+ * document resolves from the response URL, and the API refuses every such
+ * request as cross-site — see the same-origin note in
  * `packages/server/src/config/sandboxCsp.ts`.) That is the whole point of the
  * isolation, and it is why every renderer lives here rather than in the page
  * that holds the unlocked vault.
@@ -57,10 +58,12 @@ import './sandbox.css';
  *     therefore read its bytes from the `ArrayBuffer` it was handed, and mint a
  *     blob URL ONLY to put in a `src` attribute — which `img-src` and
  *     `media-src` govern, and which do not involve `connect-src` at all.
- *  2. `img-src` carries no http/https source. That is what stops a markdown
- *     document pulling a remote image, which is INTENDED (a remote fetch is a
- *     read receipt for a private file) and is shown to the user as a
- *     disabled-remote-content notice — never repaired by widening `img-src`.
+ *  2. `img-src` is `blob:` and `data:` only: no http/https source and no
+ *     `'self'`. That is what stops a markdown document pulling an image from
+ *     anywhere, this server included, which is INTENDED (a remote fetch is a
+ *     read receipt for a private file, and one to this server reached its API)
+ *     and is shown to the user as a withheld-images notice — never repaired by
+ *     widening `img-src`.
  *
  * ---------------------------------------------------------------------------
  * THE HANDSHAKE, FROM THIS SIDE
@@ -73,7 +76,9 @@ import './sandbox.css';
  * framed with `referrerpolicy="no-referrer"`, and its own origin is opaque), and
  * the trust direction runs the other way — the HOST is what must not trust this
  * document. What stops an arbitrary page from framing it and speaking to it is
- * `frame-ancestors 'self'` in its policy, not a check written here.
+ * `frame-ancestors 'self'` in its policy; what stops a page that OPENS it, or a
+ * sibling frame, is that the port is taken from `window.parent` alone (F-22),
+ * with `Cross-Origin-Opener-Policy: same-origin` on the response in front of it.
  */
 
 /**
@@ -401,16 +406,29 @@ function onRootClick(event: MouseEvent): void {
  * The window listener is removed the moment a port arrives — the mirror of the
  * host's one-shot rule, and for a related reason: with the listener gone, a
  * second attempt to hand this document a channel reaches nobody, so there is
- * exactly one channel per document and no way to acquire another.
+ * exactly one channel per document and no way to acquire another. A message
+ * from any window but `win.parent` is ignored without consuming that one shot,
+ * so a stranger posting first cannot lock the embedder out either.
  */
 export function startSandbox(win: Window): void {
   const doc = win.document;
 
   const onWindowMessage = (event: MessageEvent): void => {
+    // ONLY THE PARENT MAY DRIVE THIS DOCUMENT (F-22). A transferred port is a
+    // capability, but not one only the embedder holds: any window with a handle
+    // to this one — a page that OPENED `/sandbox.html`, a sibling frame — can
+    // create a channel and post it here, and whoever holds the other end then
+    // feeds this document what to render and reads every reply. So the port is
+    // taken from `win.parent` and from nobody else. At top level `parent` is the
+    // window itself, so an opener is refused without a separate rule, and the
+    // document still boots: the a11y harness drives it top-level by posting to
+    // itself, because axe's page rules skip frames. Refusing to boot at top level
+    // would buy nothing beyond this check and lose that.
+    if (event.source !== win.parent) return;
     const port = event.ports[0];
     // The handshake reply is IDENTIFIED BY ITS PORT, not by its payload: a
-    // transferred port is a capability the embedder alone can create, whereas
-    // a payload is something any framing document could imitate.
+    // transferred port is a capability a framing document must deliberately
+    // create, whereas a payload is something anything could imitate.
     if (!port) return;
     win.removeEventListener('message', onWindowMessage);
     channel = port;

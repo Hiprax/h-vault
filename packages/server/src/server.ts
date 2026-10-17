@@ -11,12 +11,16 @@ import { startTokenCleanupJob } from './jobs/tokenCleanup.js';
 import { startBackupScheduler } from './jobs/backupScheduler.js';
 import { initBreachRangeCache } from './jobs/breachSeed.js';
 import { startUpdateCheckJob } from './jobs/updateCheck.js';
+import { startMaintenanceJob } from './jobs/maintenance.js';
 import { closeRateLimitStore } from './middleware/rateLimiter.js';
 import { runMigrations } from './utils/migrations.js';
 import { getRunningJobs } from './utils/jobTracker.js';
 import { createGracefulShutdown } from './utils/gracefulShutdown.js';
 import { createTimedServer } from './utils/httpTimeouts.js';
+import { describeBoundAddress, listenOn } from './utils/listenAddress.js';
+import { reportDeploymentMode, reportTlsVerificationOverride } from './utils/deploymentChecks.js';
 import { runStoragePreflight } from './utils/storageHealth.js';
+import { verifyEmailTransportAtBoot } from './utils/email.js';
 
 const logger = createModuleLogger('server');
 
@@ -31,6 +35,13 @@ async function startServer(): Promise<void> {
   try {
     // Connect to database
     await connectDatabase();
+
+    // A start outside production runs with every rate limiter off and weaker
+    // cookies; say so once, loudly (also reported as `mode` on /metrics).
+    reportDeploymentMode(config.NODE_ENV, logger);
+    // And, whatever the mode, a process-wide switch that turns certificate
+    // verification off for every outbound connection, SMTP included.
+    reportTlsVerificationOverride(process.env, logger);
 
     // Run pending migrations before starting anything else
     await runMigrations();
@@ -53,6 +64,9 @@ async function startServer(): Promise<void> {
     // turned it off with UPDATE_CHECK_ENABLED=false. Its result is stored in the
     // database, so every worker answers from it, not only this one.
     const updateCheckTask = isPrimaryWorker ? startUpdateCheckJob() : null;
+    // Hourly housekeeping (the audit-log caps first). Started unconditionally on
+    // the primary worker: none of its steps needs object storage or SMTP.
+    const maintenanceTask = isPrimaryWorker ? startMaintenanceJob() : null;
     if (!isPrimaryWorker) {
       logger.info(
         'Skipping background jobs on worker instance ' +
@@ -69,9 +83,11 @@ async function startServer(): Promise<void> {
     // followed by `listen`, with no seam between them to put these in.
     const server = createTimedServer(app);
 
-    server.listen(config.PORT, () => {
+    listenOn(server, { port: config.PORT, host: config.HOST }, () => {
+      // The address the kernel bound, not the configured one: the smoke gate reads
+      // this line to prove the emitted entry point really passes `HOST`.
       logger.info(
-        `${config.APP_NAME} server running on port ${String(config.PORT)} in ${config.NODE_ENV} mode`,
+        `${config.APP_NAME} server listening on ${describeBoundAddress(server.address())} in ${config.NODE_ENV} mode`,
       );
 
       // Signal PM2 that the process is ready to accept connections (requires wait_ready: true)
@@ -96,6 +112,12 @@ async function startServer(): Promise<void> {
       //   * NOT handed to `trackJob`. It is not a scheduled job, and putting it in
       //     the running set would make graceful shutdown wait on it.
       void runStoragePreflight();
+
+      // One-shot email check, for the same three reasons: `sendEmail` never throws,
+      // so a relay that cannot satisfy the TLS requirement (or refuses the login)
+      // would otherwise fail every verification, reset and unlock mail one quiet log
+      // line at a time. This says so once, loudly, at startup, and never rejects.
+      void verifyEmailTransportAtBoot();
     });
 
     // Track active connections for graceful shutdown
@@ -120,6 +142,7 @@ async function startServer(): Promise<void> {
         documentCleanupTask,
         // Stops its cron AND clears the pending boot check.
         updateCheckTask,
+        maintenanceTask,
       ],
       server,
       activeConnections,

@@ -68,7 +68,6 @@ vi.mock('../src/services/crypto/cryptoService', () => ({
     decryptVaultKey: vi.fn(),
     encryptData: vi.fn(),
     decryptData: vi.fn(),
-    generateSearchHash: vi.fn(),
     clearKey: vi.fn(),
     clearCryptoKey: vi.fn().mockResolvedValue(undefined),
   },
@@ -126,6 +125,14 @@ vi.mock('../src/services/offlineCache', async (importOriginal) => ({
     getCachedFolders: vi.fn().mockResolvedValue([]),
     clear: vi.fn().mockResolvedValue(undefined),
   },
+}));
+
+// These suites test the shell, not its release notes: the status read stays
+// pending, as on a slow network, so the release-notes host never settles after a
+// test's synchronous assertions, outside act(...).
+vi.mock('../src/services/api/releaseStatusApi', async (importActual) => ({
+  ...(await importActual<typeof import('../src/services/api/releaseStatusApi')>()),
+  getReleaseStatusApi: () => new Promise<never>(() => {}),
 }));
 
 vi.mock('../src/services/api/client', () => ({
@@ -258,7 +265,6 @@ function makeDecryptedItem(
       notes: '',
       customFields: [],
     },
-    searchHash: 'abc',
     createdAt: now,
     updatedAt: now,
     _raw: {

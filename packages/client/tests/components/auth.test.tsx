@@ -1,7 +1,8 @@
 import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { AxiosError, AxiosHeaders } from 'axios';
+import { MAX_INVITATION_TOKEN_LENGTH } from '@hvault/shared';
 import { LoginPage } from '../../src/components/auth/LoginPage';
 import { RegisterPage } from '../../src/components/auth/RegisterPage';
 import { UnlockScreen } from '../../src/components/auth/UnlockScreen';
@@ -816,7 +817,12 @@ describe('RegisterPage', () => {
     fireEvent.click(screen.getByRole('button', { name: /create account/i }));
 
     await waitFor(() => {
-      expect(mockRegister).toHaveBeenCalledWith('newuser@example.com', 'superStrongPass1');
+      // No invitation on an open server: the third argument is pinned absent.
+      expect(mockRegister).toHaveBeenCalledWith(
+        'newuser@example.com',
+        'superStrongPass1',
+        undefined,
+      );
     });
 
     await waitFor(() => {
@@ -935,7 +941,182 @@ describe('RegisterPage', () => {
     fireEvent.click(screen.getByRole('button', { name: /create account/i }));
 
     await waitFor(() => {
-      expect(mockRegister).toHaveBeenCalledWith('user@example.com', 'superStrongPass1');
+      expect(mockRegister).toHaveBeenCalledWith('user@example.com', 'superStrongPass1', undefined);
+    });
+  });
+
+  describe('registration mode and invitations', () => {
+    // `vi.clearAllMocks()` keeps implementations, so the mode a test serves would
+    // otherwise leak into whichever test the shuffle runs next.
+    afterEach(() => {
+      vi.mocked(api.get).mockReset();
+    });
+
+    /** Answers `GET /config` with the given registration mode (or no block for `null`). */
+    function serveMode(mode: 'open' | 'invite' | 'closed' | null) {
+      vi.mocked(api.get).mockResolvedValue({
+        data: {
+          success: true,
+          data: {
+            fileEncryption: { maxSizeMB: 100 },
+            ...(mode === null ? {} : { registration: { mode } }),
+          },
+        },
+      });
+    }
+
+    function renderAt(entry: string) {
+      return render(
+        <MemoryRouter initialEntries={[entry]}>
+          <RegisterPage />
+        </MemoryRouter>,
+      );
+    }
+
+    async function fillAndSubmit(email = 'invitee@example.com') {
+      fireEvent.change(screen.getByLabelText('Email'), { target: { value: email } });
+      fireEvent.change(screen.getByLabelText('Master Password'), {
+        target: { value: 'superStrongPass1' },
+      });
+      fireEvent.change(screen.getByLabelText('Confirm Master Password'), {
+        target: { value: 'superStrongPass1' },
+      });
+      fireEvent.click(
+        screen.getByText(/I understand that H-Vault cannot recover my master password/),
+      );
+      fireEvent.click(screen.getByRole('button', { name: /create account/i }));
+    }
+
+    it('reads the invitation from the link fragment, drops the fragment and sends the invitation', async () => {
+      serveMode('invite');
+      mockRegister.mockResolvedValue({ emailSent: true });
+
+      renderAt('/register#invite=tok_ABC-123');
+
+      // The fragment is replaced away at once, so it lives in no history entry.
+      await waitFor(() => {
+        expect(mockNavigate).toHaveBeenCalledWith(
+          { pathname: '/register', search: '', hash: '' },
+          { replace: true },
+        );
+      });
+      expect(await screen.findByLabelText('Invitation code')).toHaveValue('tok_ABC-123');
+
+      await fillAndSubmit();
+
+      await waitFor(() => {
+        expect(mockRegister).toHaveBeenCalledWith(
+          'invitee@example.com',
+          'superStrongPass1',
+          'tok_ABC-123',
+        );
+      });
+    });
+
+    it('asks for an invitation on an invite-only server and does not submit without one', async () => {
+      serveMode('invite');
+      renderAt('/register');
+
+      expect(await screen.findByLabelText('Invitation code')).toHaveValue('');
+      await fillAndSubmit();
+
+      expect(
+        await screen.findByText('An invitation is required to register on this server.'),
+      ).toBeInTheDocument();
+      expect(mockRegister).not.toHaveBeenCalled();
+    });
+
+    it('refuses a pasted invitation that cannot be one, marking the field', async () => {
+      serveMode('invite');
+      renderAt('/register');
+
+      const field = await screen.findByLabelText('Invitation code');
+      // A token is not prose: no spell-checking marks on it, and no error state
+      // before anything was submitted.
+      expect(field).toHaveAttribute('spellcheck', 'false');
+      expect(field).toHaveAttribute('aria-invalid', 'false');
+      expect(screen.getByText('Invitation code').className).not.toMatch(/destructive/);
+      fireEvent.change(field, {
+        target: { value: 'not a token!' },
+      });
+      await fillAndSubmit();
+
+      expect(await screen.findByText('That is not an invitation code.')).toBeInTheDocument();
+      expect(mockRegister).not.toHaveBeenCalled();
+      // The field and its label both show the error.
+      expect(screen.getByLabelText('Invitation code')).toHaveAttribute('aria-invalid', 'true');
+      expect(screen.getByText('Invitation code').className).toMatch(/destructive/);
+    });
+
+    it('sends a pasted invitation without its surrounding spaces', async () => {
+      serveMode('invite');
+      mockRegister.mockResolvedValue({ emailSent: true });
+      renderAt('/register');
+
+      fireEvent.change(await screen.findByLabelText('Invitation code'), {
+        target: { value: '  tok_ABC-123  ' },
+      });
+      await fillAndSubmit();
+
+      await waitFor(() => {
+        expect(mockRegister).toHaveBeenCalledWith(
+          'invitee@example.com',
+          'superStrongPass1',
+          'tok_ABC-123',
+        );
+      });
+    });
+
+    it('holds an invitation to the server bound: at the bound it is sent, one past it is refused', async () => {
+      serveMode('invite');
+      mockRegister.mockResolvedValue({ emailSent: true });
+      renderAt('/register');
+
+      const field = await screen.findByLabelText('Invitation code');
+      fireEvent.change(field, { target: { value: 'x'.repeat(MAX_INVITATION_TOKEN_LENGTH + 1) } });
+      await fillAndSubmit();
+      expect(await screen.findByText('That is not an invitation code.')).toBeInTheDocument();
+      expect(mockRegister).not.toHaveBeenCalled();
+
+      fireEvent.change(field, { target: { value: 'x'.repeat(MAX_INVITATION_TOKEN_LENGTH) } });
+      fireEvent.click(screen.getByRole('button', { name: /create account/i }));
+      await waitFor(() => {
+        expect(mockRegister).toHaveBeenCalledWith(
+          'invitee@example.com',
+          'superStrongPass1',
+          'x'.repeat(MAX_INVITATION_TOKEN_LENGTH),
+        );
+      });
+    });
+
+    it('says a closed server is closed and offers no form to fill', async () => {
+      serveMode('closed');
+      renderAt('/register');
+
+      expect(await screen.findByText(/registration is closed on this server/i)).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /create account/i })).toBeNull();
+      expect(screen.queryByLabelText('Master Password')).toBeNull();
+      expect(screen.getByText('Sign in')).toBeInTheDocument();
+      expect(mockRegister).not.toHaveBeenCalled();
+    });
+
+    it('shows no invitation field on an open server', async () => {
+      serveMode('open');
+      renderAt('/register');
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(screen.queryByLabelText('Invitation code')).toBeNull();
+    });
+
+    it('shows the plain form when the server says nothing about registration', async () => {
+      serveMode(null);
+      renderAt('/register');
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(screen.getByRole('button', { name: /create account/i })).toBeInTheDocument();
+      expect(screen.queryByLabelText('Invitation code')).toBeNull();
     });
   });
 });

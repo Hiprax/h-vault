@@ -23,13 +23,12 @@
  *     rejected it: the refresh token is unknown, expired, or replayed (reuse
  *     detection has already revoked the family). The session really is over; log
  *     out.
- *   - **403 `ACCOUNT_LOCKED` — authoritative, but about the ACCOUNT, not the
- *     session.** A lockout is a thirty-minute condition the owner can discharge
- *     right now with the emailed unlock link, and the server no longer rotates or
- *     clears the refresh cookie to answer one — so the session on the other side
- *     of it is the same session, with the same days or weeks left on it. Logging
- *     out here would `POST /auth/logout` and DELETE that row: the client would
- *     finish destroying exactly what the server was careful not to. See
+ *   - **403 `ACCOUNT_LOCKED` — never a dead session.** A lockout is about a
+ *     FACTOR of the account, not about the session: the server never refuses a
+ *     refresh for one (the refresh cookie is itself proof of a prior sign-in), and
+ *     it answers `ACCOUNT_LOCKED` only where a two-factor code is checked. Should a
+ *     request that carries a session ever receive it, logging out would
+ *     `POST /auth/logout` and DELETE a session the server never ended. See
  *     {@link isAccountLocked}.
  *   - **Everything else — transient.** 429 (a rate limit we will be under again
  *     shortly), any 5xx, a network error with no `response` at all (offline, DNS,
@@ -67,14 +66,15 @@ export function isCsrfRejection(error: unknown): boolean {
 }
 
 /**
- * Whether `error` is the server refusing an otherwise-valid credential because
- * the ACCOUNT is temporarily locked.
+ * Whether `error` is the server refusing a two-factor code because the account's
+ * SECOND FACTOR is temporarily locked (ten wrong codes).
  *
- * `POST /auth/refresh` evaluates the account BEFORE it claims the presented
- * token, so a lockout leaves the refresh row unspent and the cookie in place:
- * the same cookie works again the moment the lockout is discharged, by the
- * emailed unlock link or by the thirty-minute deadline passing. That is what
- * makes this a state the client must SHOW rather than a session it must end.
+ * The server answers it at the 2FA sign-in step and at the three signed-in code
+ * checks (turning 2FA off, regenerating backup codes, deleting the account) —
+ * each of which has already verified the master password, so the distinct answer
+ * confirms nothing. A PASSWORD lockout never produces it: the sign-in step
+ * answers every unproven attempt during one exactly like a wrong password, and a
+ * refresh is never refused for either factor.
  *
  * Matched by EXACT equality against the `ERROR_CODES` constant, unlike
  * {@link isCsrfRejection}'s substring test. The two are deliberately different:
@@ -87,22 +87,16 @@ export function isCsrfRejection(error: unknown): boolean {
  * The one sentence this client says about a lockout.
  *
  * It lives here, beside {@link isAccountLocked}, because the two must move
- * together, and it has two renderers: {@link describeTransientFailure}, and
- * `lib/utils.ts`'s `getApiErrorMessage` for every toast that never consults this
- * module. The server's message on that refusal is the machine constant
- * `ACCOUNT_LOCKED`, which is not something to show anybody.
- *
- * `ProtectedRoute`'s full-screen state deliberately does NOT use it: a screen has
- * a heading and a body where a toast has one line, so it says the same two things
- * split across both. Its test pins the remedy, which is the half that must not
- * quietly disappear from either.
+ * together, and its one renderer is `lib/utils.ts`'s `getApiErrorMessage`, which
+ * every sign-in and settings form uses. The server's message on that refusal is
+ * the machine constant `ACCOUNT_LOCKED`, which is not something to show anybody.
  *
  * It names both exits deliberately. Waiting is not the only one: the lockout also
  * ends the moment the owner follows the link already in their inbox, and a
  * sentence that said only "try again later" would hide the faster remedy.
  */
 export const ACCOUNT_LOCKED_MESSAGE =
-  'Your account is temporarily locked. Use the unlock link we emailed you, or try again later.';
+  'Too many wrong two-factor codes, so two-factor verification is locked for now. Use the unlock link we emailed you, or try again later.';
 
 export function isAccountLocked(error: unknown): boolean {
   if (!isAxiosError(error)) return false;
@@ -125,12 +119,15 @@ export function isAccountLocked(error: unknown): boolean {
  * token endpoint briefly unreachable or rate-limited) logged the user out and
  * revoked a session that was never in question.
  *
- * **A locked account is excluded for the same reason**, and it is the second
+ * **A locked factor is excluded for the same reason**, and it is the second
  * thing this predicate got wrong in a destructive direction: `ACCOUNT_LOCKED` is
- * a temporary condition on the ACCOUNT, the refresh token behind it is untouched,
- * and calling it a dead session made the client delete a session the server had
- * just declined to. Everything else — an unknown, expired or replayed token, a
- * deleted or unverified user, a 401 from any authenticated route — is unaffected.
+ * a temporary condition on a FACTOR of the account and never ends a session, so
+ * calling it a dead session made the client delete a session the server had
+ * declined to end. The server no longer answers a refresh with it at all; the
+ * exclusion stays because signed-in requests (the 2FA code checks in Settings)
+ * can now receive it, and no caller may ever read it as "log out". Everything
+ * else — an unknown, expired or replayed token, a deleted or unverified user, a
+ * 401 from any authenticated route — is unaffected.
  */
 export function isSessionGone(error: unknown): boolean {
   if (!isAxiosError(error)) return false;
@@ -144,10 +141,14 @@ export function isSessionGone(error: unknown): boolean {
  * The refusals that mean a 2FA temp token is spent: resubmitting the same code,
  * or a corrected one, against the same token can never succeed.
  *
- * `POST /auth/2fa/login` answers an expired, malformed, purpose-mismatched or
- * device-mismatched temp token — and an account that no longer exists, or is
- * mid-erasure — with `TOKEN_INVALID`; an account that locked between the
- * password step and this one with `ACCOUNT_LOCKED`. `TOKEN_EXPIRED` is listed
+ * `POST /auth/login/2fa` answers an expired, malformed, purpose-mismatched or
+ * device-mismatched temp token, one whose single-use challenge has already been
+ * spent by a completed sign-in (or that predates challenges), was cancelled by a
+ * password reset or change, "log out everywhere" or a detected session replay, or
+ * was consumed by an exchange whose code another sign-in spent first — and an
+ * account that no longer exists, or is mid-erasure — with `TOKEN_INVALID`; an account whose second factor is locked
+ * (a thirty-minute condition that outlives the five-minute temp token) with
+ * `ACCOUNT_LOCKED`. `TOKEN_EXPIRED` is listed
  * because this predicate lives in the module the refresh consumers share and
  * `/auth/refresh` does emit it; the 2FA route itself does not.
  *
@@ -248,14 +249,6 @@ export function retryAfterSeconds(error: unknown): number | null {
  * "Request failed with status code 429" reads to the user as "wrong password".
  */
 export function describeTransientFailure(error: unknown): string | null {
-  // First, because it is the most specific: a locked account is a 403 and would
-  // otherwise fall through to `getApiErrorMessage`, which renders the raw
-  // `ACCOUNT_LOCKED` constant at the user. It belongs here rather than in a
-  // caller: a lockout ends the same way a rate limit does — by waiting, or by
-  // acting on the mail — so every site that already speaks for the transient
-  // failures should speak for this one too.
-  if (isAccountLocked(error)) return ACCOUNT_LOCKED_MESSAGE;
-
   if (isRateLimited(error)) {
     const wait = retryAfterSeconds(error);
     return wait === null

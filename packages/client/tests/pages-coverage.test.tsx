@@ -16,7 +16,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import React from 'react';
 
@@ -95,7 +95,6 @@ vi.mock('../src/services/crypto/cryptoService', () => ({
     decryptVaultKey: vi.fn(),
     encryptData: vi.fn(),
     decryptData: vi.fn(),
-    generateSearchHash: vi.fn(),
     clearKey: vi.fn(),
     clearCryptoKey: vi.fn().mockResolvedValue(undefined),
   },
@@ -378,7 +377,6 @@ function makeDecryptedItem(
       notes: '',
       customFields: [],
     },
-    searchHash: 'abc',
     createdAt: created,
     updatedAt: now,
     _raw: {
@@ -624,7 +622,7 @@ describe('VerifyEmailPage', () => {
 
   it('shows loading state initially when token is present', () => {
     mockVerifyEmailApi.mockReturnValue(new Promise(() => {})); // never resolves
-    renderWithRouter(<VerifyEmailPage />, { route: '/verify-email?token=test-token' });
+    renderWithRouter(<VerifyEmailPage />, { route: '/verify-email#token=test-token' });
 
     expect(screen.getByText('Verifying Email')).toBeInTheDocument();
   });
@@ -633,7 +631,7 @@ describe('VerifyEmailPage', () => {
     mockVerifyEmailApi.mockResolvedValue({
       data: { success: true, message: 'Email verified successfully' },
     });
-    renderWithRouter(<VerifyEmailPage />, { route: '/verify-email?token=test-token' });
+    renderWithRouter(<VerifyEmailPage />, { route: '/verify-email#token=test-token' });
 
     await waitFor(() => {
       expect(screen.getByText('Email Verified')).toBeInTheDocument();
@@ -643,7 +641,7 @@ describe('VerifyEmailPage', () => {
 
   it('shows error when verification fails', async () => {
     mockVerifyEmailApi.mockRejectedValue(new Error('Token expired'));
-    renderWithRouter(<VerifyEmailPage />, { route: '/verify-email?token=bad-token' });
+    renderWithRouter(<VerifyEmailPage />, { route: '/verify-email#token=bad-token' });
 
     await waitFor(() => {
       expect(screen.getByText('Verification Failed')).toBeInTheDocument();
@@ -660,7 +658,7 @@ describe('VerifyEmailPage', () => {
 
   it('has link to sign in after verification', async () => {
     mockVerifyEmailApi.mockResolvedValue({ data: { success: true, message: 'OK' } });
-    renderWithRouter(<VerifyEmailPage />, { route: '/verify-email?token=test-token' });
+    renderWithRouter(<VerifyEmailPage />, { route: '/verify-email#token=test-token' });
 
     await waitFor(() => {
       expect(screen.getByText('Email Verified')).toBeInTheDocument();
@@ -680,7 +678,7 @@ describe('UnlockAccountPage', () => {
 
   it('shows loading state initially when token is present', () => {
     mockUnlockAccountApi.mockReturnValue(new Promise(() => {}));
-    renderWithRouter(<UnlockAccountPage />, { route: '/unlock-account?token=test-token' });
+    renderWithRouter(<UnlockAccountPage />, { route: '/unlock-account#token=test-token' });
 
     expect(screen.getByText('Unlocking Account')).toBeInTheDocument();
   });
@@ -689,7 +687,7 @@ describe('UnlockAccountPage', () => {
     mockUnlockAccountApi.mockResolvedValue({
       data: { success: true, message: 'Account unlocked' },
     });
-    renderWithRouter(<UnlockAccountPage />, { route: '/unlock-account?token=test-token' });
+    renderWithRouter(<UnlockAccountPage />, { route: '/unlock-account#token=test-token' });
 
     await waitFor(() => {
       expect(screen.getByText('Account Unlocked')).toBeInTheDocument();
@@ -699,7 +697,7 @@ describe('UnlockAccountPage', () => {
 
   it('shows error when unlock fails', async () => {
     mockUnlockAccountApi.mockRejectedValue(new Error('Token expired'));
-    renderWithRouter(<UnlockAccountPage />, { route: '/unlock-account?token=bad-token' });
+    renderWithRouter(<UnlockAccountPage />, { route: '/unlock-account#token=bad-token' });
 
     await waitFor(() => {
       expect(screen.getByText('Unlock Failed')).toBeInTheDocument();
@@ -756,7 +754,7 @@ describe('ResetPasswordPage', () => {
   });
 
   it('renders the password reset form when token is present', async () => {
-    await renderResetPassword('/reset-password?token=test-token');
+    await renderResetPassword('/reset-password#token=test-token');
 
     expect(screen.getByRole('heading', { name: /reset password/i })).toBeInTheDocument();
     expect(screen.getByLabelText('Email')).toBeInTheDocument();
@@ -766,13 +764,13 @@ describe('ResetPasswordPage', () => {
   });
 
   it('shows data loss warning', async () => {
-    await renderResetPassword('/reset-password?token=test-token');
+    await renderResetPassword('/reset-password#token=test-token');
 
     expect(screen.getByText(/vault items will become unrecoverable/i)).toBeInTheDocument();
   });
 
   it('shows validation error for mismatched passwords', async () => {
-    renderWithRouter(<ResetPasswordPage />, { route: '/reset-password?token=test-token' });
+    renderWithRouter(<ResetPasswordPage />, { route: '/reset-password#token=test-token' });
 
     await act(async () => {
       fireEvent.change(screen.getByLabelText('Email'), { target: { value: 'test@example.com' } });
@@ -791,7 +789,7 @@ describe('ResetPasswordPage', () => {
   });
 
   it('has back to sign in link', async () => {
-    await renderResetPassword('/reset-password?token=test-token');
+    await renderResetPassword('/reset-password#token=test-token');
 
     expect(screen.getByText('Back to sign in').closest('a')).toHaveAttribute('href', '/login');
   });
@@ -1913,6 +1911,41 @@ describe('SessionsPage', () => {
 // ==========================================================================
 
 describe('AuditLogPage', () => {
+  it('names the three backup-recipient events (F-05) in words, never as raw action codes', async () => {
+    mockGetAuditLogApi.mockResolvedValue({
+      data: {
+        success: true,
+        data: [
+          ['r1', 'backup_recipients_update'],
+          ['r2', 'backup_recipient_confirmed'],
+          ['r3', 'backup_recipients_suspended'],
+        ].map(([_id, action]) => ({
+          _id,
+          action,
+          ipAddress: '192.168.1.1',
+          userAgent: 'Chrome/120',
+          timestamp: '2026-09-01T12:00:00.000Z',
+        })),
+        pagination: { page: 1, limit: 20, total: 3, totalPages: 1 },
+      },
+    });
+
+    const { default: AuditLogPage } = await import('../src/pages/AuditLogPage');
+    await act(async () => {
+      renderWithRouter(<AuditLogPage />);
+    });
+
+    const table = await screen.findByRole('table');
+    for (const [label, colour] of [
+      ['Backup Recipients Changed', 'bg-amber-100'],
+      ['Backup Recipient Confirmed', 'bg-cyan-100'],
+      ['Backup Recipients Suspended', 'bg-amber-100'],
+    ] as const) {
+      expect(within(table).getByText(label)).toHaveClass(colour);
+    }
+    expect(within(table).queryByText('backup_recipients_update')).not.toBeInTheDocument();
+  });
+
   it('renders "Audit Log" heading', async () => {
     mockGetAuditLogApi.mockResolvedValue({
       data: {

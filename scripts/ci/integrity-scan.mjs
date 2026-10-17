@@ -571,14 +571,48 @@ const MANIFEST_RULES = [
   },
 ];
 
-/** Markers by EXISTENCE: a file whose whole purpose is suppressing findings. */
+/**
+ * Markers by EXISTENCE: a file whose whole purpose is suppressing findings.
+ *
+ * `perLine` files are marked ONE LINE AT A TIME instead, because each line
+ * silences exactly one finding: `.gitleaksignore` holds one gitleaks
+ * fingerprint (`<commit>:<file>:<rule>:<line>`) per line. With a single marker
+ * for the file, one entry excused every line it would ever hold, so the
+ * seventeenth fingerprint cost no more than the first. Each line's marker text
+ * is the line itself, so its entry's `symbol` names the fingerprint (or a
+ * commit-pinned prefix of it, bounded by `maxHits`), and capacity counts lines.
+ * Lines are read the way gitleaks reads them (`AddGitleaksIgnore` in its
+ * `detect.go`: trimmed, blank lines and `#` comments skipped), so exactly the
+ * lines that suppress something demand an entry.
+ *
+ * A per-line entry's `symbol` is ANCHORED, never a substring (`perLine.exact`,
+ * `perLine.prefix`): a full fingerprint excuses the one line EQUAL to it (by
+ * substring, `…:12` would also excuse `…:120`), and a prefix must pin the
+ * commit, the file and the rule, ending at the `:` before the line number, and
+ * excuses lines that START with it. A commit is immutable, so such a prefix can
+ * only ever match fingerprints of one historical blob a reviewer has read; any
+ * other symbol (a bare rule id, a bare commit, a path) could match a finding
+ * nobody reviewed, including one in a commit not written yet, and is
+ * LEDGER-MALFORMED. The shapes live here rather than being imported from the
+ * gitleaks gate because `selfHash` pins this file alone.
+ */
 const IGNORE_FILES = [
   { path: '.trivyignore', rule: 'IGNORE-FILE-TRIVY', kind: 'vulnerability-acceptance' },
   { path: '.semgrepignore', rule: 'IGNORE-FILE-SEMGREP', kind: 'known-gap' },
   { path: '.nsprc', rule: 'IGNORE-FILE-NSP', kind: 'vulnerability-acceptance' },
   { path: '.snyk', rule: 'IGNORE-FILE-SNYK', kind: 'vulnerability-acceptance' },
-  { path: '.gitleaksignore', rule: 'IGNORE-FILE-GITLEAKS', kind: 'known-gap' },
+  {
+    path: '.gitleaksignore',
+    rule: 'IGNORE-FILE-GITLEAKS',
+    kind: 'known-gap',
+    perLine: {
+      exact: /^[0-9a-f]{40}:[^:]+:[A-Za-z0-9._-]+:[1-9]\d*$/,
+      prefix: /^[0-9a-f]{40}:[^:]+:[A-Za-z0-9._-]+:$/,
+    },
+  },
 ];
+/** Per-line rule id → its symbol shapes. */
+const PER_LINE = new Map(IGNORE_FILES.filter((f) => f.perLine).map((f) => [f.rule, f.perLine]));
 
 /**
  * Rule ids with NO marker in the tree. These are the ONLY staleness-exempt ids
@@ -629,6 +663,16 @@ const fail = (msg) => {
 const posix = (p) => p.split(sep).join('/');
 const today = () => new Date().toISOString().slice(0, 10);
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+/**
+ * A date the calendar has, not merely one in its shape. `2099-13-01` passes
+ * DATE_RE, compares as a string after every real date and makes the day
+ * arithmetic NaN, so no age cap (`NaN > cap`) would ever fire on it.
+ */
+const isCalendarDate = (s) => {
+  if (typeof s !== 'string' || !DATE_RE.test(s)) return false;
+  const time = Date.parse(`${s}T00:00:00Z`);
+  return !Number.isNaN(time) && new Date(time).toISOString().slice(0, 10) === s;
+};
 const daysBetween = (a, b) => (Date.parse(b) - Date.parse(a)) / 86_400_000;
 const sha = (s) => createHash('sha256').update(s).digest('hex').slice(0, 16);
 
@@ -836,20 +880,25 @@ for (const rel of candidateFiles()) {
 }
 
 for (const f of IGNORE_FILES) {
-  if (existsSync(join(ROOT, f.path))) {
-    record(
-      {
-        id: f.rule,
-        kind: f.kind,
-        severity: 'high',
-        forbidden: false,
-        synthesized: true,
-        msg: `${f.path} suppresses findings`,
-      },
-      f.path,
-      0,
-      f.path,
-    );
+  const abs = join(ROOT, f.path);
+  if (!existsSync(abs)) continue;
+  const rule = {
+    id: f.rule,
+    kind: f.kind,
+    severity: 'high',
+    forbidden: false,
+    synthesized: true,
+    msg: `${f.path} suppresses findings`,
+  };
+  if (!f.perLine) {
+    record(rule, f.path, 0, f.path);
+    continue;
+  }
+  const lines = readFileSync(abs, 'utf8').split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const suppression = lines[i].trim();
+    if (suppression === '' || suppression.startsWith('#')) continue;
+    record(rule, f.path, i + 1, suppression);
   }
 }
 
@@ -885,7 +934,18 @@ const violations = [];
 const consumed = new Map();
 const touched = new Set();
 const reportedEntries = new Set();
-const anchorMatches = (e, hit) => !e.symbol || (hit.text ?? '').includes(e.symbol);
+const anchorMatches = (e, hit) => {
+  const shapes = PER_LINE.get(hit.rule);
+  if (shapes) {
+    // Anchored, see IGNORE_FILES. A malformed symbol matches nothing; the
+    // hygiene pass below reports the entry itself.
+    if (typeof e.symbol !== 'string') return false;
+    if (shapes.exact.test(e.symbol)) return hit.text === e.symbol;
+    if (shapes.prefix.test(e.symbol)) return (hit.text ?? '').startsWith(e.symbol);
+    return false;
+  }
+  return !e.symbol || (hit.text ?? '').includes(e.symbol);
+};
 
 for (const hit of hits) {
   if (hit.disposition === 'report-only') continue;
@@ -983,6 +1043,20 @@ for (const e of entries) {
       );
     }
   }
+  const perLineShapes = e.rule ? PER_LINE.get(e.rule) : undefined;
+  if (
+    perLineShapes &&
+    e.symbol &&
+    !(
+      typeof e.symbol === 'string' &&
+      (perLineShapes.exact.test(e.symbol) || perLineShapes.prefix.test(e.symbol))
+    )
+  ) {
+    flag(
+      'LEDGER-MALFORMED',
+      `${e.rule} symbols must be one full commit-pinned fingerprint or a <commit>:<file>:<rule>: prefix; "${String(e.symbol)}" could match lines nobody reviewed`,
+    );
+  }
   if (e.rule && REQUIRE_SYMBOL.has(e.rule) && !e.symbol) {
     flag(
       'ANCHOR-REQUIRED',
@@ -995,16 +1069,22 @@ for (const e of entries) {
       `maxHits=${e.maxHits} exceeds policy.maxHitsPerEntry=${policy.maxHitsPerEntry}; split it into individually justified entries`,
     );
   }
-  if (!DATE_RE.test(e.created ?? '')) {
-    flag('LEDGER-BAD-DATE', `created "${e.created ?? '(missing)'}" is not YYYY-MM-DD`);
+  if (!isCalendarDate(e.created)) {
+    flag(
+      'LEDGER-BAD-DATE',
+      `created "${e.created ?? '(missing)'}" is not a YYYY-MM-DD calendar date`,
+    );
   } else if (e.created > today()) {
     flag('LEDGER-FUTURE-DATED', `created "${e.created}" is in the future`);
   }
 
-  if (!DATE_RE.test(e.expires ?? '')) {
-    flag('LEDGER-BAD-DATE', `expires "${e.expires ?? '(missing)'}" is not YYYY-MM-DD`);
+  if (!isCalendarDate(e.expires)) {
+    flag(
+      'LEDGER-BAD-DATE',
+      `expires "${e.expires ?? '(missing)'}" is not a YYYY-MM-DD calendar date`,
+    );
   } else {
-    if (DATE_RE.test(e.created ?? '') && e.expires < e.created) {
+    if (isCalendarDate(e.created) && e.expires < e.created) {
       flag('LEDGER-BAD-DATE', `expires ${e.expires} precedes created ${e.created}`);
     }
     if (e.expires < today()) flag('LEDGER-EXPIRED', `expired ${e.expires}; re-justify or remove`);

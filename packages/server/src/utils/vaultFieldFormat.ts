@@ -15,7 +15,8 @@ import { VAULT_FIELD_V2_IV_MARKER } from '@hvault/shared';
  *
  * The fields read are exactly the IVs a vault row stores: an item's `nameIv`,
  * `dataIv` and every `passwordHistory[].iv`, and a folder's `nameIv`. Both inputs
- * are `unknown` because a restore's rows come from a parsed file, not a schema.
+ * are `unknown` because a restore's rows come from a parsed file whose skeleton
+ * alone is checked (`backupPayloadSchema`: rows are objects), not their fields.
  */
 export function carriesBoundField(items: unknown, folders: unknown): boolean {
   for (const item of rows(items)) {
@@ -28,10 +29,12 @@ export function carriesBoundField(items: unknown, folders: unknown): boolean {
 }
 
 /**
- * The object entries of what should be an array of rows, and nothing else. A
- * restore's rows come from a parsed file, so the array may be missing, may not be
- * an array, and may hold `null`s or strings; none of those can carry a field, and
- * none of them may throw here and turn a malformed file into a 500.
+ * The object entries of what should be an array of rows, and nothing else. Both
+ * callers hand it validated lists today (a restore's file is refused unless its
+ * row lists are arrays of objects, `backupPayloadSchema`; a rotation's rows come
+ * from `bulkReEncryptSchema`), but a nested `passwordHistory` may be absent and a
+ * future caller may pass anything, so a missing or non-array list, a `null` or a
+ * string yields no row and never throws.
  */
 function rows(value: unknown): Record<string, unknown>[] {
   if (!Array.isArray(value)) return [];

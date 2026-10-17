@@ -9,6 +9,7 @@ import {
 } from '../middleware/rateLimiter.js';
 import {
   updateSettingsSchema,
+  updateNotificationPreferencesSchema,
   changePasswordSchema,
   setup2faSchema,
   verify2faSchema,
@@ -20,6 +21,7 @@ import {
 import {
   getProfile,
   updateSettings,
+  updateNotificationPreferences,
   changePassword,
   setup2fa,
   verify2fa,
@@ -47,6 +49,14 @@ router.get('/profile', generalAuthLimiter, getProfile);
 // action that also emits an audit row per changed field, so an unlimited endpoint
 // let a valid session flood the audit log.
 router.put('/settings', generalAuthLimiter, validate(updateSettingsSchema, 'body'), updateSettings);
+// Security emails (F-26): turning a critical one off needs the master password, so
+// this route spends the same proof budget as every other proof.
+router.put(
+  '/notifications',
+  passwordVerifyLimiter,
+  validate(updateNotificationPreferencesSchema, 'body'),
+  updateNotificationPreferences,
+);
 router.put(
   '/change-password',
   passwordVerifyLimiter,

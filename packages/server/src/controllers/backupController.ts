@@ -1,6 +1,7 @@
 import type { Request, Response } from 'express';
+import type { z } from 'zod';
 import { catchAsync, httpErrors } from '@hiprax/errors';
-import { createModuleLogger } from '../utils/logger.js';
+import { createModuleLogger, errorMessage } from '../utils/logger.js';
 import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
 import { User } from '../models/User.js';
@@ -11,8 +12,10 @@ import { createAuditLog } from '../services/auditService.js';
 import { sendEmail, escapeHtml } from '../utils/email.js';
 import { config, emailConfigured } from '../config/index.js';
 import { acquireJobLock, releaseJobLock } from '../utils/jobLock.js';
+import { trackJob } from '../utils/jobTracker.js';
 import {
   StaleVaultKeyError,
+  assertMasterPasswordProof,
   acquireVaultRotationLock,
   assertVaultKeyVersion,
   assertVaultNotRotating,
@@ -26,20 +29,53 @@ import {
   vaultKeyVersionOf,
 } from '../utils/controllerHelpers.js';
 import { carriesBoundField } from '../utils/vaultFieldFormat.js';
+import {
+  VaultQuotaExceededError,
+  VaultRowLimitError,
+  createCountedRow,
+  updateCountedRow,
+} from '../utils/vaultQuota.js';
 import { estimateItemJsonSize, estimateFolderJsonSize } from '../utils/sizeEstimator.js';
-import { collectDocumentSummary } from '../utils/documentSummary.js';
+import { collectDocumentSummary, type DocumentSummary } from '../utils/documentSummary.js';
+import {
+  ROW_CURSOR_BATCH_SIZE,
+  closingMembers,
+  forEachRow,
+  jsonArrayOf,
+  sendJsonStream,
+} from '../utils/jsonStream.js';
+import { sendDeadlineMs } from '../utils/heavyResponseBudget.js';
 import { hasCycle } from '../utils/folderGraph.js';
+import { claimOutboundMail } from '../utils/outboundMailBudget.js';
+import {
+  applyRecipientList,
+  confirmRecipientToken,
+  confirmedRecipientsFor,
+  currentRecipientsFor,
+  noteBackupDelivered,
+  publicBackupSettings,
+  publicRecipients,
+  recordUndeliverableBackup,
+  sendDueConfirmations,
+  type UndeliverableReason,
+} from '../utils/backupRecipients.js';
+import { notifySecurityEventLater } from '../utils/securityNotifications.js';
 import {
   APP_VERSION,
   ITEM_TYPES,
   MAX_IMPORT_ITEMS,
   MAX_ITEMS_PER_USER,
   MAX_FOLDERS_PER_USER,
+  MAX_BACKUP_MAILS_PER_USER_PER_DAY,
+  ERROR_CODES,
   maskEmail,
+  backupPayloadSchema,
 } from '@hvault/shared';
 import type {
   BackupSetupInput,
   BackupSettingsInput,
+  BackupRecipientsInput,
+  ConfirmBackupRecipientInput,
   BackupChangePasswordInput,
   BackupHistoryInput,
   RestoreBackupInput,
@@ -54,11 +90,13 @@ const BACKUP_TRIGGER_LOCK_TTL_MS = 5 * 60 * 1000;
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
+// Neither list names `searchHash`: a backup written by an earlier release carries
+// a keyed hash of each row's name, and nothing stores one any more (F-12), so the
+// projection is what drops it.
 const ALLOWED_FOLDER_FIELDS = new Set([
   'encryptedName',
   'nameIv',
   'nameTag',
-  'searchHash',
   'parentId',
   'icon',
   'color',
@@ -76,16 +114,8 @@ const ALLOWED_ITEM_FIELDS = new Set([
   'tags',
   'favorite',
   'folderId',
-  'searchHash',
   'passwordHistory',
 ]);
-
-// A searchHash is an HMAC-SHA256 digest rendered as 64 lowercase hex chars. The
-// Folder/VaultItem models enforce this via a `match` validator, so a backup row
-// (legacy or tampered) carrying any other shape would otherwise throw a Mongoose
-// ValidationError mid-restore. The import path enforces the same shape through
-// its `searchHash` schema pattern.
-const SEARCH_HASH_RE = /^[a-f0-9]{64}$/;
 
 /**
  * Counts how many backup rows a restore will actually INSERT as net-new documents,
@@ -107,6 +137,19 @@ const SEARCH_HASH_RE = /^[a-f0-9]{64}$/;
  * supplies the concrete model (VaultItem or Folder). The `(userId, sourceRefId)`
  * partial index backs its provenance lookup.
  */
+/**
+ * The backup's spelling of a row id, when it is one: a STRING of 24 hex digits.
+ *
+ * `mongoose.isValidObjectId` is not this test. It defers to bson's
+ * `ObjectId.isValid`, which also accepts an OBJECT whose `id` is 24 hex digits,
+ * and `String()` of that object is "[object Object]", which `new ObjectId` then
+ * refuses: a 500 inside the restore's lock, after a `keep_both` restore had already
+ * written its folders. A backup is JSON, so a real id is always a string.
+ */
+function backupRowId(value: unknown): string | undefined {
+  return typeof value === 'string' && mongoose.isObjectIdOrHexString(value) ? value : undefined;
+}
+
 async function countNetNewRestoreRows(
   backupRows: Record<string, unknown>[],
   conflictStrategy: RestoreBackupInput['conflictStrategy'],
@@ -119,8 +162,9 @@ async function countNetNewRestoreRows(
   const candidateIds: string[] = [];
   let netNew = 0;
   for (const row of backupRows) {
-    if (mongoose.isValidObjectId(row._id)) {
-      candidateIds.push(String(row._id));
+    const id = backupRowId(row._id);
+    if (id !== undefined) {
+      candidateIds.push(id);
     } else {
       netNew++; // no valid _id → a fresh id is minted → always net-new
     }
@@ -134,6 +178,154 @@ async function countNetNewRestoreRows(
   return netNew;
 }
 
+/** The rows a backup carries: every folder, and every live (untrashed) item. */
+const backupFolderRows = (userId: string) =>
+  Folder.find({ userId })
+    .select('-sourceRefId -searchHash')
+    .batchSize(ROW_CURSOR_BATCH_SIZE)
+    .lean()
+    .cursor();
+const backupItemRows = (userId: string) =>
+  VaultItem.find({ userId, deletedAt: { $exists: false } })
+    .select('-sourceRefId -searchHash')
+    .batchSize(ROW_CURSOR_BATCH_SIZE)
+    .lean()
+    .cursor();
+
+/** What a backup document counted while it was produced. */
+interface BackupTally {
+  itemCount: number;
+  folderCount: number;
+}
+
+type BackupAccount = NonNullable<Awaited<ReturnType<typeof readBackupAccount>>>;
+
+/** The account a backup is built for, with the key material the file carries. */
+function readBackupAccount(userId: string) {
+  return User.findById(userId).lean();
+}
+
+/** Room left in an envelope's counts for the digits a full vault's counts take. */
+const ENVELOPE_COUNT_DIGITS = 16;
+
+/** The members a backup document closes with: wrapped keys, counts, the document summary. */
+function backupClosingMembers(
+  user: BackupAccount,
+  tally: BackupTally,
+  documentSummary: DocumentSummary,
+): Record<string, unknown> {
+  return {
+    encryptedVaultKey: user.encryptedVaultKey,
+    vaultKeyIv: user.vaultKeyIv,
+    vaultKeyTag: user.vaultKeyTag,
+    backupEncryption: {
+      encryptedBWK: user.settings.backup.encryptedBWK,
+      bwkIv: user.settings.backup.bwkIv,
+      bwkTag: user.settings.backup.bwkTag,
+      bwkSalt: user.settings.backup.bwkSalt,
+      bwkEncryptedVaultKey: user.settings.backup.bwkEncryptedVaultKey,
+      bwkVaultKeyIv: user.settings.backup.bwkVaultKeyIv,
+      bwkVaultKeyTag: user.settings.backup.bwkVaultKeyTag,
+    },
+    metadata: { itemCount: tally.itemCount, folderCount: tally.folderCount },
+    // The documents this backup does NOT contain. Optional and additive on the
+    // wire: a backup written before this field existed must still restore, which
+    // is why nothing downstream may require it. See `utils/documentSummary.ts`
+    // for why a backup mentions documents at all.
+    documentSummary,
+  };
+}
+
+/** The document's opening, up to the items array. */
+const backupHead = (): string =>
+  `{"version":${JSON.stringify(APP_VERSION)},"exportDate":${JSON.stringify(new Date().toISOString())},"items":`;
+
+/**
+ * The size check a backup is refused by, run BEFORE the first byte is produced, so
+ * a refusal is a whole 413 envelope rather than a truncated file.
+ *
+ * The envelope (head, empty arrays, wrapped keys, counts, document summary) is
+ * measured exactly; the rows are walked on both cursors with the conservative
+ * field-length estimator (`utils/sizeEstimator.ts`, the same one the export uses),
+ * one row at a time in bounded memory, stopping at the first row that crosses the
+ * budget, so an oversized vault is refused after a fraction of it has been read.
+ * Returns the estimate, which the download's send deadline is derived from.
+ */
+async function estimateBackupBytes(
+  userId: string,
+  user: BackupAccount,
+  documentSummary: DocumentSummary,
+  maxSizeBytes: number,
+): Promise<number> {
+  const envelope =
+    Buffer.byteLength(
+      backupHead() +
+        '[],"folders":[]' +
+        closingMembers(
+          backupClosingMembers(user, { itemCount: 0, folderCount: 0 }, documentSummary),
+        ),
+      'utf8',
+    ) + ENVELOPE_COUNT_DIGITS;
+  let estimatedSize = envelope;
+  const refuseDuringCollection = (): never => {
+    throw httpErrors.payloadTooLarge(
+      'Backup size exceeds the maximum allowed size during collection',
+    );
+  };
+  // `forEachRow` closes each cursor on every exit, the refusal thrown here included.
+  await forEachRow(backupFolderRows(userId), (folder) => {
+    estimatedSize += estimateFolderJsonSize(folder as unknown as Record<string, unknown>);
+    if (estimatedSize > maxSizeBytes) refuseDuringCollection();
+  });
+  await forEachRow(backupItemRows(userId), (item) => {
+    estimatedSize += estimateItemJsonSize(item as unknown as Record<string, unknown>);
+    if (estimatedSize > maxSizeBytes) refuseDuringCollection();
+  });
+  if (estimatedSize > maxSizeBytes) {
+    throw httpErrors.payloadTooLarge(
+      `Backup size exceeds the maximum allowed size (${String(config.BACKUP_MAX_SIZE_MB)} MB)`,
+    );
+  }
+  return estimatedSize;
+}
+
+/**
+ * The backup document, a chunk at a time: its fixed head, the items and the folders
+ * straight from their cursors, then the account's wrapped keys, the counts and the
+ * document summary. The same member order a whole-object `JSON.stringify` of it
+ * produced, and the client verifies the file's `integrity` HMAC over its own
+ * re-serialisation after parsing, so the layout of the bytes is not part of any
+ * contract.
+ *
+ * `beforeLastChunk` runs once every row has been produced and before the closing
+ * brace is, which is where the download records itself: after the content, and
+ * before the client can observe the end of the response.
+ */
+async function* backupDocument(
+  userId: string,
+  user: BackupAccount,
+  documentSummary: DocumentSummary,
+  tally: BackupTally,
+  beforeLastChunk?: () => Promise<void>,
+): AsyncGenerator<string> {
+  yield backupHead();
+  yield* jsonArrayOf(backupItemRows(userId), () => {
+    tally.itemCount += 1;
+  });
+  yield ',"folders":';
+  yield* jsonArrayOf(backupFolderRows(userId), () => {
+    tally.folderCount += 1;
+  });
+  yield closingMembers(backupClosingMembers(user, tally, documentSummary)).slice(0, -1);
+  await beforeLastChunk?.();
+  yield '}';
+}
+
+/**
+ * The whole backup as one string, for the one caller that needs the file whole:
+ * the mailed backup, whose attachment has to be complete before it is sent. The
+ * download streams the same document instead.
+ */
 async function collectBackupData(
   userId: string,
   maxSizeBytes: number,
@@ -141,76 +333,14 @@ async function collectBackupData(
   json: string;
   itemCount: number;
 }> {
-  const user = await User.findById(userId).lean();
-
-  // Stream both folders and vault items via cursors and accumulate against a
-  // shared size budget. Folders run first because items frequently reference
-  // them in the final payload structure. Both share the same field-length
-  // estimator (see `utils/sizeEstimator.ts`) used by the export endpoint, so
-  // we never serialize per-row in the hot loop.
-  const items: unknown[] = [];
-  const folders: unknown[] = [];
-  let estimatedSize = 0;
-
-  const folderCursor = Folder.find({ userId }).select('-sourceRefId').lean().cursor();
-  for await (const folder of folderCursor) {
-    estimatedSize += estimateFolderJsonSize(folder as unknown as Record<string, unknown>);
-    if (estimatedSize > maxSizeBytes) {
-      throw httpErrors.payloadTooLarge(
-        `Backup size exceeds the maximum allowed size during collection`,
-      );
-    }
-    folders.push(folder);
-  }
-
-  const itemCursor = VaultItem.find({ userId, deletedAt: { $exists: false } })
-    .select('-sourceRefId')
-    .lean()
-    .cursor();
-  for await (const item of itemCursor) {
-    estimatedSize += estimateItemJsonSize(item as unknown as Record<string, unknown>);
-    if (estimatedSize > maxSizeBytes) {
-      throw httpErrors.payloadTooLarge(
-        `Backup size exceeds the maximum allowed size during collection`,
-      );
-    }
-    items.push(item);
-  }
-
+  const user = await readBackupAccount(userId);
+  if (!user) throw httpErrors.notFound('User not found');
   const documentSummary = await collectDocumentSummary(userId);
-
-  const backupPayload = {
-    version: APP_VERSION,
-    exportDate: new Date().toISOString(),
-    items,
-    folders,
-    encryptedVaultKey: user?.encryptedVaultKey,
-    vaultKeyIv: user?.vaultKeyIv,
-    vaultKeyTag: user?.vaultKeyTag,
-    backupEncryption: {
-      encryptedBWK: user?.settings.backup.encryptedBWK,
-      bwkIv: user?.settings.backup.bwkIv,
-      bwkTag: user?.settings.backup.bwkTag,
-      bwkSalt: user?.settings.backup.bwkSalt,
-      bwkEncryptedVaultKey: user?.settings.backup.bwkEncryptedVaultKey,
-      bwkVaultKeyIv: user?.settings.backup.bwkVaultKeyIv,
-      bwkVaultKeyTag: user?.settings.backup.bwkVaultKeyTag,
-    },
-    metadata: {
-      itemCount: items.length,
-      folderCount: folders.length,
-    },
-    // The documents this backup does NOT contain. Optional and additive on the
-    // wire: a backup written before this field existed must still restore, which
-    // is why nothing downstream may require it. See `utils/documentSummary.ts`
-    // for why a backup mentions documents at all.
-    documentSummary,
-  };
-
-  return {
-    json: JSON.stringify(backupPayload),
-    itemCount: items.length,
-  };
+  await estimateBackupBytes(userId, user, documentSummary, maxSizeBytes);
+  const tally: BackupTally = { itemCount: 0, folderCount: 0 };
+  let json = '';
+  for await (const chunk of backupDocument(userId, user, documentSummary, tally)) json += chunk;
+  return { json, itemCount: tally.itemCount };
 }
 
 /**
@@ -252,18 +382,7 @@ export const setupBackup = catchAsync(async (req: Request, res: Response): Promi
     throw httpErrors.notFound('User not found');
   }
 
-  const isMatch = await bcrypt.compare(body.authHash, existingUser.authHash);
-  if (!isMatch) {
-    const failCtx = getRequestContext(req);
-    await createAuditLog(
-      userId,
-      'password_verification_failed',
-      { endpoint: 'backup_setup' },
-      failCtx.ip,
-      failCtx.userAgent,
-    );
-    throw httpErrors.unauthorized('Current password is incorrect');
-  }
+  await assertMasterPasswordProof(req, existingUser, body.authHash, 'backup_setup');
 
   // ── The vault-key guard pair ───────────────────────────────────────────────
   //
@@ -352,18 +471,14 @@ export const updateBackupSettings = catchAsync(
     const body = req.body as BackupSettingsInput;
 
     const setFields: Record<string, unknown> = {};
-    const unsetFields: Record<string, unknown> = {};
 
+    // The recipients are NOT set here: `backupSettingsSchema` refuses a body that
+    // carries them (400 naming `PUT /backup/recipients`), before this runs.
     if (body.enabled !== undefined) {
       setFields['settings.backup.enabled'] = body.enabled;
     }
     if (body.scheduleHour !== undefined) {
       setFields['settings.backup.scheduleHour'] = body.scheduleHour;
-    }
-    if (body.backupEmails !== undefined) {
-      setFields['settings.backup.backupEmails'] = body.backupEmails;
-      // Clean up deprecated backupEmail field
-      unsetFields['settings.backup.backupEmail'] = 1;
     }
 
     if (Object.keys(setFields).length === 0) {
@@ -381,12 +496,11 @@ export const updateBackupSettings = catchAsync(
       }
     }
 
-    const updateOp: Record<string, unknown> = { $set: setFields };
-    if (Object.keys(unsetFields).length > 0) {
-      updateOp.$unset = unsetFields;
-    }
-
-    const user = await User.findByIdAndUpdate(userId, updateOp, { returnDocument: 'after' })
+    const user = await User.findByIdAndUpdate(
+      userId,
+      { $set: setFields },
+      { returnDocument: 'after' },
+    )
       .select('-__v')
       .lean();
 
@@ -408,7 +522,141 @@ export const updateBackupSettings = catchAsync(
     res.status(200).json({
       success: true,
       message: 'Backup settings updated',
-      data: user.settings.backup,
+      data: publicBackupSettings(user.settings.backup),
+    });
+  },
+);
+
+/**
+ * `PUT /backup/recipients`: replaces where mailed backups go (F-05).
+ *
+ * Behind the master-password proof, because this is where the whole vault leaves
+ * the server: a stolen session alone must not be able to name a new address.
+ * Every address other than the account's own verified one is stored UNCONFIRMED
+ * and is mailed a confirmation link now (inside the daily email budget; whatever
+ * is not sent now the hourly maintenance step sends). Nothing is mailed a backup
+ * before it confirms. The audit row names the addresses masked.
+ */
+export const updateBackupRecipients = catchAsync(
+  async (req: Request, res: Response): Promise<void> => {
+    const userId = getUserId(req);
+    const body = req.body as BackupRecipientsInput;
+
+    const user = await User.findById(userId).select('+authHash').lean();
+    if (!user) {
+      throw httpErrors.notFound('User not found');
+    }
+    await assertMasterPasswordProof(req, user, body.authHash, 'backup_recipients');
+
+    const update = await applyRecipientList(userId, body.backupEmails, user.authHash);
+    // The confirmation mails go out now, but the request waits for them only so
+    // long: the list is already stored, and a relay that hangs must not hold the
+    // response. Whatever is still owed when the wait ends is sent by this same run
+    // in the background, or by the hourly maintenance step.
+    // A failure here (the database, not the relay: `sendEmail` never throws) must not
+    // turn a stored list into a 500; the mails simply stay owed for the hourly step.
+    const sending = sendDueConfirmations(userId).catch((err: unknown) => {
+      logger.error('Sending recipient confirmations failed; they stay owed', {
+        userId,
+        error: errorMessage(err),
+      });
+      return null;
+    });
+    trackJob(sending.then(() => undefined));
+    const confirmations = await Promise.race([
+      sending,
+      new Promise<null>((resolve) => {
+        setTimeout(() => resolve(null), INLINE_CONFIRMATION_WAIT_MS).unref();
+      }),
+    ]);
+
+    const ctx = getRequestContext(req);
+    await createAuditLog(
+      userId,
+      'backup_recipients_update',
+      {
+        recipients: update.recipients.map((entry) => maskEmail(entry.email)),
+        added: update.added.length,
+        removed: update.removed.length,
+        reinstated: update.reinstated.map((email) => maskEmail(email)),
+      },
+      ctx.ip,
+      ctx.userAgent,
+    );
+    // The owner is told where backups go now, masked (F-26).
+    notifySecurityEventLater(userId, 'backup_recipients_changed', {
+      ip: ctx.ip,
+      recipients: update.recipients.map((entry) => entry.email),
+    });
+    logger.info('Backup recipients updated', {
+      userId,
+      recipients: update.recipients.length,
+      confirmationsSent: confirmations?.sent ?? 'in progress',
+    });
+
+    // From the primary: the reply must show the list this request just wrote (the
+    // settings page replaces the user's edit with it), not a lagging secondary's.
+    const stored = await User.findById(userId)
+      .select('settings.backup.backupRecipients')
+      .read('primary')
+      .lean();
+    const storedList = stored?.settings.backup.backupRecipients ?? [];
+    const recipients = publicRecipients(storedList);
+    res.status(200).json({
+      success: true,
+      message: 'Backup recipients saved',
+      data: {
+        recipients,
+        confirmationsSent: confirmations?.sent ?? 0,
+        // Still being sent when the wait ended (or the run failed): the entries still
+        // marked owed as the list stands now.
+        confirmationsPending:
+          confirmations?.pending ?? storedList.filter((entry) => entry.confirmationDue).length,
+      },
+    });
+  },
+);
+
+/** How long a recipient-list update waits for its confirmation mails before answering. */
+const INLINE_CONFIRMATION_WAIT_MS = 15_000;
+
+/** What the owner's audit row carries instead of the recipient's address and browser. */
+const RECIPIENT_CONTEXT_WITHHELD = 'withheld';
+
+/**
+ * `POST /backup/recipients/confirm`: a recipient following its confirmation link.
+ *
+ * PUBLIC: mounted before `authenticate`, because the recipient usually has no
+ * account here. The token alone decides, and it is single use (see
+ * `confirmRecipientToken`). Every refusal is the same 400, and the success body
+ * says nothing about the account.
+ */
+export const confirmBackupRecipient = catchAsync(
+  async (req: Request, res: Response): Promise<void> => {
+    const { token } = req.body as ConfirmBackupRecipientInput;
+
+    const confirmed = await confirmRecipientToken(token);
+    if (!confirmed) {
+      throw httpErrors.badRequest(ERROR_CODES.TOKEN_INVALID);
+    }
+
+    // The row lands in the OWNER's log, but the request came from the RECIPIENT:
+    // its network address and browser are a third party's, and are not recorded.
+    await createAuditLog(
+      confirmed.userId,
+      'backup_recipient_confirmed',
+      { recipient: maskEmail(confirmed.email) },
+      RECIPIENT_CONTEXT_WITHHELD,
+      RECIPIENT_CONTEXT_WITHHELD,
+    );
+    logger.info('Backup recipient confirmed', {
+      userId: confirmed.userId,
+      recipient: maskEmail(confirmed.email),
+    });
+
+    res.status(200).json({
+      success: true,
+      message: 'This address will now receive the encrypted backups it was asked to receive.',
     });
   },
 );
@@ -433,19 +681,42 @@ export const triggerBackup = catchAsync(async (req: Request, res: Response): Pro
     throw httpErrors.conflict('A backup is already in progress for this account');
   }
 
-  // Collect response data inside try, release lock in finally, then send response.
-  // This ensures the lock is released before the HTTP response reaches the client.
-  let responseData: {
-    itemCount: number;
-    fileSizeBytes: number;
-    emailSent: boolean;
-    emailsSent: number;
-    emailsFailed: number;
-    failedEmails: string[];
-    emails: string[];
+  // The run happens inside the lock; its OUTCOME is answered after the lock is
+  // released, so the lock is gone before the response reaches the client. A run that
+  // mailed nothing on purpose comes back as the reason, recorded, and is answered 409.
+  const triggerCtx = getRequestContext(req);
+  const recordUndeliverable = async (
+    reason: UndeliverableReason,
+  ): Promise<{ undeliverable: UndeliverableReason }> => {
+    await recordUndeliverableBackup(userId, reason, (metadata) =>
+      createAuditLog(userId, 'backup_failed', metadata, triggerCtx.ip, triggerCtx.userAgent),
+    );
+    return { undeliverable: reason };
   };
 
-  try {
+  const runBackup = async (): Promise<
+    | {
+        sent: {
+          itemCount: number;
+          fileSizeBytes: number;
+          emailSent: boolean;
+          emailsSent: number;
+          emailsFailed: number;
+          failedEmails: string[];
+          emails: string[];
+        };
+      }
+    | { undeliverable: UndeliverableReason }
+  > => {
+    // Only CONFIRMED recipients (or, with no list at all, the account's own
+    // verified address). Decided before the backup is built, so a run that could
+    // mail nobody costs no vault read, and never widened to the account address
+    // when a list exists but nobody on it has confirmed.
+    let emails = confirmedRecipientsFor(user);
+    if (emailConfigured && emails.length === 0) {
+      return recordUndeliverable('no_confirmed_recipient');
+    }
+
     const maxSizeBytes = config.BACKUP_MAX_SIZE_MB * 1024 * 1024;
     const { json, itemCount } = await collectBackupData(userId, maxSizeBytes);
     const fileSizeBytes = Buffer.byteLength(json, 'utf8');
@@ -457,10 +728,22 @@ export const triggerBackup = catchAsync(async (req: Request, res: Response): Pro
       );
     }
 
-    // Determine recipient emails
-    const emails = user.settings.backup.backupEmails?.length
-      ? user.settings.backup.backupEmails
-      : [user.email];
+    // Re-read who may receive it NOW, from the primary: a reset, a password change
+    // or "log out everywhere" that suspended a recipient while the backup was being
+    // built must stop the mail to it. The budget is claimed for, and the mail sent
+    // to, this list.
+    if (emailConfigured) {
+      emails = await currentRecipientsFor(userId);
+      if (emails.length === 0) {
+        return recordUndeliverable('no_confirmed_recipient');
+      }
+    }
+
+    // The day's outbound budget, claimed for every recipient at once and before the
+    // first send: a run the budget cannot cover sends nothing at all.
+    if (emailConfigured && !(await claimOutboundMail(userId, emails.length))) {
+      return recordUndeliverable('daily_mail_budget');
+    }
 
     let emailsSentCount = 0;
     let emailsFailedCount = 0;
@@ -498,6 +781,7 @@ export const triggerBackup = catchAsync(async (req: Request, res: Response): Pro
     }
 
     const emailSent = emailsSentCount > 0;
+    if (emailSent) await noteBackupDelivered(userId);
     const status = emailSent ? 'success' : emailConfigured ? 'failed' : 'success';
 
     await BackupLog.create({
@@ -518,7 +802,6 @@ export const triggerBackup = catchAsync(async (req: Request, res: Response): Pro
       },
     });
 
-    const triggerCtx = getRequestContext(req);
     await createAuditLog(
       userId,
       'backup_triggered',
@@ -541,29 +824,46 @@ export const triggerBackup = catchAsync(async (req: Request, res: Response): Pro
       emailsFailedCount,
     });
 
-    responseData = {
-      itemCount,
-      fileSizeBytes,
-      emailSent,
-      emailsSent: emailsSentCount,
-      emailsFailed: emailsFailedCount,
-      failedEmails,
-      emails,
+    return {
+      sent: {
+        itemCount,
+        fileSizeBytes,
+        emailSent,
+        emailsSent: emailsSentCount,
+        emailsFailed: emailsFailedCount,
+        failedEmails,
+        emails,
+      },
     };
+  };
+
+  let outcome: Awaited<ReturnType<typeof runBackup>>;
+  try {
+    outcome = await runBackup();
   } finally {
     await releaseJobLock(backupJobName, lockId);
   }
 
+  if ('undeliverable' in outcome) {
+    throw httpErrors.conflict(
+      outcome.undeliverable === 'no_confirmed_recipient'
+        ? 'No backup recipient is confirmed, so nothing was sent. Review the recipients in Backup settings.'
+        : `Sending this backup to every confirmed recipient would go over the daily backup email limit (${String(MAX_BACKUP_MAILS_PER_USER_PER_DAY)} per account). Nothing was sent; try again tomorrow.`,
+    );
+  }
+  const responseData = outcome.sent;
+
   res.status(200).json({
     success: true,
-    message:
-      responseData.emailsSent === responseData.emails.length
+    // "Not configured" is decided first: with email off nothing was sent to anyone,
+    // which must never read as "sent to every recipient" (0 of 0).
+    message: !emailConfigured
+      ? 'Backup created successfully (email not configured)'
+      : responseData.emailsSent === responseData.emails.length
         ? 'Backup created and sent successfully'
         : responseData.emailsSent > 0
           ? `Backup created. Sent to ${String(responseData.emailsSent)}/${String(responseData.emails.length)} recipients`
-          : emailConfigured
-            ? 'Backup created but all email deliveries failed'
-            : 'Backup created successfully (email not configured)',
+          : 'Backup created but all email deliveries failed',
     data: {
       itemCount: responseData.itemCount,
       fileSizeBytes: responseData.fileSizeBytes,
@@ -575,10 +875,26 @@ export const triggerBackup = catchAsync(async (req: Request, res: Response): Pro
   });
 });
 
+/**
+ * `GET /backup/download`: the backup file, STREAMED.
+ *
+ * Admitted through the heavy-response budget (`middleware/heavyResponseAdmission.ts`)
+ * before this runs. The size is decided first, by an estimate pass over the rows
+ * (`estimateBackupBytes`), so an oversized vault is refused with a whole 413 before
+ * a byte of the file exists; then the document is sent from the cursors with
+ * backpressure, under an absolute send deadline derived from that estimate.
+ *
+ * The download is recorded (a `BackupLog` row and the `backup_download` audit
+ * entry) once the content has been produced, before the final byte, so it is on
+ * record by the time the client sees the file end. A transfer that ends early (the
+ * client left, the deadline passed, a cursor failed) is recorded too, as failed and
+ * `completed: false`: whatever reached the client before the cut is still a copy of
+ * the vault that left the server.
+ */
 export const downloadBackup = catchAsync(async (req: Request, res: Response): Promise<void> => {
   const userId = getUserId(req);
 
-  const user = await User.findById(userId).lean();
+  const user = await readBackupAccount(userId);
 
   if (!user) {
     throw httpErrors.notFound('User not found');
@@ -589,41 +905,68 @@ export const downloadBackup = catchAsync(async (req: Request, res: Response): Pr
   }
 
   const maxSizeBytes = config.BACKUP_MAX_SIZE_MB * 1024 * 1024;
-  const { json, itemCount } = await collectBackupData(userId, maxSizeBytes);
-  const fileSizeBytes = Buffer.byteLength(json, 'utf8');
-
-  // Final size check on the complete serialized payload (includes metadata overhead)
-  if (fileSizeBytes > maxSizeBytes) {
-    throw httpErrors.payloadTooLarge(
-      `Backup size exceeds the maximum allowed size (${String(config.BACKUP_MAX_SIZE_MB)} MB)`,
-    );
-  }
-
-  await BackupLog.create({
-    userId,
-    status: 'success',
-    fileSizeBytes,
-    itemCount,
-    sentTo: ['download'],
-  });
+  const documentSummary = await collectDocumentSummary(userId);
+  const estimate = await estimateBackupBytes(userId, user, documentSummary, maxSizeBytes);
 
   const downloadCtx = getRequestContext(req);
-  await createAuditLog(
-    userId,
-    'backup_download',
-    { fileSizeBytes, itemCount },
-    downloadCtx.ip,
-    downloadCtx.userAgent,
-  );
+  const tally: BackupTally = { itemCount: 0, folderCount: 0 };
+  // An object rather than a `let`: the flag is set inside `record`, which the
+  // compiler cannot see running before the check below.
+  const recording = { done: false };
+  // The audit row FIRST (`createAuditLog` never throws), then the history row in
+  // its own try: this runs inside the stream, just before the last byte, so a
+  // history write that throws would destroy a file already all but delivered, and
+  // with `done` set the interrupted-download fallback below would skip both rows.
+  const record = async (completed: boolean, fileSizeBytes: number): Promise<void> => {
+    recording.done = true;
+    await createAuditLog(
+      userId,
+      'backup_download',
+      { fileSizeBytes, itemCount: tally.itemCount, completed },
+      downloadCtx.ip,
+      downloadCtx.userAgent,
+    );
+    try {
+      await BackupLog.create({
+        userId,
+        status: completed ? 'success' : 'failed',
+        fileSizeBytes,
+        itemCount: tally.itemCount,
+        sentTo: ['download'],
+        ...(completed ? {} : { errorMessage: 'The download ended before the whole file was sent' }),
+      });
+    } catch (err: unknown) {
+      logger.error('Could not write a backup download to the backup history', {
+        userId,
+        error: errorMessage(err),
+      });
+    }
+  };
 
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
   const filename = `hvault-backup-${timestamp}.enc`;
 
+  res.status(200);
   res.setHeader('Content-Type', 'application/json');
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-  res.setHeader('Content-Length', String(fileSizeBytes));
 
-  res.status(200).send(json);
+  let produced = 0;
+  const outcome = await sendJsonStream(
+    res,
+    (async function* counting() {
+      for await (const chunk of backupDocument(userId, user, documentSummary, tally, () =>
+        record(true, produced + 1),
+      )) {
+        produced += Buffer.byteLength(chunk, 'utf8');
+        yield chunk;
+      }
+    })(),
+    { deadlineMs: sendDeadlineMs(estimate), label: 'Backup download' },
+  );
+
+  // `record` cannot throw: the audit write swallows its own failures and the
+  // history write sits in its own try (see `record` above).
+  if (!outcome.completed && !recording.done) await record(false, outcome.bytes);
 });
 
 export const getBackupHistory = catchAsync(async (req: Request, res: Response): Promise<void> => {
@@ -756,6 +1099,71 @@ export const changeBackupPassword = catchAsync(
   },
 );
 
+/**
+ * A restore's backup file, parsed and with its skeleton checked: an object whose
+ * `items` and `folders`, when present, are bounded arrays of objects. Each row's
+ * fields are still unvalidated here; the restore's allowlists decide them row by row.
+ */
+interface BackupPayload {
+  items?: Record<string, unknown>[];
+  folders?: Record<string, unknown>[];
+}
+
+/** The length of `payload[key]` when the payload is an object and that is an array, else 0. */
+function arrayLength(payload: unknown, key: 'items' | 'folders'): number {
+  const value: unknown = (payload as Partial<Record<string, unknown>> | null)?.[key];
+  return Array.isArray(value) ? value.length : 0;
+}
+
+/**
+ * Parses the restore's `data` string and checks its skeleton against
+ * `backupPayloadSchema`, returning the payload AS PARSED (the schema's loose output
+ * is a copy and is discarded). Refusals are 400s.
+ *
+ * Three refusals, in this order: malformed JSON, more entries in total than
+ * `MAX_IMPORT_ITEMS` (counted before any row is read), and a skeleton that does
+ * not match.
+ *
+ * Called BEFORE the rotation fence and the vault-key lock, never inside them. A
+ * malformed or oversized file is the client's error whatever the account's state, so it is
+ * answered without reading the account or taking the lock; and the multi-megabyte
+ * parse it costs is no longer spent while every other key-changing operation of the
+ * account waits. It used to run in the locked span with no shape check, where a
+ * payload whose `items` held `null` failed as a 500 and a payload that was not an
+ * object at all "restored" nothing successfully.
+ *
+ * Only the FIRST problem is named, with its path: a file of ten thousand bad rows
+ * is not answered with ten thousand sentences.
+ */
+function parseBackupPayload(data: string): BackupPayload {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    throw httpErrors.badRequest('Invalid backup data: malformed JSON');
+  }
+  // The entry count comes FIRST, before any row is looked at: it is two array
+  // lengths, while the skeleton check below walks every row, so a file of
+  // millions of junk entries is refused here for the price of reading them.
+  const totalEntries = arrayLength(parsed, 'items') + arrayLength(parsed, 'folders');
+  if (totalEntries > MAX_IMPORT_ITEMS) {
+    throw httpErrors.badRequest(
+      `Restore exceeds the maximum allowed item count (${String(MAX_IMPORT_ITEMS)}). Received ${String(totalEntries)} entries.`,
+    );
+  }
+  const result = backupPayloadSchema.safeParse(parsed);
+  if (!result.success) {
+    // A failed parse always carries at least one issue; only the first is named.
+    const [{ path, message }] = result.error.issues as [z.core.$ZodIssue, ...z.core.$ZodIssue[]];
+    throw httpErrors.badRequest(
+      path.length > 0
+        ? `Invalid backup data at ${path.map(String).join('.')}: ${message}`
+        : `Invalid backup data: ${message}`,
+    );
+  }
+  return parsed as BackupPayload;
+}
+
 /** What a completed restore reports, so the lock can be released before it is sent. */
 interface RestoreOutcome {
   itemsRestored: number;
@@ -780,9 +1188,13 @@ interface RestoreOutcome {
  * is ANSWERED rather than thrown, the recoverable stale-generation 409, returns
  * `null` to say so.
  */
-async function restoreUnderRotationLock(req: Request, userId: string): Promise<RestoreOutcome> {
+async function restoreUnderRotationLock(
+  req: Request,
+  userId: string,
+  backupPayload: BackupPayload,
+): Promise<RestoreOutcome> {
   const body = req.body as RestoreBackupInput;
-  const { conflictStrategy, data } = body;
+  const { conflictStrategy } = body;
 
   // A restore NEVER replaces the caller's vault key. The client re-encrypts every
   // backup row to this account's current vault key before sending, so restore only
@@ -790,18 +1202,6 @@ async function restoreUnderRotationLock(req: Request, userId: string): Promise<R
   // That is exactly why it must be fenced during a rotation: the key the client
   // re-encrypted against is the one the rotation is replacing.
   await assertVaultNotRotating(userId);
-
-  // Parse the backup data (client sends already-decrypted JSON)
-  let backupPayload: {
-    items?: Record<string, unknown>[];
-    folders?: Record<string, unknown>[];
-  };
-
-  try {
-    backupPayload = JSON.parse(data) as typeof backupPayload;
-  } catch {
-    throw httpErrors.badRequest('Invalid backup data: malformed JSON');
-  }
 
   const backupItems = backupPayload.items ?? [];
   const backupFolders = backupPayload.folders ?? [];
@@ -819,13 +1219,6 @@ async function restoreUnderRotationLock(req: Request, userId: string): Promise<R
     );
   }
 
-  const totalEntries = backupItems.length + backupFolders.length;
-  if (totalEntries > MAX_IMPORT_ITEMS) {
-    throw httpErrors.badRequest(
-      `Restore exceeds the maximum allowed item count (${String(MAX_IMPORT_ITEMS)}). Received ${String(totalEntries)} entries.`,
-    );
-  }
-
   // Enforce the per-user item + folder caps against the number of rows this
   // restore will actually INSERT, not the raw backup size. Under skip / overwrite
   // a repeat restore matches prior rows by owned `_id` or `(userId, sourceRefId)`
@@ -833,6 +1226,13 @@ async function restoreUnderRotationLock(req: Request, userId: string): Promise<R
   // reject an idempotent repeat restore once it crosses the cap — breaking the
   // "fully idempotent across repeated restores" guarantee. keep_both always mints
   // fresh rows, so there every backup row counts (the growth the cap bounds).
+  //
+  // These two counts are the WHOLE-restore refusal, answered before anything is
+  // written. They are not what holds the caps: a create from another endpoint can
+  // land between them and the inserts below. Every insert reserves its row in the
+  // account's counters in one conditional write (`createCountedRow`, F-15), so a
+  // row that no longer fits is skipped as `storage_limit` rather than stored past
+  // the cap.
   const existingItemCount = await VaultItem.countDocuments({ userId });
   const netNewItems = await countNetNewRestoreRows(backupItems, conflictStrategy, async (ids) => {
     const objectIds = ids.map((id) => new mongoose.Types.ObjectId(id));
@@ -887,8 +1287,8 @@ async function restoreUnderRotationLock(req: Request, userId: string): Promise<R
 
   // The vault-key generation, checked HERE rather than beside the fence at the
   // top of the handler, and this is the last statement before the first write.
-  // Between the two lie a multi-megabyte `JSON.parse`, the entry-count cap and
-  // four collection scans for the net-new counts — hundreds of milliseconds in
+  // Between the two lie the format gate and four collection scans for the
+  // net-new counts — hundreds of milliseconds in
   // which a rotation can commit and leave every row below sealed under a key
   // the account has already replaced. The exclusion lock the caller holds is what
   // makes that span atomic rather than merely short.
@@ -940,9 +1340,7 @@ async function restoreUnderRotationLock(req: Request, userId: string): Promise<R
 
     for (const folder of backupFolders) {
       const rawId = folder._id;
-      const folderId = mongoose.isValidObjectId(rawId)
-        ? String(rawId)
-        : new mongoose.Types.ObjectId().toString();
+      const folderId = backupRowId(rawId) ?? new mongoose.Types.ObjectId().toString();
       // Resolve the row this backup folder maps onto, in precedence order:
       //   1. owned by `_id` (the strongest identity — the user's own live row);
       //   2. else a prior-restored row matched by `(userId, sourceRefId)`.
@@ -961,17 +1359,10 @@ async function restoreUnderRotationLock(req: Request, userId: string): Promise<R
           : undefined;
 
       const sanitizedFolder = pickAllowedFields(folder, ALLOWED_FOLDER_FIELDS);
-
-      // Drop a malformed searchHash up front so it can never trip the model's
-      // `match` validator (a ValidationError here would otherwise abort the whole
-      // restore). A valid-format hash is kept; collisions are handled per-branch
-      // below via the unique partial index's E11000.
-      if (
-        sanitizedFolder.searchHash !== undefined &&
-        (typeof sanitizedFolder.searchHash !== 'string' ||
-          !SEARCH_HASH_RE.test(sanitizedFolder.searchHash))
-      ) {
-        sanitizedFolder.searchHash = undefined;
+      // A position of -0 is stored as a double where every other is an int32; it
+      // is 0 (the folder schemas normalise it the same way for every other write).
+      if (typeof sanitizedFolder.sortOrder === 'number') {
+        sanitizedFolder.sortOrder = sanitizedFolder.sortOrder + 0;
       }
 
       // Drop a malformed parentId up front so an un-castable value can't throw a
@@ -986,19 +1377,23 @@ async function restoreUnderRotationLock(req: Request, userId: string): Promise<R
       // post-loop cleanup below.
       if (
         sanitizedFolder.parentId !== undefined &&
-        !mongoose.isValidObjectId(sanitizedFolder.parentId)
+        backupRowId(sanitizedFolder.parentId) === undefined
       ) {
         sanitizedFolder.parentId = undefined;
       }
 
       // Each folder write is guarded so one bad row never aborts the whole
-      // restore. The bespoke per-branch E11000 searchHash-strip retries below
-      // still run FIRST (this is a compose, not a replace); this outer guard
-      // catches a residual persistence-layer data error — a ValidationError
-      // (missing/over-length required field), a CastError, or an E11000 that
-      // even the retry couldn't resolve — and skips just that folder as
-      // `invalid_folder_data`, mirroring the item loop. Anything else (a
-      // transient DB failure) still propagates and fails the request.
+      // restore: a residual persistence-layer data error — a ValidationError
+      // (missing/over-length required field), a CastError, or an E11000 (no
+      // unique index but `_id` remains on folders, and every insert below mints
+      // a fresh one, so that is a race, not a shape a backup can carry) — skips
+      // just that folder as `invalid_folder_data`, mirroring the item loop.
+      // Anything else (a transient DB failure) still propagates and fails the
+      // request. A backup's `searchHash` (an earlier release wrote one) is not in
+      // ALLOWED_FOLDER_FIELDS, so it never reaches a write.
+      // Set when the matched folder was deleted by another request while this
+      // restore ran: it is gone, so nothing may be filed under it any more.
+      let matchedFolderGone = false;
       try {
         if (targetFolderId !== undefined) {
           // `targetFolderId` (narrowed to string) is the real `_id` of the matched
@@ -1013,71 +1408,35 @@ async function restoreUnderRotationLock(req: Request, userId: string): Promise<R
             continue;
           }
           if (conflictStrategy === 'overwrite') {
-            // The folder's searchHash is in ALLOWED_FOLDER_FIELDS, so the $set can
-            // write a hash that collides with a *different* sibling folder (e.g. a
-            // tampered backup, or two folders renamed to the same name after the
-            // backup was taken). That violates the unique partial (userId,
-            // searchHash) index → E11000. Mirror the keep_both / fresh-insert
-            // siblings: retry the overwrite with searchHash stripped so the rest of
-            // the folder data is still applied rather than 500-ing the restore.
-            try {
-              await Folder.findOneAndUpdate(
-                { _id: matchedFolderId, userId },
-                { $set: { ...sanitizedFolder, userId } },
-                { runValidators: true },
-              );
+            // Through the byte quota (F-24): pinned on the row it measured, and
+            // refused (skipped as `storage_limit`) when the growth does not fit.
+            const overwritten = await updateCountedRow({
+              kind: 'folder',
+              userId,
+              id: matchedFolderId,
+              update: { $set: { ...sanitizedFolder, userId } },
+            });
+            if (overwritten) {
               foldersRestored++;
-            } catch (err: unknown) {
-              if (
-                err instanceof Error &&
-                'code' in err &&
-                (err as { code?: number }).code === 11000
-              ) {
-                const { searchHash: _ovwHash, ...folderWithoutHash } = sanitizedFolder;
-                await Folder.findOneAndUpdate(
-                  { _id: matchedFolderId, userId },
-                  { $set: { ...folderWithoutHash, userId }, $unset: { searchHash: 1 } },
-                  { runValidators: true },
-                );
-                foldersRestored++;
-              } else {
-                throw err;
-              }
+              // The overwrite writes `parentId` from the raw backup row (a backup
+              // ref id), so this row now needs the post-loop remap too — record it.
+              folderIdMap.set(folderId, matchedFolderId);
+              continue;
             }
-            // The overwrite writes `parentId` from the raw backup row (a backup
-            // ref id), so this row now needs the post-loop remap too — record it.
-            folderIdMap.set(folderId, matchedFolderId);
-            continue;
+            // The matched folder was deleted by another request while this restore
+            // ran: the backup's folder comes back as a new one, created below.
+            matchedFolderGone = true;
           }
           // keep_both: create a new folder with a new _id and record the mapping.
           // Duplication is keep_both's contract, so this fires even for a
-          // sourceRefId match. The Folder model has a unique partial index on
-          // (userId, searchHash); since the backup folder shares its searchHash
-          // with the existing one, re-using it would throw E11000 and crash the
-          // entire restore. Strip searchHash from the duplicate so the insert
-          // succeeds — the user can rename the folder later, rebuilding the hash.
-          // Stamp `sourceRefId = folderId` so a later restore recognizes this row.
-          const { searchHash: _dupSearchHash, ...folderWithoutHash } = sanitizedFolder;
-          try {
-            const newFolder = await Folder.create({
-              ...folderWithoutHash,
-              userId,
-              sourceRefId: folderId,
-            });
-            folderIdMap.set(folderId, String(newFolder._id));
-            foldersRestored++;
-          } catch (err: unknown) {
-            if (
-              err instanceof Error &&
-              'code' in err &&
-              (err as { code?: number }).code === 11000
-            ) {
-              foldersSkipped++;
-              folderSkipReasons.push({ folderId, reason: 'conflict_skipped' });
-              continue;
-            }
-            throw err;
-          }
+          // sourceRefId match. Stamp `sourceRefId = folderId` so a later restore
+          // recognizes this row.
+          const duplicate = { ...sanitizedFolder, userId, sourceRefId: folderId };
+          const newFolder = await createCountedRow('folder', userId, duplicate, () =>
+            Folder.create(duplicate),
+          );
+          folderIdMap.set(folderId, String(newFolder._id));
+          foldersRestored++;
         } else {
           // NEW to this user: either a folder deleted since the backup was made,
           // or a foreign _id from a cross-account backup. NEVER reuse the backup's
@@ -1090,39 +1449,30 @@ async function restoreUnderRotationLock(req: Request, userId: string): Promise<R
           // `(userId, sourceRefId)` instead of duplicating it. Record backupRefId
           // -> newId so child folders and items that referenced the backup id are
           // rewired by the remap below.
-          //
-          // The searchHash may still collide with a sibling folder (e.g. one the
-          // user created post-backup with the same name) — the only remaining
-          // unique index on this path is the partial (userId, searchHash). Catch
-          // that E11000 and retry without searchHash rather than failing.
-          try {
-            const newFolder = await Folder.create({
-              ...sanitizedFolder,
-              userId,
-              sourceRefId: folderId,
-            });
-            folderIdMap.set(folderId, String(newFolder._id));
-            foldersRestored++;
-          } catch (err: unknown) {
-            if (
-              err instanceof Error &&
-              'code' in err &&
-              (err as { code?: number }).code === 11000
-            ) {
-              const { searchHash: _siblingHash, ...folderWithoutHash } = sanitizedFolder;
-              const retryFolder = await Folder.create({
-                ...folderWithoutHash,
-                userId,
-                sourceRefId: folderId,
-              });
-              folderIdMap.set(folderId, String(retryFolder._id));
-              foldersRestored++;
-            } else {
-              throw err;
-            }
-          }
+          const fresh = { ...sanitizedFolder, userId, sourceRefId: folderId };
+          const newFolder = await createCountedRow('folder', userId, fresh, () =>
+            Folder.create(fresh),
+          );
+          folderIdMap.set(folderId, String(newFolder._id));
+          foldersRestored++;
         }
       } catch (err: unknown) {
+        if (err instanceof VaultQuotaExceededError || err instanceof VaultRowLimitError) {
+          // No room in the account's storage quota for this folder, or none left
+          // under the folder cap (a folder another request created while this
+          // restore ran took the last place the count above saw free; the cap is
+          // decided per row, atomically, F-15). When the backup's folder matched
+          // one the account already has (an overwrite, or the duplicate a keep-both
+          // would have added), that folder is still mapped, so the rows that name it
+          // are filed there; only a folder that would have been new leaves them
+          // unfiled, as does one that was deleted meanwhile.
+          if (targetFolderId !== undefined && !matchedFolderGone) {
+            folderIdMap.set(folderId, targetFolderId);
+          }
+          foldersSkipped++;
+          folderSkipReasons.push({ folderId, reason: 'storage_limit' });
+          continue;
+        }
         const isDataError =
           err instanceof Error && (err.name === 'ValidationError' || err.name === 'CastError');
         const isDuplicateKey =
@@ -1312,9 +1662,7 @@ async function restoreUnderRotationLock(req: Request, userId: string): Promise<R
       }
 
       const rawId = item._id;
-      const itemId = mongoose.isValidObjectId(rawId)
-        ? String(rawId)
-        : new mongoose.Types.ObjectId().toString();
+      const itemId = backupRowId(rawId) ?? new mongoose.Types.ObjectId().toString();
       // Resolve the row this backup item maps onto, owned-by-`_id` first, then a
       // prior-restored row by `(userId, sourceRefId)`. When matched, the conflict
       // strategy is applied against the matched row's real `_id` (equal to `itemId`
@@ -1326,6 +1674,16 @@ async function restoreUnderRotationLock(req: Request, userId: string): Promise<R
       const isTrashed = existingItem?.deletedAt != null;
 
       const sanitizedItem = pickAllowedFields(item, ALLOWED_ITEM_FIELDS);
+
+      // A folder reference that is not a string id is no reference: Mongoose would
+      // cast an object such as `{"_id": "<24 hex>"}` to that id, filing the item
+      // under a folder nothing below validated.
+      if (
+        sanitizedItem.folderId !== undefined &&
+        backupRowId(sanitizedItem.folderId) === undefined
+      ) {
+        sanitizedItem.folderId = undefined;
+      }
 
       // Remap folderId if a new folder was created during keep_both
       if (typeof sanitizedItem.folderId === 'string' && folderIdMap.has(sanitizedItem.folderId)) {
@@ -1344,28 +1702,15 @@ async function restoreUnderRotationLock(req: Request, userId: string): Promise<R
         sanitizedItem.folderId = undefined;
       }
 
-      // Drop a malformed searchHash (legacy/tampered backups) so it can't trip
-      // the model's `match` validator. The import path enforces the same SHAPE
-      // — `/^[a-f0-9]{64}$/` — but REJECTS a violation outright, because there
-      // `searchHash` is a required schema field the client always recomputes.
-      // Restore must SANITIZE instead, and the difference is deliberate: a
-      // legacy or partially-valid backup still has to restore, so one bad hash
-      // may not fail the whole file. A valid item with a bad searchHash is still
-      // restored — just without the hash, which the user rebuilds on next edit.
-      if (
-        sanitizedItem.searchHash !== undefined &&
-        (typeof sanitizedItem.searchHash !== 'string' ||
-          !SEARCH_HASH_RE.test(sanitizedItem.searchHash))
-      ) {
-        sanitizedItem.searchHash = undefined;
-      }
-
       // Each per-item write is guarded so one bad row never aborts the whole
       // restore. Only persistence-layer rejections (Mongoose ValidationError —
       // e.g. an over-length encrypted field — or an E11000 duplicate key from a
       // tampered/legacy backup) are swallowed as a skip; any other error
       // (e.g. a transient DB failure) still propagates and fails the request.
       try {
+        // Set when the matched row was permanently deleted by another request
+        // while this restore ran: the backup row then comes back as a new one.
+        let matchedRowGone = false;
         if (existingItem) {
           // The real `_id` of the matched row — owned by backup id, or a
           // prior-restored row keyed by sourceRefId.
@@ -1376,35 +1721,44 @@ async function restoreUnderRotationLock(req: Request, userId: string): Promise<R
             // override as a skip reason so the client can warn the user that
             // their `skip`/`keep_both` selection did not apply to trashed
             // entries.
-            await VaultItem.findOneAndUpdate(
-              { _id: matchedItemId, userId },
-              { $set: { ...sanitizedItem, userId }, $unset: { deletedAt: 1 } },
-              { runValidators: true },
-            );
-            itemsRestored++;
-            itemSkipReasons.push({ itemId, reason: 'trashed_auto_restored' });
-            continue;
-          }
-          if (conflictStrategy === 'skip') {
+            const restored = await updateCountedRow({
+              kind: 'item',
+              userId,
+              id: matchedItemId,
+              update: { $set: { ...sanitizedItem, userId }, $unset: { deletedAt: 1 } },
+            });
+            if (restored) {
+              itemsRestored++;
+              itemSkipReasons.push({ itemId, reason: 'trashed_auto_restored' });
+              continue;
+            }
+            matchedRowGone = true;
+          } else if (conflictStrategy === 'skip') {
             itemsSkipped++;
             itemSkipReasons.push({ itemId, reason: 'conflict_skipped' });
             continue;
-          }
-          if (conflictStrategy === 'overwrite') {
-            await VaultItem.findOneAndUpdate(
-              { _id: matchedItemId, userId },
-              { $set: { ...sanitizedItem, userId } },
-              { runValidators: true },
-            );
+          } else if (conflictStrategy === 'overwrite') {
+            const overwritten = await updateCountedRow({
+              kind: 'item',
+              userId,
+              id: matchedItemId,
+              update: { $set: { ...sanitizedItem, userId } },
+            });
+            if (overwritten) {
+              itemsRestored++;
+              continue;
+            }
+            matchedRowGone = true;
+          } else {
+            // keep_both: create a new item with a new _id. Duplication is its
+            // contract, so this fires even for a sourceRefId match. Stamp
+            // `sourceRefId = itemId` so a later restore recognizes this row.
+            const duplicate = { ...sanitizedItem, userId, sourceRefId: itemId };
+            await createCountedRow('item', userId, duplicate, () => VaultItem.create(duplicate));
             itemsRestored++;
-            continue;
           }
-          // keep_both: create a new item with a new _id. Duplication is its
-          // contract, so this fires even for a sourceRefId match. Stamp
-          // `sourceRefId = itemId` so a later restore recognizes this row.
-          await VaultItem.create({ ...sanitizedItem, userId, sourceRefId: itemId });
-          itemsRestored++;
-        } else {
+        }
+        if (!existingItem || matchedRowGone) {
           // NEW to this user: an item deleted since the backup, or a foreign _id
           // from a cross-account backup. Mint a fresh _id (omit `_id`) — never
           // reuse the backup's globally-unique _id, which may belong to another
@@ -1413,10 +1767,21 @@ async function restoreUnderRotationLock(req: Request, userId: string): Promise<R
           // Stamp `sourceRefId = itemId` (the backup ref id) so a REPEAT restore of
           // the same backup recognizes this row by `(userId, sourceRefId)` instead
           // of duplicating it.
-          await VaultItem.create({ ...sanitizedItem, userId, sourceRefId: itemId });
+          const fresh = { ...sanitizedItem, userId, sourceRefId: itemId };
+          await createCountedRow('item', userId, fresh, () => VaultItem.create(fresh));
           itemsRestored++;
         }
       } catch (err: unknown) {
+        if (err instanceof VaultQuotaExceededError || err instanceof VaultRowLimitError) {
+          // No room in the account's storage quota for this row, or none left under
+          // the item cap (a row another request created while this restore ran took
+          // the last place the count above saw free; the cap is decided per row,
+          // atomically, F-15). The rest of the restore goes on: a later row may
+          // fit, or shrink one already stored.
+          itemsSkipped++;
+          itemSkipReasons.push({ itemId, reason: 'storage_limit' });
+          continue;
+        }
         // Persistence-layer data-quality rejections are skipped per-item:
         //   • ValidationError — a failed model validator (over-length field, etc.)
         //   • CastError — an un-castable field (e.g. a malformed passwordHistory
@@ -1460,12 +1825,15 @@ async function restoreUnderRotationLock(req: Request, userId: string): Promise<R
  * `POST /backup/restore` — add the backup's rows to this account, under the
  * vault key the client re-encrypted them with.
  *
- * ## Why this handler is a lock and nothing else
+ * ## Why this handler is a lock and (almost) nothing else
  *
  * The work is in {@link restoreUnderRotationLock}; what is here is the span that
- * work has to be atomic over. A restore's vault-key checks are reads, and the
- * distance from them to the first row written is a multi-megabyte `JSON.parse`,
- * the entry-count cap and four counted collection scans — long enough for a
+ * work has to be atomic over, preceded by the one thing that needs no account
+ * state at all: parsing the file, counting its entries and checking its skeleton
+ * ({@link parseBackupPayload}), which refuses a malformed or oversized file with a
+ * 400 before the lock is taken. A restore's vault-key checks are reads, and the
+ * distance from them to the first row written is the format gate and four counted
+ * collection scans — long enough for a
  * rotation to raise its fence, enumerate an account these rows are not yet part
  * of, and commit. Every row the restore then writes is sealed under the key that
  * rotation has just replaced: stranded on arrival, unreadable afterwards, and
@@ -1484,13 +1852,17 @@ async function restoreUnderRotationLock(req: Request, userId: string): Promise<R
  */
 export const restoreBackup = catchAsync(async (req: Request, res: Response): Promise<void> => {
   const userId = getUserId(req);
-  const { conflictStrategy } = req.body as RestoreBackupInput;
+  const { conflictStrategy, data } = req.body as RestoreBackupInput;
+
+  // The file's shape is the client's business and is settled first, before the
+  // lock below and the fence inside it. See `parseBackupPayload`.
+  const backupPayload = parseBackupPayload(data);
 
   const rotationLockId = await acquireVaultRotationLock(userId);
   let outcome: RestoreOutcome | undefined;
   let staleVaultKey: StaleVaultKeyError | null = null;
   try {
-    outcome = await restoreUnderRotationLock(req, userId);
+    outcome = await restoreUnderRotationLock(req, userId, backupPayload);
   } catch (error) {
     // Caught NARROWLY, by type, and OUTSIDE the span: rendering it inside would
     // put the response on the wire while the lock is still held. A blanket catch

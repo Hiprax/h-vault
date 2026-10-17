@@ -120,6 +120,14 @@ const PREREQUISITES = {
     label: 'the oasdiff binary',
     ok: () => hasExe('oasdiff', ['--version']),
   },
+  gitleaks: {
+    label: 'the gitleaks binary',
+    ok: () => hasExe('gitleaks', ['version']),
+  },
+  'osv-scanner': {
+    label: 'the osv-scanner binary',
+    ok: () => hasExe('osv-scanner', ['--version']),
+  },
   codeql: {
     label: 'a usable CodeQL CLI',
     ok: () => {
@@ -148,6 +156,18 @@ if (uncovered.length > 0) {
       'Add one to scripts/ci/lib/selftest-defects.mjs beside the gate it proves — ' +
       'a gate nobody has seen fail is indistinguishable from a gate that cannot.',
   );
+}
+
+// (a') A case that requires something this table cannot probe would be reported
+// BLOCKED on every machine, for ever, and read as "the tool is missing" rather
+// than as the typo it is. Refused up front, by name, like a missing case.
+const unprobed = Object.entries(DEFECTS).flatMap(([name, defect]) =>
+  (defect.requires ?? [])
+    .filter((requirement) => !Object.hasOwn(PREREQUISITES, requirement))
+    .map((requirement) => `${name} requires "${requirement}"`),
+);
+if (unprobed.length > 0) {
+  fatal(`defect case prerequisite(s) this harness cannot probe: ${unprobed.join(', ')}`);
 }
 
 const selected = registered.filter((t) => only.length === 0 || only.includes(t.name));

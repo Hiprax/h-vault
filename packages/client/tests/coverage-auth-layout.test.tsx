@@ -60,6 +60,14 @@ vi.mock('../src/stores/vaultStore', () => ({
   useVaultStore: vi.fn(),
 }));
 
+// These suites test the shell, not its release notes: the status read stays
+// pending, as on a slow network, so the release-notes host never settles after a
+// test's synchronous assertions, outside act(...).
+vi.mock('../src/services/api/releaseStatusApi', async (importActual) => ({
+  ...(await importActual<typeof import('../src/services/api/releaseStatusApi')>()),
+  getReleaseStatusApi: () => new Promise<never>(() => {}),
+}));
+
 vi.mock('../src/services/api/client', () => ({
   api: { post: vi.fn(), get: vi.fn(), put: vi.fn(), delete: vi.fn() },
   // Refreshing is now one exported helper (it owns the cross-tab lock, the
@@ -108,6 +116,9 @@ vi.mock('../src/services/api/configApi', () => ({
   // AppLayout asks this before it can decide whether the Documents entry exists.
   // It never rejects in production, and the stub keeps that contract.
   getDocumentsConfig: mockGetDocumentsConfig,
+  // The register page asks which registration mode the server runs (F-24); it
+  // never rejects in production either (null = "the server did not say").
+  readRegistrationMode: () => Promise.resolve('open'),
 }));
 
 vi.mock('../src/services/crypto/fileCryptoService', async (importOriginal) => {

@@ -62,7 +62,6 @@ vi.mock('../src/services/crypto/cryptoService', () => ({
     encryptData: vi.fn(),
     encryptDataWithAad: vi.fn(),
     decryptData: vi.fn(),
-    generateSearchHash: vi.fn(),
     clearKey: vi.fn(),
     clearCryptoKey: vi.fn().mockResolvedValue(undefined),
   },
@@ -206,7 +205,6 @@ beforeEach(() => {
     iv: 'fresh-bound-iv',
     tag: 'fresh-bound-tag',
   });
-  vi.mocked(cryptoService.generateSearchHash).mockResolvedValue('f'.repeat(64));
   vi.mocked(cryptoService.decryptData).mockResolvedValue(JSON.stringify({ username: 'u' }));
 });
 

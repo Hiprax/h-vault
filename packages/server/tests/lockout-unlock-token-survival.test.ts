@@ -17,7 +17,7 @@
  * link the owner had ever been sent. No replacement was issued, because the mail
  * was guarded by `newAttempts === MAX_FAILED_ATTEMPTS` and 11 is not 10. One
  * wrong password every half hour — well inside `authLimiter`'s 20 per IP per 15
- * minutes and `accountLimiter`'s 20 per email per 15 minutes — locked a stranger
+ * minutes and the then per-email limit of 20 per 15 minutes — locked a stranger
  * out of their vault indefinitely.
  *
  * The only remaining exit was `POST /auth/reset-password`, and in this product
@@ -58,11 +58,22 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 // The unlock mailer is stubbed so "was a link sent, and which one?" is directly
 // observable. The real sender is an inert no-op in the test environment (no SMTP
 // configured), which would make the token unreadable rather than absent.
+// One unlock-link sender serves both factors since F-26 (`sendAccountUnlockEmail(email,
+// token, factor)`); the second factor's alert left the email module for the security
+// notice helper. Each factor's link is still observed on a spy of its own, so every
+// assertion below keeps its meaning: `password` for the password factor's link,
+// `secondFactor` for the two-factor step's.
+const unlockMails = vi.hoisted(() => ({
+  password: vi.fn().mockResolvedValue({ success: true, message: 'sent' }),
+  secondFactor: vi.fn().mockResolvedValue({ success: true, message: 'sent' }),
+}));
+
 vi.mock('../src/utils/email.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/utils/email.js')>();
   return {
     ...actual,
-    sendAccountUnlockEmail: vi.fn().mockResolvedValue({ success: true, message: 'sent' }),
+    sendAccountUnlockEmail: (email: string, token: string, factor = 'password') =>
+      (factor === 'second_factor' ? unlockMails.secondFactor : unlockMails.password)(email, token),
   };
 });
 
@@ -78,21 +89,21 @@ import { User } from '../src/models/User.js';
 import type { IUser } from '../src/models/User.js';
 import { RefreshToken } from '../src/models/RefreshToken.js';
 import { AuditLog } from '../src/models/AuditLog.js';
-import { sendAccountUnlockEmail } from '../src/utils/email.js';
 import {
   authHeader,
   createTestUser,
   generateStateHash,
   getCsrf,
-  deriveTestPurposeKey,
   type TestUser,
+  signTwoFactorChallenge,
 } from './helpers.js';
 
 const API = '/api/v1';
 const BCRYPT_ROUNDS = 4;
 const LOCKOUT_DURATION_MS = LOCKOUT_DURATION_MINUTES * 60 * 1000;
 
-const mockedUnlockEmail = vi.mocked(sendAccountUnlockEmail);
+const mockedUnlockEmail = unlockMails.password;
+const mockedSecondFactorEmail = unlockMails.secondFactor;
 const cm = new CryptoManager();
 const encKey = process.env['SESSION_SECRET'] ?? 'TestSessionSecret4Testing!!12345';
 
@@ -205,7 +216,9 @@ describe('lockout recovery — the emailed unlock link survives a re-lock', () =
     expect(eleventh.body.message).toBe('Invalid email or password');
 
     const relocked = await readUser(user.id);
-    expect(relocked!.failedLoginAttempts).toBe(MAX_LOGIN_ATTEMPTS + 1);
+    // Capped at the threshold (F-03 bounded accounting): a counter never grows
+    // past MAX_LOGIN_ATTEMPTS, however long the guessing goes on.
+    expect(relocked!.failedLoginAttempts).toBe(MAX_LOGIN_ATTEMPTS);
     // Genuinely re-locked (the brake still works) and on a NEW deadline.
     expect(relocked!.lockoutUntil!.getTime()).toBeGreaterThan(Date.now());
     expect(relocked!.lockoutUntil!.getTime()).not.toBe(firstDeadline);
@@ -308,7 +321,16 @@ describe('lockout recovery — the emailed unlock link survives a re-lock', () =
     expect(after!.failedLoginAttempts).toBe(0);
   });
 
-  it('keeps the 2FA step on the same episode, so its link survives a re-lock too', async () => {
+  it('mails the 2FA step its own link, which ends that lockout for its whole run', async () => {
+    // F-03/F-28: the 2FA step counts on the SECOND factor's own state, so its
+    // threshold mails a second-factor link bound to that factor's episode. While
+    // the lock runs the step refuses without counting, so the episode cannot be
+    // rewritten under the link; the link then ends the lock, and only that one.
+    // (A served second-factor lockout is discharged when the password-proven
+    // step is reached again, so the "re-lock after the wait" this test used to
+    // drive now yields a fresh budget instead: second-factor-lockout.test.ts.)
+    mockedSecondFactorEmail.mockReset();
+    mockedSecondFactorEmail.mockResolvedValue({ success: true, message: 'sent' });
     const secretObj = new Secret();
     const twoFa = await createTestUser({ emailVerified: true });
     await User.findByIdAndUpdate(twoFa.id, {
@@ -317,15 +339,11 @@ describe('lockout recovery — the emailed unlock link survives a re-lock', () =
         twoFactorSecret: cm.encryptTextSync(secretObj.base32, encKey),
         backupCodes: [await bcrypt.hash('abcdef0123456789', BCRYPT_ROUNDS)],
         lastTotpTimestamp: 1,
-        failedLoginAttempts: MAX_LOGIN_ATTEMPTS - 1,
+        secondFactorLockout: { failedAttempts: MAX_LOGIN_ATTEMPTS - 1 },
       },
     });
 
-    const tempToken = jwt.sign(
-      { userId: twoFa.id, purpose: '2fa_temp' },
-      deriveTestPurposeKey('2fa_temp'),
-      { expiresIn: '5m' },
-    );
+    const tempToken = await signTwoFactorChallenge({ userId: twoFa.id, purpose: '2fa_temp' });
     const real = Number(
       new TOTP({ algorithm: 'SHA1', digits: 6, period: 30, secret: secretObj }).generate(),
     );
@@ -340,27 +358,39 @@ describe('lockout recovery — the emailed unlock link survives a re-lock', () =
         .send({ tempToken, code: wrongCode });
     };
 
-    // Crossing the threshold on the 2FA step mails the link.
+    // Crossing the threshold on the 2FA step mails the SECOND-FACTOR link.
     const crossing = await post2fa();
     expect(crossing.status).toBe(401);
-    expect(mockedUnlockEmail).toHaveBeenCalledTimes(1);
-    const link = mailedToken(0);
+    expect(mockedSecondFactorEmail).toHaveBeenCalledTimes(1);
+    expect(mockedUnlockEmail).not.toHaveBeenCalled();
+    const link = mockedSecondFactorEmail.mock.calls[0]![1];
 
-    // A second wrong code after the wait re-locks without re-mailing…
-    await expireLockout(twoFa.id);
-    const relock = await post2fa();
-    expect(relock.status).toBe(401);
-    expect(mockedUnlockEmail).toHaveBeenCalledTimes(1);
+    const locked = await User.findById(twoFa.id).select('+secondFactorLockout');
+    const episode = locked!.secondFactorLockout?.episodeId;
+    expect(episode).toBeTruthy();
+    const claims = jwt.decode(link) as { stateHash?: string; factor?: string } | null;
+    expect(claims?.stateHash).toBe(generateStateHash(episode!));
+    expect(claims?.factor).toBe('second_factor');
 
-    const stillLocked = await readUser(twoFa.id);
-    expect(stillLocked!.lockoutUntil!.getTime()).toBeGreaterThan(Date.now());
+    // While it runs the step refuses, without counting or re-minting anything.
+    const refused = await post2fa();
+    expect(refused.status).toBe(403);
+    expect(refused.body.message).toBe('ACCOUNT_LOCKED');
+    expect(mockedSecondFactorEmail).toHaveBeenCalledTimes(1);
+    const still = await User.findById(twoFa.id).select('+secondFactorLockout');
+    expect(still!.secondFactorLockout?.episodeId).toBe(episode);
+    expect(still!.secondFactorLockout?.failedAttempts).toBe(MAX_LOGIN_ATTEMPTS);
 
-    // …and the original link still ends it.
+    // …and the link ends it, the second factor's state whole, the password's untouched.
     const unlocked = await postUnlock(agent, link);
     expect(unlocked.status).toBe(200);
-    const after = await readUser(twoFa.id);
-    expect(after!.lockoutUntil).toBeUndefined();
+    const after = await User.findById(twoFa.id).select('+secondFactorLockout');
+    expect(after!.secondFactorLockout).toBeUndefined();
     expect(after!.failedLoginAttempts).toBe(0);
+
+    // Single-use: the episode it named is gone.
+    const replay = await postUnlock(agent, link);
+    expect(replay.status).toBe(400);
   });
 
   it('writes no session and no login row while the victim is locked out', async () => {

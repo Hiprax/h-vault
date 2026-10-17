@@ -9,6 +9,8 @@ import {
   MAX_BACKUP_EMAILS,
   MAX_RESTORE_DATA_LENGTH,
   MAX_IMPORT_ITEMS,
+  MAX_ITEMS_PER_USER,
+  MAX_FOLDERS_PER_USER,
   MAX_TAGS_PER_ITEM,
   MAX_ENCRYPTED_NAME_LENGTH,
   MAX_ENCRYPTED_DATA_LENGTH,
@@ -23,6 +25,8 @@ import {
   DEFAULT_PASSWORD_LENGTH,
   MIN_PASSWORD_LENGTH,
   MAX_PASSWORD_LENGTH,
+  SECURITY_NOTIFICATION_PREFERENCE_EVENTS,
+  type SecurityNotificationPreferenceEvent,
 } from '../constants/index.js';
 import { objectIdSchema, optionalVaultKeyVersionSchema, rowIdNonceSchema } from './common.js';
 
@@ -101,6 +105,29 @@ export const passwordGenOptionsSchema = z
     path: ['lowercase'],
   });
 
+/**
+ * Which security emails an owner wants (F-26), as a PARTIAL map: only the events
+ * named are changed, anything else is left as stored. A key that is not one of the
+ * events an owner may choose (the two mandatory notices included) is refused.
+ */
+export const notificationPreferencesSchema = z.strictObject(
+  // A named key per event rather than a record, so every key a request can carry
+  // is visible to whatever walks the schema (the request logger's mask list is
+  // derived that way).
+  Object.fromEntries(
+    SECURITY_NOTIFICATION_PREFERENCE_EVENTS.map((event) => [event, z.boolean().optional()]),
+  ) as Record<SecurityNotificationPreferenceEvent, z.ZodOptional<z.ZodBoolean>>,
+);
+
+/**
+ * `PUT /user/notifications`: the same map, with the master-password proof that
+ * turning a critical notice off requires.
+ */
+export const updateNotificationPreferencesSchema = z.object({
+  authHash: z.string().min(1).max(100),
+  notifications: notificationPreferencesSchema,
+});
+
 export const updateSettingsSchema = z.object({
   autoLockTimeout: z
     .number()
@@ -140,6 +167,10 @@ export const updateSettingsSchema = z.object({
   // `SHOW_RELEASE_NOTES_DEFAULT`). Turning it off only stops the automatic
   // opening; the notes stay one click away.
   showReleaseNotes: z.boolean().optional(),
+  // Security emails (F-26). This route takes no password, so it may turn any of
+  // them ON and the optional ones off; turning a critical one off is refused here
+  // and done through `PUT /user/notifications` with the master password.
+  notifications: notificationPreferencesSchema.optional(),
 });
 
 export const setup2faSchema = z.object({
@@ -224,10 +255,65 @@ export const backupSetupSchema = z
     }
   });
 
-export const backupSettingsSchema = z.object({
-  enabled: z.boolean().optional(),
-  scheduleHour: z.number().int().min(0).max(23).optional(),
-  backupEmails: z.array(z.email().max(254).toLowerCase().trim()).max(MAX_BACKUP_EMAILS).optional(),
+/**
+ * The sentence a `PUT /backup/settings` body carrying `backupEmails` is refused
+ * with. Exported so the server's docs and tests quote the one wording.
+ */
+export const BACKUP_RECIPIENTS_MOVED_MESSAGE =
+  'Backup recipients are changed with PUT /api/v1/backup/recipients, which requires your master password.';
+
+/**
+ * One backup recipient address, as every recipient route accepts it. No `.trim()`:
+ * the address format is checked first and refuses surrounding space, so a trim
+ * after it could never change a value (the client trims before sending).
+ */
+const backupRecipientEmailSchema = z.email().max(254).toLowerCase();
+
+export const backupSettingsSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    scheduleHour: z.number().int().min(0).max(23).optional(),
+    // REFUSED, never silently stripped. The recipient list moved to
+    // `PUT /backup/recipients`, behind the master-password proof, because where a
+    // mailed backup goes is where the whole vault leaves the server. Dropping the
+    // key from this schema would not refuse it: strip mode would discard it, an
+    // older tab's combined save (`{enabled, scheduleHour, backupEmails}`) would
+    // answer 200, and the user would believe recipients were saved that never
+    // were. So the key stays declared and any value at all is a 400 whose message
+    // names the route to use instead. No inner bound: Zod skips a later refinement
+    // once a check has failed (length checks are the exception, they still run),
+    // so an over-long list or entry would be refused with a message that did not
+    // say where recipients went (the body limit bounds size).
+    backupEmails: z
+      .array(z.string({ error: BACKUP_RECIPIENTS_MOVED_MESSAGE }), {
+        error: BACKUP_RECIPIENTS_MOVED_MESSAGE,
+      })
+      .optional(),
+  })
+  .superRefine((data, ctx) => {
+    if (data.backupEmails !== undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['backupEmails'],
+        message: BACKUP_RECIPIENTS_MOVED_MESSAGE,
+      });
+    }
+  });
+
+/**
+ * `PUT /backup/recipients`: the whole recipient list, and the master-password
+ * proof that has to accompany any change to it. Every address other than the
+ * account's own verified one is stored unconfirmed and is mailed a confirmation
+ * link; none receives a backup before following it.
+ */
+export const backupRecipientsSchema = z.object({
+  authHash: z.string().min(1).max(100),
+  backupEmails: z.array(backupRecipientEmailSchema).max(MAX_BACKUP_EMAILS),
+});
+
+/** `POST /backup/recipients/confirm`: the token from a recipient's confirmation link. */
+export const confirmBackupRecipientSchema = z.object({
+  token: z.string().min(1).max(2000),
 });
 
 export const backupChangePasswordSchema = z
@@ -301,6 +387,42 @@ export const restoreBackupSchema = z.object({
   vaultKeyVersion: optionalVaultKeyVersionSchema,
 });
 
+/**
+ * An array of at most `max` objects, its LENGTH checked before any element is.
+ *
+ * `z.array(row).max(max)` would not bound anything: Zod 4 parses every element
+ * first and runs the length check only afterwards, keeping an issue for every
+ * element that failed, so a 25 MiB array of `null` would be answered only after
+ * collecting an issue object for each of its millions of entries. Here the
+ * elements are first taken as `unknown` (references only), the length is checked,
+ * and only an array within it is piped on to have each element checked as an
+ * object: a pipe whose first stage failed never runs its second.
+ */
+const boundedRows = (max: number) =>
+  z
+    .array(z.unknown())
+    .max(max)
+    .pipe(z.array(z.looseObject({})));
+
+/**
+ * The SKELETON of the backup file a restore carries as its `data` string, checked
+ * after `JSON.parse` and before anything else (the rotation fence, the vault-key
+ * lock, the counts): the payload is an object, and `items`/`folders`, when present,
+ * are arrays of objects of a bounded length.
+ *
+ * Every object is LOOSE on purpose, and the server keeps the payload it PARSED, not
+ * this schema's output. Zod 4's plain `z.object({})` strips every key it does not
+ * name, so a strict skeleton would hand the restore empty rows and drop the
+ * `backupEncryption` block; the fields of each row are the restore's own allowlists'
+ * business, row by row, exactly as before.
+ */
+export const backupPayloadSchema = z.looseObject({
+  version: z.union([z.number(), z.string()]).optional(),
+  exportDate: z.string().optional(),
+  items: boundedRows(MAX_ITEMS_PER_USER).optional(),
+  folders: boundedRows(MAX_FOLDERS_PER_USER).optional(),
+});
+
 export const exportSchema = z.object({
   // Export is JSON-only. The server serializes the encrypted vault as JSON and
   // ignores any other format, so the schema accepts only 'json' to keep the
@@ -328,7 +450,7 @@ export const exportSchema = z.object({
 // lengths but makes no matching decisions of its own.
 //
 // The former `data` envelope — a JSON string of encrypted items the server
-// de-duplicated by name/searchHash — has been removed. It is the defect this
+// de-duplicated by name and by a keyed name hash — has been removed. It is the defect this
 // contract replaces (ten accounts on one site collapsed into one), so it is not
 // accepted in any form; an old client is rejected by this schema.
 
@@ -350,15 +472,10 @@ export const importPasswordHistoryEntrySchema = z.object({
 
 /**
  * One encrypted item to INSERT. This mirrors the item shape the server maps
- * through its fixed `ALLOWED_ITEM_FIELDS` projection. `searchHash` is required
- * because every other creation path writes one, so an import that omitted it
- * would be the single source of rows whose stored hash does not match their
- * name. It is NOT required because restore matches on it — item restore matches
- * on an owned `_id` and then `(userId, sourceRefId)`, never on content or
- * `searchHash`, and `VaultItem`'s `(userId, searchHash)` index is non-unique
- * sparse. (Folders are the place a `searchHash` is genuinely load-bearing:
- * their `(userId, searchHash)` unique partial index is what makes a duplicate
- * folder name a 409.)
+ * through its fixed `ALLOWED_ITEM_FIELDS` projection. It carries no keyed hash of
+ * the name (F-12): nothing stores one, and a row from an older client that still
+ * sends `searchHash` has it dropped here like any other undeclared key, so that
+ * client keeps working.
  *
  * `passwordHistory` is optional and carried for one reason: re-importing a
  * native H-Vault export must not erase the history of an item it restores.
@@ -373,7 +490,6 @@ export const importInsertItemSchema = z.object({
   encryptedData: z.string().min(1).max(MAX_ENCRYPTED_DATA_LENGTH),
   dataIv: z.string().min(1).max(24),
   dataTag: z.string().min(1).max(32),
-  searchHash: z.string().regex(/^[a-f0-9]{64}$/),
   tags: z.array(z.string().trim().min(1).max(50)).max(MAX_TAGS_PER_ITEM).default([]),
   favorite: z.boolean().default(false),
   folderId: objectIdSchema.optional(),
@@ -386,9 +502,8 @@ export const importInsertItemSchema = z.object({
 /**
  * One existing item to UPDATE in place. Carries `id` (reusing the shared
  * `objectIdSchema` — a case-insensitive hex ObjectId with a lowercase transform),
- * the six ciphertext fields, a client-recomputed `searchHash` (an overwrite
- * replaces `encryptedName`, so the stored hash must be refreshed alongside it),
- * and an optional bounded `passwordHistory`. It deliberately does NOT carry
+ * the six ciphertext fields and an optional bounded `passwordHistory`; an older
+ * client's `searchHash` is dropped, as on an insert. It deliberately does NOT carry
  * `tags`/`favorite`/`folderId`: an import updates content only and must not
  * silently reorganize an existing vault.
  */
@@ -400,7 +515,6 @@ export const importUpdateItemSchema = z.object({
   encryptedData: z.string().min(1).max(MAX_ENCRYPTED_DATA_LENGTH),
   dataIv: z.string().min(1).max(24),
   dataTag: z.string().min(1).max(32),
-  searchHash: z.string().regex(/^[a-f0-9]{64}$/),
   passwordHistory: z.array(importPasswordHistoryEntrySchema).max(PASSWORD_HISTORY_MAX).optional(),
 });
 

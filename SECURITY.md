@@ -65,67 +65,243 @@ security posture, not a disclaimer.
   wrapped key and a set of sizes. **A hostile server cannot reorder, truncate, or splice one
   document into another either** — a segment's position and an end-of-file marker are inside
   its nonce, and the document's id is inside every key derivation, so each of those
-  tamperings makes the decryption fail rather than producing plausible bytes. **Vault
+  tamperings makes the decryption fail rather than producing plausible bytes. Because a
+  segment's nonce is derived from its position, a resumed upload re-reads the file and stops
+  unless every slice is byte-identical (by SHA-256) to the one first encrypted at its
+  position, so one nonce never encrypts two different plaintexts. **Vault
   entries are bound the same way**: every entry field the app writes (a restore is the one
   exception, below) is sealed to its entry,
   its field and its item type, so one moved elsewhere is refused (the limits of that are under
-  _What it cannot protect against_). The keyed hash of each item's name that the server stores
-  is computed under a separate subkey derived from the vault key and held by the browser as
-  non-extractable, so the vault key is never used as a hashing key, and its raw bytes are
-  exported once per vault key to derive that subkey rather than on every save.
+  _What it cannot protect against_). **No keyed hash of an item's or a folder's name is
+  stored**: a name exists on the server only as ciphertext under a fresh random IV, so the
+  stored rows do not show which entries share a name. An earlier release stored such a hash;
+  migration v5 removes it from every row and drops every index over it when this release
+  first starts. What it cannot reach: a backup or export made before the upgrade still
+  carries the old hashes (a restore or import ignores them); so does any copy of the database
+  taken before the upgrade (a dump, a volume snapshot), and so does a replica set's operation
+  log (the Docker stack runs one), which keeps the recent writes that stored them until it wraps;
+  and an entry written in
+  the seconds of a rolling restart by a server process still running the earlier release keeps
+  the hash it was given, at rest, until the entry is deleted (no list, read, update answer,
+  export or backup returns it).
 - **A passive network attacker.** All traffic is expected to run over TLS terminated by
   your reverse proxy, and the vault payloads are already ciphertext underneath it.
+- **Copies of API answers kept by a cache.** Every response the application sends under
+  `/api/v1`, refusals included, carries `Cache-Control: no-store` (with `Pragma: no-cache` for
+  HTTP/1.0 caches), so neither the browser's disk cache nor a compliant proxy between it and
+  the server keeps a profile, a page of ciphertext or a wrapped key after the tab is closed.
+  This holds on the PM2 path too, which has no inner Nginx to add it. (Answers Node or a proxy
+  produce before the request reaches the application, such as a malformed-request 400 or a
+  gateway error, carry no account data.)
+- **API requests caused by another site's pages, or by the isolated document viewer.** The API
+  refuses, with 403 and before any handler runs, every request a browser marks
+  `Sec-Fetch-Site: cross-site`, whatever it asks for: an image, a script, a stylesheet, a form,
+  a navigation. Every request the document viewer's sandboxed frame causes is marked that way,
+  since its origin is opaque. The application's own requests are `same-origin`; a client that
+  is not a browser (a health probe, a metrics scraper) sends no such header and is not affected,
+  and a browser too old to send it falls back on the session cookies being `SameSite=Strict`
+  and on the CSRF token, as before. Browsers send this header only over HTTPS (or to the
+  local machine), so this protection, like the opener isolation described under the document
+  viewer, depends on the TLS this guide already requires.
+- **Mail intercepted between this server and its SMTP relay.** The connection to the relay
+  must be encrypted (STARTTLS, TLS 1.2 or later, certificate verified against the public roots
+  or the CA in `SMTP_TLS_CA`) before the server authenticates or sends a message, so a relay
+  that offers no TLS, or a network attacker who strips its STARTTLS advertisement, gets
+  neither the SMTP password nor a verification, password-reset or unlock link: the send fails
+  and the server reports the relay at startup (a relay that starts failing later shows up as
+  failed sends in the log). **What this does not cover:** a relay whose `SMTP_HOST` is a
+  loopback IP address (`127.0.0.1`, `::1`) is exempt by default, because that connection cannot
+  leave the machine (`SMTP_REQUIRE_TLS=true` removes the exemption); a NAME is never exempt,
+  `localhost` included, because the mail library resolves a name through DNS first, so whoever
+  answers that query would decide where the connection goes. `SMTP_REQUIRE_TLS=false` switches
+  the requirement off entirely, `NODE_TLS_REJECT_UNAUTHORIZED=0` in the environment turns
+  certificate checks off for the whole process (the server warns at startup when it sees it),
+  and what the relay does with the message after it (onward delivery to the recipient's
+  provider) is outside this server's control.
+- **One-time tokens in logs and history.** The verification, password-reset, unlock and
+  backup-recipient confirmation links carry their token in the URL fragment (`#token=…`), which
+  a browser never sends to a server: it appears in no request line, so neither Nginx tier's
+  access log nor this server's request log receives it, and it is never forwarded in a
+  `Referer`. The page reads it, removes it from the address bar (so the session-history entry
+  and a later bookmark no longer hold it; a browser's own record of visited URLs may still hold
+  the link as first opened, on that device only) and sends it in the body of one POST, where the
+  request logger masks it. **For this release only**, a link mailed before it, with the token in the query
+  string, is still accepted and stripped the same way; a request for such a link has already
+  put that token in the logs, and it stays usable there until it expires (a day for a verification link, an hour for a
+  reset or unlock link) or is used.
+- **Going round the proxy, and deployments that silently run with their brakes off.** Outside
+  Docker the server listens on `127.0.0.1` unless `HOST` says otherwise, so on the PM2 path only
+  processes on the same machine (the local Nginx among them) can reach it, and the documented
+  `TRUST_PROXY=loopback` trusts that proxy by its address rather than by a hop count a direct
+  client could exploit to choose its own address. Two misconfigurations are detected rather than
+  guessed at: a start in development mode (`NODE_ENV` unset or `development`: every rate limit
+  off, weaker cookies) and a production server receiving proxied requests from a local or private
+  address with `TRUST_PROXY` unset or `0` (every client sharing one rate-limit bucket and audit
+  address). Each is logged once and reported on the token-gated `/api/v1/metrics`; the public
+  `/api/v1/health` answers with the same fields in every mode, so it names neither the mode nor
+  the version. **They are reported, not refused:** the server still starts and serves in both
+  cases, and an operator who sets `HOST=0.0.0.0` or a numeric `TRUST_PROXY` outside Docker is
+  trusted to mean it. The detector sees only a proxy on a loopback or private address, and under
+  PM2's cluster mode each worker keeps its own gauge.
 - **Credential stuffing and online guessing.** Rate limiting, account lockout with progressive
   delays, and 2FA — with the lockout and 2FA paths deliberately built so they do not leak
-  whether an account exists. The failed-attempt count behind that lockout is **one counter
-  shared by both sign-in steps**, and it is the only per-account limit on the second factor, so
-  it is discharged only by a sign-in that actually **completes** — never merely by a correct
-  password, which would let anyone already holding one reset the second factor's only brake
-  between batches of guesses. A lockout that has genuinely been waited out is the single
-  exception, and reaching it costs the full lockout duration. **A lockout is itself a
-  denial-of-service anyone who knows an address can impose**, so its own bound is part of the
-  design and not an afterthought: it expires on its own, and the emailed unlock link is tied to
-  the **lock episode** rather than to the moment the lockout is due to end. Extending a lockout
-  extends the episode, so the link already sent keeps working however long an attacker grinds,
-  and a fresh one is sent only when the outstanding link would expire before the lockout it
-  covers — at most one new link about every half hour, which is what stops that guarantee from
-  becoming a mail-flood vector of its own. The honest bound is per **window** rather than per
-  episode: a link lives an hour and a lockout lasts thirty minutes, so an attacker who keeps an
-  episode alive indefinitely can cause a new link to be sent roughly every half hour. That is
-  the price of the guarantee it replaces — a locked-out owner whose only link had been killed by
-  the attacker's next attempt, with no replacement ever sent — and it is bounded and stated here
-  rather than left to be discovered. The link a replacement supersedes stays valid until its own hour
-  is up, so two can verify at once; that is harmless, because links naming one episode are one
-  capability, and spending either ends the episode and kills the rest. A lockout also costs
-  nothing but the wait: refreshing a session while one stands is refused **before** the
-  presented refresh token is spent, so the sessions the account already had are all still
-  there when it lifts, and the browser keeps the cookie it arrived with. A thirty-minute
-  condition anyone who knows an address can impose must not be able to end a thirty-day one.
-  This matters
-  more here than it would elsewhere, because resetting the master password mints a new vault key,
-  so "just reset it" is not a recovery path but total data loss. The credential budget is kept
-  separate from the budgets for token refresh and vault unlock, so that ordinary use of the app
-  can never spend the allowance you need in order to sign in. A caller-supplied value (a
-  header, a cookie, a rotating token) appears in a rate-limit key only where an IP-keyed tier
-  bounds the same route regardless — the per-account tier keys on the submitted email for that
-  reason, and the refresh tier, which has no such companion, keys on the address alone. Every tier
-  on an authenticated route keys on the account instead, because the account id comes from a
+  whether an account exists. **Each factor has its own lockout.** Ten wrong passwords lock the
+  password step; ten wrong two-factor codes, counted at every place a code is checked (the 2FA
+  sign-in step, turning 2FA off, regenerating backup codes, deleting the account), lock the
+  second-factor step. A wrong password never counts against the second factor and a wrong code
+  never counts against the password, so ten wrong codes can no longer turn the password step
+  into an oracle that confirms the password. Short of a lockout, a sign-in clears a counter only when it actually
+  **completes**, never merely by a correct password (which would let anyone already holding one
+  reset the second factor's brake between batches of guesses), and never while that factor's own
+  lockout is running; other things clear one too. A lockout that has genuinely been waited out is
+  discharged at its own step: the password's by the next correct password, the second factor's
+  by the next code check after a proven master password, before that code is read (so a wrong
+  code there is the first of a fresh ten); reaching either costs the full lockout duration.
+  That factor's emailed unlock link clears it, a password reset clears the password's, and
+  turning two-factor off or enrolling a new authenticator clears the second factor's.
+
+  **What a password lockout costs a stranger, and what it costs you.** While the password is
+  locked, every sign-in that does not present a live device proof for the account gets exactly
+  the answer a wrong password gets — the same status, message, delay and audit row — **whether
+  or not the password was right**, so no answer during a lockout tells the guesser that a guess was correct
+  (the account owner is told, by email only; see "Security emails to the account owner"). Each
+  such attempt is counted and audited, and the accounting is bounded: the counter stops at the
+  threshold, the deadline is pushed out at most once a minute while the attempts continue, and
+  the attempts of one minute are recorded as **one** audit row with a count (carrying the first
+  attempt's address and browser). The honest bound on
+  the denial of service is therefore this: **someone who knows your address can keep new,
+  unrecognised browsers out of your account for as long as they keep guessing**, in thirty-minute
+  windows that are renewed while the guessing goes on. It costs them very little: one attempt
+  during a lockout, once its first minute has passed, pushes the deadline out to thirty minutes
+  from then, and the ten failures that started it do not expire on their own, so after a lockout
+  lapses unused a single wrong password locks the account again at once. About one request every
+  half hour keeps it locked, until a correct password reaches the account while it is not locked,
+  the unlock link is used, or the password is reset. What they cannot do: learn from any
+  answer whether a password is correct (the one residual is timing measured after the answer,
+  described under "Security emails to the account owner"), end or freeze a session you already have (a lockout never refuses a
+  session refresh), or lock out a browser that holds a live device proof for the account (one
+  left by a completed sign-in on this version and used within the last 30 days, not since
+  revoked). Such a browser holds a **device proof** (the `__hv_device` cookie, described below) and signs in
+  normally during a lockout, without clearing it. And the emailed **unlock link** does two
+  things: it ends the lockout, and it hands the browser that follows it a single-use proof valid
+  for ten minutes, so that browser can sign in even if the guessing re-locks the account a
+  second later. The link is tied to the **lock episode** rather than to the moment the lockout is
+  due to end, so the link already sent keeps working however long an attacker grinds, and a
+  fresh one is sent only when the outstanding link would expire before the lockout it covers —
+  at most one new link about every half hour, which stops that guarantee from becoming a
+  mail-flood vector. The link a replacement supersedes stays valid until its own hour is up, so
+  two can verify at once; that is harmless, because links naming one episode are one capability,
+  and spending either ends the episode and kills the rest.
+
+  **A second-factor lockout** is reachable only by someone who has the master password, so it
+  is answered differently: the 2FA step says the account is locked (the password is already
+  proven there, so the answer confirms nothing new), the owner is emailed that their master
+  password was entered and the code then failed, and the remedy that actually evicts such a
+  person — changing the master password from a session you already have — keeps working,
+  because a second-factor lockout never refuses a session refresh either. Its own link unlocks
+  the second factor only. A browser trusted to skip the two-factor step (see "Remember me and
+  trusted devices") never reaches that step, so it still signs in during a second-factor
+  lockout.
+
+  **A proven password buys one sign-in.** For an account with 2FA, a correct password is answered
+  with a challenge that lives five minutes, and each sign-in gets its own. The first exchange of
+  a challenge that presents a correct code consumes it. Presented again afterwards, the spent
+  challenge is refused before its code is even read, so nothing is counted and no code is spent.
+  Of two exchanges sent at once on the same challenge, both can pass that check and have their
+  codes checked, but only one can consume the challenge; the other is refused before its code is consumed, so it spends no backup
+  code (a wrong code sent in that race is counted like any other). One correct password
+  therefore yields one session, never several, whoever holds the challenge. Using one challenge
+  does not cancel another that was never used; that one still works until it expires. A password
+  reset or change, "log out everywhere" and a detected copy of a session cookie do cancel every
+  challenge open at that moment, so a correct password proven before them can no longer be turned
+  into a session minutes later. A sign-in already under way at that moment can still complete: one
+  whose password check is running can still be handed a challenge, and one that has already
+  consumed its challenge can still be handed its session, as a sign-in on an account without 2FA can. A code that
+  another sign-in spends in the moment between this exchange consuming its
+  challenge and spending the code leaves the challenge spent, and the answer says so (start the
+  sign-in again), not "wrong code". A wrong
+  code does not consume a challenge, so a typo costs nothing but the retry. A six-digit code is
+  checked only as an authenticator code and anything else only as a backup code, so a wrong
+  authenticator code costs the server no backup-code hashing.
+
+  This matters more here than it would elsewhere, because resetting the master password mints a
+  new vault key, so "just reset it" is not a recovery path but total data loss; the sign-in page,
+  the forgot-password page and the lockout mail all point at the unlock link instead. The
+  credential budget is kept separate from the budgets for token refresh and vault unlock, so that
+  ordinary use of the app can never spend the allowance you need in order to sign in. No budget
+  ahead of a handler is keyed on anything the caller chose (a header, a cookie, a rotating token,
+  a submitted e-mail): a key the caller picks is a fresh bucket per request, and a key naming a
+  victim is a budget anyone can spend on the victim's behalf. That is why there is no per-account
+  limit on sign-in any more: keyed on the submitted e-mail, it let twenty requests from anywhere
+  refuse the owner's correct password on every device, and it braked nothing the handler's own
+  lockout does not. The sign-in tiers are keyed on the address, and the refresh tier on the
+  address alone. Every tier on an authenticated route keys on the account instead, because the account id comes from a
   verified token: neighbours behind one address never spend each other's budget, and an attacker
   holding a session cannot buy a fresh budget by moving to another address. That covers the
   heavy-operation tier and the confirmation of a new 2FA setup. It also covers every vault-item
-  and folder write: each one leaves an audit row that is kept for a year, so each is bounded per
-  account, at a ceiling sized for the app's own one-request-per-item bulk actions. That bounds how
-  fast one account can grow the log, not how large it gets: at the two ceilings it is 21,000 rows
-  per quarter hour, about two million a day, each kept for the year. Ceilings much lower than that
-  need the bulk actions to become single requests first. Getting the key wrong on any of these
-  tiers turns a limiter into a lockout of the legitimate user, an open door for the attacker, or
-  both. Every IP-keyed tier buckets IPv6 by its **`/64` prefix** rather than by
+  and folder write: each one leaves an audit row, so each is bounded per account, at a ceiling
+  sized for the app's own one-request-per-item bulk actions. That bounds how fast one account can
+  grow the log; how large it can grow is bounded separately (see **The audit log's size** below).
+  Getting the key wrong on any of these tiers turns a limiter into a lockout of the legitimate
+  user, an open door for the attacker, or both. Every IP-keyed tier buckets IPv6 by its **`/64` prefix** rather than by
   the individual address, because a single routed IPv6 allocation hands one attacker 18
   quintillion addresses: keyed on the full `/128`, an IP-keyed limiter is not a limiter at all,
   it is a counter that never reaches two. That aggregation happens inside the library that
   parses the address, so it is a dependency this project deliberately keeps current — the
   advisory that stood in exactly that code path (`ip-address`, reachable from every rate-limit
   key) is cleared, and the `/64` bucketing is pinned by a test rather than left to a default.
+
+- **A copied session cookie.** The refresh cookie is httpOnly and is replaced at every refresh,
+  which spends the old value. When a spent value is presented again (the browser it was issued to
+  and a copy of it both refreshing), the server treats that sign-in as stolen: it ends every
+  session of that sign-in, revokes every trusted device and device proof on the account, cancels
+  every sign-in still waiting for its two-factor code, emails the owner (unless they turned that
+  email off, which takes the master password), and writes a security audit entry,
+  `token_reuse_detected` (shown as "Stolen Session
+  Detected"), with the address and browser that presented the spent value, the browser the
+  sign-in was issued to, and how many sessions and trusted devices it revoked. The entry never
+  holds a token, a hash of one or the sign-in's identifier (only a short hash of it). A detected
+  replay is recorded even when replays race: the same value replayed twice at once records one
+  entry, and two different spent values of one sign-in replayed at the same moment can record one
+  each; an entry's counts may miss what a replay racing it revoked first. What can still leave no
+  entry: a failure to write the audit row itself (it is logged), and every session of the account
+  being ended by another request at that very moment (log out everywhere, a password reset or
+  change), which removes the spent values before the replay can claim one. On a database without
+  transactions (a standalone MongoDB behind PM2), a refresh of the same sign-in that completes at
+  that very moment can keep its new session. A spent value is
+  remembered for 7 days; one presented later is simply refused, with no entry and nothing revoked.
+  An access token already issued to the copy is not revoked: it keeps working until it expires
+  (`JWT_ACCESS_EXPIRY`, five minutes by default).
+- **The audit log's size.** A rate bounds how fast the log grows, not how large it gets, so the
+  log is also bounded by size, and its entries come in two classes. **Activity** entries (what an
+  account did to its own items, folders, documents and backups, and each vault lock and unlock) are capped at **100,000 per
+  account**, oldest removed first: an hourly maintenance job trims every account back to the cap,
+  and the server also trims an account on every hundredth such entry, so an account can sit above
+  the cap by at most about an hour of its write ceilings (longer only on an instance so large that
+  one pass over every account takes more than its ten-minute budget). A run of identical metadata-only edits (a
+  favourite toggled, a folder moved or reordered) from one address and user agent, each within a
+  minute of the last, is recorded as one entry with a count; an edit that changes an item's or a
+  folder's encrypted contents always gets an entry of its own, and edits from two different
+  addresses or user agents never share one (two browsers behind one address that send an identical
+  user-agent string can). **Security** entries (sign-ins and sign-outs, password, 2FA, session and trusted-device
+  events, among them a replayed refresh token, recorded with the address that replayed it and the
+  browser the sign-in was issued to, exports and imports, backup setup, download and restore, settings) are never trimmed and
+  never merged, so flooding edits can push out only older activity (older vault lock and unlock
+  entries among it), never a sign-in or any other security entry. The exceptions are the entries a stranger can cause, which are capped
+  separately at 5,000 per account and trimmed the same way. The residual, stated at its size:
+  every other security entry takes the account's password or a signed-in session, and is bounded
+  only by its route's rate limit and the retention period (365 days by default), not by a cap. A
+  session can write, without re-entering the master password, sign-outs, session and
+  trusted-device revocations and settings changes (one shared budget of 60 a minute, up to 86,400
+  a day), imports (60 per 15 minutes, 5,760 a day), backup downloads (10 per 15 minutes, shared
+  with the other heavy operations, 960 a day), backup restores and failed password checks (one
+  budget of 5 per 15 minutes, 480 a day) and failed unlocks (5 per 5 minutes, 1,440 a day): about
+  95,000 entries a day at most. Anyone who knows the master password can also write sign-in
+  entries, and those are limited per client address (20 per 15 minutes), not per account, so an
+  attacker who holds the password and many addresses can grow an account's log further. Both are
+  stated here rather than closed: capping them would mean trimming records of how the account was
+  used.
+
 - **One account reading or changing another's data.** Every route that takes an id scopes its query
   to the authenticated user, and that is asserted **exhaustively rather than by sampling**: the
   route table is built from the real Express router — so a route added tomorrow appears in it
@@ -141,13 +317,19 @@ security posture, not a disclaimer.
   distinguishable rejection that would confirm the probe was understood.
 - **Backup theft.** Emailed and downloaded backups carry no plaintext: every row in them is
   ciphertext under the vault key, and the copy of that vault key they carry for a
-  cross-account restore is sealed under a _separate_ backup password. A backup you
+  cross-account restore is sealed under a _separate_ backup password. The file also carries the
+  vault key sealed under your master key, so whoever holds a copy can attack either password
+  offline (see _A weak master or backup password_): a backup file is as strong as the weaker of
+  the two. A backup you
   **download from the browser** additionally carries an HMAC-SHA256 integrity signature,
   computed under a key separated from the backup wrapping key by HKDF. A backup that
   **arrives by email** — the scheduled one, and the one the Back Up Now button sends — does
   not: it is assembled on the server, which has neither the backup password nor the key
   derived from it, so there is nothing there to sign with. That is why restoring an emailed
   backup asks for confirmation; see the next bullet for what the confirmation means.
+- **A stolen session redirecting your backups.** Where mailed backups go changes only with your
+  master password, and no address other than your own receives one before it has confirmed; see
+  [Where mailed backups go](#where-mailed-backups-go).
 - **Tampered backup files.** Restore rejects dangling and self-referential folder links,
   and breaks any folder cycle a malicious file plants. It also checks the integrity
   signature before anything is sent — but the sentence that matters is **which key it is
@@ -294,19 +476,37 @@ security posture, not a disclaimer.
   An entry you did not change but that now reads differently, or says it cannot be read, is
   something to check against a backup rather than something to trust.
 
-- **A weak master password.** It is the root of the entire key hierarchy. PBKDF2 at
-  600,000 iterations raises the cost of an offline attack against a stolen auth hash; it
-  does not rescue a guessable password.
+- **A weak master or backup password.** The master password is the root of the entire key
+  hierarchy. The database holds your vault key sealed under a key derived from it (and a bcrypt
+  hash of a value derived from it), and every backup file carries that same sealed vault key
+  plus a second copy sealed under your backup password, with that password's salt. Anyone holding
+  a database dump or a backup file can therefore test guesses at either password **offline**,
+  with no rate limit, lockout or notice; a guess that opens the sealed key is confirmed by it.
+  Each guess costs 600,000 rounds of PBKDF2-SHA256 (salted with the account email for the master
+  password, with a random salt for the backup password). That raises the cost of every guess; it
+  does not rescue a guessable password. Use a long, unique master password and a different,
+  equally strong backup password.
 - **A lost master password.** There is no recovery path and no reset that preserves data,
   by design — the server cannot decrypt the vault for you. The same applies to the file
   encryption tool's password and the backup password.
 - **Malware on the device.** A keylogger, a hostile browser extension, or an attacker with
   the unlocked machine defeats any password manager.
-- **Metadata.** The server necessarily learns what it must in order to function: your
-  email, when you logged in and from where, how many items and folders you have, when they
-  were changed, and their type. Item _contents_ and _names_ are encrypted; their _existence_
-  is not. **Tags are stored in plaintext** — they are indexed so the server can filter by
-  them — so a tag is a label the server can read. Importing from another password manager
+- **Metadata.** The server necessarily learns what it must in order to function, and stores
+  this in the clear: your email; when you signed in, and the address and browser of every audited
+  action; how many items, folders and documents you have and roughly how large each stored entry
+  is; each item's type, the folder it is in, its tags, whether it is a favorite, whether and when
+  it was put in the trash, how many previous passwords it keeps and when each was replaced; when
+  items, folders and documents were created and changed; your folder tree (each folder's parent,
+  icon, colour and position); each document's exact size, folder and favorite flag; the
+  addresses your backups are mailed to; for each session and trusted device, the browser's user
+  agent, address and the fingerprint the app sends; and, for an entry created by restoring a
+  backup, the id it had in that file. Item _contents_ and _names_, folder names, and document
+  names and contents are encrypted; their _existence_ is not. No keyed hash of an item's or a
+  folder's name is stored any more, so the database no longer shows which entries share a name
+  (a server process from the previous release, during a rolling upgrade, can still write one, and
+  database copies taken before the upgrade and a replica set's operation log, until it wraps,
+  still hold the old ones).
+  **Tags are stored in plaintext**, so a tag is a label the server can read. Importing from another password manager
   converts that export's folder/group names into tags, which means the server learns your
   source folder taxonomy (for example `Banking`, `Work SSO`). Do not put anything sensitive
   in a tag; use the item's name or a field instead, both of which are encrypted.
@@ -411,6 +611,299 @@ record keeps its own 30-day expiry, a user who keeps returning can go up to
 This is intended: the master password is still required on every unlock, and either window lapsing
 lands the user back at a full login.
 
+### Device proofs (why a lockout does not lock you out)
+
+Every sign-in that completes, and every use of an emailed unlock link, leaves the browser a
+**device proof**: a random token in an httpOnly cookie (`__hv_device`, `Secure` and
+`SameSite=Strict` in production, sent only to the `/api/v1/auth` routes, of which sign-in,
+unlock, refresh and log-out-everywhere read it). The server stores only its
+SHA-256, bound to one account. A sign-in that presents a live proof for the account it names is not
+braked by that account's password lockout; everything else is. So a stranger holding your account
+locked keeps out browsers that have not signed in to it (or whose proof has lapsed or been revoked),
+not the ones you keep using.
+
+- **Minted on completion, replaced at every sign-in, kept alive while used.** A proof is issued when
+  a sign-in completes (password only, the 2FA step, or a trusted-device skip) and replaced at every
+  later completed sign-in, so a copied cookie keeps working until you next sign in in that browser
+  (or run "log out everywhere", below), and not after. It lasts 30
+  days from its last use: every session refresh in that browser pushes its expiry out again, so a
+  proof does not lapse while you keep using a remembered session (a refresh only extends a proof the
+  browser already holds; it never mints one). An account holds at most 50 (the one issued longest
+  ago is dropped first, however recently it was used), and the database removes each at its expiry.
+- **Its own failure budget.** A wrong password presented with a proof counts against the proof, not
+  against the account, so a typo on your own laptop does not lock out your other new devices. Five
+  wrong passwords inside one fifteen-minute window revoke the proof, and that is audited as
+  `device_proof_revoked` (the window is fixed and opens at the first wrong password, so up to
+  seven can land in quick succession across its boundary without revoking it); the browser is then an ordinary unrecognised one.
+- **The unlock link proves the browser that follows it.** Using the link sets a **single-use** proof
+  that lasts ten minutes, spent by the first correct password it accompanies (even if a second
+  factor is still owed; of two requests racing with it, only one is proven), so the owner can get
+  in even when the guessing re-locks the account seconds after the link is used. A browser that
+  already holds a live proof keeps it instead.
+- **Revoked when the footing changes.** A password change or reset, refresh-token reuse detection (a
+  stolen-cookie signal) and "log out everywhere" revoke every proof on the account, including any
+  copy of the proof in the browser you run them from; "log out everywhere" then hands that browser a
+  fresh proof, so it stays recognised while the copies stop working. Account deletion erases them.
+  A password change or reset hands out no proof of its own, so afterwards no browser is recognised
+  until it next completes a sign-in: if strangers keep the password step locked at that moment,
+  sign in through the unlock link.
+- **What it does not do.** A proof never skips the password: it only decides whether a password
+  lockout applies. It does not skip the second factor either (that is what a trusted device is
+  for), and a second-factor lockout still refuses the 2FA step whatever proof is presented.
+- **The residual it accepts.** Someone holding a live proof (a stolen cookie, or a shared computer
+  left signed out but not cleared) can try four wrong passwords every fifteen minutes without ever
+  starting the account's lockout or its mail; the fifth revokes the proof and puts them back under
+  the lockout like anyone else, and a copy stays usable for as long as its source browser keeps
+  using its session. That is the device-cookie protocol's trade-off, chosen so that a typo on your
+  own laptop never locks out your other new devices. "Log out everywhere", a password change or a
+  reset revokes every proof and every copy of one.
+
+### Who can create an account
+
+Registration is **open by default**, and that default is kept for compatibility, not because it
+is safe on the open internet: on a server anyone can reach, anyone can create accounts, and each
+account can store data up to its own limits. The server logs a warning about it at every production
+boot. The operator closes it with `REGISTRATION_MODE`:
+
+- **`closed`**: every registration is refused with a 403 and a fixed message. The refusal is
+  decided before any account lookup, so it says nothing about whether an address is registered.
+- **`invite`**: a registration must present an **invitation minted for its exact address**. An
+  invitation is minted only by the operator's command-line tool or by an account the operator lists
+  in `REGISTRATION_INVITERS`, and the latter must prove its master password to do it (at most 10 in
+  any 24 hours each, audited as `invitation_create` with the address masked; the operator's
+  command-line tool is not capped). Never by any account: an
+  account that could invite anyone would let every invitee invite others in turn. An invitation is
+  32 random bytes, stored only as a keyed hash (a copy of the database admits nobody), works for 7
+  days, and is spent by the first registration of its address; of two registrations racing for it,
+  exactly one wins. A registration without a valid invitation is refused with a 403 and one fixed
+  message whatever was wrong with it, again before any account lookup. **H-Vault never mails an
+  invitation**: the link (`/register#invite=…`) is handed over by the inviter, and it carries the
+  invitation in the URL fragment, which browsers never send to a server or write to an access log;
+  the register page moves it into the form and removes it from the address bar at once. Anyone who
+  obtains a link before its invitee does can register that address (the account is still unverified
+  until someone controlling the mailbox confirms it), so send it only to the person invited.
+- **`REGISTRATION_ALLOWED_DOMAINS`** restricts every mode that registers anyone to addresses in the
+  listed domains, matched exactly (a subdomain is a different domain). An address outside them is
+  answered exactly as a registered address is: the same generic success, after the same password
+  hashing, with nothing created and nothing mailed, so the list is not revealed one guess at a time
+  by the answer. The response time is equalised only by that password hashing (an address inside
+  the list also costs an account lookup, and a new one an account write), so the list is protected
+  from guesses read off the answer, not from careful timing measurement.
+
+`GET /config` publishes the mode (so the register page can say "closed" before the form is filled),
+never the domain list or the inviters.
+
+### Accounts whose address is never verified
+
+A registration holds its address before anyone has shown they control the mailbox: the account
+cannot sign in until the address is verified, but nobody else can register that address while it
+exists. So an account whose address is still unverified **`UNVERIFIED_ACCOUNT_TTL_DAYS` (default 7)
+days after it was created is erased** by the token cleanup job, which runs every 6 hours and reaps
+oldest first for at most five minutes per run; whatever is left waits for the next run. The erasure
+is the same cascade an account deletion runs, and it leaves one system audit entry
+(`unverified_account_reaped`) naming the account by id with the address masked; if that erasure
+fails part way, the cleanup job finishes it on a later run and the entry then says
+`deletion_cleanup`. Two kinds of account are never erased this way: one that holds any vault,
+folder, document or in-progress upload data, and one whose stored record has no verification field at all (an erasure
+is not the place to guess). An invitation still open for the reaped address is removed with it, as
+every erasure removes the invitations naming its address, so the inviter mints a new one.
+
+Each account is claimed by one conditional write before it is erased, and a verification is stored
+only while no erasure has claimed the account, so a verification link followed at the moment the
+reaper picks the account either wins (the account is kept) or is refused (the erasure finishes);
+an account is never verified while its data is being deleted.
+
+Until then, the mailbox's owner can take the address back at once: a password reset and an unlock
+link are still mailed for an unverified account, deliberately, because the mailbox is the rightful
+claimant, and a reset replaces the password whoever chose it. A verification link is not offered in
+their place, since following one would activate the password the first registrant chose.
+
+### Security emails to the account owner
+
+The owner is emailed when something security-relevant happens to the account: the correct master
+password entered from an unrecognised browser during a password lockout, a password reset or
+change, two-factor authentication turned on or off, new backup codes, a browser trusted to skip the
+two-factor step, a recognised browser losing that status after wrong passwords, a two-factor
+lockout, the backup recipient list changed or suspended, a backup that could not be sent, a copied
+session detected, and an account deletion. Every one of these goes through one sender with a fixed
+text per event. A notice carries **no token, no link and no secret** (where to choose which emails
+arrive is named in words: Settings in H-Vault), recipient addresses appear masked, and the only thing taken
+from the request is its IP address, shown only when it is one (never the browser's user agent,
+which anyone can set to any text, a link included). A two-factor lockout therefore sends two
+emails: the notice, and the separate unlock link that is the remedy.
+
+Notices go only to a **verified** address, never when email is not configured, and never for an
+account being erased (except the deletion notice, written from the address read before the erasure
+began). The same notice is not sent twice in a row within an hour; any notice that reads differently is,
+and so is a change to a different recipient list even when the masked addresses read the same. The
+email saying security emails were turned off is never held back: a second one within the hour is sent
+too, since it may not be the owner's. That makes a repeated event (the
+password guessed right again and again during a lockout, say) one email an hour, but it does not
+bound alternating events: someone able to cause two different events in turn causes an email each
+time. Almost every one of those events needs the master password, a signed-in session, a stolen
+session token, a browser that signed in before or a link mailed to the owner; a backup that could
+not be sent is the server's own. A notice whose sending fails is not retried within that hour. Notices do not count
+against the daily backup email budget, except the one about a backup that was not sent.
+
+The owner chooses which notices arrive. Turning one back on, and turning off the optional ones
+(new backup codes, a trusted browser, a browser no longer recognised, recipients suspended, a
+backup not sent), needs no password; turning off any other needs the
+master password, and the account is then emailed once to say which were turned off. That email
+and the deletion notice cannot be turned off. A password reset turns every notice that needs the
+master password back on. A stolen session alone therefore cannot silence the notices about a stolen
+password or session, and someone holding the password who silences them causes an email saying so
+(subject to the same limits as every notice: a verified address, email configured and the relay
+accepting it; the hourly repeat rule does not apply to it).
+
+**A correct password during a lockout is never readable through the API.** The sign-in is refused
+with exactly the answer, the delay, the stored writes and the audit entry a wrong password gets,
+and the email is started only after the response has gone. Nothing it stores is returned by any
+endpoint: the record of the last notice is never part of a reply, and writing it does not move the
+account's `updatedAt`, which the profile returns. Two residuals remain. Whoever reads the account's
+mailbox learns that the password was guessed, which is the point of telling the owner. And the
+email's own work (one account read, one write and, at most once an hour, the delivery) runs in the
+same server process after the response, so a client measuring the server's response times to later
+requests could in principle tell the two apart; it is not equalised.
+
+### Heavy responses and list pages
+
+A backup download, a backup mailed on demand, a vault export and the scheduled backup each read a
+whole vault (up to the 25 MB backup limit). They are admitted through **one budget per server
+process: two at a time, one per account**; a second request from an account that has one running
+is refused, and one past the process budget waits. The download and the export are **streamed**
+from the database with backpressure, so the server holds one small database batch (16 rows) at a
+time rather than the whole file, the size limit is decided before the first byte, and a client that has not taken the file
+within a deadline derived from its size (128 KiB/s plus 30 seconds) is cut off, so a client that
+stops reading cannot hold a slot for longer than that. What this does not bound: two accounts can
+still occupy both slots of a process for up to that deadline each, which delays other accounts'
+downloads without refusing them. A transfer that is cut off or fails is recorded in the audit log
+as not completed; part of the file may still have reached the client. The vault item and trash
+lists are streamed the same way and limited to 3,100 pages per account per 15 minutes: the app
+re-reads the whole vault each time its vault page opens, so that is one visit to the largest
+vault every fifteen seconds. The limit bounds how fast one account can make the server read and
+send whole pages, not how many it reads at once.
+
+### How much one account can store
+
+Every account's vault items and folders count against **one storage quota**
+(`VAULT_STORAGE_QUOTA_MB_PER_USER`, 512 MB by default), trashed ones included until they are
+purged; documents have their own. A change that would grow the vault past it is refused (400,
+"Storage limit reached"), and a change that does not grow it never is, however far over the
+quota the account is: deleting, purging, emptying the trash, shrinking an entry, rotating or
+re-sealing the vault key, and every read keep working. A backup restore that runs out of room
+restores what fits and reports the rest as `storage_limit`.
+
+The server keeps a running count per account and decides each growing write against it with one
+conditional update before the first row is written, so concurrent requests cannot together take
+an account past the quota. What this does not bound exactly:
+
+- **A rotation or re-seal is never refused**, so an account can end one rotation above its quota
+  by that rotation's own growth (at most one request body, 30 MB). It can then only shrink.
+- **The count can drift** when the server stops between writing a row and counting it, or when a
+  write's outcome is unknown (the count then keeps the reservation, which errs towards refusing
+  early). An hourly job recounts accounts that have been quiet for ten minutes from what the
+  database stores, at most 200 accounts a run and the longest-unrecounted first, so on a large
+  instance one account's correction can wait many hours; until it runs, an account may be refused
+  slightly early or admitted slightly late.
+- **During a rolling upgrade**, a worker still running the previous release writes without
+  counting. The recount corrects those accounts once the upgrade has finished.
+
+The same conditional update decides the **item and folder limits** (10,000 items, trashed ones
+included, and 500 folders). The account carries a running count of each beside the byte count, and
+a create, an import or a restore reserves its rows in it before writing, so requests sent together,
+from one endpoint or from several, cannot take an account past either limit: whichever reservation
+lands first takes the last place and the others are refused (a restore skips the rows that no longer
+fit as `storage_limit`). Only an insert adds to the count and only a permanent removal (deleting from
+the trash, emptying it, the nightly purge, deleting a folder) takes from it. The drift and rolling
+upgrade caveats above apply to these counts too, and the same hourly recount corrects them.
+
+### Log files
+
+The full log stream is the server's console output, which the Docker stack's container runtime
+keeps and rotates (PM2 writes it to `logs/out.log` and `logs/error.log` and does not rotate them
+unless `pm2-logrotate` is installed). The rotating log files the server also writes are bounded by **count**: a new file
+every 4 MB or day, at most 3 kept. Under `NODE_ENV=production` only the one shared file is written
+(each module's own file is off unless `LOG_MODULE_FILES=true`), so the files hold at most 12 MB
+per server process (PM2's two workers write the same file, each keeping its own count, so somewhat
+more there).
+In the Docker stack they live in a memory-backed directory of 64 MB (16 MB for the bootstrap
+one-shot), and a test holds the total every module's logger can open below that size. The bound
+is what keeps the directory from filling. A failure the logging library reports is written once to
+the console; a failed write to the file itself (the directory full after all, a permissions error)
+is not intercepted by the logging library in use and ends the process; Docker's restart policy
+starts the app again (the bootstrap one-shot then fails and is re-run by the next `up`). It is a
+defect written up for the library's owner. What this does not bound: the rotator removes the
+oldest file when it opens a new one, and a burst of more than 4 MB of log lines written in one
+uninterrupted run of code can open files faster than it removes them; a file it missed that way
+is never removed later, and stays until the directory is cleared (for the container's in-memory
+directory, a restart). No request logs anywhere near that much in one run.
+
+### Where mailed backups go
+
+A mailed backup is your whole vault, encrypted, leaving the server as an attachment, so the list
+of addresses it goes to is guarded like a credential:
+
+- **Only the master password changes the list.** A session alone (a stolen access token, an
+  unlocked browser left behind) cannot add, remove or re-approve a recipient: the list is saved
+  through its own request, which re-checks your master password, and the settings request that
+  used to carry it now refuses it.
+- **Every address other than your own confirms before it receives anything.** Saving the list
+  emails each new address a link that works once and for 24 hours; the address receives no backup
+  until it follows it. The link is bound to your account, that address and a random value that
+  changes every time the address changes state, and it carries its token in the part of the URL
+  that is never sent to a server, so the token reaches no access log. Your own verified address is
+  confirmed at once.
+- **Nothing is rerouted.** With no recipients listed, backups go to your account address, as they
+  always did. When recipients are listed and none has confirmed, nothing is sent: the run is
+  recorded as failed and you are emailed about it at most once (within the daily budget below) until the list changes or a backup is delivered.
+  The list is read again, fresh, immediately before a backup is mailed, so a suspension that lands
+  while it is being built stops the mail to that address.
+- **Recovery cuts every other address off.** A password reset, a password change and "log out
+  everywhere" suspend every recipient except your own address, and every confirmation link already
+  sent stops working. You approve the list again with your master password: an address that had
+  confirmed is then confirmed again without a new email (its consent was never in question, and the
+  links sent before stay dead), and one that never confirmed is sent a new link. A save that
+  carried a proof of your old password is refused once the new one is stored, so it cannot undo
+  the suspension.
+- **Outbound backup email is budgeted: 30 messages per account per UTC day**, counting every
+  mailed backup once per recipient, every confirmation and every "backup not sent" notice. A
+  confirmation the mail relay refuses is sent at most three times in all (the first attempt and two retries).
+  A backup run claims the budget for all its recipients at once: a run the remaining budget cannot
+  cover is sent to nobody and recorded as failed, without a "backup not sent" email (that email is
+  for a list with no confirmed recipient).
+- **Addresses from before this control wait for you.** Recipients stored by an earlier version are
+  carried over unconfirmed and are NOT emailed: a recipient's click proves the recipient agrees,
+  never that you put the address there, so nothing is sent to them until you save the list again.
+  A list you already saved on this version is kept as you saved it, and the old addresses are dropped.
+
+What this does not protect against:
+
+- **Somebody who knows your master password** can add their own address and confirm it. The
+  confirmation proves the recipient agrees, not that you do. The remedy is to change the master
+  password, which suspends every recipient but your own; then review the list before approving it
+  again.
+- **The budget is per account, not per server.** Every account can make the server send up to 30
+  of these messages a day, and with open registration anybody can create accounts; the
+  registration settings in [Who can create an account](#who-can-create-an-account) are what bound
+  that.
+- **A session can pause your off-site copies.** "Log out everywhere" needs only a session and
+  suspends every third-party recipient; while your own address is on the list it keeps receiving,
+  so no "not sent" notice follows. A session can likewise spend the day's email budget on manual
+  backups, delaying that day's scheduled one.
+- **A mail already handed to the relay is not recalled.** The list is re-read just before the
+  budget is claimed; a suspension that lands while the messages are being sent does not stop the
+  ones already handed over.
+- **A confirmation mail is delivered at most once.** A server that stops between claiming a
+  confirmation and sending it leaves that address unmailed until you save the list again once its
+  link would have expired.
+- **Refresh-token reuse and turning two-factor authentication off do not suspend recipients.** A
+  reused refresh token is a stolen session, which could never change recipients; turning 2FA off
+  needs the master password and a code, and is an owner's action.
+- **The confirmation is recorded in your audit log without the recipient's network address or
+  browser**, which are a third party's.
+- **Rolling back to 0.15.x** after this version has started once mails backups to the account
+  address only: the older version does not read the new list.
+
 ### Password breach checking (Have I Been Pwned)
 
 Vault Health checks passwords against the Have I Been Pwned Pwned Passwords corpus using
@@ -444,6 +937,30 @@ packages/server`, or inside the production image (which has no `npm`) with
   `UPDATE_CHECK_ENABLED=false` too, for a server that contacts no third party at all). The cache is **fail-safe**: a miss
   falls through to HIBP, and an upstream failure with no cached fallback surfaces as an
   error, never as a "not breached" result.
+- **The cache is bounded, and each account's lookups behind it are budgeted.** A range fetched on demand
+  is deleted four freshness windows (`BREACH_CACHE_TTL_DAYS`) after it was fetched; until
+  then a stale range remains the fallback when HIBP is unreachable. At most 20,000 on-demand
+  ranges are kept (about 720 MB at the typical ~36 KB per range), the oldest removed first,
+  hourly and after every 500th range a server process inserts, so between evictions the
+  collection can run a few hundred rows per process over the cap. Seeded ranges are never
+  expired or evicted (a lookup never overwrites a seeded range): seeding the whole corpus
+  (about 37 GB) is the operator's decision. Both bounds use indexes that `create-indexes` builds;
+  until it has run on an upgraded deployment, the hourly eviction fails and logs instead.
+  Each fetch the cache could not avoid is charged to the account that caused it: 10,000
+  per 15 minutes (one full check of the largest vault an account may hold) and 30,000 per
+  day. Past either, a request that needs a fetch is refused (429) as a whole unless a stale
+  cached range can answer it, while a request the cache answers entirely still succeeds. What this does not bound, stated plainly:
+  - The worst case of the cap is set by the size of a range, not by the typical one: the
+    per-range fetch bound (1 MiB) allows about 20 GB if the upstream ever sent maximal
+    ranges.
+  - The budget is per account, so the total the server fetches grows with the number of
+    accounts, and registration is open by default.
+  - One account's daily budget exceeds the cap, so an account can push other accounts'
+    ranges out of the cache. That costs them extra fetches, never a wrong answer.
+  - An account past its budget sees a cached prefix answered and an uncached one refused,
+    so it can tell which prefixes are in the cache, that is, which prefixes someone on this
+    instance looked up recently. The cache records no account, and response timing already
+    told cached from fetched.
 - **On-device saved results.** The breach findings and weak-password scores shown on the
   Vault Health page are cached in the browser (IndexedDB) **encrypted with your vault key**,
   so they survive a page refresh or browser close without forcing a re-scan. They stay
@@ -578,13 +1095,21 @@ isolated document, embedded as
 'none'` is the containment, and it is worth being exact about what that buys**: it blocks
   `fetch`, `XMLHttpRequest`, WebSockets, `EventSource` and `sendBeacon`, so a compromised renderer
   can never READ a response; and no directive in the policy names an external host, so nothing it
-  emits can reach a third party. What it does not do is stop every packet — `script-src`,
-  `style-src`, `img-src` and `font-src` allow `'self'`, and inside a sandboxed document CSP
-  resolves `'self'` from the response's URL rather than from the document's opaque origin, so an
-  `<img src="/api/v1/…">` is a request this server would see. The honest bound is therefore **no
-  host but this one, and no readable answer**, not "no network at all" — the same bound residual
-  risk 1 below describes for self-navigation. All of it is affordable only because there is no PDF
-  renderer; see below.
+  emits can reach a third party. Images and fonts have no same-origin source either: `img-src` is
+  `blob:` and `data:` only (pictures the frame decodes from the bytes it was handed, or that a
+  document carries inline) and `font-src` is `data:`, because inside a sandboxed document CSP
+  resolves `'self'` from the response's URL rather than from the document's opaque origin, so
+  `'self'` would name this server. A document that points an image at any address, this server's
+  included, has that image refused in the browser and is shown a notice saying so. What the
+  policy cannot do is stop every packet: `script-src` and `style-src` keep `'self'` for the frame's
+  own code, and nothing stops a document navigating itself. Every such request leaves an opaque
+  origin, so the browser marks it `Sec-Fetch-Site: cross-site`, and **the API refuses every request
+  marked that way, with 403, before any handler runs** (whatever it asks for: a script, a
+  stylesheet, a navigation). The honest bound is therefore **no host but this one, no readable
+  answer, and no API handler** (that last part over HTTPS only: browsers send `Sec-Fetch-Site`
+  only to a trustworthy origin), not "no network at all": a request still reaches the reverse
+  proxy's access log, and navigating away to another site is residual risk 1 below. All of it is
+  affordable only because there is no PDF renderer; see below.
 - **It is handed bytes and nothing else.** The application decrypts the file, verifies every
   segment's authentication tag and the whole-file digest, and only then posts the plaintext, a
   render mode, an extension hint and the current theme. Never the document key, the vault key, an
@@ -592,7 +1117,11 @@ isolated document, embedded as
   embedder's URL — which contains the document id — is not handed over in `document.referrer`.
 - **The channel is one-shot.** The frame announces itself once on the window; the application
   accepts that handshake **at most once per frame** and removes the listener at that moment,
-  then transfers a `MessagePort` and says everything else over it. One frame per document, created
+  then transfers a `MessagePort` and says everything else over it. The frame, in turn, takes a port
+  only from the window that embeds it: a port posted by any other window (a page that opened the
+  viewer's address, a sibling frame) is ignored, and a page on another origin that opens that
+  address keeps no handle to it at all, because it is served with
+  `Cross-Origin-Opener-Policy: same-origin`. One frame per document, created
   fresh and destroyed when you navigate away, so one document can never observe the next. A link
   clicked inside the frame is delivered as a message, checked against the same URL allowlist the
   rest of the app uses (http, https and mailto only), and opened only after you confirm a dialog
@@ -711,7 +1240,8 @@ leaves the write fence raised, and only signing in lowers that, which cannot hap
 
 The generation check is a read, and a read is only worth the distance to the write that trusts it.
 Four operations have real work between the two: an import parses and validates a whole file, a
-restore does the same and then counts four collections, a document upload waits for the storage
+restore counts four collections (its file is parsed and its structure checked before any of this,
+so a malformed one is refused without waiting on the lock), a document upload waits for the storage
 service to assemble the file, and a master-password change revokes every session. A rotation
 starting inside one of those gaps had already listed the vault without the arriving entries, so
 they were sealed under a key the account was in the middle of replacing — unreadable from the
@@ -817,11 +1347,30 @@ orders look interchangeable and are not:
   entry marked for the next run rather than removing an entry whose file is still there.
 - **Deleting an account** is the one path that runs the other way round: every entry is
   removed with the rest of the account's data first, and only then are the account's files
-  swept from storage by prefix. Because the entries are already gone, a file the sweep cannot
-  reach is already unreadable rather than a document still standing. The erasure is reported
-  as complete in that case — it is — and the failure is logged for the operator, with the
-  remainder reclaimed by the scheduled clean-up. On a deployment with no document store
-  configured the sweep does nothing at all.
+  swept from storage by prefix. A file is never swept while an attempt that failed part-way could
+  have left an entry naming it: the sweep runs only once the whole erasure has finished. Because
+  the entries are already gone, a file the sweep cannot reach is already unreadable rather than a
+  document still standing. The erasure is reported as complete in that case — it is — and the
+  failure is logged for the operator, with the remainder reclaimed by the scheduled clean-up. On a
+  deployment with no document store configured the sweep does nothing at all.
+
+The erasure is **forward-only rather than all-or-nothing**. An account's history can be large (a
+year of audit entries, thousands of items, a stale session record per refresh), and a single
+database transaction sized by all of it is one the database aborts at its time limit, which would
+leave the account impossible to delete. So the bulk of the account is removed in small batches
+first, and only a short final step (anything written while the batches ran, the trusted devices
+and the account itself) runs as one transaction. A failure part-way therefore leaves some of the
+account's data already gone and the account still there, marked, and the next run finishes it.
+The one record that outlives the account names it by id and keeps the address only **masked**
+(the first and last character of the part before the `@`, and the domain), together with the
+address and browser the deletion was requested from. A local part of one or two characters is
+shown in full by that mask. Records written by earlier versions, which kept the address in clear,
+are rewritten to the masked form when the server first starts on this version. A very large
+account can take long enough to erase that the request asking for it times out at a proxy first;
+the erasure carries on, and the marker below covers the time it takes. A scheduled backup that is
+already being mailed when an erasure begins can still finish, and its log entry, which names the
+recipients, then outlives the account for the retention period; a backup for an account already
+marked is never started.
 
 An account whose erasure did not finish keeps the marker that says so, and that marker is the
 only durable record that its data still needs removing — which is why nothing clears it before
@@ -829,14 +1378,16 @@ the erasure it guards is done. For as long as it stands, **the account cannot be
 existing session is refused, a token refresh is refused, and signing in afresh is refused too,
 with the same answer a wrong password gets so that nothing new is revealed about the address.
 No session row and no audit row is written by any of those three, because the scheduled clean-up
-must find the record exactly as the failed erasure left it. What the marker does **not** stop is
-the four unauthenticated recovery routes, which are reached with an emailed token rather than a
-session: verifying an address, requesting a password reset, completing one, and spending an
-unlock link. Each of those still writes — a reset rewrites the stored credential and the wrapped
-vault key, and two of them write an audit row. They are left open deliberately, because gating
-them would remove the account's last self-service exit for the sake of a record the clean-up is
-about to delete anyway; but "nothing is written" is true of the three doors a session goes
-through, not of the whole account.
+must find the record exactly as the failed erasure left it. The emailed links are refused the
+same way: completing a password reset, spending an unlock link and verifying an address all answer
+such an account as they answer a dead link, before anything is written (and a reset whose account
+is claimed for erasure between its read and its write records nothing further). None of them could
+help: the account can no longer be signed in to whatever its password or lockout says. Requesting a
+reset link or a new verification link for such an account mails nothing and answers as it does for
+any address, so the answer reveals nothing either. A
+document upload that completes while its own account is being erased (the owner deleting the
+account in another tab) is taken back, its row and its stored file, rather than left behind (a file
+the storage service refuses to delete at that moment is left to the hourly storage clean-up).
 
 Neither deletion is recoverable, and neither is undone by restoring a backup. The same fact
 has an operational consequence that belongs to whoever runs the server rather than to whoever
@@ -903,12 +1454,14 @@ sandboxed frame the document viewer uses: an opaque origin, no vault key beside 
 storage, and a policy of `connect-src 'none'`. Running it in the application's own origin would
 put it next to the unlocked vault with a full network available to it.
 
-**The residual risk that frame does leave.** Its policy allows `img-src 'self'`, and any iframe can
-navigate itself, so a compromised release of that decoder could make credential-less same-origin
-GET requests. It could not read the responses, and no cookie would be attached, but a request URL
-would land in this server's own access log. That channel cannot be closed for any iframe, and it
-is much smaller than the alternative, where the same compromise would have the vault key in reach.
-The decoder is a small, zero-dependency package and is pinned like everything else.
+**The residual risk that frame does leave.** Its policy allows scripts and stylesheets from this
+server (its own code), and any iframe can navigate itself, so a compromised release of that
+decoder could still make credential-less GET requests to this server. It could not read the
+responses, no cookie would be attached, and the API refuses each one aimed at `/api/v1` before any
+handler runs, because a request from the frame is marked as coming from another site; but a request
+URL would land in the reverse proxy's access log. That channel cannot be closed for any iframe, and it is much
+smaller than the alternative, where the same compromise would have the vault key in reach. The
+decoder is a small, zero-dependency package and is pinned like everything else.
 
 **What the decoded keys are while they are on screen.** They are unwrapped TOTP secrets, which is
 the plainest secret this application ever holds. They live in one module-level map, never in a
@@ -1060,12 +1613,18 @@ devices via clipboard sync. H-Vault reduces the exposure window but cannot elimi
 
 ## Security practices in this repository
 
-- Every push runs `npm run ci` locally through the `pre-push` hook — thirty-one gates,
-  including a dependency audit at moderate and above over the production tree, ESLint with
-  `eslint-plugin-security`, static analysis (CodeQL where the CLI is installed, otherwise
-  Semgrep CE or OpenGrep, and the gate reports which engine answered), container builds
-  scanned with Trivy (zero fixable CRITICAL/HIGH), a secret scan over every tracked file
-  **and every blob in git history**, the cross-user authorization matrix over the whole
+- Every push runs `npm run ci` locally through the `pre-push` hook — thirty-three gates,
+  including a dependency audit at moderate and above over the production tree, an OSV
+  advisory scan (osv-scanner) over every package in the lockfile, development tooling
+  included (one advisory with no fixed release, in a dependency of a development-only linter
+  that never ships and is only ever handed a file path the pipeline writes itself, is
+  accepted through a reviewed ledger entry that expires within thirty days and fails the
+  scan once it no longer matches), ESLint with `eslint-plugin-security`, static analysis (CodeQL where the CLI is
+  installed, otherwise Semgrep CE or OpenGrep, and the gate reports which engine answered),
+  container builds scanned with Trivy (zero fixable CRITICAL/HIGH), a secret scan over every
+  tracked file **and every blob in git history**, gitleaks' provider-specific rule set over
+  every commit (each allowlisted fixture pinned to one commit and recorded in the
+  suppression ledger), the cross-user authorization matrix over the whole
   route table, a conformance run of the storage port against the real object-storage engine
   in a container, and a redaction suite that asserts no request value, audit row or
   production error body carries a secret. Eight further gates form the release tier, run on
@@ -1080,14 +1639,25 @@ devices via clipboard sync. H-Vault reduces the exposure window but cannot elimi
   only against `.testfortress/baseline.json`; and `npm run verify:selftest` plants one
   defect per registered gate and requires each to go red for a reason its own report
   attributes to that defect. A gate whose prerequisite is missing on the machine — an
-  absent CodeQL CLI, a stopped Docker daemon — is reported BLOCKED and counted separately,
-  never as proven.
+  absent CodeQL CLI, a stopped Docker daemon, an absent gitleaks or osv-scanner — is
+  reported BLOCKED and counted separately, never as proven. In the pipeline itself an
+  absent scanner is "could not run" (exit 2), which fails the push; only the static-analysis
+  gate may report itself skipped, and only when neither CodeQL nor its fallback engine is
+  installed.
 - Every container sets `no-new-privileges` and drops all Linux capabilities, and every
   one but the database runs on a read-only root filesystem; the application, Nginx and
-  bootstrap images run as a numeric non-root user. The database container is the exception,
-  because its entrypoint starts as root to fix volume ownership, adds back exactly five
-  capabilities and keeps a writable root filesystem. The Compose stack publishes exactly one
+  bootstrap images run as a numeric non-root user. The object storage engine runs as root inside
+  its container (an accepted residual, see "The object storage service" below), and so does the
+  short-lived database-user provisioning one-shot. The database container is the exception to
+  the capability and read-only rules: its entrypoint starts as root to fix volume ownership, adds
+  back exactly five capabilities and keeps a writable root filesystem. The Compose stack publishes exactly one
   loopback-bound port; the database has no published port and no route to the internet.
+- Secrets reach only the containers that use them. The application gets the root `.env`; the
+  index-building one-shot, which runs the stack's largest image (its whole development toolchain),
+  gets only the database URI, the pool sizes, the three retention settings and the mode, never a
+  JWT, session, 2FA, mail or storage secret; and the database root credential exists only in the
+  database and its user-provisioning one-shot. A test holds the one-shot's settings to exactly the
+  keys it reads, and the deployment drill checks the environment it actually ran with.
 - Secrets are validated at boot: the app refuses to start in production with a
   placeholder secret, a non-HTTPS origin, or a partial mail configuration.
 - Dependency install scripts are reviewed rather than trusted by default: the root
@@ -1098,6 +1668,24 @@ devices via clipboard sync. H-Vault reduces the exposure window but cannot elimi
   reporting the ones it does not cover; a later npm release enforces it. That is why the
   telemetry opt-out is set separately. The production images install with scripts disabled
   either way.
+- The release workflow gives write access only to the job that publishes. The job that
+  installs dependencies and runs the gauntlet holds a read-only token and does not keep it in
+  its checkout, so a compromised dependency or tool running there cannot push to the
+  repository or move a release tag; the publishing job checks the commit out afresh and runs
+  only this repository's own scripts. Every GitHub Action is pinned to a full commit SHA, the
+  five downloaded tools (actionlint, hadolint, oasdiff, gitleaks and osv-scanner) are checked
+  against SHA-256 values committed in the workflow, and
+  `diff-cover` is installed from a hash-locked requirements file. Be precise about the limit:
+  code that runs in the gauntlet job can still read what that job can read and make it fail
+  or pass, and these things it fetches are not pinned by a hash committed here: the runner
+  image itself (`ubuntu-latest`); the Node toolchain `actions/setup-node` downloads; the
+  Playwright browsers and the system packages `playwright install --with-deps` installs
+  through apt; the Alpine packages `apk upgrade` pulls into the images the image gate builds
+  (their base images, `node:24-alpine3.23`, `mongo:8.0`, Nginx and Garage, are all pinned by
+  digest, and the development stack's database names the same digest); the Trivy scanner image
+  (`aquasec/trivy:latest`) and the vulnerability database it fetches; and the MongoDB server
+  binary the test harness downloads, which is checked only against a checksum served from
+  the same host. The npm dependency tree is pinned by the lockfile's integrity hashes.
 
 ## Hardening your own deployment
 
@@ -1108,6 +1696,34 @@ put an instance in front of real data — in particular: set a dedicated
 to `127.0.0.1`. If the server must make no request to a third party it was not asked to,
 set `UPDATE_CHECK_ENABLED=false`; the release check is then off, and the app says so.
 
+### The database's root credential
+
+The root password reaches two containers through their environment: the database, and the
+one-shot that provisions the application's own database user. A command line
+(`/proc/<pid>/cmdline`) can be read by every account on the Docker host under the default
+`hidepid=0`, while a process's environment can be read only by the account that owns it. So the
+database healthcheck reads the password from its environment and signs in from inside its script,
+and the README's backup, restore and rotation commands do the same. A test fails if any service's
+healthcheck, entrypoint or command expands a password or secret, or if a documented command
+passes one as an argument; and once the stack is up, the deployment drill watches the command
+lines of the database container's `mongosh` processes across two healthcheck runs for every
+secret it generated.
+
+One exposure is outside this repository's control. On the **first** start against an empty data
+volume, the official MongoDB image's initialisation passes the root user name and password to its
+`jq` helper as arguments, for a few milliseconds, while it creates the root user; later starts skip
+that step. Nothing this repository runs or documents does so otherwise.
+
+Releases up to and including 0.15.0 passed the password to `mongosh` as `-p` in that healthcheck,
+every ten seconds, and the README's earlier command for rotating `MONGO_APP_PASSWORD` put the new
+application password on the command line once. **If other people have accounts on your Docker
+host, rotate `MONGO_ROOT_PASSWORD`** (and `MONGO_APP_PASSWORD`, if you rotated it with that earlier
+command): inside the database first, then in `.env`, then `docker compose up -d --wait` (the
+README's "Rotating secrets" table has the exact commands, which keep the new value off the command
+line). Changing `.env` alone does not rotate it: the database creates the root user only on its
+first start, so the healthcheck would then fail to sign in and the stack would not come up. On a
+host where only you and the Docker daemon's account log in, rotating it is optional.
+
 ### The object storage service
 
 The bundled Docker stack runs an S3-compatible storage service for the document store. Three
@@ -1117,10 +1733,12 @@ down and covered by the deployment drill rather than by a unit test:
 
 - **It publishes no port and sits on the internal network.** Its S3 API authenticates with a
   static key pair and has none of the application's rate limiting, CSRF handling or session
-  management in front of it, so the app container is the only thing that can reach it. Do not
+  management in front of it, so only the containers on the internal data network can reach it, and of those only the app
+  holds its key pair. Do not
   publish it "for tooling"; use `docker compose exec` instead.
 - **Its image is pinned by digest.** It is the one image in the stack this repository does not
-  build, and a tag is a mutable pointer.
+  build, and a tag is a mutable pointer (the base images the others are built from are pinned the
+  same way).
 - **Its bucket credentials rotate as a pair.** Measured against the pinned engine: changing
   the secret alone makes the service exit 1 and refuse to start rather than adopt the new
   value, which under a restart policy is a crash loop. Change the access key id and the secret
@@ -1131,3 +1749,21 @@ The service holds nothing but ciphertext: documents are sealed in the browser un
 server never sees, so it holds no filename, no MIME type, no tag, no note and no content. That
 is what makes it safe for it to be a separate service at all — but it is also why its volume,
 and only its volume, holds your users' files. See the backup boundary above.
+
+**It runs as root inside its container: an accepted residual.** The engine's image declares no
+user, so in the default stack its process runs as root inside its container. That is bounded. The
+test suite holds these parts of the bound: it sits on the internal network only, with no published
+port; every capability is dropped and `no-new-privileges` is set; and it has a read-only root
+filesystem. The remaining part is the document store's design rather than the stack's: it holds
+nothing but ciphertext, sealed in the browser. Within the internal network it can still connect to the
+database and the application like any process there, so a compromise of it is a foothold on that
+network; using its root on the host would take a container-runtime escape, and where Docker runs
+rootless, the container's root is an unprivileged account on the host. It is not closed by
+default because the volumes an existing deployment's engine wrote are owned by root, and an engine
+started as another user on them refuses to start (a crash loop under the restart policy; measured
+against the pinned image). An operator who wants it closed can switch to the optional non-root
+image, `docker/garage.Dockerfile` (the same pinned image plus a numeric non-root user), with a
+one-shot that first hands both volumes to that user; the compose wiring for both is shipped
+commented out in `docker-compose.yml`, with the instructions, and was validated against a fresh
+volume and against one the stock image had filled. Going back to the stock image needs the volumes
+handed back to root first; the same comment gives that command.

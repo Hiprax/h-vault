@@ -14,6 +14,14 @@ import { createAuditLog } from '../services/auditService.js';
 import { cascadeDeleteUser } from '../utils/cascadeDelete.js';
 import { supportsTransactions } from '../utils/transactionSupport.js';
 import { revokeTrustedDevices } from '../utils/trustedDevices.js';
+import { revokeDeviceProofs } from '../utils/deviceProofs.js';
+import { revokeTwoFactorChallenges } from '../utils/twoFactorChallenge.js';
+import { notifySecurityEventLater } from '../utils/securityNotifications.js';
+import {
+  publicBackupSettings,
+  publicRecipients,
+  suspendThirdPartyRecipients,
+} from '../utils/backupRecipients.js';
 import {
   StaleVaultKeyError,
   acquireVaultRotationLock,
@@ -22,16 +30,26 @@ import {
   sendStaleVaultKey,
   assertVaultNotRotating,
   getRequestContext,
+  assertMasterPasswordProof,
   getUserId,
   vaultKeyVersionFilter,
   vaultKeyVersionOf,
 } from '../utils/controllerHelpers.js';
+import { canInvite } from '../utils/invitations.js';
+import { vaultQuotaBytes } from '../utils/vaultQuota.js';
 import { readStringCookie } from '../utils/cookies.js';
+import { lockoutClearUpdate } from '../utils/lockout.js';
+import {
+  verifySecondFactor,
+  withSecondFactorCas,
+  type SecondFactorVerdict,
+} from '../utils/secondFactor.js';
 import { cryptoManager } from '../utils/cryptoManager.js';
 import { config, isProduction, twoFactorEncryptionKey } from '../config/index.js';
 import { REFRESH_COOKIE_NAME } from '../constants/index.js';
 import {
   APP_NAME,
+  ERROR_CODES,
   BACKUP_CODES_COUNT,
   MAX_SESSIONS,
   MAX_TRUSTED_DEVICES,
@@ -44,8 +62,13 @@ import {
   LOCK_ON_HIDDEN_DEFAULT,
   LOCK_ON_HIDDEN_DELAY_MINUTES,
   SHOW_RELEASE_NOTES_DEFAULT,
+  SECURITY_NOTIFICATION_PREFERENCE_EVENTS,
+  CRITICAL_SECURITY_NOTIFICATION_EVENTS,
 } from '@hvault/shared';
 import type {
+  SecurityNotificationPreferenceEvent,
+  SecurityNotificationPreferences,
+  UpdateNotificationPreferencesInput,
   UpdateSettingsInput,
   ChangePasswordInput,
   AuditLogQueryInput,
@@ -95,7 +118,40 @@ function withSettingsDefaults<T extends IUserSettings>(settings: T): T {
     showReleaseNotes: raw.showReleaseNotes ?? SHOW_RELEASE_NOTES_DEFAULT,
     defaultPasswordLength: clampLength(raw.defaultPasswordLength),
     defaultPasswordOptions: normalisePasswordGenOptions(raw.defaultPasswordOptions),
+    notifications: notificationPreferences(raw.notifications),
   };
+}
+
+/**
+ * Every security email an owner may choose (F-26), as stored: only an explicit
+ * `false` is off, so an event added after the account was created is on.
+ */
+function notificationPreferences(
+  stored: Partial<Record<SecurityNotificationPreferenceEvent, boolean>> | undefined,
+): SecurityNotificationPreferences {
+  return Object.fromEntries(
+    SECURITY_NOTIFICATION_PREFERENCE_EVENTS.map((event) => [event, stored?.[event] !== false]),
+  ) as SecurityNotificationPreferences;
+}
+
+const CRITICAL_EVENTS: readonly SecurityNotificationPreferenceEvent[] =
+  CRITICAL_SECURITY_NOTIFICATION_EVENTS;
+
+/** The events a partial preference map names, with the value it gives each. */
+function notificationChanges(
+  notifications: Partial<Record<SecurityNotificationPreferenceEvent, boolean | undefined>>,
+): [SecurityNotificationPreferenceEvent, boolean][] {
+  return (Object.entries(notifications) as [SecurityNotificationPreferenceEvent, unknown][]).filter(
+    (entry): entry is [SecurityNotificationPreferenceEvent, boolean] =>
+      typeof entry[1] === 'boolean',
+  );
+}
+
+/** The `$set` fields that store those changes, one path per event. */
+function notificationFields(
+  changes: readonly [SecurityNotificationPreferenceEvent, boolean][],
+): Record<string, boolean> {
+  return Object.fromEntries(changes.map(([event, on]) => [`settings.notifications.${event}`, on]));
 }
 
 /** A stored length, repaired into the range the generator can actually use. */
@@ -201,11 +257,23 @@ export const getProfile = catchAsync(async (req: Request, res: Response): Promis
     //
     // The `select: false` fields (`authHash`, `twoFactorSecret`,
     // `pendingTwoFactorSecret`, `pendingTwoFactorExpiry`, `backupCodes`,
-    // `lockoutEpisodeId`, `lockoutNotifiedAt`) are absent from the `.lean()` read
-    // above and none of them is added back here. The last two matter most to this
-    // list: the read is an unprojected `.lean()` spread, so `select: false` is the
-    // ONLY thing keeping the unlock-link identity off the wire, and an enumeration
-    // that fell behind the model is how somebody concludes it is safe to drop.
+    // `lockoutEpisodeId`, `lockoutNotifiedAt`, `secondFactorLockout`) are absent
+    // from the `.lean()` read above and none of them is added back here. The last
+    // three matter most to this list: the read is an unprojected `.lean()` spread,
+    // so `select: false` is the ONLY thing keeping the unlock-link identities off
+    // the wire, and an enumeration that fell behind the model is how somebody
+    // concludes it is safe to drop.
+    // Whether Settings should offer to mint an invitation: the server registers by
+    // invitation AND this account is one of the operator's listed inviters. A
+    // convenience for the UI only; `POST /auth/invitations` decides it again.
+    canInvite: canInvite(user.email),
+    // The vault byte quota: what this account's items and folders occupy (trash
+    // included, since a trashed row stays stored until it is purged) and the
+    // ceiling a growing write is refused at. `null` until the counter is installed,
+    // which the first counted write or the hourly recount does; the client then
+    // shows no usage rather than a zero it cannot vouch for.
+    vaultBytes: typeof user.vaultBytes === 'number' ? user.vaultBytes : null,
+    vaultQuotaBytes: vaultQuotaBytes(),
     ...(interruptedRotation
       ? {
           pendingEncryptedVaultKey: user.pendingEncryptedVaultKey,
@@ -218,7 +286,11 @@ export const getProfile = catchAsync(async (req: Request, res: Response): Promis
       backup: {
         enabled: backupSettings.enabled,
         scheduleHour: backupSettings.scheduleHour,
-        backupEmails: backupSettings.backupEmails,
+        // Deprecated and always empty (the response schema keeps the property, so
+        // an older client reading it finds an empty list rather than a missing one).
+        // The recipients, and whether each has confirmed, are `backupRecipients`.
+        backupEmails: [],
+        backupRecipients: publicRecipients(backupSettings.backupRecipients),
         lastBackupAt: backupSettings.lastBackupAt,
         lastBackupStatus: backupSettings.lastBackupStatus,
         isConfigured,
@@ -272,6 +344,20 @@ export const updateSettings = catchAsync(async (req: Request, res: Response): Pr
   if (body.showReleaseNotes !== undefined) {
     setFields['settings.showReleaseNotes'] = body.showReleaseNotes;
   }
+  if (body.notifications !== undefined) {
+    // This route proves no password, so it may not silence the notices that exist
+    // to tell the owner about a stolen password or session (F-26): turning one of
+    // those off is refused, whatever is stored, and NOTHING in the request is
+    // written. Turning one back on, and either way for the others, is fine.
+    const changes = notificationChanges(body.notifications);
+    const critical = changes.some(([event, on]) => !on && CRITICAL_EVENTS.includes(event));
+    if (critical) {
+      throw httpErrors.badRequest(
+        'Turning off this security email needs your master password: use PUT /api/v1/user/notifications.',
+      );
+    }
+    Object.assign(setFields, notificationFields(changes));
+  }
 
   if (Object.keys(setFields).length === 0) {
     throw httpErrors.badRequest('No settings provided to update');
@@ -307,9 +393,79 @@ export const updateSettings = catchAsync(async (req: Request, res: Response): Pr
     // Normalised for the same reason as `getProfile`: a settings write that
     // touched only `theme` still returns the whole subdocument, which for an
     // older account is missing every field added since it was created.
-    data: withSettingsDefaults(user.settings),
+    data: {
+      ...withSettingsDefaults(user.settings),
+      // The stored backup subdocument, with its recipient list rebuilt field by
+      // field so no entry's confirmation nonce can reach the wire.
+      backup: publicBackupSettings(user.settings.backup),
+    },
   });
 });
+
+/**
+ * `PUT /user/notifications`: which security emails the owner receives (F-26), with
+ * the master-password proof, which is what turning a CRITICAL one off requires
+ * (`CRITICAL_SECURITY_NOTIFICATION_EVENTS`). On `passwordVerifyLimiter`, the budget
+ * every proof shares.
+ *
+ * The write is conditioned on the stored credential the proof was checked against,
+ * so a proof of a password that has since been reset or changed cannot land after
+ * the change (401). Turning critical notices off mails the owner, unconditionally,
+ * saying which: whoever silenced them held the master password, and the owner must
+ * not lose the trail without being told once.
+ */
+export const updateNotificationPreferences = catchAsync(
+  async (req: Request, res: Response): Promise<void> => {
+    const userId = getUserId(req);
+    const body = req.body as UpdateNotificationPreferencesInput;
+    const changes = notificationChanges(body.notifications);
+    if (changes.length === 0) {
+      throw httpErrors.badRequest('No notification preferences provided to update');
+    }
+
+    const user = await User.findById(userId).select('+authHash').lean();
+    if (!user) {
+      throw httpErrors.notFound('User not found');
+    }
+    await assertMasterPasswordProof(req, user, body.authHash, 'notifications');
+    const before = notificationPreferences(user.settings.notifications);
+
+    const updated = await User.findOneAndUpdate(
+      { _id: userId, authHash: user.authHash },
+      { $set: notificationFields(changes) },
+      { returnDocument: 'after', runValidators: true },
+    )
+      .select('settings.notifications')
+      .lean();
+    if (!updated) {
+      // The password changed between the proof and the write.
+      throw httpErrors.unauthorized('Current password is incorrect');
+    }
+
+    const ctx = getRequestContext(req);
+    await createAuditLog(
+      userId,
+      'settings_update',
+      { changedKeys: changes.map(([event]) => `notifications.${event}`) },
+      ctx.ip,
+      ctx.userAgent,
+    );
+    const silenced = changes
+      .filter(([event, on]) => !on && before[event] && CRITICAL_EVENTS.includes(event))
+      .map(([event]) => event);
+    if (silenced.length > 0) {
+      notifySecurityEventLater(userId, 'security_notices_turned_off', {
+        ip: ctx.ip,
+        events: silenced,
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      data: { notifications: notificationPreferences(updated.settings.notifications) },
+    });
+  },
+);
 
 /**
  * Thrown inside the transactional branch of {@link changePassword} to ABORT it
@@ -467,6 +623,8 @@ export const changePassword = catchAsync(async (req: Request, res: Response): Pr
   let guardedVaultKeyVersion = 0;
   let staleVaultKey: StaleVaultKeyError | null = null;
   let interruptedRotationNotCarried = false;
+  // How many third-party backup recipients this change suspended, once committed.
+  let suspendedRecipients = 0;
 
   /**
    * The interrupted rotation's key, re-wrapped by the client under the new MEK —
@@ -576,6 +734,16 @@ export const changePassword = catchAsync(async (req: Request, res: Response): Pr
           // (§1.5 site 2). Runs in the same transaction so it commits atomically
           // with the password update.
           await revokeTrustedDevices(userId, session);
+          // Every device proof goes with them: a new master password is a new
+          // footing, and a proof exempts its browser from the password lockout.
+          await revokeDeviceProofs(userId, { session });
+          // And every sign-in still waiting for its second factor, each granted by
+          // a proof of the password this change replaces.
+          await revokeTwoFactorChallenges(userId, { session });
+          // A new master password is a change of footing: every third-party backup
+          // recipient is suspended (its mailed links die) until the owner approves
+          // the list again. In the transaction, so it commits with the password.
+          suspendedRecipients = await suspendThirdPartyRecipients(userId, session);
           const result = await User.updateOne(vaultKeyWriteFilter, vaultKeyWrite, { session });
           if (result.matchedCount === 0) {
             throw new SupersededVaultKeyWrite();
@@ -584,6 +752,8 @@ export const changePassword = catchAsync(async (req: Request, res: Response): Pr
       } catch (error) {
         if (!(error instanceof SupersededVaultKeyWrite)) throw error;
         supersededMidWrite = true;
+        // Aborted: the suspension was rolled back with everything else.
+        suspendedRecipients = 0;
       } finally {
         await session.endSession();
       }
@@ -596,6 +766,10 @@ export const changePassword = catchAsync(async (req: Request, res: Response): Pr
       // Same revocation as the transactional branch (§1.5 site 2): drop trusted
       // devices so none skips 2FA under the new password.
       await revokeTrustedDevices(userId);
+      await revokeDeviceProofs(userId);
+      await revokeTwoFactorChallenges(userId);
+      // Suspended BEFORE the write too, the same fail-safe order as the revocations.
+      suspendedRecipients = await suspendThirdPartyRecipients(userId);
       // A conditional `updateOne` rather than the `user.save()` this branch used
       // to perform, because a hydrated save cannot carry a filter — it writes the
       // document it holds, which is exactly how a superseded wrapper used to land.
@@ -607,6 +781,14 @@ export const changePassword = catchAsync(async (req: Request, res: Response): Pr
       // and `authHash` stores a 60-character bcrypt digest.
       const result = await User.updateOne(vaultKeyWriteFilter, vaultKeyWrite);
       supersededMidWrite = result.matchedCount === 0;
+      // Once more after the new credential is stored: a recipient-list update
+      // proving the OLD password could have landed between the first suspension
+      // and this write (its own write is conditioned on the credential it proved,
+      // so none can land after it). The transactional branch needs no second pass:
+      // the list update's write cannot interleave with the transaction's.
+      if (!supersededMidWrite) {
+        suspendedRecipients += await suspendThirdPartyRecipients(userId);
+      }
     }
   } catch (error) {
     // Caught NARROWLY, by type. A blanket catch here would turn any failure in
@@ -625,6 +807,22 @@ export const changePassword = catchAsync(async (req: Request, res: Response): Pr
     // next request the moment this one lands must not race the release round trip
     // and be refused by a span that has already finished.
     await releaseVaultRotationLock(userId, rotationLockId);
+  }
+
+  if (suspendedRecipients > 0) {
+    const suspendCtx = getRequestContext(req);
+    await createAuditLog(
+      userId,
+      'backup_recipients_suspended',
+      { count: suspendedRecipients, reason: 'password_change' },
+      suspendCtx.ip,
+      suspendCtx.userAgent,
+    );
+    notifySecurityEventLater(userId, 'backup_recipients_suspended', {
+      ip: suspendCtx.ip,
+      count: suspendedRecipients,
+      reason: 'password_change',
+    });
   }
 
   if (interruptedRotationNotCarried) {
@@ -663,6 +861,7 @@ export const changePassword = catchAsync(async (req: Request, res: Response): Pr
 
   const pwCtx = getRequestContext(req);
   await createAuditLog(userId, 'password_change', undefined, pwCtx.ip, pwCtx.userAgent);
+  notifySecurityEventLater(userId, 'password_changed', { ip: pwCtx.ip });
 
   logger.info('Password changed', { userId });
 
@@ -671,6 +870,19 @@ export const changePassword = catchAsync(async (req: Request, res: Response): Pr
     message: 'Password changed successfully. Please log in again.',
   });
 });
+
+/**
+ * Renders a session-level verifier refusal. A locked second factor is a 403
+ * `ACCOUNT_LOCKED`: the caller already proved the master password on this very
+ * request, so naming the lock tells them nothing about the code. A wrong code
+ * keeps the answer every session site has always given. Never returns.
+ */
+function throwSecondFactorRefusal(verdict: Extract<SecondFactorVerdict, { ok: false }>): never {
+  if (verdict.reason === 'locked') {
+    throw httpErrors.forbidden(ERROR_CODES.ACCOUNT_LOCKED);
+  }
+  throw httpErrors.badRequest('Invalid verification code');
+}
 
 export const setup2fa = catchAsync(async (req: Request, res: Response): Promise<void> => {
   const userId = getUserId(req);
@@ -764,27 +976,16 @@ export const verify2fa = catchAsync(async (req: Request, res: Response): Promise
     throw httpErrors.badRequest('2FA setup has expired. Please start the setup process again.');
   }
 
-  // Decrypt the pending secret stored server-side
-  const secret = cryptoManager.decryptTextSync(user.pendingTwoFactorSecret, twoFactorEncryptionKey);
-
-  const totp = new TOTP({
-    algorithm: 'SHA1',
-    digits: 6,
-    period: 30,
-    secret: Secret.fromBase32(secret),
+  // The ONE verifier, at its enrolment site: it checks the PENDING secret, and
+  // it neither counts a wrong code nor refuses on a recorded lockout. The pending
+  // secret is known to whoever called `setup2fa` with the master password moments
+  // ago, so a wrong code here guesses nothing, and counting it would lock out a
+  // user who mistypes while enrolling.
+  const verdict = await verifySecondFactor(user, code, {
+    site: 'verify2fa',
+    acceptBackupCodes: false,
   });
-  // window: 1 allows ±1 time step (±30s) to tolerate minor clock drift
-  const delta = totp.validate({ token: code, window: 1 });
-
-  if (delta === null) {
-    throw httpErrors.badRequest('Invalid verification code');
-  }
-
-  // TOTP replay protection: reject codes that have already been used.
-  // The delta from validate() tells us which time step the code belongs to.
-  // We store the time step and reject codes at or before the stored timestamp.
-  const totpTimeStep = Math.floor(Date.now() / 1000 / 30) + delta;
-  if (user.lastTotpTimestamp != null && totpTimeStep <= user.lastTotpTimestamp) {
+  if (!verdict.ok) {
     throw httpErrors.badRequest('Invalid verification code');
   }
 
@@ -811,36 +1012,32 @@ export const verify2fa = catchAsync(async (req: Request, res: Response): Promise
   // 2FA. If two requests race here (e.g. same user, two tabs), exactly one wins
   // the compare-and-set and commits a single set of backup codes. The loser
   // gets null back and returns 409, so the returned backup codes in the
-  // successful response are the ones actually persisted. The filter conditions
-  // on both `twoFactorEnabled: false` AND that this TOTP time step strictly
-  // advances `lastTotpTimestamp`, folding the replay guard into the same atomic
-  // compare-and-set (the earlier read-check is a non-atomic read-then-write that
-  // a same-time-step race could slip past) — a replayed/raced code matches 0
-  // docs and is rejected below.
-  const updated = await User.findOneAndUpdate(
-    {
-      _id: userId,
-      twoFactorEnabled: false,
-      $or: [
-        { lastTotpTimestamp: { $exists: false } },
-        { lastTotpTimestamp: null },
-        { lastTotpTimestamp: { $lt: totpTimeStep } },
-      ],
-    },
+  // successful response are the ones actually persisted. The verifier's fragment
+  // is merged INTO this one write rather than applied beside it: it conditions
+  // the write on the step being unspent (and on the pending secret still being
+  // the one the code was checked against) and records the step, so enabling and
+  // consuming the code stay one atomic statement. The new factor starts with a
+  // clean brake: any second-factor state left from a previous enrolment belonged
+  // to a secret that no longer exists.
+  const cas = withSecondFactorCas(
+    { _id: userId, twoFactorEnabled: false },
     {
       $set: {
         twoFactorSecret: encryptedSecret,
         backupCodes: hashedBackupCodes,
         twoFactorEnabled: true,
-        lastTotpTimestamp: totpTimeStep,
       },
       $unset: {
         pendingTwoFactorSecret: 1,
         pendingTwoFactorExpiry: 1,
+        ...lockoutClearUpdate('second_factor').$unset,
       },
     },
-    { returnDocument: 'after' },
+    verdict,
   );
+  const updated = await User.findOneAndUpdate(cas.filter, cas.update, {
+    returnDocument: 'after',
+  });
 
   if (!updated) {
     throw httpErrors.conflict('Two-factor authentication is already enabled');
@@ -855,6 +1052,7 @@ export const verify2fa = catchAsync(async (req: Request, res: Response): Promise
 
   const enable2faCtx = getRequestContext(req);
   await createAuditLog(userId, '2fa_enable', undefined, enable2faCtx.ip, enable2faCtx.userAgent);
+  notifySecurityEventLater(userId, 'two_factor_enabled', { ip: enable2faCtx.ip });
 
   logger.info('2FA enabled', { userId });
 
@@ -895,31 +1093,17 @@ export const disable2fa = catchAsync(async (req: Request, res: Response): Promis
     throw httpErrors.badRequest('Two-factor authentication is not enabled');
   }
 
-  // Decrypt the stored secret
-  const decryptedSecret = cryptoManager.decryptTextSync(
-    user.twoFactorSecret,
-    twoFactorEncryptionKey,
-  );
-  const totp = new TOTP({
-    algorithm: 'SHA1',
-    digits: 6,
-    period: 30,
-    secret: Secret.fromBase32(decryptedSecret),
+  // Through the ONE verifier: a wrong code counts on the second factor's own
+  // brake (this site used to count nothing, so a session holder who knew the
+  // password could guess codes here for free), a locked factor is refused
+  // without reading the code, and a right code comes back as a compare-and-set
+  // merged into the disabling write below, so the step is consumed by the same
+  // statement that removes the factor.
+  const verdict = await verifySecondFactor(user, code, {
+    site: 'disable2fa',
+    acceptBackupCodes: false,
   });
-  // window: 1 allows ±1 time step (±30s) to tolerate minor clock drift
-  const delta = totp.validate({ token: code, window: 1 });
-
-  if (delta === null) {
-    throw httpErrors.badRequest('Invalid verification code');
-  }
-
-  // TOTP replay protection: reject codes that have already been used.
-  // The delta from validate() tells us which time step the code belongs to.
-  // We store the time step and reject codes at or before the stored timestamp.
-  const currentTimeStep = Math.floor(Date.now() / 1000 / 30) + delta;
-  if (user.lastTotpTimestamp != null && currentTimeStep <= user.lastTotpTimestamp) {
-    throw httpErrors.badRequest('Invalid verification code');
-  }
+  if (!verdict.ok) throwSecondFactorRefusal(verdict);
 
   // Disabling 2FA is a downgrade in account security. Every refresh token
   // issued under the 2FA-enabled regime must be revoked so those sessions
@@ -950,13 +1134,28 @@ export const disable2fa = catchAsync(async (req: Request, res: Response): Promis
     revokeFilter.tokenHash = { $ne: hashToken(currentToken) };
   }
 
-  // Use findByIdAndUpdate to reliably unset fields. The user document was
-  // fetched with .select('+authHash +twoFactorSecret +backupCodes') which
-  // may not persist $unset correctly via user.save() on partially-selected docs.
-  await User.findByIdAndUpdate(userId, {
-    $set: { twoFactorEnabled: false },
-    $unset: { twoFactorSecret: 1, backupCodes: 1, lastTotpTimestamp: 1 },
-  });
+  // One conditional write: the factor is removed only if the code's step is
+  // still unspent AND the secret is still the one the code was checked against. A
+  // write that matches nothing means a concurrent request spent the same code
+  // (or replaced the factor) first; nothing is written and the code is refused.
+  // The factor's own lockout state goes with it.
+  const cas = withSecondFactorCas(
+    { _id: userId },
+    {
+      $set: { twoFactorEnabled: false },
+      $unset: {
+        twoFactorSecret: 1,
+        backupCodes: 1,
+        lastTotpTimestamp: 1,
+        ...lockoutClearUpdate('second_factor').$unset,
+      },
+    },
+    verdict,
+  );
+  const disabled = await User.findOneAndUpdate(cas.filter, cas.update);
+  if (!disabled) {
+    throw httpErrors.badRequest('Invalid verification code');
+  }
 
   await RefreshToken.deleteMany(revokeFilter);
 
@@ -968,6 +1167,7 @@ export const disable2fa = catchAsync(async (req: Request, res: Response): Promis
 
   const disable2faCtx = getRequestContext(req);
   await createAuditLog(userId, '2fa_disable', undefined, disable2faCtx.ip, disable2faCtx.userAgent);
+  notifySecurityEventLater(userId, 'two_factor_disabled', { ip: disable2faCtx.ip });
 
   logger.info('2FA disabled', { userId });
 
@@ -1006,34 +1206,20 @@ export const regenerateBackupCodes = catchAsync(
       throw httpErrors.unauthorized('Current password is incorrect');
     }
 
-    // Require 2FA code when 2FA is enabled
-    let totpTimeStep: number | undefined;
+    // Require 2FA code when 2FA is enabled, checked by the ONE verifier: a wrong
+    // code counts on the second factor's brake, a locked factor is refused, and a
+    // right one is consumed by the same write that stores the new codes.
+    let verdict: Extract<SecondFactorVerdict, { ok: true }> | undefined;
     if (user.twoFactorSecret) {
       if (!code) {
         throw httpErrors.badRequest('Two-factor authentication code is required');
       }
-      const decryptedSecret = cryptoManager.decryptTextSync(
-        user.twoFactorSecret,
-        twoFactorEncryptionKey,
-      );
-      const totp = new TOTP({
-        algorithm: 'SHA1',
-        digits: 6,
-        period: 30,
-        secret: Secret.fromBase32(decryptedSecret),
+      const checked = await verifySecondFactor(user, code, {
+        site: 'regenerateBackupCodes',
+        acceptBackupCodes: false,
       });
-      const delta = totp.validate({ token: code, window: 1 });
-      if (delta === null) {
-        throw httpErrors.badRequest('Invalid verification code');
-      }
-
-      // TOTP replay protection: reject codes that have already been used.
-      // The delta from validate() tells us which time step the code belongs to.
-      // We store the time step and reject codes at or before the stored timestamp.
-      totpTimeStep = Math.floor(Date.now() / 1000 / 30) + delta;
-      if (user.lastTotpTimestamp != null && totpTimeStep <= user.lastTotpTimestamp) {
-        throw httpErrors.badRequest('Invalid verification code');
-      }
+      if (!checked.ok) throwSecondFactorRefusal(checked);
+      verdict = checked;
     }
 
     // Generate new backup codes (old ones are completely replaced)
@@ -1061,19 +1247,13 @@ export const regenerateBackupCodes = catchAsync(
     // regenerations must not each publish a distinct backup-code set (the returned
     // codes must equal the ones persisted). The earlier read-check is non-atomic
     // and a same-time-step race can slip past.
-    if (totpTimeStep !== undefined) {
-      const updated = await User.findOneAndUpdate(
-        {
-          _id: userId,
-          twoFactorEnabled: true,
-          $or: [
-            { lastTotpTimestamp: { $exists: false } },
-            { lastTotpTimestamp: null },
-            { lastTotpTimestamp: { $lt: totpTimeStep } },
-          ],
-        },
-        { $set: { backupCodes: hashedBackupCodes, lastTotpTimestamp: totpTimeStep } },
+    if (verdict !== undefined) {
+      const cas = withSecondFactorCas(
+        { _id: userId, twoFactorEnabled: true },
+        { $set: { backupCodes: hashedBackupCodes } },
+        verdict,
       );
+      const updated = await User.findOneAndUpdate(cas.filter, cas.update);
       if (!updated) {
         throw httpErrors.badRequest('Invalid verification code');
       }
@@ -1102,6 +1282,7 @@ export const regenerateBackupCodes = catchAsync(
       regenCtx.ip,
       regenCtx.userAgent,
     );
+    notifySecurityEventLater(userId, 'backup_codes_regenerated', { ip: regenCtx.ip });
 
     logger.info('Backup codes regenerated', { userId });
 
@@ -1285,9 +1466,13 @@ export const getAuditLog = catchAsync(async (req: Request, res: Response): Promi
     // tick and an import writes N audit rows from one `Date.now()`, so ties are
     // the normal case rather than a curiosity — and a row that moves across a
     // page boundary between two requests is one the reader either sees twice or
-    // never sees at all. The reasoning, and why the index is deliberately left
-    // alone rather than extended with `_id`, is written out at
-    // `documentController.sendDocumentPage` and `vaultController`'s own sort.
+    // never sees at all (see `documentController.sendDocumentPage`).
+    //
+    // Unlike the item and document lists, whose rows a per-account cap bounds,
+    // this sort IS index-served: `models/AuditLog.ts` carries `_id` at the end of
+    // both `{userId, timestamp}` and `{userId, action, timestamp}` (migration v2
+    // dropped the pair without it), so a page walks the index rather than
+    // sorting every row the account has in memory.
     AuditLog.find(filter)
       .select('-userId')
       .sort({ timestamp: -1, _id: -1 })
@@ -1337,44 +1522,58 @@ export const deleteAccount = catchAsync(async (req: Request, res: Response): Pro
     throw httpErrors.unauthorized('Current password is incorrect');
   }
 
-  // Require 2FA code when 2FA is enabled
+  // Require 2FA code when 2FA is enabled, checked by the ONE verifier: a wrong
+  // code counts on the second factor's brake (this site used to count nothing),
+  // a locked factor is refused, and a right one is consumed by the same write
+  // that marks the account for deletion.
+  let verdict: Extract<SecondFactorVerdict, { ok: true }> | undefined;
   if (user.twoFactorEnabled && user.twoFactorSecret) {
     if (!code) {
       throw httpErrors.badRequest('Two-factor authentication code is required');
     }
-    const decryptedSecret = cryptoManager.decryptTextSync(
-      user.twoFactorSecret,
-      twoFactorEncryptionKey,
-    );
-    const totp = new TOTP({
-      algorithm: 'SHA1',
-      digits: 6,
-      period: 30,
-      secret: Secret.fromBase32(decryptedSecret),
+    const checked = await verifySecondFactor(user, code, {
+      site: 'deleteAccount',
+      acceptBackupCodes: false,
     });
-    const delta = totp.validate({ token: code, window: 1 });
-    if (delta === null) {
-      throw httpErrors.badRequest('Invalid verification code');
-    }
-
-    // TOTP replay protection: reject codes that have already been used.
-    // The delta from validate() tells us which time step the code belongs to.
-    // We store the time step and reject codes at or before the stored timestamp.
-    // Since the account is being deleted, we don't need to update lastTotpTimestamp.
-    const currentTimeStep = Math.floor(Date.now() / 1000 / 30) + delta;
-    if (user.lastTotpTimestamp != null && currentTimeStep <= user.lastTotpTimestamp) {
-      throw httpErrors.badRequest('Invalid verification code');
-    }
+    if (!checked.ok) throwSecondFactorRefusal(checked);
+    verdict = checked;
   }
 
   // Phase 1: Mark user as pending deletion. If any subsequent step fails,
-  // a background cleanup job can detect and complete the deletion.
-  await User.updateOne({ _id: userId }, { $set: { deletionPending: true } });
+  // a background cleanup job can detect and complete the deletion. When a code
+  // was verified, the mark is conditional on its step being unspent, so the same
+  // code cannot be spent twice. And it is conditional on no deletion being under
+  // way: of two requests that passed every check above at once (a double submit),
+  // exactly one marks the account, erases it and sends the deletion email.
+  const notYetPending = { _id: userId, deletionPending: { $ne: true } };
+  const pending =
+    verdict === undefined
+      ? { filter: notYetPending, update: { $set: { deletionPending: true } } }
+      : withSecondFactorCas(notYetPending, { $set: { deletionPending: true } }, verdict);
+  const marked = await User.updateOne(pending.filter, pending.update);
+  if (marked.matchedCount === 0) {
+    // Nothing matched because another deletion got there first (its mark is set, or
+    // its erasure has already removed the row), or, with two-factor, because the
+    // code's step was spent or the factor changed since it was checked.
+    if (!(await User.exists({ _id: userId, deletionPending: { $ne: true } }).read('primary'))) {
+      throw httpErrors.conflict('Account deletion is already in progress.');
+    }
+    throw httpErrors.badRequest('Invalid verification code');
+  }
+
+  // The owner is told now, from what was read BEFORE the erasure: the cascade is
+  // about to delete the row the address lives on. Requested is what the mail says,
+  // so it goes even if the cascade below has to be finished by the cleanup job. It
+  // is not a preference: an account being erased has no settings left to honour.
+  const deleteCtx = getRequestContext(req);
+  notifySecurityEventLater(userId, 'account_deletion_requested', {
+    ip: deleteCtx.ip,
+    snapshot: { email: user.email, emailVerified: user.emailVerified },
+  });
 
   // Phase 2: Cascade delete all associated data. Uses a MongoDB transaction
   // when the topology supports it (replica set), otherwise falls back to
   // sequential deletes with retry via deletionPending flag.
-  const deleteCtx = getRequestContext(req);
   const deleted = await cascadeDeleteUser({
     userId,
     userEmail: user.email,

@@ -75,7 +75,6 @@ vi.mock('../src/services/crypto/cryptoService', () => ({
     deriveKeys: vi.fn(),
     encryptData: vi.fn(),
     decryptData: vi.fn(),
-    generateSearchHash: vi.fn(),
     clearCryptoKey: vi.fn().mockResolvedValue(undefined),
   },
 }));
@@ -251,6 +250,7 @@ function auditOk(
     userAgent: string;
     timestamp: string;
     metadata?: Record<string, unknown>;
+    count?: number;
   }[],
   totalPages = 1,
 ) {
@@ -656,6 +656,65 @@ describe('AuditLogPage - row rendering', () => {
     expect(within(rows[2]!).queryByText(/left$/)).toBeNull();
   });
 
+  it('shows the attempt count of a coalesced row, and nothing for a single event', async () => {
+    // F-03: sign-in attempts made during a password lockout are recorded one row
+    // per minute with a count, so a flood does not bury the page. "Failed Login"
+    // alone would hide that the row was many attempts; a row with count 1, or a
+    // row written before the field existed, is one event and shows no count.
+    mockGetAuditLogApi.mockResolvedValue(
+      auditOk([
+        {
+          _id: 'c1',
+          action: 'login_failed',
+          ipAddress: '198.51.100.7',
+          userAgent: 'curl/8',
+          timestamp: '2025-06-01T12:00:00.000Z',
+          metadata: { reason: 'locked' },
+          count: 37,
+        },
+        {
+          _id: 'c2',
+          action: 'login_failed',
+          ipAddress: '198.51.100.7',
+          userAgent: 'curl/8',
+          timestamp: '2025-06-01T12:01:00.000Z',
+          metadata: { reason: 'invalid_password' },
+          count: 1,
+        },
+        {
+          _id: 'c3',
+          action: 'device_proof_revoked',
+          ipAddress: '10.0.0.4',
+          userAgent: 'Chrome/120',
+          timestamp: '2025-06-01T12:02:00.000Z',
+          metadata: { reason: 'failure_budget' },
+        },
+        {
+          // A count that is not a number is no count: the response is not
+          // schema-validated here, and a string compares as a number.
+          _id: 'c4',
+          action: 'login_failed',
+          ipAddress: '198.51.100.7',
+          userAgent: 'curl/8',
+          timestamp: '2025-06-01T12:03:00.000Z',
+          metadata: { reason: 'locked' },
+          count: '5' as unknown as number,
+        },
+      ]),
+    );
+
+    renderPage(<AuditLogPage />);
+
+    const table = await screen.findByRole('table');
+    const rows = within(table).getAllByRole('row').slice(1);
+    expect(rows).toHaveLength(4);
+    expect(within(rows[0]!).getByText('× 37')).toBeInTheDocument();
+    expect(within(rows[1]!).queryByText(/^×/)).toBeNull();
+    expect(within(rows[2]!).getByText('Sign-in Proof Revoked')).toBeInTheDocument();
+    expect(within(rows[2]!).queryByText(/^×/)).toBeNull();
+    expect(within(rows[3]!).queryByText(/^×/)).toBeNull();
+  });
+
   it('renders the mapped label for a known action and the raw action for an unknown one', async () => {
     mockGetAuditLogApi.mockResolvedValue(
       auditOk([
@@ -696,6 +755,33 @@ describe('AuditLogPage - row rendering', () => {
     expect(
       second.getByText(new Date('2025-06-02T08:30:00.000Z').toLocaleString()),
     ).toBeInTheDocument();
+  });
+
+  it('names a replayed refresh token a stolen session, in the row and in the filter (F-16)', async () => {
+    mockGetAuditLogApi.mockResolvedValue(
+      auditOk([
+        {
+          _id: 'r1',
+          action: 'token_reuse_detected',
+          ipAddress: '203.0.113.9',
+          userAgent: 'replayer/1.0',
+          timestamp: '2025-06-03T09:00:00.000Z',
+          metadata: { sessionsRevoked: 1, trustedDevicesRevoked: 2 },
+        },
+      ]),
+    );
+
+    renderPage(<AuditLogPage />);
+
+    const table = await screen.findByRole('table');
+    const row = within(within(table).getAllByRole('row')[1]!);
+    const badge = row.getByText('Stolen Session Detected');
+    // A compromise signal, coloured like a failed sign-in rather than the neutral fallback.
+    expect(badge.className).toContain('bg-red-100');
+    expect(row.queryByText('token_reuse_detected')).toBeNull();
+    expect(screen.getByRole('option', { name: 'Stolen Session Detected' })).toHaveValue(
+      'token_reuse_detected',
+    );
   });
 });
 
@@ -760,6 +846,23 @@ describe('VaultPage - mount fetching', () => {
     });
 
     expect(await screen.findByText('Failed to load vault items')).toBeInTheDocument();
+  });
+
+  it('says why the items could not load when the reason is passing (a refused reload)', async () => {
+    const refused = Object.assign(new Error('Request failed with status code 429'), {
+      isAxiosError: true,
+      response: { status: 429, headers: { 'retry-after': '600' }, data: { message: 'Too many' } },
+    });
+    primeVaultStore({ fetchItems: vi.fn().mockRejectedValue(refused) });
+
+    await act(async () => {
+      renderPage(<VaultPage />);
+    });
+
+    expect(await screen.findByText('Failed to load vault items')).toBeInTheDocument();
+    expect(
+      screen.getByText('Too many attempts. Please try again in 10 minutes.'),
+    ).toBeInTheDocument();
   });
 
   it('toasts when the folders fetch fails', async () => {
@@ -879,6 +982,41 @@ describe('VaultPage - create-item dialog', () => {
     expect(fetchItems.mock.calls.length).toBe(fetchesBeforeSave + 1);
   });
 
+  it('a refused re-read after a save keeps the list, raises no toast and rejects nothing unhandled', async () => {
+    // A PLAIN function, never a `vi.fn`: Vitest subscribes to every promise a
+    // mock returns, which would handle this rejection for the page. The mount
+    // load succeeds; the re-read after the save is refused.
+    let reads = 0;
+    const fetchItems = () => {
+      reads += 1;
+      return reads === 1
+        ? Promise.resolve()
+        : Promise.reject(new Error('Request failed with status code 429'));
+    };
+    primeVaultStore({ fetchItems });
+    const unhandled: unknown[] = [];
+    const listener = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', listener);
+    try {
+      await act(async () => {
+        renderPage(<VaultPage />);
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Create Item' }));
+      await act(async () => {
+        fireEvent.click(screen.getByText('Save Form'));
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    } finally {
+      process.off('unhandledRejection', listener);
+    }
+
+    expect(reads).toBe(2);
+    expect(unhandled).toEqual([]);
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.queryByText('Failed to load vault items')).not.toBeInTheDocument();
+  });
+
   it('closes on Escape without re-fetching', async () => {
     const fetchItems = vi.fn().mockResolvedValue(undefined);
     primeVaultStore({ fetchItems });
@@ -990,7 +1128,7 @@ describe('VerifyEmailPage', () => {
   it('falls back to a default success message when the API returns none', async () => {
     mockVerifyEmailApi.mockResolvedValue({ data: { success: true } });
 
-    renderPage(<VerifyEmailPage />, '/verify-email?token=t1');
+    renderPage(<VerifyEmailPage />, '/verify-email#token=t1');
 
     expect(await screen.findByText('Email Verified')).toBeInTheDocument();
     expect(screen.getByText('Email verified successfully.')).toBeInTheDocument();
@@ -1003,7 +1141,7 @@ describe('VerifyEmailPage', () => {
       response: { data: { message: 'Verification token has expired' } },
     });
 
-    renderPage(<VerifyEmailPage />, '/verify-email?token=expired');
+    renderPage(<VerifyEmailPage />, '/verify-email#token=expired');
 
     expect(await screen.findByText('Verification Failed')).toBeInTheDocument();
     expect(screen.getByText('Verification token has expired')).toBeInTheDocument();
@@ -1015,7 +1153,7 @@ describe('VerifyEmailPage', () => {
     await act(async () => {
       render(
         <StrictMode>
-          <MemoryRouter initialEntries={['/verify-email?token=t1']}>
+          <MemoryRouter initialEntries={['/verify-email#token=t1']}>
             <VerifyEmailPage />
           </MemoryRouter>
         </StrictMode>,
@@ -1031,7 +1169,7 @@ describe('UnlockAccountPage', () => {
   it('falls back to a default success message when the API returns none', async () => {
     mockUnlockAccountApi.mockResolvedValue({ data: { success: true } });
 
-    renderPage(<UnlockAccountPage />, '/unlock-account?token=t1');
+    renderPage(<UnlockAccountPage />, '/unlock-account#token=t1');
 
     expect(await screen.findByText('Account Unlocked')).toBeInTheDocument();
     expect(
@@ -1046,7 +1184,7 @@ describe('UnlockAccountPage', () => {
       response: { data: { message: 'Unlock token is invalid' } },
     });
 
-    renderPage(<UnlockAccountPage />, '/unlock-account?token=bad');
+    renderPage(<UnlockAccountPage />, '/unlock-account#token=bad');
 
     expect(await screen.findByText('Unlock Failed')).toBeInTheDocument();
     expect(screen.getByText('Unlock token is invalid')).toBeInTheDocument();
@@ -1058,7 +1196,7 @@ describe('UnlockAccountPage', () => {
     await act(async () => {
       render(
         <StrictMode>
-          <MemoryRouter initialEntries={['/unlock-account?token=t1']}>
+          <MemoryRouter initialEntries={['/unlock-account#token=t1']}>
             <UnlockAccountPage />
           </MemoryRouter>
         </StrictMode>,

@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import { applyMongoKernelCompat } from '../packages/server/tests/mongoKernelCompat.js';
 import { createS3Provider } from '../packages/server/src/services/storage/s3Provider.js';
 import { startStorageEngine, type StorageEngine } from '../tests/harness/s3Server.js';
+import { E2E_JWT_REFRESH_SECRET } from './serverSecrets.js';
 
 /**
  * E2E server startup script.
@@ -55,7 +56,7 @@ const DOCUMENT_STORAGE_QUOTA_MB_PER_USER = 1;
 const E2E_ENV: Record<string, string> = {
   NODE_ENV: 'development',
   JWT_ACCESS_SECRET: 'e2e-test-access-secret-minimum-32-characters-long',
-  JWT_REFRESH_SECRET: 'e2e-test-refresh-secret-minimum-32-characters-long',
+  JWT_REFRESH_SECRET: E2E_JWT_REFRESH_SECRET,
   SESSION_SECRET: 'e2e-test-session-secret-minimum-32-characters-long',
   // Pin Vite to loopback regardless of the developer's shell environment, so the
   // dev server matches Playwright's baseURL / health probe. The PORT is
@@ -63,6 +64,10 @@ const E2E_ENV: Record<string, string> = {
   // playwright.config.ts resolves it through the same `resolveDevPort` helper
   // Vite uses, so a `VITE_PORT` override moves both together (default 5173).
   VITE_HOST: '127.0.0.1',
+  // The API's listen address, pinned for the same reason: the Vite proxy targets
+  // 127.0.0.1:5000, and an exported HOST in the shell (some shells export the
+  // machine NAME, which refuses boot) would move the API away from it.
+  HOST: '127.0.0.1',
   // Explicitly disable email to prevent the developer's .env SMTP/Gmail settings
   // from leaking into E2E tests. Without this, backup trigger tests fail because
   // emailConfigured=true causes backup status='failed' when SMTP sends fail.
@@ -178,7 +183,7 @@ async function main(): Promise<void> {
     MONGODB_URI: MONGO_URI,
     // The four connection variables the server validates ALL-OR-NONE, plus the two
     // that have defaults. They are spread AFTER the developer's own environment on
-    // purpose: `config/index.ts` calls `dotenv.config()` with `override: false`, so
+    // purpose: `config/envFile.ts` calls `dotenv.config()` with `override: false`, so
     // process.env wins over the repository's `.env`, and a developer who points
     // `S3_*` at a real bucket does not have this suite write to it.
     S3_ENDPOINT: engine.endpoint,

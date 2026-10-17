@@ -8,7 +8,6 @@ export interface IFolder {
   encryptedName: string;
   nameIv: string;
   nameTag: string;
-  searchHash?: string | undefined;
   // Restore provenance: the backup row's original `_id` (as a string), set ONLY
   // when the server fresh-inserts a NON-owned folder during restore so a repeat
   // restore of the same backup can match `(userId, sourceRefId)` instead of
@@ -38,7 +37,9 @@ const folderSchema = new Schema<IFolder>(
     encryptedName: { type: String, required: true, maxlength: 1000 },
     nameIv: { type: String, required: true, maxlength: 24 },
     nameTag: { type: String, required: true, maxlength: 32 },
-    searchHash: { type: String, sparse: true, maxlength: 128, match: /^[a-f0-9]{64}$/ },
+    // No keyed hash of the name is stored (F-12), so two folders may share a name,
+    // as they always could: only restored folders ever carried one. Migration v5
+    // removed it from the rows and dropped its unique partial index.
     sourceRefId: { type: String },
     parentId: {
       type: Schema.Types.ObjectId,
@@ -68,13 +69,6 @@ const folderSchema = new Schema<IFolder>(
 
 folderSchema.index({ userId: 1, parentId: 1 });
 folderSchema.index({ userId: 1, sortOrder: 1 });
-folderSchema.index(
-  { userId: 1, searchHash: 1 },
-  {
-    unique: true,
-    partialFilterExpression: { searchHash: { $type: 'string' } },
-  },
-);
 
 // Restore idempotency: matches a repeat-restored, non-owned folder by its origin
 // `_id` so `skip`/`overwrite` do not duplicate. NON-unique (keep_both may mint

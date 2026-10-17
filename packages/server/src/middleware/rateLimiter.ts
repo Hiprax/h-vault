@@ -8,11 +8,11 @@ import {
   DOCUMENT_PLAINTEXT_CHUNK_BYTES,
   MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER,
   MAX_FOLDERS_PER_USER,
+  PAGINATION_DEFAULTS,
   MAX_ITEMS_PER_USER,
   HIBP_BATCH_MAX_PREFIXES,
   LOGIN_RATE_LIMIT_WINDOW_MINUTES,
   LOGIN_RATE_LIMIT_MAX_PER_IP,
-  LOGIN_RATE_LIMIT_MAX_PER_ACCOUNT,
 } from '@hvault/shared';
 import { MAX_IP_ADDRESS_LENGTH } from '../utils/controllerHelpers.js';
 
@@ -219,87 +219,6 @@ export const authLimiter =
         });
         next(
           httpErrors.tooManyRequests('Too many authentication attempts, please try again later'),
-        );
-      },
-    }),
-  );
-
-/**
- * Read the `email` field from a login request body defensively.
- *
- * In Express 5 (body-parser 2.x), a request with a non-JSON `Content-Type`
- * (e.g. `text/plain`, `multipart/form-data`) or no body at all leaves
- * `req.body === undefined` — body-parser sets `req.body = undefined` and
- * returns early rather than coercing it to `{}`. `accountLimiter` is the
- * first middleware on `POST /login` to touch the body (it runs before
- * `validate`), so an unguarded `(req.body as …).email` would throw a
- * `TypeError` here and surface as a 500 before Zod ever returns a clean 400.
- * The optional chain yields `undefined` for a missing body instead.
- */
-function getRequestEmail(req: Request): unknown {
-  return (req.body as Record<string, unknown> | undefined)?.email;
-}
-
-/**
- * Per-account rate-limit key generator. Keys by lowercased email when present;
- * otherwise falls back to the already-guarded client key (see
- * {@link withClientKeyGuard}). A valid key is always required because
- * express-rate-limit evaluates `skip` and the key generator independently —
- * the `account:no-email:<ip>` form is the safe fallback for the no-email path
- * that {@link skipAccountLimiter} excludes from counting.
- */
-export function buildAccountKey(req: Request): string {
-  const email = getRequestEmail(req);
-  if (typeof email === 'string' && email.length > 0) {
-    return `account:email:${email.toLowerCase()}`;
-  }
-  return `account:no-email:${resolveClientKey(req) ?? ''}`;
-}
-
-/**
- * Skip per-account counting for requests with no usable `email`. Such requests
- * are already constrained by the IP-keyed `authLimiter` (which runs before
- * `accountLimiter` on the route), so counting them against the generous
- * per-account limit would only let the no-email path borrow that bucket. When
- * skipped, the request falls through to `validate`, which returns a clean 400.
- */
-export function skipAccountLimiter(req: Request): boolean {
-  const email = getRequestEmail(req);
-  return typeof email !== 'string' || email.length === 0;
-}
-
-/**
- * Per-account login rate limiter.
- *
- * Allows {@link LOGIN_RATE_LIMIT_MAX_PER_ACCOUNT} login attempts per
- * {@link LOGIN_RATE_LIMIT_WINDOW_MINUTES}-minute window per email address. Stacked
- * on top of {@link authLimiter} on `POST /auth/login`, and the precise control of
- * the two: it cannot be diluted by an attacker rotating IPs, and it cannot be
- * exhausted for one account by traffic aimed at another.
- */
-const accountStore = createStore(CREDENTIAL_WINDOW_MS);
-export const accountLimiter =
-  noopIfNonProduction() ??
-  withClientKeyGuard(
-    'accountLimiter',
-    rateLimit({
-      windowMs: CREDENTIAL_WINDOW_MS,
-      limit: LOGIN_RATE_LIMIT_MAX_PER_ACCOUNT,
-      standardHeaders: true,
-      legacyHeaders: false,
-      ...(accountStore ? { store: accountStore } : {}),
-      validate: { singleCount: false, keyGeneratorIpFallback: false },
-      keyGenerator: buildAccountKey,
-      skip: skipAccountLimiter,
-      handler: (_req, _res, next, options) => {
-        logger.warn('Per-account rate limit exceeded', {
-          windowMs: options.windowMs,
-          limit: options.limit,
-        });
-        next(
-          httpErrors.tooManyRequests(
-            'Too many login attempts for this account, please try again later',
-          ),
         );
       },
     }),
@@ -991,6 +910,60 @@ export const folderWriteLimiter =
     FOLDER_WRITE_RATE_LIMIT_MAX,
     VAULT_WRITE_RATE_LIMIT_WINDOW_MS,
     'Too many folder changes, please try again later',
+  );
+
+// ---------------------------------------------------------------------------
+// Vault list pages
+// ---------------------------------------------------------------------------
+
+/** Window the {@link VAULT_LIST_RATE_LIMIT_MAX} budget is spent over. */
+export const VAULT_LIST_RATE_LIMIT_WINDOW_MS = FIFTEEN_MINUTES_MS;
+
+/**
+ * Full walks of the largest vault one user may make in a window, counted in walks
+ * of fifty pages. The app walks the whole vault, and the trash, every time the
+ * vault page mounts (and `/vault` and `/vault/:id` are sibling routes, so opening
+ * an item and coming back is a visit), as well as on sign-in, unlock, reconnect,
+ * an import, a rotation and the authenticator import's first load. A visit to the
+ * largest vault is at most 51 pages (50 of items and the trash's first: trashed
+ * rows count toward the same cap), and ordinary use must never meet the budget, so
+ * it allows one visit every fifteen seconds for the whole window: 60 visits of 51
+ * pages is 3,060, rounded up to whole walks of fifty, 62.
+ *
+ * (The first derivation, 8, assumed reloads only on sign-in, unlock, reconnect
+ * and bulk actions; the client's real triggers refused the eighth visit to a full
+ * vault, and the list the user was looking at emptied.)
+ */
+export const VAULT_LIST_RELOAD_FACTOR = 62;
+
+/**
+ * List pages one user may request per window: the pages a vault at
+ * `MAX_ITEMS_PER_USER` takes at the largest page size, times
+ * {@link VAULT_LIST_RELOAD_FACTOR} (50 x 62 = 3,100, under four a second
+ * sustained). It bounds the rate a single account can make the server read and
+ * stream whole pages at, not their concurrency.
+ */
+export const VAULT_LIST_RATE_LIMIT_MAX =
+  Math.ceil(MAX_ITEMS_PER_USER / PAGINATION_DEFAULTS.MAX_LIMIT) * VAULT_LIST_RELOAD_FACTOR;
+
+/**
+ * `GET /vault/items` and `GET /vault/items/trash`, one budget for both. A page is
+ * up to 200 rows of up to half a megabyte each, and the routes carried no limiter
+ * at all.
+ *
+ * NOT `generalAuthLimiter`, for the reason the write budgets give: that is ONE
+ * 60-a-minute `general:` bucket shared with logout, and a full vault load is up to
+ * a hundred pages (items and trash), so it would refuse the list partway and then
+ * the logout after it.
+ */
+export const vaultListLimiter =
+  noopIfNonProduction() ??
+  createUserKeyedLimiter(
+    'vaultListLimiter',
+    'vaultList:',
+    VAULT_LIST_RATE_LIMIT_MAX,
+    VAULT_LIST_RATE_LIMIT_WINDOW_MS,
+    'Too many vault list requests, please try again later',
   );
 
 /**

@@ -63,6 +63,34 @@ afterEach(() => {
   uninstallTestClock();
 });
 
+/**
+ * A React state update outside `act(...)` fails the test that caused it.
+ *
+ * React only LOGS that warning, so a test whose component settles after its
+ * synchronous assertions passes while the update it never awaited lands
+ * unobserved, and the suite's output fills with lines nobody reads (seventy of
+ * them once, all from the release-notes host). The wrapper records the warning
+ * and still prints it; this hook, which runs after the test body's pending
+ * microtasks, turns it into a failure naming the component. A test that
+ * silences `console.error` itself is unaffected: that is its own decision.
+ */
+const updatesOutsideAct: string[] = [];
+const printConsoleError = console.error.bind(console);
+console.error = (...args: unknown[]): void => {
+  const [message, component] = args;
+  if (typeof message === 'string' && message.includes('not wrapped in act(')) {
+    updatesOutsideAct.push(typeof component === 'string' ? component : 'a component');
+  }
+  printConsoleError(...args);
+};
+afterEach(() => {
+  if (updatesOutsideAct.length === 0) return;
+  const components = [...new Set(updatesOutsideAct.splice(0))].join(', ');
+  throw new Error(
+    `React reported a state update outside act(...) in ${components}: await what the component does after rendering, or keep it from settling in this test.`,
+  );
+});
+
 // Ensure Web Crypto API is available in jsdom environment
 if (!globalThis.crypto?.subtle) {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -83,6 +111,15 @@ if (!globalThis.crypto?.subtle) {
 if (typeof Element !== 'undefined' && !Element.prototype.scrollIntoView) {
   Element.prototype.scrollIntoView = function scrollIntoView(): void {
     /* no layout in jsdom, so there is nothing to scroll */
+  };
+}
+
+// jsdom has no media engine: its `HTMLMediaElement.prototype.play` only logs
+// "Not implemented". The camera preview awaits `play()` (and tolerates a refusal),
+// so here it resolves, as a browser's does once playback starts.
+if (typeof HTMLMediaElement !== 'undefined') {
+  HTMLMediaElement.prototype.play = function play(): Promise<void> {
+    return Promise.resolve();
   };
 }
 

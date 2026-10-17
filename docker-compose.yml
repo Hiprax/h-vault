@@ -78,6 +78,18 @@ x-hvault-app-environment: &hvault-app-environment
   # is the only thing that connects to it. Pinned here so a PORT meant for local
   # development in .env cannot desynchronise the Nginx upstream from the app.
   PORT: '5000'
+  # The address Express listens on inside the container. The server's own default
+  # is loopback (right for a bare-metal/PM2 host, where only local processes, the
+  # local Nginx among them, may connect); in a container that would refuse the stack's Nginx, which arrives
+  # over the `edge` bridge. Nothing is published, so this reaches no host port.
+  HOST: 0.0.0.0
+  # The logger's per-module files stay OFF in every container (the server's
+  # production default, pinned here so a value meant for local development in
+  # .env cannot switch them on). The log directory is a size-capped tmpfs: one
+  # file per module (about forty) cannot be bounded inside it, while the ONE
+  # global file, which already carries every module's lines, is at most 12 MB
+  # (see the tmpfs entries below and `LOG_FILE_ROTATION` in utils/logger.ts).
+  LOG_MODULE_FILES: 'false'
   # Single-node replica set (rs0), initiated by the db healthcheck below. The app
   # needs a replica set for its transactional paths (vault key rotation, account
   # cascade-delete, refresh-token rotation), all of which check the driver's
@@ -98,7 +110,7 @@ x-hvault-app-environment: &hvault-app-environment
   # NOTE: MONGO_APP_PASSWORD is interpolated into a URI. Keep it URL-safe —
   # generate it with `openssl rand -hex 32`. A raw '@', ':', '/' or '?' in the
   # password would be parsed as URI syntax and the connection would fail.
-  MONGODB_URI: mongodb://${MONGO_APP_USERNAME:-hvault_app}:${MONGO_APP_PASSWORD:?MONGO_APP_PASSWORD is required}@hvault-db:27017/hvault?replicaSet=rs0&authSource=hvault
+  MONGODB_URI: &hvault-mongodb-uri mongodb://${MONGO_APP_USERNAME:-hvault_app}:${MONGO_APP_PASSWORD:?MONGO_APP_PASSWORD is required}@hvault-db:27017/hvault?replicaSet=rs0&authSource=hvault
   # Proxies in front of Express, for a correct req.ip in rate limiting and audit
   # logs. This count must match reality EXACTLY: Express trusts the last N entries
   # of X-Forwarded-For, so a count higher than the real number of proxies lets a
@@ -107,7 +119,8 @@ x-hvault-app-environment: &hvault-app-environment
   #   2 = the host's system Nginx + this stack's Nginx  (the documented topology)
   #   1 = this stack's Nginx only (you hit 127.0.0.1:${HVAULT_HTTP_PORT} directly)
   TRUST_PROXY: '${TRUST_PROXY_HOPS:-2}'
-  # Scrub the discrete MongoDB credentials out of the app and bootstrap containers.
+  # Scrub the discrete MongoDB credentials out of the app container (the bootstrap
+  # gets no `env_file` at all; see hvault-bootstrap below).
   # `env_file: .env` injects EVERY key from the single root .env — including the
   # root credential that only hvault-db and hvault-db-init legitimately need — and
   # `environment:` is the only per-key override Compose offers. Without these lines
@@ -268,6 +281,14 @@ services:
       # The logger's rotating file transports. A tmpfs keeps the root filesystem
       # read-only while still giving them somewhere to go; the authoritative log
       # stream is stdout, which Docker captures and rotates (see `logging` above).
+      # CEILING: with LOG_MODULE_FILES false (the environment above) only the one
+      # global file is written, at most 3 files of 4 MB = 12 MB (`LOG_FILE_ROTATION`
+      # in packages/server/src/utils/logger.ts), plus the rotator's own audit file
+      # of under 1 KB, against this 64 MB. `tests/log-storage-bound.test.ts` sums
+      # every file the server's loggers open under this service's environment and
+      # holds the total below the size parsed from this line. That bound is what
+      # keeps the tmpfs from filling: a write that failed anyway is not caught by
+      # the logging library today and ends the process (restart: unless-stopped).
       - /app/logs:size=64m,uid=1000,gid=1000,mode=0700
     # 1 GB rather than 512 MB, for headroom on the heaviest thing this app legitimately
     # does: a 30 MB backup restore or full-vault key rotation, which decrypts,
@@ -385,15 +406,18 @@ services:
 
   # --- One-shot bootstrap: MongoDB indexes, then exits -----------------------
   # In production Mongoose runs with `autoIndex: false`, so indexes are never
-  # created implicitly. They are not just a performance matter here: the Folder
-  # (userId, searchHash) UNIQUE partial index is what makes duplicate-folder
-  # detection return 409 instead of silently inserting, and the AuditLog /
+  # created implicitly. They are not just a performance matter here: the
+  # `users.email` UNIQUE index is what refuses a second account for one address
+  # instead of silently inserting it, and the AuditLog /
   # RefreshToken TTL indexes are what bound those collections' growth. Without this
   # step the stack boots and looks healthy while quietly losing both guarantees —
   # which is why the app gates on it completing successfully.
   #
   # It is idempotent (createIndexes on an existing index is a no-op), so it runs on
-  # every `up` and picks up any index a new release added.
+  # every `up` and picks up any index a new release added. An expiry index whose
+  # retention setting (AUDIT_LOG_RETENTION_DAYS, BACKUP_RETENTION_DAYS,
+  # BREACH_CACHE_TTL_DAYS) changed is dropped and rebuilt with the new value.
+  # Nothing else is ever dropped.
   hvault-bootstrap:
     build:
       <<: *hvault-build
@@ -411,29 +435,48 @@ services:
     # This image carries the full devDependency tree (it runs the TypeScript
     # create-indexes script through tsx), which makes it the widest attack surface
     # in the stack — so it gets the same read-only root as the app rather than being
-    # let off because it only lives for two seconds. Everything it writes is routed
-    # to tmpfs: npm's cache (relocated to /tmp/.npm by the environment override
-    # below, since $HOME is on the now read-only root) and @hiprax/logger's log
-    # directory, which it creates at module scope from cwd=/app/packages/server.
+    # let off because it only lives for two seconds. Anything it writes goes to
+    # tmpfs: /tmp, and @hiprax/logger's log directory (cwd=/app/packages/server).
+    # The script no longer loads the logger (it reads only the secret-free index
+    # configuration, F-20), so that directory is a guard for a later import that
+    # reaches it, sized for the logger's production default.
     read_only: true
     tmpfs:
       - /tmp:size=64m,uid=1000,gid=1000,mode=1777
+      # CEILING: the same 12 MB as hvault-app's log tmpfs (one global file, 3 x 4 MB;
+      # module files off by the production default, since this service has no
+      # LOG_MODULE_FILES pin), held below this 16 MB by tests/log-storage-bound.test.ts.
       - /app/packages/server/logs:size=16m,uid=1000,gid=1000,mode=0700
     mem_limit: 512m
     cpus: '1.0'
     pids_limit: 100
     logging: *hvault-logging
-    env_file: *hvault-env-file
+    # NO `env_file`, deliberately (F-20). This one-shot connects to the database
+    # and builds indexes, and nothing else: it reads only the secret-free index
+    # configuration (packages/server/src/config/indexConfigSchema.ts), so it is handed
+    # exactly those seven keys and no other. With the root .env wholesale it held
+    # every application secret (JWT, session and 2FA keys, SMTP and storage
+    # credentials) inside the stack's widest image (the whole devDependency tree)
+    # for no use at all. tests/index-config.test.ts holds this key set equal to the
+    # module's and each default below equal to the schema's, and the deployment
+    # drill checks the environment the container actually ran with.
+    #
+    # No `npm_config_cache` either, and its absence is the point: this image no
+    # longer ships npm at all (it invokes `tsx scripts/create-indexes.ts` directly,
+    # as hvault-app invokes node directly); the /tmp tmpfs stays, because a
+    # read-only root with no writable temp directory is a trap for the next tool.
     environment:
-      # No `npm_config_cache` here any more, and its absence is the point: this
-      # image no longer ships npm at all. It carried one only so that
-      # `npm run create-indexes -w packages/server` worked, and npm's bundled
-      # dependency tree was the stack's largest source of vulnerability findings;
-      # the stage now invokes `tsx scripts/create-indexes.ts` directly, exactly as
-      # hvault-app already invokes node directly. The /tmp tmpfs below stays: a
-      # read-only root filesystem with no writable temp directory is a trap for
-      # the next tool that needs one.
-      <<: *hvault-app-environment
+      NODE_ENV: production
+      # The SAME scoped URI as the app (one anchor, so the two cannot drift).
+      MONGODB_URI: *hvault-mongodb-uri
+      # The same .env keys the app reads, interpolated from .env, defaulting to
+      # the schema's own defaults: a retention changed in .env reaches the TTL
+      # index built here and the value the app reads alike.
+      MONGO_MAX_POOL_SIZE: ${MONGO_MAX_POOL_SIZE:-10}
+      MONGO_MIN_POOL_SIZE: ${MONGO_MIN_POOL_SIZE:-2}
+      AUDIT_LOG_RETENTION_DAYS: ${AUDIT_LOG_RETENTION_DAYS:-365}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-30}
+      BREACH_CACHE_TTL_DAYS: ${BREACH_CACHE_TTL_DAYS:-30}
     networks:
       # `data` only. It opens one MongoDB connection and makes no outbound call, so
       # it is deliberately kept off `edge` and has no route to the internet.
@@ -601,33 +644,55 @@ services:
       # Idempotently initiate the single-node replica set, advertising the
       # `hvault-db` service name so in-network clients resolve the primary, and
       # report healthy only once this node IS a writable primary — i.e. once
-      # transactions are actually available. `$$` is Compose's escape for a literal
-      # `$`, so the credentials are read from the container's own environment and
-      # never appear in the command line stored in `docker inspect`.
+      # transactions are actually available.
+      #
+      # The root credential is read by the SCRIPT from the container's own
+      # environment (`process.env`) and used to authenticate from inside it, so the
+      # probe puts it on no command line. It used to be passed as
+      # `-u "$$MONGO_INITDB_ROOT_USERNAME" -p "$$MONGO_INITDB_ROOT_PASSWORD"`, and
+      # the comment here claimed that kept it off the command line. It did only for
+      # the one `docker inspect` stores: the shell in the container expanded it into
+      # mongosh's argv every ten seconds, and a process's argv is readable by every
+      # account on the host (`/proc/<pid>/cmdline`), while its environment is
+      # readable only by its owner (measured: the value was in mongosh's argv until
+      # mongosh retitled itself). docker/mongo/provision-app-user.js authenticates
+      # the same way. (One exposure is upstream and outside this file: on the FIRST
+      # start against an empty data volume, the official image's initialisation
+      # hands the root user name and password to `jq` as arguments for a few
+      # milliseconds while it creates the root user; SECURITY.md records it.)
+      #
+      # Signing in comes FIRST and a failure ends the probe unhealthy, explicitly:
+      # `db.hello()` needs no authentication, so a probe that carried on after a
+      # refused sign-in would report an initiated primary healthy on any password.
+      # The refusal is printed as its `codeName` (`AuthenticationFailed`), so the
+      # probe log says why. Healthy also requires the reply to name the replica set:
+      # during first initialisation the image runs a temporary STANDALONE mongod,
+      # which reports itself writable and would otherwise pass for the real one.
       #
       # A failed `rs.initiate` is REPORTED, not discarded. On an already-initiated
-      # set it is the expected outcome and says so; any other failure — bad
-      # credentials, an unreachable member, a host name that does not resolve —
+      # set it is the expected outcome and says so; any other failure — an
+      # unreachable member, a host name that does not resolve —
       # used to be swallowed by an empty catch, leaving an unhealthy container
       # whose probe explained nothing. Only the error's `codeName` is printed: a
       # short enum, never the message or a stack frame.
       #
       # stderr alone is discarded (`2>/dev/null`), which is what keeps replica-set
       # state and stack traces out of the probe log that `docker inspect` retains.
-      # Under `--quiet` the only thing this writes to stdout is the `print` below:
-      # `rs.status()` and `db.hello()` sit inside blocks and are not echoed.
+      # Under `--quiet` the only things this writes to stdout are the two `print`s
+      # below: `rs.status()` and `db.hello()` sit inside blocks and are not echoed.
       test:
         - CMD-SHELL
         - >-
           mongosh --quiet
-          -u "$$MONGO_INITDB_ROOT_USERNAME" -p "$$MONGO_INITDB_ROOT_PASSWORD"
-          --authenticationDatabase admin
           --eval '
+            try { db.getSiblingDB("admin").auth(process.env.MONGO_INITDB_ROOT_USERNAME, process.env.MONGO_INITDB_ROOT_PASSWORD) }
+            catch (e0) { print("auth: " + (e0.codeName || "failed")); quit(1) }
             try { rs.status() } catch (e) {
               try { rs.initiate({ _id: "rs0", members: [{ _id: 0, host: "hvault-db:27017" }] }) }
               catch (e2) { print("rs.initiate: " + (e2.codeName || "failed")) }
             }
-            quit(db.hello().isWritablePrimary ? 0 : 1)
+            const hello = db.hello()
+            quit(hello.isWritablePrimary && hello.setName === "rs0" ? 0 : 1)
           ' 2>/dev/null
       interval: 10s
       timeout: 10s
@@ -730,6 +795,81 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
+
+  # --- OPTIONAL: run the object storage engine as a non-root user -------------
+  # NOT the default. The engine image above declares no USER, so its process is
+  # root inside its container; SECURITY.md ("The object storage service") records
+  # that as an accepted residual and states its bound (the internal `data`
+  # network only, every capability dropped, no-new-privileges, a read-only root,
+  # and nothing to read but ciphertext). This closes it, at the cost of one more
+  # image to build and one more one-shot.
+  #
+  # A plain `user: "1000:1000"` on the service above would crash-loop an existing
+  # deployment: the volumes it already wrote are owned by root, and the engine
+  # panics at boot ("Unable to read or generate node ID: Permission denied",
+  # exit 139; measured against the pinned image). So the alternative builds
+  # docker/garage.Dockerfile (the same pinned image plus `USER 1000:1000`) and
+  # runs a one-shot first that hands both volumes to that user, on every `up`
+  # (idempotent). Validated against a fresh volume and against one the stock
+  # image had already filled: the stored objects read back unchanged.
+  #
+  # TO USE IT, save the block between the two markers, with the leading "  # "
+  # removed from every line, as `docker-compose.override.yml` beside this file
+  # (Compose loads that file automatically), then
+  # `docker compose up -d --build --wait`.
+  #
+  # TO GO BACK to the stock image, hand the volumes back to root FIRST, while the
+  # override is still in place, or the stock engine fails the same way (it runs
+  # with every capability dropped, so even root cannot read a key file it does
+  # not own):
+  #   docker compose stop hvault-s3
+  #   docker compose run --rm --entrypoint chown hvault-s3-volumes -R 0:0 /var/lib/garage/meta /var/lib/garage/data
+  # then delete docker-compose.override.yml and
+  # `docker compose up -d --wait --remove-orphans` (which also removes the exited
+  # one-shot's container).
+  #
+  # >>> optional-nonroot-storage (docker-compose.override.yml)
+  # services:
+  #   hvault-s3:
+  #     build:
+  #       context: .
+  #       dockerfile: docker/garage.Dockerfile
+  #     image: hvault-s3:${HVAULT_VERSION:-0.15.0}
+  #     # The tmpfs now belongs to the engine's user, like the app's and Nginx's.
+  #     # `!override` replaces the list above rather than appending to it.
+  #     tmpfs: !override
+  #       - /tmp:size=64m,uid=1000,gid=1000,mode=1777
+  #     depends_on:
+  #       hvault-s3-volumes:
+  #         condition: service_completed_successfully
+  #   # One-shot: re-owns both volumes, then exits 0. Root with CHOWN and nothing
+  #   # else, no network at all, a read-only root and an image pinned by digest.
+  #   hvault-s3-volumes:
+  #     image: alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+  #     container_name: ${HVAULT_STACK_NAME:-hvault}-s3-volumes
+  #     restart: 'no'
+  #     user: '0:0'
+  #     entrypoint: ['chown', '-R', '1000:1000', '/var/lib/garage/meta', '/var/lib/garage/data']
+  #     security_opt:
+  #       - no-new-privileges:true
+  #     cap_drop:
+  #       - ALL
+  #     cap_add:
+  #       - CHOWN
+  #     read_only: true
+  #     network_mode: none
+  #     mem_limit: 64m
+  #     cpus: '0.25'
+  #     pids_limit: 10
+  #     logging:
+  #       driver: json-file
+  #       options:
+  #         max-size: '10m'
+  #         max-file: '3'
+  #     volumes:
+  #       - hvault-s3-meta:/var/lib/garage/meta
+  #       - hvault-s3-data:/var/lib/garage/data
+  # <<< optional-nonroot-storage
 
 # --- networks ----------------------------------------------------------------
 # Two networks separate the public-facing edge from the data tier:

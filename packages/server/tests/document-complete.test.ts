@@ -74,6 +74,7 @@ import { User } from '../src/models/User.js';
 import { documentCompleteLockName, vaultRotationLockName } from '../src/utils/controllerHelpers.js';
 import { acquireJobLock, releaseJobLock } from '../src/utils/jobLock.js';
 import { buildObjectKey } from '../src/utils/documentObjects.js';
+import { cascadeDeleteUser } from '../src/utils/cascadeDelete.js';
 import { createInMemoryStorage } from './helpers/inMemoryStorage.js';
 import { authHeader, createTestUser, getCsrf, type TestUser } from './helpers.js';
 
@@ -434,7 +435,6 @@ describe('POST /documents/uploads/:id/complete', () => {
         encryptedName: 'folder-ciphertext',
         nameIv: 'iv',
         nameTag: 'tag',
-        searchHash: 'a'.repeat(64),
         sortOrder: 0,
       });
       const kept = await seedTransfer(user, { folderId: String(folder._id) });
@@ -1578,5 +1578,95 @@ describe('POST /documents/uploads/:id/complete', () => {
         await JobLock.countDocuments({ jobName: documentCompleteLockName(user.id, seeded.id) }),
       ).toBe(0);
     });
+  });
+});
+
+describe('POST /documents/uploads/:id/complete racing the erasure of its own account', () => {
+  let user: TestUser;
+
+  beforeEach(async () => {
+    storageRef.current = createInMemoryStorage();
+    user = await createTestUser({ email: 'documents-complete-erasure@example.com' });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /**
+   * The owner deletes the account in another tab while a large completion is
+   * inside the engine's own assembly call, after the completion's last check that
+   * the account is live. The whole erasure (rows, objects, the user row) finishes
+   * there; the completion then writes its row and its object for an account that
+   * no longer exists, and nothing would ever remove them: the zombie loop needs a
+   * user row, and the orphan sweep skips any object a documents row names.
+   */
+  it('re-checks the account after writing the row, and takes the row and the object back', async () => {
+    const seeded = await seedTransfer(user, {
+      partSizes: [DOCUMENT_CIPHERTEXT_CHUNK_BYTES, 1024 + DOCUMENT_TAG_BYTES],
+    });
+    const storage = storageRef.current!;
+    const assemble = storage.completeMultipartUpload.bind(storage);
+    vi.spyOn(storage, 'completeMultipartUpload').mockImplementation(async (...args) => {
+      const erased = await cascadeDeleteUser({
+        userId: user.id,
+        userEmail: user.email,
+        ip: 'test',
+        userAgent: 'test/erasure-in-another-tab',
+        auditAction: 'account_delete',
+      });
+      expect(erased).toBe(true);
+      return assemble(...args);
+    });
+
+    const res = await complete(user, seeded.id);
+
+    expect(res.status, JSON.stringify(res.body)).toBe(401);
+    expect(res.body.message).toBe('Invalid or expired token');
+    expect(await Document.countDocuments({ userId: user.id })).toBe(0);
+    expect(storage.storedKeys()).toEqual([]);
+    // Nothing is recorded under the erased account either.
+    expect(await AuditLog.countDocuments({ userId: user.id })).toBe(0);
+    expect(await User.exists({ _id: user.id })).toBeNull();
+  });
+
+  it('still answers 401 and takes the row back when the object cannot be deleted (logged)', async () => {
+    const seeded = await seedTransfer(user, {
+      partSizes: [DOCUMENT_CIPHERTEXT_CHUNK_BYTES, 1024 + DOCUMENT_TAG_BYTES],
+    });
+    const storage = storageRef.current!;
+    const assemble = storage.completeMultipartUpload.bind(storage);
+    vi.spyOn(storage, 'completeMultipartUpload').mockImplementation(async (...args) => {
+      // This time the account is only MARKED when the engine call ends: an erasure
+      // still under way. Its own sweep would also find the row; the completion
+      // takes it back at once all the same.
+      await User.collection.updateOne(
+        { _id: new mongoose.Types.ObjectId(user.id) },
+        { $set: { deletionPending: true } },
+      );
+      return assemble(...args);
+    });
+    vi.spyOn(storage, 'deleteObject').mockRejectedValueOnce(new Error('engine unavailable'));
+
+    const res = await complete(user, seeded.id);
+
+    expect(res.status, JSON.stringify(res.body)).toBe(401);
+    expect(await Document.countDocuments({ userId: user.id })).toBe(0);
+    // The object the failed delete left behind is the collector's to find.
+    expect(storage.storedKeys()).toEqual([seeded.objectKey]);
+    expect(await AuditLog.countDocuments({ userId: user.id, action: 'document_create' })).toBe(0);
+  });
+
+  it('commits as before when the account is still live after the row is written', async () => {
+    const seeded = await seedTransfer(user, {
+      partSizes: [DOCUMENT_CIPHERTEXT_CHUNK_BYTES, 1024 + DOCUMENT_TAG_BYTES],
+    });
+
+    const res = await complete(user, seeded.id);
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(await Document.countDocuments({ userId: user.id })).toBe(1);
+    expect(storageRef.current!.storedKeys()).toEqual([seeded.objectKey]);
+    expect(await AuditLog.countDocuments({ userId: user.id, action: 'document_create' })).toBe(1);
   });
 });

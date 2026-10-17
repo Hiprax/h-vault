@@ -2,20 +2,22 @@
  * Phase 10 — resilience-verify: the per-user item cap cannot be breached by
  * OVERLAPPING imports, on the STANDALONE topology.
  *
- * The cap check is a read followed by a write (`countDocuments` → `insertMany`).
- * Two imports that each individually fit can therefore both pass the read and
- * then both write, landing the user over `MAX_ITEMS_PER_USER` — unless something
- * serializes them. The default harness (`tests/setup.ts`) connects to a
- * standalone `MongoMemoryServer`, which rejects multi-document transactions, so
- * on THIS topology the executor's transaction branch never runs and the
- * guarantee rests ENTIRELY on the per-user `vault-import:<userId>` JobLock. That
- * is what these tests pin: the loser of the race gets a 409 and writes nothing,
- * and the cap holds however the requests interleave.
+ * The cap used to be a read followed by a write (`countDocuments` → `insertMany`),
+ * so two imports that each individually fit could both pass the read and then
+ * both write, landing the user over `MAX_ITEMS_PER_USER`. Two controls hold it
+ * now: the account's row counter, which every inserter reserves its rows against
+ * in one conditional write before it inserts (F-15, the race against OTHER
+ * endpoints is `vault-row-counters.test.ts`), and the per-user
+ * `vault-import:<userId>` JobLock, which keeps two imports from interleaving at
+ * all. The default harness (`tests/setup.ts`) connects to a standalone
+ * `MongoMemoryServer`, which rejects multi-document transactions, so on THIS
+ * topology the executor's transaction branch never runs. These tests pin that
+ * the loser of the race gets a 409 (the lock) or a 400 (the cap) and writes
+ * nothing, and the cap holds however the requests interleave.
  *
  * The replica-set half of the same guarantee — where `session.withTransaction`
- * genuinely runs and the cap is re-checked inside it — lives in
- * `import-operations-transaction.test.ts`, which already stands up a
- * `MongoMemoryReplSet`.
+ * genuinely runs — lives in `import-operations-transaction.test.ts`, which
+ * already stands up a `MongoMemoryReplSet`.
  *
  * Covers:
  *   • an import parked inside the locked region 409s a second, overlapping one
@@ -26,6 +28,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import request from 'supertest';
+import mongoose from 'mongoose';
 import {
   MAX_IMPORT_DATA_LENGTH,
   MAX_IMPORT_FILE_SIZE_BYTES,
@@ -36,6 +39,7 @@ import {
 import app from '../src/app.js';
 import { VaultItem } from '../src/models/VaultItem.js';
 import { IMPORT_RATE_LIMIT_MAX } from '../src/middleware/rateLimiter.js';
+import { reserveVaultWrite } from '../src/utils/vaultQuota.js';
 import { createTestUser, authHeader, sampleVaultItem, getCsrf, rawItems } from './helpers.js';
 import type { TestUser } from './helpers.js';
 
@@ -83,26 +87,23 @@ async function prepareImport(
 }
 
 /**
- * Shrinks the user's effective item headroom to `headroom` NET-NEW rows without
- * seeding 10,000 real ones.
- *
- * The stub calls THROUGH to the real count and adds a fixed offset, so the value
- * the executor sees still tracks what has actually been written. That is what
- * makes a concurrency test meaningful: a flat `mockResolvedValue` would pin the
- * count to a constant and the cap could then never notice rows a racing request
- * had just inserted, which is precisely the interaction under test.
+ * Shrinks the user's effective headroom to `headroom` NET-NEW rows by planting
+ * the account's row counter at `MAX_ITEMS_PER_USER - headroom` (F-15: the cap is
+ * held by that counter, which every inserter reserves against in one
+ * conditional write; `countDocuments` is no longer read). The counters are
+ * installed first by a zero reservation, exactly what any write does. Every
+ * insert that lands then moves the counter, so the headroom the next request
+ * sees still tracks what has actually been written, which is the very
+ * interaction under test.
  */
-function pinHeadroom(headroom: number): void {
-  const realCountDocuments = VaultItem.countDocuments.bind(VaultItem) as unknown as (
-    filter?: Record<string, unknown>,
-    options?: Record<string, unknown>,
-  ) => Promise<number>;
-  const offset = MAX_ITEMS_PER_USER - headroom;
-
-  vi.spyOn(VaultItem, 'countDocuments').mockImplementation(((
-    filter?: Record<string, unknown>,
-    options?: Record<string, unknown>,
-  ) => realCountDocuments(filter, options).then((count) => count + offset)) as never);
+async function pinHeadroom(userId: string, headroom: number): Promise<void> {
+  await reserveVaultWrite(userId, { bytes: 0 });
+  await mongoose.connection
+    .collection('users')
+    .updateOne(
+      { _id: new mongoose.Types.ObjectId(userId) },
+      { $set: { 'counters.items': MAX_ITEMS_PER_USER - headroom } },
+    );
 }
 
 describe('Phase 10 — the import cap holds under overlapping requests (standalone)', () => {
@@ -119,7 +120,7 @@ describe('Phase 10 — the import cap holds under overlapping requests (standalo
   it('409s an import that overlaps one already inside the locked region, and writes nothing', async () => {
     // Four rows of headroom, three per request: either request fits on its own,
     // both together do not.
-    pinHeadroom(4);
+    await pinHeadroom(user.id, 4);
 
     // Park the FIRST import mid-write, inside the lock and after its cap check,
     // so the second one is guaranteed to arrive while the lock is genuinely
@@ -184,7 +185,7 @@ describe('Phase 10 — the import cap holds under overlapping requests (standalo
     // The serialized case: each request fits when it runs, but the second one's
     // cap check must observe the rows the first one committed. This is the
     // outcome the JobLock forces the racing case to degrade into.
-    pinHeadroom(4);
+    await pinHeadroom(user.id, 4);
 
     const first = await (
       await prepareImport(user.accessToken, {
@@ -213,7 +214,7 @@ describe('Phase 10 — the import cap holds under overlapping requests (standalo
     const HEADROOM = 4;
     const ROWS_PER_REQUEST = 3;
     const REQUESTS = 4;
-    pinHeadroom(HEADROOM);
+    await pinHeadroom(user.id, HEADROOM);
 
     const senders = await Promise.all(
       Array.from({ length: REQUESTS }, (_, requestIndex) =>
@@ -244,9 +245,10 @@ describe('Phase 10 — the import cap holds under overlapping requests (standalo
     );
     const stored = await rawItems(user.id);
 
-    // The invariant. Delete the JobLock and this fails: every request reads the
-    // count before any of them writes, all four pass, and 12 rows land in a
-    // 4-row allowance.
+    // The invariant. It used to rest on the JobLock alone (every request read the
+    // count before any of them wrote, so without it all four passed and 12 rows
+    // landed in a 4-row allowance); it is now held by the row-counter reservation
+    // as well (F-15), and the lock decides which requests get to try.
     expect(stored.length).toBeLessThanOrEqual(HEADROOM);
     // And nothing was written that was not also reported (or vice versa).
     expect(stored).toHaveLength(reported);

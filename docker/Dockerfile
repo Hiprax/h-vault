@@ -27,7 +27,14 @@
 # Node (v24.18.0) and is unaffected; `node:24-alpine3.22`/`3.21` are older Node lines.
 # This is the same Node runtime, still musl/Alpine — every apk/undici/Trivy note below
 # holds. Revisit when the Alpine 3.24+ musl regression is resolved upstream.
-FROM node:24-alpine3.23 AS base
+#
+# Pinned by DIGEST as well as by tag: a tag is a mutable pointer the publisher can
+# move onto different bytes, and the digest is what Docker enforces. It is the
+# multi-platform index digest, read from the registry on 2026-10-15 (both
+# `docker buildx imagetools inspect` and the registry's Docker-Content-Digest
+# header agreed); move it deliberately, by reading the new one the same way.
+# `apk upgrade` below still pulls current Alpine fixes into every build.
+FROM node:24-alpine3.23@sha256:e44c87c7dd212720eb00469aeac89504ca2be77b8f0d6dbffb30665d5fcc59e1 AS base
 WORKDIR /app
 # Patch the base image's OS packages before anything is built on top of them, for
 # the same reason and by the same means as the `web` stage below.
@@ -183,8 +190,8 @@ RUN chmod -R a+rX,go-w packages/client && npm run build -w packages/client
 # -----------------------------------------------------------------------------
 # In production Mongoose runs with `autoIndex: false` (config/database.ts), so
 # indexes are NEVER created implicitly. They are not merely a performance
-# concern here: the Folder `(userId, searchHash)` UNIQUE partial index is what
-# makes duplicate-folder detection return 409, and the AuditLog / RefreshToken
+# concern here: the `users.email` UNIQUE index is what refuses a second account
+# for one address, and the AuditLog / RefreshToken
 # TTL indexes are what bound their collections' growth. Without this step the
 # stack boots and *appears* healthy while silently losing those guarantees — so
 # compose gates the app on this container completing successfully.
@@ -235,12 +242,16 @@ RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
       /app/node_modules/.bin/tsc /app/node_modules/.bin/tsc6 /app/node_modules/.bin/tsserver
 
 # The log directory MUST exist and be owned by `node` before the drop to that user.
-# This is the difference between a stack that comes up on a fresh clone and one
-# that does not:
+# This was the difference between a stack that comes up on a fresh clone and one
+# that does not, and it is kept although the script no longer opens a log file:
 #   * `npm run <script> -w packages/server` runs with cwd = /app/packages/server
 #     (the script is `tsx scripts/create-indexes.ts`, a relative path that only
 #     resolves from there);
-#   * the script imports src/config, which calls createLogger() at MODULE SCOPE;
+#   * the script used to import src/config, which calls createLogger() at MODULE
+#     SCOPE. It now reads only src/config/indexConfig.ts, which loads no logger
+#     (F-20: the one-shot is given no secret, so it cannot load the application
+#     configuration), but any later import that reaches the logger brings the
+#     next point back;
 #   * @hiprax/logger eagerly mkdirs `<cwd>/logs` and THROWS if it cannot;
 #   * /app/packages/server was created by COPY as root (0755), so uid 1000 cannot
 #     create anything inside it -> EACCES -> the bootstrap exits non-zero -> the
@@ -274,6 +285,11 @@ CMD ["/app/node_modules/.bin/tsx", "scripts/create-indexes.ts"]
 # -----------------------------------------------------------------------------
 FROM base AS app
 ENV NODE_ENV=production
+# Listen on every interface INSIDE the container: the server's own default is
+# 127.0.0.1 (right for a bare-metal host), which would refuse every connection
+# from outside the container, the stack's Nginx included. Compose pins the same
+# value; this keeps an image run on its own reachable too.
+ENV HOST=0.0.0.0
 
 # The production runtime executes `node` directly (see CMD and HEALTHCHECK) and
 # never invokes npm. Remove the global npm CLI: the Alpine base ships it with a

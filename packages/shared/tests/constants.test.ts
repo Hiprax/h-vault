@@ -26,7 +26,6 @@ import {
   MAX_LOGIN_ATTEMPTS,
   LOGIN_RATE_LIMIT_WINDOW_MINUTES,
   LOGIN_RATE_LIMIT_MAX_PER_IP,
-  LOGIN_RATE_LIMIT_MAX_PER_ACCOUNT,
   BACKUP_CODES_COUNT,
   DEFAULT_PASSWORD_LENGTH,
   MIN_PASSWORD_LENGTH,
@@ -44,6 +43,15 @@ import {
   CUSTOM_FIELD_TYPES,
   NOTE_FORMATS,
   AUDIT_ACTIONS,
+  STRANGER_WRITABLE_AUDIT_ACTIONS,
+  SECURITY_NOTIFICATION_EVENTS,
+  SECURITY_NOTIFICATION_PREFERENCE_EVENTS,
+  CRITICAL_SECURITY_NOTIFICATION_EVENTS,
+  MANDATORY_SECURITY_NOTIFICATION_EVENTS,
+  SECURITY_NOTIFICATION_INTERVAL_MINUTES,
+  MAX_STRANGER_AUDIT_ROWS_PER_USER,
+  MAX_ACTIVITY_AUDIT_ROWS_PER_USER,
+  AUDIT_COALESCE_WINDOW_MS,
   BACKUP_STATUSES,
   ERROR_CODES,
   PAGINATION_DEFAULTS,
@@ -131,7 +139,13 @@ import {
   VAULT_FIELD_V2_IV_MARKER,
   ROW_ID_DERIVATION_PREFIX,
   ROW_ID_NONCE_PATTERN,
-  VAULT_SEARCH_KEY_INFO,
+} from '../src/constants/index.js';
+import {
+  HIBP_MAX_MISSES_PER_USER_PER_DAY,
+  HIBP_MAX_MISSES_PER_USER_PER_WINDOW,
+  HIBP_MISS_BUDGET_WINDOW_MINUTES,
+  HIBP_ONDEMAND_MAX_ROWS,
+  MAX_ITEMS_PER_USER as ITEM_CAP,
 } from '../src/constants/index.js';
 import {
   cardDataSchema,
@@ -641,21 +655,13 @@ describe('Document-store constants', () => {
     expect(16 + VAULT_FIELD_V2_IV_MARKER.length).toBeLessThanOrEqual(24);
   });
 
-  it('pins the row-id derivation and the search-key label as format constants', () => {
+  it('pins the row-id derivation as a format constant', () => {
     // Both sides compute a created row's id from these bytes independently, so a
     // change on one side alone stores every new row under an id its fields were
-    // not sealed to; and the search label decides every stored `searchHash`.
+    // not sealed to. (The search-key label pinned here before F-12 is gone with
+    // the name hash it derived.)
     expect(ROW_ID_DERIVATION_PREFIX).toBe('hvault/row-id/v1|');
     expect(ROW_ID_DERIVATION_PREFIX.indexOf('|')).toBe(ROW_ID_DERIVATION_PREFIX.length - 1);
-    expect(VAULT_SEARCH_KEY_INFO).toBe('hvault/item/search/v1');
-    // Distinct from every other HKDF label in the app, so no two purposes share a key.
-    for (const other of [
-      DOCUMENT_STREAM_INFO_PREFIX,
-      DOCUMENT_META_INFO_PREFIX,
-      DOCUMENT_DEK_WRAP_INFO_PREFIX,
-    ]) {
-      expect(other.startsWith(VAULT_SEARCH_KEY_INFO)).toBe(false);
-    }
     // The nonce alphabet: exactly 40 lower-case hex characters, at 39, 40 and 41.
     expect(ROW_ID_NONCE_PATTERN.test('a'.repeat(40))).toBe(true);
     expect(ROW_ID_NONCE_PATTERN.test('a'.repeat(39))).toBe(false);
@@ -781,10 +787,6 @@ describe('Rate limiting constants', () => {
     expect(LOGIN_RATE_LIMIT_MAX_PER_IP).toBe(20);
   });
 
-  it('LOGIN_RATE_LIMIT_MAX_PER_ACCOUNT is 20', () => {
-    expect(LOGIN_RATE_LIMIT_MAX_PER_ACCOUNT).toBe(20);
-  });
-
   it('the per-IP budget covers several complete 2FA sign-ins', () => {
     // A 2FA sign-in costs two slots (`/auth/login` then `/auth/login/2fa`), so the
     // ceiling has to be comfortably more than twice a plausible number of people
@@ -795,11 +797,11 @@ describe('Rate limiting constants', () => {
     expect(LOGIN_RATE_LIMIT_MAX_PER_IP / SLOTS_PER_2FA_SIGN_IN).toBeGreaterThanOrEqual(10);
   });
 
-  it('the per-IP budget is not looser than the per-account one', () => {
-    // Per-email counting is the precise anti-guessing control and must stay at
-    // least as tight; an IP ceiling below it would make the per-account limiter
-    // unreachable and therefore dead.
-    expect(LOGIN_RATE_LIMIT_MAX_PER_ACCOUNT).toBeLessThanOrEqual(LOGIN_RATE_LIMIT_MAX_PER_IP);
+  it('no per-account (per-e-mail) sign-in limit exists any more (F-04)', async () => {
+    // Keyed on the submitted address, it let anyone refuse the owner's correct
+    // password on every device; the account lockout brakes guessing instead.
+    const constants: Record<string, unknown> = await import('../src/constants/index.js');
+    expect(constants).not.toHaveProperty('LOGIN_RATE_LIMIT_MAX_PER_ACCOUNT');
   });
 });
 
@@ -870,12 +872,83 @@ describe('Enum arrays', () => {
     expect(AUDIT_ACTIONS.length).toBeGreaterThanOrEqual(26);
   });
 
-  it('AUDIT_ACTIONS has exactly 47 distinct operations (keep README in sync)', () => {
+  it('AUDIT_ACTIONS has exactly 54 distinct operations (keep README in sync)', () => {
     // The README "Audit Logging" feature line documents this exact count
-    // ("47 distinct operations"). If a new audit action is added, bump both
-    // this assertion and the README number together.
-    expect(AUDIT_ACTIONS.length).toBe(47);
+    // ("54 distinct operations"). If a new audit action is added, bump both
+    // this assertion and the README number together. 48th: `device_proof_revoked`
+    // (F-03, a device proof revoked by its failure budget); 49th:
+    // `invitation_create` (F-24); 50th-52nd: the backup recipient list approved,
+    // a recipient confirmed, recipients suspended by a recovery (F-05); 53rd:
+    // `token_reuse_detected` (F-16, a replayed refresh token); 54th:
+    // `unverified_account_reaped` (F-21, the system row of a reaped account).
+    expect(AUDIT_ACTIONS.length).toBe(54);
+    expect(AUDIT_ACTIONS).toContain('unverified_account_reaped');
+    expect(AUDIT_ACTIONS).toContain('token_reuse_detected');
+    expect(AUDIT_ACTIONS).toContain('device_proof_revoked');
+    expect(AUDIT_ACTIONS).toContain('invitation_create');
+    expect(AUDIT_ACTIONS).toContain('backup_recipients_update');
+    expect(AUDIT_ACTIONS).toContain('backup_recipient_confirmed');
+    expect(AUDIT_ACTIONS).toContain('backup_recipients_suspended');
     expect(new Set(AUDIT_ACTIONS).size).toBe(AUDIT_ACTIONS.length);
+  });
+
+  it('security emails: which ones the owner can never silence, and which only with the master password', () => {
+    // F-26: the critical set is what a stolen session must not be able to turn
+    // off, and the mandatory set is not a preference at all. Shrinking either is a
+    // threat-model change (SECURITY.md, "Security emails to the account owner").
+    expect([...CRITICAL_SECURITY_NOTIFICATION_EVENTS].sort()).toEqual(
+      [
+        'locked_sign_in_correct_password',
+        'password_reset',
+        'password_changed',
+        'two_factor_enabled',
+        'two_factor_disabled',
+        'second_factor_lockout',
+        'backup_recipients_changed',
+        'token_reuse_detected',
+      ].sort(),
+    );
+    expect([...MANDATORY_SECURITY_NOTIFICATION_EVENTS].sort()).toEqual(
+      ['account_deletion_requested', 'security_notices_turned_off'].sort(),
+    );
+    // Every event is exactly one of: a preference, or mandatory.
+    expect(
+      [
+        ...SECURITY_NOTIFICATION_PREFERENCE_EVENTS,
+        ...MANDATORY_SECURITY_NOTIFICATION_EVENTS,
+      ].sort(),
+    ).toEqual([...SECURITY_NOTIFICATION_EVENTS].sort());
+    expect(new Set(SECURITY_NOTIFICATION_EVENTS).size).toBe(SECURITY_NOTIFICATION_EVENTS.length);
+    for (const event of CRITICAL_SECURITY_NOTIFICATION_EVENTS) {
+      expect(SECURITY_NOTIFICATION_PREFERENCE_EVENTS).toContain(event);
+    }
+    expect(SECURITY_NOTIFICATION_INTERVAL_MINUTES).toBe(60);
+  });
+
+  it('caps exactly the three actions an unauthenticated request can write, at 5,000 rows', () => {
+    // F-03: these are the only rows a stranger can make the server write under a
+    // victim's account (a failed sign-in, a rejected trusted-device cookie, a link
+    // unlock). The server trims ONLY them, so a new entry here would let the trim
+    // delete the owner's own history, and a missing one would let a stranger grow
+    // the log without bound. Changing either is a threat-model change (SECURITY.md).
+    expect([...STRANGER_WRITABLE_AUDIT_ACTIONS].sort()).toEqual(
+      ['account_unlock', 'login_failed', 'trusted_device_rejected'].sort(),
+    );
+    for (const action of STRANGER_WRITABLE_AUDIT_ACTIONS) {
+      expect(AUDIT_ACTIONS).toContain(action);
+    }
+    // Owner-only actions are never trimmed.
+    expect(STRANGER_WRITABLE_AUDIT_ACTIONS).not.toContain('login');
+    expect(STRANGER_WRITABLE_AUDIT_ACTIONS).not.toContain('device_proof_revoked');
+    expect(MAX_STRANGER_AUDIT_ROWS_PER_USER).toBe(5_000);
+  });
+
+  it("caps an account's activity rows well above its stranger rows, and coalesces within a minute", () => {
+    // F-02: the activity class is what an account writes about its own data, so its
+    // cap is the generous one; the stranger cap bounds what anyone else can write.
+    expect(MAX_ACTIVITY_AUDIT_ROWS_PER_USER).toBe(100_000);
+    expect(MAX_ACTIVITY_AUDIT_ROWS_PER_USER).toBeGreaterThan(MAX_STRANGER_AUDIT_ROWS_PER_USER);
+    expect(AUDIT_COALESCE_WINDOW_MS).toBe(60_000);
   });
 
   it('audits spending a backup code, separately from regenerating the batch', () => {
@@ -1568,5 +1641,22 @@ describe('Vault item bounds', () => {
     for (const byte of bytes) binary += String.fromCharCode(byte);
     expect(btoa(binary).length).toBe(MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH);
     expect(MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH).toBe(40_000);
+  });
+});
+
+describe('Breach-cache bounds (F-06)', () => {
+  it('keeps at most 20,000 on-demand ranges', () => {
+    expect(HIBP_ONDEMAND_MAX_ROWS).toBe(20_000);
+  });
+
+  it('budgets one full cold scan of the largest vault per 15-minute window', () => {
+    expect(HIBP_MISS_BUDGET_WINDOW_MINUTES).toBe(15);
+    expect(HIBP_MAX_MISSES_PER_USER_PER_WINDOW).toBe(ITEM_CAP);
+    expect(HIBP_MAX_MISSES_PER_USER_PER_WINDOW).toBeLessThan(HIBP_ONDEMAND_MAX_ROWS);
+  });
+
+  it('budgets three full cold scans per day', () => {
+    expect(HIBP_MAX_MISSES_PER_USER_PER_DAY).toBe(3 * ITEM_CAP);
+    expect(HIBP_MAX_MISSES_PER_USER_PER_DAY).toBe(30_000);
   });
 });

@@ -1,10 +1,13 @@
 import type { Request, Response } from 'express';
+import bcrypt from 'bcryptjs';
 import { ErrorHandler, httpErrors } from '@hiprax/errors';
 import { User } from '../models/User.js';
 import { Folder } from '../models/Folder.js';
 import { JobLock } from '../models/JobLock.js';
 import { acquireJobLock, releaseJobLock } from './jobLock.js';
 import { createModuleLogger } from './logger.js';
+import { createAuditLog } from '../services/auditService.js';
+import { SESSION_INVALID_MESSAGE } from '../constants/index.js';
 
 const logger = createModuleLogger('controller-helpers');
 
@@ -183,9 +186,40 @@ export function buildFolderAwareUpdate(update: Record<string, unknown>): Record<
  * than assumed here.
  */
 export async function assertVaultNotRotating(userId: string): Promise<void> {
-  const user = await User.findById(userId).select('rotationInProgress').lean();
-  if (user?.rotationInProgress === true) {
+  const user = await User.findById(userId).select('rotationInProgress deletionPending').lean();
+  assertTenantRowLive(user);
+  if (user.rotationInProgress) {
     throw httpErrors.conflict('Vault key rotation is in progress. Please wait and retry.');
+  }
+}
+
+/**
+ * Refuses a tenant write whose account is gone or being erased, as a dead session.
+ *
+ * Passport proves the account exists on every authenticated request, but only at
+ * the START of it: a request that passed that check a moment before the account
+ * was erased is still in flight, and both guards that read the account first
+ * ({@link assertVaultNotRotating}, {@link assertVaultKeyVersion}) used to read a
+ * missing row as "not rotating" and "generation 0", so the write went ahead and
+ * stored a row for an account that no longer existed (I-08). `deletionPending`,
+ * the erasure's own first write, is refused the same way: Passport refuses it at
+ * the door, and every row written after it is one the erasure must catch.
+ *
+ * It narrows the read, so a caller past it holds a row. It is a READ like the
+ * guards it serves, not a lock. An erasure that begins after it is still caught: a
+ * row written while the erasure runs is removed by the erasure's own final sweep;
+ * every counted vault write reserves on the account row first, and finds none once
+ * the erasure has finished; and a document completion, which can outlast a whole
+ * erasure while it waits on the storage engine and would otherwise leave a row and
+ * an object nothing removes, re-checks the account after its insert and takes them
+ * back. (An upload start that outlasts one leaves only a staging row and an engine
+ * upload, which their expiry and the hourly storage clean-up remove.)
+ */
+function assertTenantRowLive<T extends { deletionPending?: boolean | undefined }>(
+  user: T | null,
+): asserts user is T {
+  if (user === null || user.deletionPending === true) {
+    throw httpErrors.unauthorized(SESSION_INVALID_MESSAGE);
   }
 }
 
@@ -342,21 +376,18 @@ export async function releaseVaultRotationLock(userId: string, lockId: string): 
  * The distributed-lock name a vault import holds for its user, mirroring
  * {@link vaultRotationLockName}.
  *
- * `toolsController.importVault` checks the per-user item cap and then writes;
- * without serialization two overlapping imports can each read a count that fits
- * and then both insert, breaching `MAX_ITEMS_PER_USER`. A transaction alone does
- * NOT close that race on every topology — a standalone deployment (and the
- * default test harness) rejects multi-document transactions entirely — so the
- * lock is what actually bounds concurrency. `acquireJobLock` is an atomic upsert
- * against the unique `jobName` index, which holds with or without transactions.
+ * It serialises one account's imports: their derived-id pre-check, their
+ * measures and their writes never interleave. A transaction alone does NOT do
+ * that on every topology — a standalone deployment (and the default test
+ * harness) rejects multi-document transactions entirely — so the lock is what
+ * bounds concurrency. `acquireJobLock` is an atomic upsert against the unique
+ * `jobName` index, which holds with or without transactions.
  *
- * Scope: `operations` is now the only import wire shape, so this lock covers
- * every import — import-vs-import cannot breach the cap on any topology. What it
- * does NOT cover is a row committed by a DIFFERENT endpoint (`POST /items`,
- * `POST /backup/restore`) between the executor's count and its insert; that
- * narrower window is pre-existing, is shared with `vaultController.createItem`'s
- * own count-then-write check, and is documented where it is taken in
- * `toolsController.executeImportOperations`.
+ * It is NOT what holds `MAX_ITEMS_PER_USER`, and could not be: a create from a
+ * DIFFERENT endpoint (`POST /items`, `POST /backup/restore`) does not take it.
+ * The cap is held by the account's row counter, which every inserter reserves in
+ * one conditional write before it inserts (`reserveVaultWrite`, F-15), so an
+ * import and a create racing for the last place cannot both have it.
  */
 export function vaultImportLockName(userId: string): string {
   return `vault-import:${userId}`;
@@ -369,8 +400,9 @@ export function vaultImportLockName(userId: string): string {
  *
  * That difference is the design. `documentController.initUpload` decides three
  * per-user budgets — the document count, the concurrent-transfer count and the
- * byte quota — by reading a count and then writing a staging row, which is the
- * same read-then-write an import performs against `MAX_ITEMS_PER_USER`. Two
+ * byte quota — by reading a count and then writing a staging row, the
+ * read-then-write an import used to perform against `MAX_ITEMS_PER_USER` before
+ * that cap became a counter reservation (F-15). Two
  * opens that each individually fit can therefore both pass the read and both
  * write, and the budgets they breach are per-user, so the lock has to be too. As
  * there, a transaction alone would not close it on every topology: a standalone
@@ -513,6 +545,35 @@ export function getRequestContext(req: Request): { ip: string; userAgent: string
       ? rawUserAgent.slice(0, MAX_USER_AGENT_LENGTH)
       : rawUserAgent;
   return { ip, userAgent };
+}
+
+/**
+ * The master-password proof a request that changes the account's footing must
+ * carry: `authHash` checked against the stored bcrypt digest. On a mismatch it
+ * records `password_verification_failed` with the endpoint that was asked, and
+ * throws 401 — so every such route answers a wrong password the same way and none
+ * forgets the audit row.
+ *
+ * The caller reads `user` with `+authHash` (the field is `select: false`).
+ *
+ * @param endpoint The name the audit row carries (`backup_setup`, `backup_recipients`, …).
+ */
+export async function assertMasterPasswordProof(
+  req: Request,
+  user: { _id: unknown; authHash: string },
+  authHash: string,
+  endpoint: string,
+): Promise<void> {
+  if (await bcrypt.compare(authHash, user.authHash)) return;
+  const ctx = getRequestContext(req);
+  await createAuditLog(
+    String(user._id),
+    'password_verification_failed',
+    { endpoint },
+    ctx.ip,
+    ctx.userAgent,
+  );
+  throw httpErrors.unauthorized('Current password is incorrect');
 }
 
 /**
@@ -659,16 +720,17 @@ export class StaleVaultKeyError extends ErrorHandler {
  * handing back the real number lets a confused client recover instead of
  * wedging.
  *
+ * ## An account that is gone is a dead session
+ *
+ * A `userId` with no row, or one marked `deletionPending`, is refused with 401,
+ * exactly as {@link assertVaultNotRotating} refuses it and as Passport refuses a
+ * dead session (`assertTenantRowLive`). It used to read as generation 0, which let
+ * a request that authenticated a moment before an erasure write for an account
+ * that no longer existed (I-08).
+ *
  * ## What it deliberately does NOT do
  *
- * It is a guard, not an existence check. A `userId` with no row yields 0 —
- * `vaultKeyVersionOf`'s documented answer for an absent value, and the same
- * answer {@link assertVaultNotRotating} gives (`user?.rotationInProgress`
- * passes for a missing user). Passport has already proved the account exists
- * and is verified on every authenticated request, and the write that follows
- * carries its own `_id` filter, so there is nothing here for a 404 to protect.
- *
- * It also does not make the check atomic with the write. The returned number is
+ * It does not make the check atomic with the write. The returned number is
  * what a caller puts in the write's own filter, via
  * {@link vaultKeyVersionFilter} — `User.updateOne({ _id, vaultKeyVersion:`
  * `vaultKeyVersionFilter(resolved) }, …)` — so that a rotation committing
@@ -687,7 +749,8 @@ export async function assertVaultKeyVersion(
   userId: string,
   supplied: number | undefined,
 ): Promise<number> {
-  const user = await User.findById(userId).select('vaultKeyVersion').lean();
+  const user = await User.findById(userId).select('vaultKeyVersion deletionPending').lean();
+  assertTenantRowLive(user);
   const current = vaultKeyVersionOf(user);
 
   if (supplied === undefined) {

@@ -6,11 +6,13 @@ const logger = createModuleLogger('rate-limit-store');
 
 /**
  * The single collection every MongoDB-backed rate-limit counter lives in.
- * Limiters disambiguate themselves with a key prefix (`auth:`, `account:`,
+ * Limiters disambiguate themselves with a key prefix (`auth:`,
  * `token:`, `refresh:`, `unlock:`, `breach:`, `breachBatch:`, `general:`,
  * `pwverify:`, `heavy:`, `import:`, `csrf:`, `docUpload:`, `docPart:`,
  * `docRead:`, `vaultWrite:`, `folderWrite:`, `twoFactorVerify:`), so one
- * collection with one TTL index serves all of them.
+ * collection with one TTL index serves all of them. The breach fetch budget
+ * (`utils/breachMissBudget.ts`) counts here too, under `breachMiss:` and
+ * `breachMissDay:`.
  *
  * The `health:` and `metrics:` counters are deliberately NOT here. Those two
  * limiters guard the diagnostic endpoints that have to keep answering while

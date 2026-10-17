@@ -7,10 +7,15 @@ import { VaultItem } from '../src/models/VaultItem.js';
 import { Folder } from '../src/models/Folder.js';
 import { BackupLog } from '../src/models/BackupLog.js';
 import { JobLock } from '../src/models/JobLock.js';
-import { PwnedRangeCache } from '../src/models/PwnedRangeCache.js';
+import { DeviceProof } from '../src/models/DeviceProof.js';
+import {
+  ON_DEMAND_RANGE_RETENTION_WINDOWS,
+  PwnedRangeCache,
+} from '../src/models/PwnedRangeCache.js';
 import { Document } from '../src/models/Document.js';
 import { DocumentUpload } from '../src/models/DocumentUpload.js';
 import { buildObjectKey } from '../src/utils/documentObjects.js';
+import { config } from '../src/config/index.js';
 
 // ---- Helpers for explain()-based index-usage assertions ----
 // A query may be served by an index (IXSCAN) or a full collection scan
@@ -191,32 +196,23 @@ describe('Database indexes', () => {
       expect(ttlIndex!.expireAfterSeconds).toBe(365 * 24 * 60 * 60);
     });
 
-    it('should have a compound index on userId and timestamp', async () => {
+    // F-02: both page indexes end in `_id`, so `GET /user/audit-log`'s total
+    // order `{timestamp: -1, _id: -1}` is an index walk, and the two superseded
+    // shapes (without `_id`) are gone (migration v2 drops them on old databases).
+    it('should have the page index {userId, timestamp, _id}', async () => {
       await AuditLog.ensureIndexes();
-      const indexes = (await AuditLog.collection.indexes()) as {
-        key: Record<string, number>;
-        [k: string]: unknown;
-      }[];
-
-      const compoundIndex = indexes.find(
-        (idx) => idx.key['userId'] === 1 && idx.key['timestamp'] === -1,
-      );
-
-      expect(compoundIndex).toBeDefined();
+      const indexes = await AuditLog.collection.indexes();
+      const keys = indexes.map((idx) => JSON.stringify(idx.key));
+      expect(keys).toContain(JSON.stringify({ userId: 1, timestamp: -1, _id: -1 }));
+      expect(keys).not.toContain(JSON.stringify({ userId: 1, timestamp: -1 }));
     });
 
-    it('should have a compound index on userId, action, and timestamp', async () => {
+    it('should have the filtered page index {userId, action, timestamp, _id}', async () => {
       await AuditLog.ensureIndexes();
-      const indexes = (await AuditLog.collection.indexes()) as {
-        key: Record<string, number>;
-        [k: string]: unknown;
-      }[];
-
-      const compoundIndex = indexes.find(
-        (idx) => idx.key['userId'] === 1 && idx.key['action'] === 1 && idx.key['timestamp'] === -1,
-      );
-
-      expect(compoundIndex).toBeDefined();
+      const indexes = await AuditLog.collection.indexes();
+      const keys = indexes.map((idx) => JSON.stringify(idx.key));
+      expect(keys).toContain(JSON.stringify({ userId: 1, action: 1, timestamp: -1, _id: -1 }));
+      expect(keys).not.toContain(JSON.stringify({ userId: 1, action: 1, timestamp: -1 }));
     });
   });
 
@@ -281,18 +277,15 @@ describe('Database indexes', () => {
       expect(index).toBeDefined();
     });
 
-    it('should have a sparse compound index on (userId, searchHash)', async () => {
+    it('has no index on searchHash: no keyed name hash is stored (F-12)', async () => {
       await VaultItem.ensureIndexes();
       const indexes = (await VaultItem.collection.indexes()) as {
         key: Record<string, number>;
-        sparse?: boolean;
-        [k: string]: unknown;
       }[];
 
-      const index = indexes.find((idx) => idx.key['userId'] === 1 && idx.key['searchHash'] === 1);
-
-      expect(index).toBeDefined();
-      expect(index!.sparse).toBe(true);
+      expect(indexes.some((idx) => 'searchHash' in idx.key)).toBe(false);
+      // Negative control: the model's other per-user indexes were built.
+      expect(indexes.some((idx) => idx.key['userId'] === 1 && idx.key['tags'] === 1)).toBe(true);
     });
 
     it('should have a compound index on (userId, tags)', async () => {
@@ -408,20 +401,17 @@ describe('Database indexes', () => {
       expect(index).toBeDefined();
     });
 
-    it('should have a unique compound index on (userId, searchHash) with partial filter', async () => {
+    it('has no index on searchHash, so two folders may share a name (F-12)', async () => {
       await Folder.ensureIndexes();
       const indexes = (await Folder.collection.indexes()) as {
         key: Record<string, number>;
-        unique?: boolean;
-        partialFilterExpression?: Record<string, unknown>;
-        [k: string]: unknown;
       }[];
 
-      const index = indexes.find((idx) => idx.key['userId'] === 1 && idx.key['searchHash'] === 1);
-
-      expect(index).toBeDefined();
-      expect(index!.unique).toBe(true);
-      expect(index!.partialFilterExpression).toBeDefined();
+      expect(indexes.some((idx) => 'searchHash' in idx.key)).toBe(false);
+      // Negative control: the model's other per-user indexes were built.
+      expect(indexes.some((idx) => idx.key['userId'] === 1 && idx.key['parentId'] === 1)).toBe(
+        true,
+      );
     });
 
     it('should have a non-unique partial compound index on (userId, sourceRefId) for restore idempotency', async () => {
@@ -699,13 +689,24 @@ describe('Database indexes', () => {
     });
   });
 
+  describe('DeviceProof model indexes', () => {
+    it('declares and builds a UNIQUE index on tokenHash (one row per presented cookie)', async () => {
+      expect(DeviceProof.schema.indexes()).toContainEqual([{ tokenHash: 1 }, { unique: true }]);
+      await DeviceProof.ensureIndexes();
+      const indexes = await DeviceProof.collection.indexes();
+      const byHash = indexes.find((idx) => JSON.stringify(idx.key) === '{"tokenHash":1}');
+      expect(byHash?.unique).toBe(true);
+    });
+  });
+
   describe('PwnedRangeCache model indexes', () => {
-    it('should have a unique index on prefix and NO TTL index', async () => {
+    it('should have a unique prefix index, a partial TTL on fetchedAt and the cap index', async () => {
       await PwnedRangeCache.ensureIndexes();
       const indexes = (await PwnedRangeCache.collection.indexes()) as {
         key: Record<string, number>;
         unique?: boolean;
         expireAfterSeconds?: number;
+        partialFilterExpression?: Record<string, unknown>;
         [k: string]: unknown;
       }[];
 
@@ -713,10 +714,35 @@ describe('Database indexes', () => {
       expect(prefixIndex).toBeDefined();
       expect(prefixIndex!.unique).toBe(true);
 
-      // Deliberately no TTL: staleness is application-level so seed entries can
-      // be exempt from the on-demand refresh window. A hard TTL would evict the
-      // stale-fallback entry and force needless re-fetches.
-      expect(indexes.some((idx) => typeof idx.expireAfterSeconds === 'number')).toBe(false);
+      // Exactly one TTL index, and it can only ever reach ON-DEMAND rows: seeded
+      // rows are outside its partial filter. Its retention is a MULTIPLE of the
+      // freshness window, because getRange serves a stale row as the fallback
+      // when HIBP is unreachable.
+      const ttl = indexes.filter((idx) => typeof idx.expireAfterSeconds === 'number');
+      expect(ttl).toHaveLength(1);
+      expect(ttl[0]!.key).toEqual({ fetchedAt: 1 });
+      expect(ttl[0]!.partialFilterExpression).toEqual({ source: 'hibp' });
+      expect(ttl[0]!.expireAfterSeconds).toBe(
+        config.BREACH_CACHE_TTL_DAYS * ON_DEMAND_RANGE_RETENTION_WINDOWS * 86_400,
+      );
+      expect(ON_DEMAND_RANGE_RETENTION_WINDOWS).toBeGreaterThan(1);
+      // The declaration too, not only a live index: an index built earlier with
+      // these options would survive a schema that stopped declaring them.
+      expect(PwnedRangeCache.schema.indexes()).toContainEqual([
+        { fetchedAt: 1 },
+        {
+          expireAfterSeconds:
+            config.BREACH_CACHE_TTL_DAYS * ON_DEMAND_RANGE_RETENTION_WINDOWS * 86_400,
+          partialFilterExpression: { source: 'hibp' },
+        },
+      ]);
+
+      // The row cap counts and walks the on-demand rows through this index.
+      const capIndex = indexes.find(
+        (idx) => JSON.stringify(idx.key) === JSON.stringify({ source: 1, fetchedAt: 1, _id: 1 }),
+      );
+      expect(capIndex).toBeDefined();
+      expect(capIndex!.expireAfterSeconds).toBeUndefined();
     });
   });
 

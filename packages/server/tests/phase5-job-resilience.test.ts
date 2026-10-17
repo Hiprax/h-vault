@@ -58,6 +58,7 @@ import cron from 'node-cron';
 import { startTokenCleanupJob } from '../src/jobs/tokenCleanup.js';
 import { startTrashCleanupJob } from '../src/jobs/trashCleanup.js';
 import { startBackupScheduler } from '../src/jobs/backupScheduler.js';
+import { startMaintenanceJob } from '../src/jobs/maintenance.js';
 import { trackJob, getRunningJobs } from '../src/utils/jobTracker.js';
 
 const mockedSchedule = vi.mocked(cron.schedule);
@@ -74,6 +75,7 @@ const jobs = [
   { name: 'token-cleanup', start: startTokenCleanupJob },
   { name: 'trash-cleanup', start: startTrashCleanupJob },
   { name: 'backup-scheduler', start: startBackupScheduler },
+  { name: 'maintenance', start: startMaintenanceJob },
 ] as const;
 
 describe('Phase 5 — background job resilience (T10)', () => {

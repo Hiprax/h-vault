@@ -79,11 +79,13 @@ describe('GET /api/v1/config', () => {
     expect(res.body.success).toBe(true);
   });
 
-  it('exposes nothing beyond the file-encryption cap and the document advertisement', async () => {
+  it('exposes nothing beyond the file-encryption cap, the document advertisement and the registration mode', async () => {
     const res = await request(app).get('/api/v1/config');
 
-    expect(Object.keys(res.body.data)).toEqual(['fileEncryption', 'documents']);
+    expect(Object.keys(res.body.data)).toEqual(['fileEncryption', 'documents', 'registration']);
     expect(Object.keys(res.body.data.fileEncryption)).toEqual(['maxSizeMB']);
+    // The mode only: the domain allowlist and the inviter list stay private.
+    expect(res.body.data.registration).toEqual({ mode: 'open' });
   });
 
   it('is wired behind the healthLimiter middleware', () => {

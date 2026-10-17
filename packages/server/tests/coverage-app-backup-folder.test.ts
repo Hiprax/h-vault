@@ -72,6 +72,7 @@ import {
   seedItem,
   type TestUser,
 } from './helpers.js';
+import { seedConfirmedRecipients } from './support/backupRecipients.js';
 
 const BWK_SETUP = {
   encryptedBWK: 'test-encrypted-bwk-data',
@@ -88,7 +89,6 @@ const hexHash = (seed: string): string =>
     .toLowerCase();
 
 const HASH_A = hexHash('a1b2c3d4');
-const HASH_B = hexHash('9f8e7d6c');
 
 type Agent = request.Agent;
 
@@ -290,9 +290,8 @@ describe('app.ts / backup / folder / migrations — uncovered behaviour', () => 
   describe('POST /api/v1/backup/trigger — e-mail delivery', () => {
     it('records a partial delivery failure in the response, the BackupLog and the audit log', async () => {
       await configureBackup(agent, user);
-      await put(agent, '/api/v1/backup/settings', user.accessToken, {
-        backupEmails: ['good@example.com', 'bad@example.com'],
-      });
+      // F-05: only CONFIRMED recipients are mailed; these two have confirmed.
+      await seedConfirmedRecipients(user.id, ['good@example.com', 'bad@example.com']);
       await seedItem(user.id);
 
       cfgState.emailConfigured = true;
@@ -331,9 +330,7 @@ describe('app.ts / backup / folder / migrations — uncovered behaviour', () => 
 
     it('marks the backup failed when every recipient delivery fails', async () => {
       await configureBackup(agent, user);
-      await put(agent, '/api/v1/backup/settings', user.accessToken, {
-        backupEmails: ['a@example.com', 'b@example.com'],
-      });
+      await seedConfirmedRecipients(user.id, ['a@example.com', 'b@example.com']);
 
       cfgState.emailConfigured = true;
       mockSendEmail.mockResolvedValue({ success: false, message: 'transporter_not_configured' });
@@ -509,8 +506,11 @@ describe('app.ts / backup / folder / migrations — uncovered behaviour', () => 
 
   // ── folderController: E11000 → 409 on create AND update ────────────────
 
-  describe('folder duplicate-name conflicts', () => {
-    it('returns 409 (not 500) when creating a second folder with the same searchHash', async () => {
+  // F-12: these two used to pin the 409 a folder name hash collision produced.
+  // No hash is stored and no index compares names any more, so both requests now
+  // succeed; what is pinned is that, and that nothing of the hash is stored.
+  describe('folder names never conflict (F-12)', () => {
+    it('creates a second folder that sends the same searchHash, storing neither hash', async () => {
       const first = await post(agent, '/api/v1/folders', user.accessToken, {
         ...sampleFolder({ searchHash: HASH_A }),
       });
@@ -520,36 +520,33 @@ describe('app.ts / backup / folder / migrations — uncovered behaviour', () => 
         ...sampleFolder({ searchHash: HASH_A }),
       });
 
-      expect(second.status).toBe(409);
-      expect(second.body.success).toBe(false);
-      expect(second.body.message).toMatch(/already exists/i);
-      expect(await Folder.countDocuments({ userId: user.id })).toBe(1);
+      expect(second.status).toBe(201);
+      expect(second.body.data._id).not.toBe(first.body.data._id);
+      expect(await Folder.countDocuments({ userId: user.id })).toBe(2);
+      expect(await Folder.countDocuments({ searchHash: { $exists: true } })).toBe(0);
     });
 
-    it('returns 409 (not 500) when RENAMING a folder onto an existing name, leaving it unchanged', async () => {
-      const a = await seedFolder(user.id, { searchHash: HASH_A, encryptedName: 'alpha' });
-      const b = await seedFolder(user.id, { searchHash: HASH_B, encryptedName: 'beta' });
+    it("renames a folder while sending another folder's hash: applied, audited once, no hash stored", async () => {
+      const a = await seedFolder(user.id, { encryptedName: 'alpha' });
+      const b = await seedFolder(user.id, { encryptedName: 'beta' });
 
       const res = await put(agent, `/api/v1/folders/${String(b._id)}`, user.accessToken, {
+        encryptedName: 'gamma',
+        nameIv: 'gamma-iv',
+        nameTag: 'gamma-tag',
         searchHash: HASH_A,
       });
 
-      expect(res.status).toBe(409);
-      expect(res.body.message).toMatch(/already exists/i);
-
-      // The losing folder must be byte-for-byte untouched.
+      expect(res.status).toBe(200);
       const raw = await Folder.findById(String(b._id)).lean();
-      expect(raw?.searchHash).toBe(HASH_B);
-      expect(raw?.encryptedName).toBe('beta');
-      // …and the winner keeps its hash too.
-      const rawA = await Folder.findById(String(a._id)).lean();
-      expect(rawA?.searchHash).toBe(HASH_A);
-
-      // A failed rename must not be audited as a successful folder_update.
-      expect(await AuditLog.countDocuments({ userId: user.id, action: 'folder_update' })).toBe(0);
+      expect(raw?.encryptedName).toBe('gamma');
+      expect(raw).not.toHaveProperty('searchHash');
+      // The other folder is untouched.
+      expect((await Folder.findById(String(a._id)).lean())?.encryptedName).toBe('alpha');
+      expect(await AuditLog.countDocuments({ userId: user.id, action: 'folder_update' })).toBe(1);
     });
 
-    it('lets a DIFFERENT user create a folder with the same searchHash (index is per-user)', async () => {
+    it('lets a DIFFERENT user create a folder sending the same searchHash', async () => {
       const other = await createTestUser();
       await seedFolder(user.id, { searchHash: HASH_A });
 

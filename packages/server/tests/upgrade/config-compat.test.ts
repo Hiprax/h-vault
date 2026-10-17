@@ -29,12 +29,13 @@
  * `bootProbe.ts` for why that is the only honest way to express "this variable
  * is not set", and for what the probe deliberately does not cover.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll } from 'vitest';
 import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BOOT_FAST_MS, TIMEOUT_EXIT, bootWithEnvFile } from './bootProbe.js';
 import { createTestTempDir } from '../tempDir.js';
+import { createTestPki } from '../smtpTestPki.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -336,6 +337,32 @@ describe('the .env is read the way the operator wrote it', () => {
       SMTP_PASS: 'line one\nline two',
       APP_NAME: 'literal\\nescape',
       SMTP_FROM: 'first line\nsecond line',
+    });
+  });
+
+  describe('a PEM certificate for SMTP_TLS_CA, in each spelling an operator can use', () => {
+    let caPem = '';
+
+    beforeAll(async () => {
+      ({ caPem } = await createTestPki('H-Vault config-compat test CA'));
+    });
+
+    /** The PEM's lines, without the trailing newline, joined by `separator`. */
+    function joined(separator: string): string {
+      return caPem.trimEnd().split('\n').join(separator);
+    }
+
+    it.each([
+      ['across several lines inside double quotes', () => `SMTP_TLS_CA="${joined('\n')}"`],
+      ['on one line with \\n escapes inside double quotes', () => `SMTP_TLS_CA="${joined('\\n')}"`],
+      ['on one line with \\n escapes inside SINGLE quotes', () => `SMTP_TLS_CA='${joined('\\n')}'`],
+    ] as const)('reads it %s', async (_label, line) => {
+      const envFile = withLines(N_MINUS_ONE_ENV, [], [line()]);
+
+      const boot = await bootWithEnvFile(envFile);
+
+      expect(boot.exitCode, boot.output).toBe(0);
+      expect(boot.config?.['SMTP_TLS_CA']).toBe(caPem.trimEnd());
     });
   });
 

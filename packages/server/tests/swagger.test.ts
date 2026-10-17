@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, vi } from 'vitest';
 import type { Mock } from 'vitest';
 import type winston from 'winston';
+import { randomUUID } from 'node:crypto';
 import request from 'supertest';
 import { z } from 'zod';
 import * as sharedSchemas from '@hvault/shared';
@@ -13,6 +14,8 @@ import {
   createFolderSchema,
   createVaultItemSchema,
   importSchema,
+  MAX_FOLDERS_PER_USER,
+  MAX_ITEMS_PER_USER,
   restoreBackupSchema,
   updateFolderSchema,
   updateVaultItemSchema,
@@ -20,6 +23,9 @@ import {
 import app from '../src/app.js';
 import { swaggerSpec } from '../src/config/swagger.js';
 import { warnIfSwaggerEnabledInProduction } from '../src/utils/swaggerWarning.js';
+import { rowLimitMessage } from '../src/utils/vaultQuota.js';
+import { User } from '../src/models/User.js';
+import { authHeader, createTestUser, getCsrf } from './helpers.js';
 import { ROUTE_TABLE } from './support/routeTable.js';
 
 describe('API Documentation', () => {
@@ -46,6 +52,17 @@ describe('API Documentation', () => {
       // drifts from the released package version — the doc-sync bug the earlier
       // `toBe('1.1.0')` literal could not catch (and which broke on every bump).
       expect(res.body.info.version).toBe(APP_VERSION);
+    });
+
+    it('states the two rules every /api/v1 answer follows, which no operation repeats', () => {
+      // A client author reads these once, here: every answer (errors included) is
+      // never cached, and a browser request marked cross-site is refused before
+      // any operation runs. Both are pinned against the code elsewhere
+      // (security-headers.test.ts, fetch-metadata-floor.test.ts); this pins that
+      // the contract says so.
+      const description = (swaggerSpec['info'] as { description?: string }).description ?? '';
+      expect(description).toContain('Cache-Control: no-store');
+      expect(description).toContain('Sec-Fetch-Site: cross-site is refused with 403');
     });
 
     it('should include all API tags', async () => {
@@ -890,5 +907,190 @@ describe('the documented rate limits', () => {
     expect(missing429).toEqual([]);
     // Vacuity guard: the route table really does carry limited routes.
     expect(limited.length).toBeGreaterThan(40);
+  });
+});
+
+describe('the answers the documentation names beyond the happy path', () => {
+  interface Operation {
+    security?: Record<string, unknown>[];
+    responses?: Record<string, unknown>;
+    description?: string;
+  }
+  const paths = swaggerSpec.paths as Record<string, Record<string, Operation | undefined>>;
+  const STATE_CHANGING = ['post', 'put', 'patch', 'delete'] as const;
+
+  /** Every state-changing operation a caller reaches WITHOUT a bearer token. */
+  const unauthenticatedWrites = Object.entries(paths).flatMap(([path, item]) =>
+    STATE_CHANGING.flatMap((method) => {
+      const operation = item[method];
+      if (operation === undefined) return [];
+      const bearer = (operation.security ?? []).some((req) => 'bearerAuth' in req);
+      return bearer ? [] : [{ path, method, operation }];
+    }),
+  );
+
+  it('documents the CSRF 403 on every unauthenticated write, and the real app sends it without a token', async () => {
+    // CSRF is enforced on every state-changing request, signed in or not, so a
+    // public write that omits its 403 tells a client that answer cannot happen.
+    expect(unauthenticatedWrites.length).toBeGreaterThanOrEqual(10);
+    const undocumented = unauthenticatedWrites
+      .filter(({ operation }) => !('403' in (operation.responses ?? {})))
+      .map(({ method, path }) => `${method.toUpperCase()} ${path}`);
+    expect(undocumented).toEqual([]);
+
+    // The forged-request case CSRF exists for: a registration the server
+    // accepts WITH a token creates nothing when it arrives without one.
+    const registration = (email: string): Record<string, unknown> => ({
+      email,
+      authHash: 'a'.repeat(64),
+      encryptedVaultKey: 'test-encrypted-vault-key',
+      vaultKeyIv: 'test-vault-key-iv',
+      vaultKeyTag: 'test-vault-key-tag',
+      kdfIterations: 600_000,
+      kdfAlgorithm: 'PBKDF2-SHA256',
+      encryptionVersion: 1,
+    });
+    // Control: the same body with a CSRF pair is a real registration.
+    const accepted = `csrf-ok-${randomUUID()}@example.com`;
+    const agent = request.agent(app);
+    const csrf = await getCsrf(agent);
+    const control = await agent
+      .post('/api/v1/auth/register')
+      .set('x-csrf-token', csrf.token)
+      .set('Cookie', csrf.cookie)
+      .send(registration(accepted));
+    expect(control.status).toBe(201);
+    expect(await User.countDocuments({ email: accepted })).toBe(1);
+
+    const forged = `csrf-${randomUUID()}@example.com`;
+    const refused = await request(app).post('/api/v1/auth/register').send(registration(forged));
+    // The account is what matters, so it is checked before the status.
+    expect(await User.countDocuments({ email: forged })).toBe(0);
+    expect(refused.status).toBe(403);
+
+    for (const { method, path } of unauthenticatedWrites) {
+      expect(path, 'a public write takes no path parameter').not.toContain('{');
+      const res = await request(app)[method](`/api/v1${path}`).send({});
+      expect(res.status, `${method.toUpperCase()} ${path} without a CSRF token`).toBe(403);
+      expect(res.body.success, `${method.toUpperCase()} ${path}`).toBe(false);
+      // The CSRF refusal itself, not some other 403 the operation documents.
+      expect(res.body.message, `${method.toUpperCase()} ${path}`).toBe('invalid csrf token');
+    }
+  });
+
+  it('documents the 503 /health sends when the database is unreachable, with success false', () => {
+    const health = paths['/health']?.['get'];
+    const unavailable = health?.responses?.['503'] as
+      | { content?: Record<string, { schema?: { properties?: Record<string, unknown> } }> }
+      | undefined;
+    const properties = unavailable?.content?.['application/json']?.schema?.properties;
+    expect(properties?.['data']).toEqual({ $ref: '#/components/schemas/HealthResponse' });
+    expect(properties?.['success']).toEqual({ type: 'boolean', example: false });
+    // And the healthy answer keeps its own example.
+    const healthy = health?.responses?.['200'] as typeof unavailable;
+    expect(healthy?.content?.['application/json']?.schema?.properties?.['success']).toEqual({
+      type: 'boolean',
+      example: true,
+    });
+  });
+
+  it('quotes the real row-limit refusal on the two creates, counting trashed rows for items only', () => {
+    const itemCreate = paths['/vault/items']?.['post']?.description ?? '';
+    const folderCreate = paths['/folders']?.['post']?.description ?? '';
+    expect(itemCreate).toContain(rowLimitMessage('item'));
+    expect(folderCreate).toContain(rowLimitMessage('folder'));
+    // Folders have no trash, so the folder sentence must not claim trashed ones count.
+    expect(itemCreate).toContain(
+      `limit of ${MAX_ITEMS_PER_USER.toLocaleString('en-US')} items (trashed ones included until they are purged) is refused with 400`,
+    );
+    expect(folderCreate).toContain(
+      `limit of ${MAX_FOLDERS_PER_USER.toLocaleString('en-US')} folders is refused with 400`,
+    );
+  });
+
+  it('declares the wrapped vault key the profile really sends, and no secret it withholds', async () => {
+    const schemas = (swaggerSpec.components as { schemas: Record<string, unknown> }).schemas;
+    const profile = schemas['UserProfile'] as { properties: Record<string, { type?: string }> };
+    const user = await createTestUser();
+    // Store every withheld field, so the response-side negative below can fail.
+    await User.updateOne(
+      { _id: user.id },
+      {
+        $set: {
+          twoFactorSecret: 'stored-two-factor-secret',
+          pendingTwoFactorSecret: 'stored-pending-secret',
+          backupCodes: ['stored-backup-code-hash'],
+          lockoutEpisodeId: 'stored-episode-id',
+          lockoutNotifiedAt: new Date(),
+          secondFactorLockout: { failedAttempts: 1 },
+        },
+      },
+    );
+    const stored = await User.collection.findOne({ email: user.email });
+    for (const field of [
+      'twoFactorSecret',
+      'pendingTwoFactorSecret',
+      'backupCodes',
+      'lockoutEpisodeId',
+      'lockoutNotifiedAt',
+      'secondFactorLockout',
+    ]) {
+      expect(stored, `${field} is stored`).toHaveProperty(field);
+    }
+    const res = await request(app)
+      .get('/api/v1/user/profile')
+      .set('Authorization', authHeader(user.accessToken));
+    expect(res.status).toBe(200);
+    const data = res.body.data as Record<string, unknown>;
+    // The client unwraps these to resume a session; the route sends them, so the
+    // contract must say so.
+    expect(data['encryptedVaultKey']).toBe('test-encrypted-vault-key');
+    expect(data['vaultKeyIv']).toBe('test-vault-key-iv');
+    expect(data['vaultKeyTag']).toBe('test-vault-key-tag');
+    for (const field of ['encryptedVaultKey', 'vaultKeyIv', 'vaultKeyTag']) {
+      expect(profile.properties[field]?.type, field).toBe('string');
+    }
+    // What the profile must never carry is neither sent nor documented.
+    for (const secret of [
+      'authHash',
+      'twoFactorSecret',
+      'pendingTwoFactorSecret',
+      'backupCodes',
+      'lockoutEpisodeId',
+      'lockoutNotifiedAt',
+      'secondFactorLockout',
+    ]) {
+      expect(data, secret).not.toHaveProperty(secret);
+      expect(profile.properties, secret).not.toHaveProperty(secret);
+    }
+  });
+
+  it('documents the backup download as the JSON attachment the handler sends', () => {
+    const ok = paths['/backup/download']?.['get']?.responses?.['200'] as
+      { description?: string; content?: Record<string, { schema?: unknown }> } | undefined;
+    expect(ok?.content?.['application/json']?.schema).toEqual({
+      type: 'object',
+      additionalProperties: true,
+    });
+    expect(ok?.description).toContain('Content-Disposition: attachment');
+    // The older media type stays listed for compatibility and says it is never sent.
+    expect(ok?.description).toContain('`application/octet-stream` is kept');
+    expect(ok?.description).toContain('never sent');
+  });
+
+  it('documents that a failed breach lookup is an error, never a "safe" answer', () => {
+    const single = paths['/tools/check-password-breach']?.['post']?.responses ?? {};
+    const failed = single['5XX'] as { description?: string } | undefined;
+    expect(failed?.description).toContain('never reported as safe');
+    // And the success answer is the range alone: no verdict field a client could
+    // read as "safe" without matching its own suffix.
+    const ok = single['200'] as
+      | {
+          content?: Record<string, { schema?: { properties?: Record<string, { type?: string }> } }>;
+        }
+      | undefined;
+    const properties = ok?.content?.['application/json']?.schema?.properties ?? {};
+    expect(Object.keys(properties).sort()).toEqual(['data', 'success']);
+    expect(properties['data']?.type).toBe('string');
   });
 });

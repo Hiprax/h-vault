@@ -31,12 +31,13 @@
  */
 
 import type { AxiosResponse } from 'axios';
-import type { ApiResponse, PublicConfig } from '@hvault/shared';
+import type { ApiResponse, PublicConfig, RegistrationMode } from '@hvault/shared';
 import {
   MAX_FILE_ENCRYPTION_SIZE_MB,
   documentsConfigResponseSchema,
   fileEncryptionConfigResponseSchema,
   publicConfigDataSchema,
+  registrationConfigResponseSchema,
 } from '@hvault/shared';
 import { api } from './client.js';
 
@@ -222,4 +223,31 @@ export async function readDocumentsConfigFresh(): Promise<DocumentsConfig | null
 
   cachedDocumentsConfig = Promise.resolve(resolved);
   return resolved;
+}
+
+// ---------------------------------------------------------------------------
+// Who may register
+// ---------------------------------------------------------------------------
+
+/**
+ * The server's registration mode, read fresh for the register page, or `null` when
+ * the server did not say: an older server without the block, a mode this client
+ * does not know, a malformed answer or a failed request. Never rejects.
+ *
+ * `null` means "show the form the page always showed". That is safe precisely
+ * because this is a DISPLAY decision: the server enforces the mode on the
+ * registration itself, so a page that guessed wrong only costs the user the
+ * server's refusal instead of an explanation up front.
+ *
+ * Not memoised: the register page is visited rarely, and a mode the operator just
+ * changed should be what the next visit shows.
+ */
+export async function readRegistrationMode(): Promise<RegistrationMode | null> {
+  try {
+    const res = await getPublicConfigApi();
+    const parsed = registrationConfigResponseSchema.safeParse(res.data);
+    return parsed.success ? (parsed.data.data.registration?.mode ?? null) : null;
+  } catch {
+    return null;
+  }
 }

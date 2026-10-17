@@ -1,7 +1,7 @@
 import mongoose, { Schema, type Model, type Types } from 'mongoose';
 import { BACKUP_STATUSES } from '@hvault/shared';
 import type { BackupStatus } from '@hvault/shared';
-import { config } from '../config/index.js';
+import { indexConfig } from '../config/indexConfig.js';
 
 // ----- Interface -----
 
@@ -57,7 +57,7 @@ backupLogSchema.index({ userId: 1, status: 1 });
 // TTL index: auto-deletes backup logs after the configured backup retention period
 backupLogSchema.index(
   { timestamp: 1 },
-  { expireAfterSeconds: config.BACKUP_RETENTION_DAYS * 24 * 60 * 60 },
+  { expireAfterSeconds: indexConfig.BACKUP_RETENTION_DAYS * 24 * 60 * 60 },
 );
 
 // ----- Model -----

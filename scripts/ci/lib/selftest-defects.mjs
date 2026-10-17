@@ -39,8 +39,14 @@ const marker = (...parts) => parts.join('');
 
 const PLANTED_LINT_DIRECTIVE = marker('//', ' eslint-', 'disable-next-line no-console');
 const PLANTED_FAKE_SECRET = marker('AKIA', 'IOSFODNN7', 'EXAMPLE');
+// A DIFFERENT AWS-access-key shape for gitleaks, because gitleaks' own
+// `aws-access-token` rule allowlists every key ending in `EXAMPLE` (measured
+// 2026-10-16 with 8.30.1: the key above is reported by nothing, this one as
+// `aws-access-token`). Planting the shared one would leave that gate green with
+// the defect in place and prove only that the allowlist works.
+const PLANTED_GITLEAKS_SECRET = marker('AKIA', 'QSELFTEST', 'PROBE7Z');
 
-/** @type {Record<string, {title: string, requires?: string[], create?: Record<string,string>, mutate?: Record<string,(text:string)=>string>, evidence?: (text:string)=>boolean}>} */
+/** @type {Record<string, {title: string, requires?: string[], create?: Record<string,string>, mutate?: Record<string,(text:string)=>string>, buryInHistory?: boolean, timeoutMs?: number, evidence?: (text:string)=>boolean}>} */
 export const DEFECTS = {
   engines: {
     title: 'raise engines.node above the running Node, so the floor is not met',
@@ -73,6 +79,27 @@ export const DEFECTS = {
     // The finding must be attributed to HISTORY, not to a file left lying about:
     // both halves of this predicate matter.
     evidence: (text) => /__selftest_secret_full/.test(text) && /"where":\s*"history"/.test(text),
+  },
+
+  'audit:secrets:gitleaks': {
+    requires: ['gitleaks'],
+    // Buried in history for the reason the `audit:secrets:full` case is: this
+    // gate reads commits, never the working tree, so the plant has to be a
+    // commit that a later commit took back.
+    //
+    // THE EVIDENCE IS THE PLANT'S OWN FINDING LINE, rule and file together, and
+    // it has to be that narrow. The workspace is a fresh repository whose one
+    // baseline commit re-introduces every fixture line `.gitleaksignore` pins to
+    // its ORIGINAL commit, so this gate is red there before anything is planted;
+    // "the gate failed" proves nothing, and only `aws-access-token | <planted
+    // file>` attributes the failure to this defect.
+    title: 'commit an AWS-access-key-shaped literal gitleaks recognises, then delete it',
+    create: {
+      'packages/server/src/__selftest_gitleaks.ts': `export const key = '${PLANTED_GITLEAKS_SECRET}';\n`,
+    },
+    buryInHistory: true,
+    evidence: (text) =>
+      /aws-access-token \| packages\/server\/src\/__selftest_gitleaks\.ts:/.test(text),
   },
 
   deadcode: {
@@ -310,8 +337,8 @@ export const DEFECTS = {
     mutate: {
       'packages/server/src/controllers/documentController.ts': (text) =>
         text.replace(
-          '  if (!isFinalPart && partBytes !== DOCUMENT_CIPHERTEXT_CHUNK_BYTES) {',
-          '  if (!isFinalPart && partBytes > DOCUMENT_CIPHERTEXT_CHUNK_BYTES) {',
+          '  if (partBytes !== requiredBytes) {',
+          '  if (isFinalPart ? partBytes !== requiredBytes : partBytes > requiredBytes) {',
         ),
     },
     // The rendered assertion, which only a FAILING run can produce, AND the name
@@ -550,7 +577,9 @@ export const DEFECTS = {
 
   'test:resource': {
     // The exact refactor this gate was built for, and the reason it is worth its
-    // minute: `collectBackupData`'s item cursor replaced by `find().lean()`.
+    // minute: the backup size guard's item cursor (`estimateBackupBytes`, the pass
+    // that decides a 413 before the first byte is produced) replaced by
+    // `find().lean()`.
     //
     // Nothing else in the repository notices. The endpoint returns the same 413
     // for the same oversized vault, with the same message; every backup test
@@ -571,15 +600,17 @@ export const DEFECTS = {
     mutate: {
       'packages/server/src/controllers/backupController.ts': (text) =>
         text.replace(
-          `  const itemCursor = VaultItem.find({ userId, deletedAt: { $exists: false } })
-    .select('-sourceRefId')
-    .lean()
-    .cursor();
-  for await (const item of itemCursor) {`,
+          `  await forEachRow(backupItemRows(userId), (item) => {
+    estimatedSize += estimateItemJsonSize(item as unknown as Record<string, unknown>);
+    if (estimatedSize > maxSizeBytes) refuseDuringCollection();
+  });`,
           `  const allItems = await VaultItem.find({ userId, deletedAt: { $exists: false } })
     .select('-sourceRefId')
     .lean();
-  for (const item of allItems) {`,
+  for (const item of allItems) {
+    estimatedSize += estimateItemJsonSize(item as unknown as Record<string, unknown>);
+    if (estimatedSize > maxSizeBytes) refuseDuringCollection();
+  }`,
         ),
     },
     // The assertion's own failure text, which a PASSING run cannot contain — the
@@ -951,6 +982,32 @@ export const DEFECTS = {
       },
     },
     evidence: (text) => /lodash/.test(text),
+  },
+
+  'audit:deps:osv': {
+    requires: ['osv-scanner'],
+    // A package version with a published advisory, planted into the LOCKFILE,
+    // which is all this gate reads: minimist 1.2.5 (prototype pollution, fixed in
+    // 1.2.6). Absent from the real lockfile, so the plant is the only copy.
+    //
+    // THE EVIDENCE IS THE GATE'S FINDING LINE, `minimist@1.2.5  <advisory id>`,
+    // never the package name alone: the gate scans with `--all-packages`, so its
+    // report lists the planted package whether or not anything is found in it,
+    // and a name match would attribute a failure the advisory did not cause.
+    title: 'add a lockfile entry for a package version with a known advisory (minimist 1.2.5)',
+    mutate: {
+      'package-lock.json': (text) => {
+        const lock = JSON.parse(text);
+        lock.packages['node_modules/minimist'] = {
+          version: '1.2.5',
+          resolved: 'https://registry.npmjs.org/minimist/-/minimist-1.2.5.tgz',
+          dev: true,
+          license: 'MIT',
+        };
+        return `${JSON.stringify(lock, null, 2)}\n`;
+      },
+    },
+    evidence: (text) => /minimist@1\.2\.5\s+[A-Z]+-[\w-]+/.test(text),
   },
 
   'test:e2e': {

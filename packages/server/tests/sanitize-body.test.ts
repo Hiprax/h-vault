@@ -139,4 +139,99 @@ describe('sanitizeRequestBody', () => {
       expect(next).toHaveBeenCalledWith();
     });
   });
+
+  describe('the query (F-13)', () => {
+    /**
+     * A request whose `query` is what Express 5 gives it: an accessor on the
+     * prototype with no setter, re-parsed on every read, so plain assignment
+     * cannot replace it.
+     */
+    function expressLikeRequest(query: unknown, body?: unknown): Request {
+      const proto = {};
+      Object.defineProperty(proto, 'query', { get: () => query, configurable: true });
+      const req = Object.create(proto) as Request;
+      if (body !== undefined) req.body = body;
+      return req;
+    }
+
+    function runRequest(req: Request): ReturnType<typeof vi.fn> {
+      const next = vi.fn();
+      sanitizeRequestBody(req, {} as Response, next as unknown as NextFunction);
+      return next;
+    }
+
+    it('installs a filtered copy of the query over the getter-only original', () => {
+      // `hppx` hands the query on with the keys it expanded; this is that shape.
+      const parsed = Object.assign(Object.create(null) as Record<string, unknown>, {
+        folderId: { $ne: 'x' },
+        $where: '1',
+        tags: ['a', { $gt: '' }],
+        keep: '1',
+      });
+      const req = expressLikeRequest(parsed);
+
+      const next = runRequest(req);
+
+      expect(next).toHaveBeenCalledTimes(1);
+      expect(next).toHaveBeenCalledWith();
+      expect(req.query).toStrictEqual({ folderId: {}, tags: ['a', {}], keep: '1' });
+      const installed = Object.getOwnPropertyDescriptor(req, 'query');
+      expect(installed).toMatchObject({ writable: true, enumerable: true, configurable: true });
+      // The parsed original is not edited in place.
+      expect(parsed.$where).toBe('1');
+    });
+
+    it('filters the body and the query of the same request', () => {
+      const req = expressLikeRequest({ $gt: '', q: 'v' }, { $ne: 1, b: 'v' });
+
+      runRequest(req);
+
+      expect(req.body).toStrictEqual({ b: 'v' });
+      expect(req.query).toStrictEqual({ q: 'v' });
+    });
+
+    it('leaves an absent or scalar query alone, installing nothing', () => {
+      for (const query of [undefined, null, 'text']) {
+        const req = expressLikeRequest(query);
+        const next = runRequest(req);
+        expect(next).toHaveBeenCalledWith();
+        expect(Object.hasOwn(req, 'query')).toBe(false);
+        expect(req.query).toBe(query);
+      }
+    });
+
+    it('refuses a query past the bound with its own 400, leaving body AND query as parsed', () => {
+      const deepQuery = nestedObject(MAX_REQUEST_BODY_DEPTH + 1);
+      const body = { $ne: 1, keep: 'v' };
+      const req = expressLikeRequest(deepQuery, body);
+
+      const next = runRequest(req);
+
+      expect(next).toHaveBeenCalledTimes(1);
+      const [error] = next.mock.calls[0] as [{ statusCode?: number; message?: string }];
+      expect(error).toBeInstanceOf(Error);
+      expect(error.statusCode).toBe(400);
+      expect(error.message).toBe('Request query is nested too deeply');
+      // Nothing half-filtered survives: neither source was replaced.
+      expect(req.body).toBe(body);
+      expect(Object.hasOwn(req, 'query')).toBe(false);
+    });
+
+    it('accepts a query exactly at the bound', () => {
+      const req = expressLikeRequest(nestedObject(MAX_REQUEST_BODY_DEPTH));
+
+      expect(runRequest(req)).toHaveBeenCalledWith();
+      expect(req.query).toStrictEqual(nestedObject(MAX_REQUEST_BODY_DEPTH));
+    });
+
+    it('reports a body past the bound as the BODY, and installs no query', () => {
+      const req = expressLikeRequest({ $gt: '' }, nestedObject(MAX_REQUEST_BODY_DEPTH + 1));
+
+      const next = runRequest(req);
+
+      const [error] = next.mock.calls[0] as [{ message?: string }];
+      expect(error.message).toBe('Request body is nested too deeply');
+      expect(Object.hasOwn(req, 'query')).toBe(false);
+    });
+  });
 });

@@ -6,7 +6,8 @@
  * the very failure both of them exist to catch. `docs-sync.test.ts` uses it for
  * the accessibility gate's scanned-view count (21 sentences across 8 files) and
  * `gate-surface.test.ts` for the number of core modules the mutation gate holds
- * to their own scores.
+ * to their own scores, and `docs-sync.test.ts` again for the number of gates
+ * each tier runs.
  *
  * Spelled-out words rather than digits because that is how those sentences are
  * written: rewriting eight documents to suit a regular expression is the wrong
@@ -57,4 +58,14 @@ export const NUMBER_WORDS = [
   'thirty-eight',
   'thirty-nine',
   'forty',
+  'forty-one',
+  'forty-two',
+  'forty-three',
+  'forty-four',
+  'forty-five',
+  'forty-six',
+  'forty-seven',
+  'forty-eight',
+  'forty-nine',
+  'fifty',
 ] as const;

@@ -5,14 +5,13 @@ import {
 } from '@hvault/shared';
 import type { ItemType } from '@hvault/shared';
 import type { z } from 'zod';
-import { cryptoService } from '../crypto/cryptoService';
 import { encryptVaultField } from '../crypto/vaultField';
 import type { ParsedImportItem } from './types';
 
 /** How many per-row reasons an import surfaces before it stops collecting. */
 export const MAX_IMPORT_WARNINGS = 10;
 
-/** The ciphertext fields (plus search hash) a sealed row puts on the wire. */
+/** The ciphertext fields a sealed row puts on the wire. */
 interface SealedImportItem {
   encryptedName: string;
   nameIv: string;
@@ -20,7 +19,6 @@ interface SealedImportItem {
   encryptedData: string;
   dataIv: string;
   dataTag: string;
-  searchHash: string;
 }
 
 /**
@@ -41,9 +39,8 @@ export type SealImportResult =
 
 /**
  * Validate ONE parsed item against the shared decrypted-data schema for its
- * type, then seal its name and data to their destination row (format v2) and
- * compute its search hash. This is the zero-knowledge boundary: plaintext never
- * leaves this step.
+ * type, then seal its name and data to their destination row (format v2). This
+ * is the zero-knowledge boundary: plaintext never leaves this step.
  *
  * Failure is reported, never thrown — a single unconvertible item must not
  * abort a whole import — and the reason names the item and the offending field
@@ -65,7 +62,7 @@ export async function sealImportItem(
 
 /**
  * Seal a name and an already-serialised data string to their destination row,
- * with the size check and the search hash every import row needs. Shared by the
+ * with the size check every import row needs. Shared by the
  * validated path above and a native re-import, which seals the stored data string
  * verbatim rather than re-validating it.
  */
@@ -93,8 +90,6 @@ export async function sealImportFields(
     return { ok: false, reason: `Skipped "${name}": item is too large to store.` };
   }
 
-  const searchHash = await cryptoService.generateSearchHash(name, vaultKey);
-
   return {
     ok: true,
     sealed: {
@@ -104,7 +99,6 @@ export async function sealImportFields(
       encryptedData: encData.encrypted,
       dataIv: encData.iv,
       dataTag: encData.tag,
-      searchHash,
     },
   };
 }

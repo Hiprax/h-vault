@@ -30,11 +30,14 @@ import {
 /*  Mocks: I/O and heavy children only, never the page under test              */
 /* -------------------------------------------------------------------------- */
 
-const { mockVerifyEmail, mockUnlockAccount, mockRefreshToken } = vi.hoisted(() => ({
-  mockVerifyEmail: vi.fn(),
-  mockUnlockAccount: vi.fn(),
-  mockRefreshToken: vi.fn(),
-}));
+const { mockVerifyEmail, mockUnlockAccount, mockRefreshToken, mockConfirmRecipient } = vi.hoisted(
+  () => ({
+    mockVerifyEmail: vi.fn(),
+    mockUnlockAccount: vi.fn(),
+    mockRefreshToken: vi.fn(),
+    mockConfirmRecipient: vi.fn(),
+  }),
+);
 
 vi.mock('../../src/stores/authStore', () => ({
   useAuthStore: Object.assign(vi.fn(), { getState: vi.fn(), setState: vi.fn() }),
@@ -76,6 +79,12 @@ vi.mock('../../src/lib/lazyZxcvbn', () => ({
 vi.mock('../../src/services/api/configApi', () => ({
   getDocumentsConfig: () => Promise.resolve({ enabled: false }),
   getFileEncryptionMaxBytes: vi.fn(),
+  // The register page asks which registration mode the server runs (F-24).
+  readRegistrationMode: () => Promise.resolve('open'),
+}));
+
+vi.mock('../../src/services/api/backupApi', () => ({
+  confirmBackupRecipientApi: mockConfirmRecipient,
 }));
 
 vi.mock('../../src/stores/encryptedStorage', () => ({
@@ -117,6 +126,7 @@ import { UnlockScreen } from '../../src/components/auth/UnlockScreen';
 import ResetPasswordPage from '../../src/pages/ResetPasswordPage';
 import VerifyEmailPage from '../../src/pages/VerifyEmailPage';
 import UnlockAccountPage from '../../src/pages/UnlockAccountPage';
+import ConfirmRecipientPage from '../../src/pages/ConfirmRecipientPage';
 import NotFoundPage from '../../src/pages/NotFoundPage';
 import VaultPage from '../../src/pages/VaultPage';
 import AboutPage from '../../src/pages/AboutPage';
@@ -319,7 +329,7 @@ describe('standalone screens are one main landmark with the card title as the h1
   });
 
   it('the reset-password form, reached with a token', async () => {
-    const { container } = renderAt('/reset-password?token=abc', <ResetPasswordPage />);
+    const { container } = renderAt('/reset-password#token=abc', <ResetPasswordPage />);
     await settleMountEffects();
     expectStandaloneScreen(container, 'Reset Password');
   });
@@ -337,7 +347,7 @@ describe('standalone screens are one main landmark with the card title as the h1
         refuse = reject;
       }),
     );
-    const { container } = renderAt('/verify-email?token=abc', <VerifyEmailPage />);
+    const { container } = renderAt('/verify-email#token=abc', <VerifyEmailPage />);
     expectStandaloneScreen(container, 'Verifying Email');
 
     refuse(httpError(400, 'Invalid or expired verification token'));
@@ -347,9 +357,21 @@ describe('standalone screens are one main landmark with the card title as the h1
 
   it('the account-unlock page after the server refuses', async () => {
     mockUnlockAccount.mockRejectedValue(httpError(400, 'Invalid or expired unlock token'));
-    const { container } = renderAt('/unlock-account?token=abc', <UnlockAccountPage />);
+    const { container } = renderAt('/unlock-account#token=abc', <UnlockAccountPage />);
     await screen.findByRole('heading', { level: 1, name: 'Unlock Failed' });
     expectStandaloneScreen(container, 'Unlock Failed');
+  });
+
+  it('the backup-recipient confirmation page, on success and on a link without a token', async () => {
+    mockConfirmRecipient.mockResolvedValue({ data: { success: true, message: 'Confirmed.' } });
+    const confirmed = renderAt('/backup/confirm-recipient#token=abc', <ConfirmRecipientPage />);
+    await screen.findByRole('heading', { level: 1, name: 'Address Confirmed' });
+    expectStandaloneScreen(confirmed.container, 'Address Confirmed');
+    confirmed.unmount();
+
+    const { container } = renderAt('/backup/confirm-recipient', <ConfirmRecipientPage />);
+    await screen.findByRole('heading', { level: 1, name: 'Confirmation Failed' });
+    expectStandaloneScreen(container, 'Confirmation Failed');
   });
 
   it('the 404 page, whose subtitle stays one level below its h1', () => {
@@ -397,13 +419,6 @@ describe('the session-recovery screens are standalone screens too', () => {
     expectStandaloneScreen(container, 'Could not reach the server');
     // Still the recoverable screen: the session was kept, not ended.
     expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
-  });
-
-  it('when the account is locked', async () => {
-    mockRefreshToken.mockRejectedValue(httpError(403, 'ACCOUNT_LOCKED'));
-    const { container } = renderGuarded();
-    await screen.findByRole('heading', { level: 1, name: 'Account temporarily locked' });
-    expectStandaloneScreen(container, 'Account temporarily locked');
   });
 
   it('the loading screen shown while a session resumes or a route loads', () => {

@@ -21,7 +21,8 @@
     "test:observability": "vitest run --config vitest.observability.config.ts",
     "type-check": "tsc --noEmit --incremental --tsBuildInfoFile ../../.cache/tsbuildinfo/server.src.tsbuildinfo && tsc -p tsconfig.test.json",
     "create-indexes": "tsx scripts/create-indexes.ts",
-    "seed-breaches": "tsx src/cli/seedBreaches.ts"
+    "seed-breaches": "tsx src/cli/seedBreaches.ts",
+    "invite": "tsx src/cli/invite.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "3.1138.0",
@@ -49,6 +50,7 @@
     "zod": "^4.6.5"
   },
   "devDependencies": {
+    "@peculiar/x509": "^2.1.0",
     "@types/cookie-parser": "^1.4.10",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
@@ -61,6 +63,7 @@
     "@vitest/coverage-v8": "^4.1.11",
     "fast-check": "^4.10.2",
     "mongodb-memory-server": "^11.3.0",
+    "reflect-metadata": "^0.2.2",
     "supertest": "^7.3.0",
     "tsx": "^4.23.15",
     "vitest": "^4.1.11",
