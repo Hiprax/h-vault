@@ -608,7 +608,16 @@ const userSchema = new Schema<IUser>(
 
 // ----- Indexes -----
 // Note: email index is already created by `unique: true` on the field definition
-userSchema.index({ emailVerified: 1 });
+// The reaper of never-verified accounts (`utils/unverifiedAccounts.ts`) pages
+// through them by `_id` from this index: partial, so it holds only the unverified
+// accounts, and keyed on `_id` after the flag, so a page is one range scan from the
+// cursor with no sort, and a run reads each unverified account at most once. It replaced a single-field
+// `{emailVerified: 1}` index (every page fetched and sorted EVERY unverified
+// account); migration v7 builds this one and drops that one.
+userSchema.index(
+  { emailVerified: 1, _id: 1 },
+  { partialFilterExpression: { emailVerified: false } },
+);
 userSchema.index({ lockoutUntil: 1 }, { sparse: true });
 userSchema.index({
   'settings.backup.enabled': 1,

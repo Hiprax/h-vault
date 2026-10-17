@@ -582,7 +582,9 @@ describe('F-28 — a code is consumed atomically wherever it is accepted', () =>
     hold.release();
     const res = await pending;
     expect(res.status).toBe(401);
-    expect(res.body.message).toBe('TWO_FA_INVALID');
+    // Its challenge was consumed before the code write, so the token is spent: a
+    // dead token, not a mistyped code.
+    expect(res.body.message).toBe('TOKEN_INVALID');
     expect(res.body.data?.accessToken).toBeUndefined();
     expect(await AuditLog.countDocuments({ userId: user.id, action: 'login' })).toBe(0);
   }, 60_000);

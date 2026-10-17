@@ -61,6 +61,16 @@ async function refreshWith(
     .set('Cookie', `${csrf.cookie}; refreshToken=${refreshToken}`);
 }
 
+/** The raw refresh token a successful refresh set in its cookie. */
+function refreshCookieOf(res: request.Response): string {
+  const cookies = ([] as string[]).concat(res.headers['set-cookie'] ?? []);
+  const value = cookies
+    .map((cookie) => /^refreshToken=([^;]+)/.exec(cookie)?.[1])
+    .find((token) => token !== undefined && token !== '');
+  if (value === undefined) throw new Error('the response set no refresh cookie');
+  return value;
+}
+
 /** Stores `count` trusted devices for `userId`. */
 async function seedTrustedDevices(userId: string, count: number): Promise<void> {
   for (let i = 0; i < count; i += 1) {
@@ -175,6 +185,98 @@ describe('F-16: refresh-token reuse is audited', () => {
       expect(res.body.message).toBe('TOKEN_REUSE_DETECTED');
     }
     expect(await auditRows(user.id, 'token_reuse_detected')).toHaveLength(1);
+  });
+
+  it('records the reuse when two DIFFERENT spent tokens of one sign-in are replayed together', async () => {
+    // Two rotations leave two spent values of one family (and a live third). A
+    // copy of the cookie jar holds both; replayed at the same moment, each replay
+    // used to delete the other's row before claiming its own, so both claims
+    // missed and the family ended with no record and no notice.
+    const first = await refreshWith(user.refreshToken);
+    expect(first.status).toBe(200);
+    const second = await refreshWith(refreshCookieOf(first));
+    expect(second.status).toBe(200);
+    const spent = [user.refreshToken, refreshCookieOf(first)];
+    const familyId = (await RefreshToken.findOne({ tokenHash: hashToken(spent[0]!) }).lean())!
+      .familyId;
+    await seedTrustedDevices(user.id, 1);
+
+    // Two barriers make the interleaving deterministic: both replays have FOUND
+    // their own spent row (they are held at the family's live-session delete,
+    // the first write after that lookup), and both have run every revocation
+    // before the trusted devices (held there) before either claims anything.
+    const holdUntilBoth = (
+      beforeRelease: () => Promise<unknown> = () => Promise.resolve(),
+    ): {
+      arrive: () => Promise<void>;
+      arrivals: () => number;
+    } => {
+      let arrived = 0;
+      let release!: () => void;
+      const both = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return {
+        arrive: () => {
+          arrived += 1;
+          if (arrived === 2) void beforeRelease().then(release);
+          return both;
+        },
+        arrivals: () => arrived,
+      };
+    };
+    const found = holdUntilBoth();
+    // While both are held there, after their live-session deletes have run, a
+    // rotation running concurrently commits a successor into the family: only the
+    // sweep after the claims can still take it.
+    const successor = 'successor-minted-by-a-concurrent-rotation';
+    const revoking = holdUntilBoth(() =>
+      RefreshToken.create({
+        userId: user.id,
+        tokenHash: hashToken(successor),
+        familyId,
+        deviceInfo: { userAgent: 'owner-agent/1.0', ip: '127.0.0.1', fingerprint: 'fp' },
+        expiresAt: new Date(Date.now() + 86_400_000),
+      }),
+    );
+    const realDeleteMany = RefreshToken.deleteMany.bind(RefreshToken) as (
+      filter: Record<string, unknown>,
+      ...rest: unknown[]
+    ) => unknown;
+    vi.spyOn(RefreshToken, 'deleteMany').mockImplementation(((
+      filter: Record<string, unknown>,
+      ...rest: unknown[]
+    ) => {
+      const query = realDeleteMany(filter, ...rest);
+      if (filter.familyId !== familyId || filter.usedAt !== null) return query;
+      return found.arrive().then(() => query);
+    }) as never);
+    const realDevices = TrustedDevice.deleteMany.bind(TrustedDevice) as (
+      ...args: unknown[]
+    ) => unknown;
+    vi.spyOn(TrustedDevice, 'deleteMany').mockImplementation(((...args: unknown[]) => {
+      const query = realDevices(...args);
+      return revoking.arrive().then(() => query);
+    }) as never);
+
+    const replays = await Promise.all(spent.map((token) => refreshWith(token, REPLAYER_UA)));
+
+    expect(found.arrivals()).toBe(2);
+    expect(revoking.arrivals()).toBe(2);
+    for (const res of replays) {
+      expect(res.status).toBe(401);
+      expect(res.body.message).toBe('TOKEN_REUSE_DETECTED');
+    }
+    // At least one record, at most one per replayed value: never none.
+    const rows = await auditRows(user.id, 'token_reuse_detected');
+    expect(rows.length).toBeGreaterThanOrEqual(1);
+    expect(rows.length).toBeLessThanOrEqual(2);
+    for (const row of rows) expect(row.userAgent).toBe(REPLAYER_UA);
+    // And the revocation is whole: the family (its live third value and the
+    // successor committed meanwhile included) and every trusted device are gone.
+    expect(await RefreshToken.exists({ tokenHash: hashToken(successor) })).toBeNull();
+    expect(await RefreshToken.countDocuments({ userId: user.id, familyId })).toBe(0);
+    expect(await TrustedDevice.countDocuments({ userId: user.id })).toBe(0);
   });
 
   it('leaves the replayed token in place when the revocation fails part-way, so the next replay finishes it', async () => {

@@ -15,6 +15,7 @@ import { cascadeDeleteUser } from '../utils/cascadeDelete.js';
 import { supportsTransactions } from '../utils/transactionSupport.js';
 import { revokeTrustedDevices } from '../utils/trustedDevices.js';
 import { revokeDeviceProofs } from '../utils/deviceProofs.js';
+import { revokeTwoFactorChallenges } from '../utils/twoFactorChallenge.js';
 import { notifySecurityEventLater } from '../utils/securityNotifications.js';
 import {
   publicBackupSettings,
@@ -736,6 +737,9 @@ export const changePassword = catchAsync(async (req: Request, res: Response): Pr
           // Every device proof goes with them: a new master password is a new
           // footing, and a proof exempts its browser from the password lockout.
           await revokeDeviceProofs(userId, { session });
+          // And every sign-in still waiting for its second factor, each granted by
+          // a proof of the password this change replaces.
+          await revokeTwoFactorChallenges(userId, { session });
           // A new master password is a change of footing: every third-party backup
           // recipient is suspended (its mailed links die) until the owner approves
           // the list again. In the transaction, so it commits with the password.
@@ -763,6 +767,7 @@ export const changePassword = catchAsync(async (req: Request, res: Response): Pr
       // devices so none skips 2FA under the new password.
       await revokeTrustedDevices(userId);
       await revokeDeviceProofs(userId);
+      await revokeTwoFactorChallenges(userId);
       // Suspended BEFORE the write too, the same fail-safe order as the revocations.
       suspendedRecipients = await suspendThirdPartyRecipients(userId);
       // A conditional `updateOne` rather than the `user.save()` this branch used
@@ -1537,13 +1542,22 @@ export const deleteAccount = catchAsync(async (req: Request, res: Response): Pro
   // Phase 1: Mark user as pending deletion. If any subsequent step fails,
   // a background cleanup job can detect and complete the deletion. When a code
   // was verified, the mark is conditional on its step being unspent, so the same
-  // code cannot be spent twice.
+  // code cannot be spent twice. And it is conditional on no deletion being under
+  // way: of two requests that passed every check above at once (a double submit),
+  // exactly one marks the account, erases it and sends the deletion email.
+  const notYetPending = { _id: userId, deletionPending: { $ne: true } };
   const pending =
     verdict === undefined
-      ? { filter: { _id: userId }, update: { $set: { deletionPending: true } } }
-      : withSecondFactorCas({ _id: userId }, { $set: { deletionPending: true } }, verdict);
+      ? { filter: notYetPending, update: { $set: { deletionPending: true } } }
+      : withSecondFactorCas(notYetPending, { $set: { deletionPending: true } }, verdict);
   const marked = await User.updateOne(pending.filter, pending.update);
   if (marked.matchedCount === 0) {
+    // Nothing matched because another deletion got there first (its mark is set, or
+    // its erasure has already removed the row), or, with two-factor, because the
+    // code's step was spent or the factor changed since it was checked.
+    if (!(await User.exists({ _id: userId, deletionPending: { $ne: true } }).read('primary'))) {
+      throw httpErrors.conflict('Account deletion is already in progress.');
+    }
     throw httpErrors.badRequest('Invalid verification code');
   }
 

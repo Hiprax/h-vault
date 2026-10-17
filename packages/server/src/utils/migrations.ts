@@ -77,6 +77,11 @@ const migrations: MigrationDefinition[] = [
     name: 'vault-row-counters',
     up: backfillVaultRowCounters,
   },
+  {
+    version: 7,
+    name: 'unverified-reaper-index',
+    up: migrateUnverifiedReaperIndex,
+  },
 ];
 
 /** How long migration v3 may spend installing counters before it leaves the rest. */
@@ -281,6 +286,46 @@ async function installRowCountersRound(
     { ordered: false },
   );
   return { owners, installed: result.modifiedCount };
+}
+
+/**
+ * v7 — the index the reaper of never-verified accounts pages through (F-21).
+ *
+ * Builds the partial `{emailVerified: 1, _id: 1}` index on `{emailVerified: false}`
+ * that `utils/unverifiedAccounts.ts` hints, then drops the single-field
+ * `{emailVerified: 1}` index it replaces: the reaper was that index's only reader,
+ * and over it every page fetched and sorted EVERY unverified account. Built here as
+ * v3 and v4 build theirs, because production runs with `autoIndex` off and a
+ * deployment that has not run `create-indexes` must not have the reaper fail every
+ * run. The spec is a literal, the one `models/User.ts` declares; an existing index
+ * on these keys under another name (85/86) is left to `create-indexes` to report.
+ * The old index is found by its KEY, never by its name, and only an index on
+ * exactly `{emailVerified: 1}` is dropped; one dropped meanwhile (27) is gone
+ * already.
+ */
+async function migrateUnverifiedReaperIndex(): Promise<void> {
+  const users = mongoose.connection.collection('users');
+  try {
+    await users.createIndex(
+      { emailVerified: 1, _id: 1 },
+      { partialFilterExpression: { emailVerified: false } },
+    );
+  } catch (error: unknown) {
+    if (!hasCode(error, INDEX_OPTIONS_CONFLICT) && !hasCode(error, INDEX_KEY_SPECS_CONFLICT)) {
+      throw error;
+    }
+  }
+  for (const index of await users.indexes()) {
+    const [only, ...rest] = Object.entries(index.key as Record<string, unknown>);
+    const replaced = only?.[0] === 'emailVerified' && only[1] === 1 && rest.length === 0;
+    if (index.name === undefined || !replaced) continue;
+    try {
+      await users.dropIndex(index.name);
+      logger.info(`Migration v7: dropped users.${index.name}`);
+    } catch (error: unknown) {
+      if (!hasCode(error, INDEX_NOT_FOUND)) throw error;
+    }
+  }
 }
 
 /** How many accounts one write batch of migration v4 converts. */

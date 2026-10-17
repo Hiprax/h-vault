@@ -1,6 +1,6 @@
 /**
- * The ONE place the single-use second-factor challenge is issued, checked and
- * consumed (see `models/Challenge.ts` for why it exists).
+ * The ONE place the single-use second-factor challenge is issued, checked,
+ * consumed and cancelled (see `models/Challenge.ts` for why it exists).
  *
  * `login` calls {@link issueTwoFactorChallenge} and signs the token it returns the
  * claims for; `login2fa` calls {@link isChallengeOpen} before it reads the code
@@ -10,7 +10,7 @@
  * is a recovery credential, and a refused exchange must not burn one).
  */
 import crypto from 'node:crypto';
-import type { Types } from 'mongoose';
+import type { ClientSession, Types } from 'mongoose';
 import { Challenge } from '../models/Challenge.js';
 
 /** How long a challenge token lives: the five minutes `login` has always given it. */
@@ -62,6 +62,28 @@ export async function isChallengeOpen(
 ): Promise<boolean> {
   const row = await Challenge.exists(openChallengeFilter(jti, userId, now)).read('primary');
   return row !== null;
+}
+
+/**
+ * Cancels every challenge the account has open, and returns how many went.
+ *
+ * A challenge is what a proof of the password bought: a five-minute right to
+ * finish signing in with a code. Whatever withdraws the footing that proof stood
+ * on (a password reset or change, "log out everywhere", a replayed refresh token)
+ * calls this beside its other revocations, or the holder of an older proof could
+ * still finish a sign-in minutes later and be handed a session issued after the
+ * revocation. In the caller's transaction when it has one, like the revocations
+ * beside it.
+ */
+export async function revokeTwoFactorChallenges(
+  userId: Types.ObjectId | string,
+  options: { session?: ClientSession } = {},
+): Promise<number> {
+  const result = await Challenge.deleteMany(
+    { userId },
+    options.session ? { session: options.session } : {},
+  );
+  return result.deletedCount;
 }
 
 /**

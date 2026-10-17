@@ -102,10 +102,19 @@ export async function reapUnverifiedAccounts(now: Date = new Date()): Promise<nu
     })
       .select('_id')
       .sort({ _id: 1 })
-      // The unverified accounts only, from their own index, then a bounded top-k
-      // sort: left alone the planner may walk EVERY account in `_id` order instead.
-      .hint({ emailVerified: 1 })
+      // The unverified accounts only, from their own partial index, which is keyed
+      // `_id` after the flag: a page is one range scan starting at the cursor, in
+      // the order asked for, with no sort stage, so a run reads each unverified
+      // account at most once instead of every one of them on every page. The
+      // scan still examines the YOUNG unverified accounts it passes (the age test is
+      // `createdAt`, not the index), so the last page of a run reads every younger
+      // unverified account after the cursor; under a large enough flood that page
+      // can still run out of time, and the next run continues from the start. Left
+      // alone the planner may walk EVERY account in `_id` order.
+      .hint({ emailVerified: 1, _id: 1 })
       .limit(REAP_PAGE_SIZE)
+      // The whole page in one reply: no second round trip for the rest of it.
+      .batchSize(REAP_PAGE_SIZE)
       .maxTimeMS(REAP_PAGE_MAX_TIME_MS)
       .read('primary')
       .lean();

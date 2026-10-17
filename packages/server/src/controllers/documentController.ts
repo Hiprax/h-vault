@@ -22,6 +22,7 @@ import type {
   UpdateDocumentInput,
 } from '@hvault/shared';
 import { config } from '../config/index.js';
+import { SESSION_INVALID_MESSAGE } from '../constants/index.js';
 import { createModuleLogger } from '../utils/logger.js';
 import { Document, type IDocument } from '../models/Document.js';
 import { DocumentUpload, type IDocumentUpload } from '../models/DocumentUpload.js';
@@ -1855,16 +1856,31 @@ async function completeUnderLock(
       // here rather than leaving the collector to find it an hour later: until it
       // does, the user is charged bucket space for a document that does not exist and
       // cannot be seen, let alone removed.
-      try {
-        await getStorage().deleteObject(upload.objectKey);
-      } catch (deleteError) {
-        logger.error('Failed to delete the object of a document row that was not written', {
-          userId,
-          uploadId: id,
-          error: deleteError instanceof Error ? deleteError.message : String(deleteError),
-        });
-      }
+      await discardUnnamedObject(
+        upload.objectKey,
+        { userId, uploadId: id },
+        'Failed to delete the object of a document row that was not written',
+      );
       throw error;
+    }
+
+    // The account may have been erased while this completion waited on the engine:
+    // the guard above is a read, the erasure takes no lock, and it sweeps only the
+    // objects that were finished when it listed them. A row and an object written
+    // after it would belong to nobody and nothing would ever remove them (the
+    // clean-up of interrupted erasures needs an account row, and the orphan sweep
+    // spares every object a documents row names). Checked AFTER the insert, so the
+    // erasure, whose first write is the account's `deletionPending`, either began
+    // before this read (and the row and object are taken back here) or begins after
+    // it (and finds both).
+    if (!(await User.exists({ _id: userId, deletionPending: { $ne: true } }).read('primary'))) {
+      await Document.deleteOne({ _id: document._id, userId });
+      await discardUnnamedObject(
+        upload.objectKey,
+        { userId, uploadId: id },
+        'Failed to delete the object of a document whose account was erased during its completion',
+      );
+      throw httpErrors.unauthorized(SESSION_INVALID_MESSAGE);
     }
 
     const completeCtx = getRequestContext(req);
@@ -1881,6 +1897,26 @@ async function completeUnderLock(
     return { kind: 'document', document };
   } finally {
     await releaseVaultRotationLock(userId, rotationLockId);
+  }
+}
+
+/**
+ * Deletes a stored object no row names, logging (never throwing) when the engine
+ * refuses: the caller is already answering for the failure that left it unnamed,
+ * and the hourly collector removes what this could not.
+ */
+async function discardUnnamedObject(
+  objectKey: string,
+  context: { userId: string; uploadId: string },
+  failure: string,
+): Promise<void> {
+  try {
+    await getStorage().deleteObject(objectKey);
+  } catch (deleteError) {
+    logger.error(failure, {
+      ...context,
+      error: deleteError instanceof Error ? deleteError.message : String(deleteError),
+    });
   }
 }
 

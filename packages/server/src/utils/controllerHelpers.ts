@@ -206,8 +206,14 @@ export async function assertVaultNotRotating(userId: string): Promise<void> {
  * the door, and every row written after it is one the erasure must catch.
  *
  * It narrows the read, so a caller past it holds a row. It is a READ like the
- * guards it serves, not a lock: an erasure that starts after it is caught by the
- * erasure's own final sweep of the rows written meanwhile.
+ * guards it serves, not a lock. An erasure that begins after it is still caught: a
+ * row written while the erasure runs is removed by the erasure's own final sweep;
+ * every counted vault write reserves on the account row first, and finds none once
+ * the erasure has finished; and a document completion, which can outlast a whole
+ * erasure while it waits on the storage engine and would otherwise leave a row and
+ * an object nothing removes, re-checks the account after its insert and takes them
+ * back. (An upload start that outlasts one leaves only a staging row and an engine
+ * upload, which their expiry and the hourly storage clean-up remove.)
  */
 function assertTenantRowLive<T extends { deletionPending?: boolean | undefined }>(
   user: T | null,

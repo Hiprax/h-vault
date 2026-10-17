@@ -32,11 +32,19 @@ import app from '../src/app.js';
 import { User } from '../src/models/User.js';
 import { RefreshToken } from '../src/models/RefreshToken.js';
 import { Challenge } from '../src/models/Challenge.js';
+import { AuditLog } from '../src/models/AuditLog.js';
 import { cryptoManager } from '../src/utils/cryptoManager.js';
 import { TWO_FACTOR_CHALLENGE_SECONDS } from '../src/utils/twoFactorChallenge.js';
 import { cascadeDeleteUser } from '../src/utils/cascadeDelete.js';
 import { supportsTransactions } from '../src/utils/transactionSupport.js';
-import { createTestUser, deriveTestPurposeKey, getCsrf, type TestUser } from './helpers.js';
+import {
+  authHeader,
+  createTestUser,
+  deriveTestPurposeKey,
+  generateStateHash,
+  getCsrf,
+  type TestUser,
+} from './helpers.js';
 import { useReplicaSetConnection } from './mongoHarness.js';
 
 const API = '/api/v1';
@@ -515,5 +523,195 @@ describe('I-01: account erasure removes the challenges (transactional branch)', 
 
   it('erases every challenge row the account owns inside the final step, and no other', async () => {
     await eraseAndCheckChallenges();
+  });
+});
+
+/** A password reset link for `user`, as `forgotPassword` mints it. */
+async function resetTokenFor(user: TestUser): Promise<string> {
+  const stored = await User.findById(user.id).select('+authHash').lean();
+  return jwt.sign(
+    { userId: user.id, purpose: 'password_reset', stateHash: generateStateHash(stored!.authHash) },
+    deriveTestPurposeKey('password_reset'),
+    { algorithm: 'HS256', expiresIn: '1h' },
+  );
+}
+
+/** Sends one authenticated or public state-changing request, CSRF included. */
+async function sendWithCsrf(
+  method: 'post' | 'put',
+  path: string,
+  body: Record<string, unknown>,
+  accessToken?: string,
+): Promise<request.Response> {
+  const agent = request(app);
+  const csrf = await getCsrf(agent);
+  const req = agent[method](`${API}${path}`)
+    .set('x-csrf-token', csrf.token)
+    .set('Cookie', csrf.cookie);
+  if (accessToken !== undefined) req.set('Authorization', authHeader(accessToken));
+  return req.send(body);
+}
+
+const CHANGED_CREDENTIAL = {
+  newAuthHash: 'changed-auth-hash-value',
+  newEncryptedVaultKey: 'rewrapped-vault-key',
+  newVaultKeyIv: 'rewrapped-iv',
+  newVaultKeyTag: 'rewrapped-tag',
+};
+
+/**
+ * A pending two-factor step was granted by a proof of the password as it stood.
+ * Whatever ends every session and withdraws the trust built on that footing (a
+ * reset, a change, "log out everywhere", a detected cookie replay) also cancels
+ * the steps still waiting for a code, or the holder of the old proof finishes one
+ * minutes later and receives a session issued AFTER the revocation.
+ */
+async function expectChallengeCancelled(
+  account: TwoFactorAccount,
+  tempToken: string,
+): Promise<void> {
+  const before = await sessionsOf(account.user.id);
+  const res = await secondFactorStep(tempToken, totpNow(account.secret));
+  expect(res.status).toBe(401);
+  expect(res.body.message).toBe('TOKEN_INVALID');
+  expect(await sessionsOf(account.user.id)).toBe(before);
+  expect(await Challenge.countDocuments({ userId: account.user.id })).toBe(0);
+  // The code itself was never read, so the step stays unspent for the owner.
+  const row = await User.findById(account.user.id).lean();
+  expect(row!.lastTotpTimestamp ?? null).toBeNull();
+}
+
+describe('I-01: a change of footing cancels every pending two-factor step', () => {
+  it('a password reset cancels a challenge issued before it', async () => {
+    const account = await createTwoFactorAccount();
+    const tempToken = await passwordStep(account.user);
+
+    const reset = await sendWithCsrf('post', '/auth/reset-password', {
+      token: await resetTokenFor(account.user),
+      email: account.user.email,
+      newAuthHash: 'reset-auth-hash-value',
+      newEncryptedVaultKey: 'fresh-encrypted-vault-key',
+      newVaultKeyIv: 'fresh-vault-iv',
+      newVaultKeyTag: 'fresh-vault-tag',
+    });
+    expect(reset.status).toBe(200);
+
+    await expectChallengeCancelled(account, tempToken);
+  });
+
+  it('a password change cancels a challenge issued before it (standalone branch)', async () => {
+    expect(supportsTransactions()).toBe(false);
+    const account = await createTwoFactorAccount();
+    const tempToken = await passwordStep(account.user);
+
+    const changed = await sendWithCsrf(
+      'put',
+      '/user/change-password',
+      { currentAuthHash: account.user.authHash, ...CHANGED_CREDENTIAL },
+      account.user.accessToken,
+    );
+    expect(changed.status).toBe(200);
+
+    await expectChallengeCancelled(account, tempToken);
+  });
+
+  it('"log out everywhere" cancels a challenge issued before it', async () => {
+    const account = await createTwoFactorAccount();
+    const tempToken = await passwordStep(account.user);
+
+    const out = await sendWithCsrf('post', '/auth/logout-all', {}, account.user.accessToken);
+    expect(out.status).toBe(200);
+
+    await expectChallengeCancelled(account, tempToken);
+  });
+
+  it('a replayed refresh token cancels a challenge issued before it', async () => {
+    const account = await createTwoFactorAccount();
+    const tempToken = await passwordStep(account.user);
+    const refresh = async (): Promise<request.Response> => {
+      const agent = request.agent(app);
+      const csrf = await getCsrf(agent, `refreshToken=${account.user.refreshToken}`);
+      return agent
+        .post(`${API}/auth/refresh`)
+        .set('x-csrf-token', csrf.token)
+        .set('Cookie', `${csrf.cookie}; refreshToken=${account.user.refreshToken}`);
+    };
+    expect((await refresh()).status).toBe(200);
+    const replay = await refresh();
+    expect(replay.body.message).toBe('TOKEN_REUSE_DETECTED');
+
+    await expectChallengeCancelled(account, tempToken);
+  });
+
+  it('keeps a challenge issued AFTER the change, and another account’s challenges', async () => {
+    const account = await createTwoFactorAccount();
+    const bystander = await createTwoFactorAccount();
+    const bystanderToken = await passwordStep(bystander.user);
+    const out = await sendWithCsrf('post', '/auth/logout-all', {}, account.user.accessToken);
+    expect(out.status).toBe(200);
+
+    const fresh = await passwordStep(account.user);
+    const done = await secondFactorStep(fresh, totpNow(account.secret));
+    expect(done.status).toBe(200);
+    const other = await secondFactorStep(bystanderToken, totpNow(bystander.secret));
+    expect(other.status).toBe(200);
+  });
+});
+
+describe('I-01: a password change cancels pending two-factor steps (transactional branch)', () => {
+  useReplicaSetConnection();
+
+  beforeAll(() => {
+    expect(supportsTransactions()).toBe(true);
+  });
+
+  it('cancels the challenge in the same transaction as the new credential', async () => {
+    const account = await createTwoFactorAccount();
+    const tempToken = await passwordStep(account.user);
+
+    const changed = await sendWithCsrf(
+      'put',
+      '/user/change-password',
+      { currentAuthHash: account.user.authHash, ...CHANGED_CREDENTIAL },
+      account.user.accessToken,
+    );
+    expect(changed.status).toBe(200);
+
+    await expectChallengeCancelled(account, tempToken);
+  });
+});
+
+describe('I-01: a code lost to a concurrent sign-in after the challenge was spent', () => {
+  it('answers TOKEN_INVALID, so the client starts over at once, and still records the replay', async () => {
+    const account = await createTwoFactorAccount();
+    const tempToken = await passwordStep(account.user);
+    // The challenge is consumed first; a concurrent sign-in then spends this TOTP
+    // step before this request's own code write lands, so that write matches
+    // nothing. The token is spent by now: "invalid code" would invite a retype on
+    // a token that can never succeed, and keep the client's master key resident.
+    const realConsume = Challenge.findOneAndUpdate.bind(Challenge) as (...args: unknown[]) => {
+      lean: () => Promise<unknown>;
+    };
+    vi.spyOn(Challenge, 'findOneAndUpdate').mockImplementation(((...args: unknown[]) => ({
+      lean: async () => {
+        const consumed = await realConsume(...args).lean();
+        await User.updateOne(
+          { _id: account.user.id },
+          { $set: { lastTotpTimestamp: Number.MAX_SAFE_INTEGER } },
+        );
+        return consumed;
+      },
+    })) as never);
+
+    const sessionsBefore = await sessionsOf(account.user.id);
+    const res = await secondFactorStep(tempToken, totpNow(account.secret));
+
+    expect(res.status).toBe(401);
+    expect(res.body.message).toBe('TOKEN_INVALID');
+    expect(await sessionsOf(account.user.id)).toBe(sessionsBefore);
+    const replays = await AuditLog.find({ userId: account.user.id, action: 'login_failed' }).lean();
+    expect(replays.map((row) => row.metadata)).toEqual([{ reason: '2fa_replay' }]);
+    // The challenge stays spent: the same token cannot be retried.
+    expect(await Challenge.countDocuments({ userId: account.user.id, consumedAt: null })).toBe(0);
   });
 });

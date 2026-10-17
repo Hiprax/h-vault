@@ -143,8 +143,10 @@ export function isSessionGone(error: unknown): boolean {
  *
  * `POST /auth/login/2fa` answers an expired, malformed, purpose-mismatched or
  * device-mismatched temp token, one whose single-use challenge has already been
- * spent by a completed sign-in (or that predates challenges) — and an account that
- * no longer exists, or is mid-erasure — with `TOKEN_INVALID`; an account whose second factor is locked
+ * spent by a completed sign-in (or that predates challenges), was cancelled by a
+ * password reset or change, "log out everywhere" or a detected session replay, or
+ * was consumed by an exchange whose code another sign-in spent first — and an
+ * account that no longer exists, or is mid-erasure — with `TOKEN_INVALID`; an account whose second factor is locked
  * (a thirty-minute condition that outlives the five-minute temp token) with
  * `ACCOUNT_LOCKED`. `TOKEN_EXPIRED` is listed
  * because this predicate lives in the module the refresh consumers share and

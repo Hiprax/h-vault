@@ -265,8 +265,18 @@ describe('authController — a backup code is consumed exactly once under a conc
     const statuses = [a.status, b.status].sort((x, y) => x - y);
     expect(statuses).toEqual([200, 401]);
 
+    // The loser's own challenge was consumed before its code write missed, so its
+    // token is dead: it is told so (TOKEN_INVALID), which is what makes the client
+    // drop the key it holds for that sign-in, rather than invited to retype a code.
     const loser = a.status === 401 ? a : b;
-    expect(loser.body.message).toBe('TWO_FA_INVALID');
+    expect(loser.body.message).toBe('TOKEN_INVALID');
+    expect(
+      await AuditLog.countDocuments({
+        userId: user.id,
+        action: 'login_failed',
+        'metadata.reason': '2fa_replay',
+      }),
+    ).toBe(1);
 
     // The code is gone, and exactly ONE new session exists (the seeded token + one).
     const after = await User.findById(user.id).select('+backupCodes');

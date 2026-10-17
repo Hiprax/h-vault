@@ -231,6 +231,31 @@ describe('F-26: PUT /user/notifications (master password)', () => {
     expect(subjectsTo(user.email)).toEqual([]);
   });
 
+  it('off, back on, and off again within the hour mails the "turned off" notice both times', async () => {
+    // The owner's own "turned off" an hour ago says nothing about the second one,
+    // which may be somebody else holding the password: it is never held back.
+    const user = await createTestUser();
+    const off = () =>
+      send('put', '/user/notifications', user, {
+        authHash: user.authHash,
+        notifications: { password_changed: false },
+      });
+
+    expect((await off()).status).toBe(200);
+    await settle();
+    const on = await send('put', '/user/settings', user, {
+      notifications: { password_changed: true },
+    });
+    expect(on.status).toBe(200);
+    await settle();
+    // Turning a notice back on mails nothing.
+    expect(subjectsTo(user.email)).toEqual([TURNED_OFF]);
+    expect((await off()).status).toBe(200);
+    await settle();
+
+    expect(subjectsTo(user.email)).toEqual([TURNED_OFF, TURNED_OFF]);
+  });
+
   it('turning optional notices off with the proof sends no notice about it', async () => {
     const user = await createTestUser();
     const res = await send('put', '/user/notifications', user, {

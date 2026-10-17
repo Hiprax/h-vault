@@ -422,7 +422,9 @@ export async function dischargeUnlockedEpisode(
   episodeId: string,
 ): Promise<boolean> {
   const result = await User.updateOne(
-    { _id: userId, [FACTOR_PATHS[factor].episode]: episodeId },
+    // Never on an account being erased: an unlock restores nothing there, and the
+    // erasure must find the row as it left it.
+    { _id: userId, [FACTOR_PATHS[factor].episode]: episodeId, deletionPending: { $ne: true } },
     lockoutClearUpdate(factor),
   );
   return result.matchedCount === 1;

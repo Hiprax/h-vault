@@ -2524,7 +2524,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Documents'],
         summary: 'Turn a finished transfer into a document',
         description:
-          "Verifies every part against the storage engine's own ledger, DERIVES the document's chunk count and its ciphertext and plaintext sizes from that ledger rather than from this request, re-checks the storage quota against the bytes actually received, and commits the document row. Nothing the client says about the size of its own file is believed. Refused with 400 when a part is missing, when the engine and the server disagree about a part, or when the parts cannot frame a document (a final segment holding only its authentication tag is the case that looks valid and is not); with 409 while a vault-key rotation is running, when the wrapped key was produced under a superseded vault key, or when another completion for the same account is already in flight. Completions of one account are decided one at a time, so the quota is measured against every document committed before this one and is not overshot by several finishing together. A repeat completion returns the document the first one committed, so a client that retried after a timeout cannot tell whether its first attempt landed.",
+          "Verifies every part against the storage engine's own ledger, DERIVES the document's chunk count and its ciphertext and plaintext sizes from that ledger rather than from this request, re-checks the storage quota against the bytes actually received, and commits the document row. Nothing the client says about the size of its own file is believed. Refused with 400 when a part is missing, when the engine and the server disagree about a part, or when the parts cannot frame a document (a final segment holding only its authentication tag is the case that looks valid and is not); with 409 while a vault-key rotation is running, when the wrapped key was produced under a superseded vault key, or when another completion for the same account is already in flight. Completions of one account are decided one at a time, so the quota is measured against every document committed before this one and is not overshot by several finishing together. A repeat completion returns the document the first one committed, so a client that retried after a timeout cannot tell whether its first attempt landed. A completion whose account was deleted while it waited on the storage engine is answered 401, and the row it had just written is taken back, with its stored object (removed at once when the engine allows, otherwise by the hourly storage clean-up).",
         security: [{ bearerAuth: [], csrfToken: [] }],
         parameters: [UPLOAD_ID_PARAM],
         requestBody: jsonRequestBody('CompleteDocumentUploadRequest'),
@@ -2890,7 +2890,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Auth'],
         summary: 'Complete 2FA verification',
         description:
-          'Verifies a TOTP code (or backup code) to complete two-factor authentication. Rate limited: 20 req/IP per 15 min, shared with the other credential endpoints, plus the token-verification budget of 20 req/IP per 15 min. When the originating login opted into "remember me" (carried in the signed temp token, not the request body) AND the code submitted was a TOTP code, a successful response additionally sets a httpOnly `trustedDevice` cookie scoped to `/api/v1/auth`, allowing this device to skip the 2FA step on later logins until the trust grant expires. A **backup code** never sets that cookie, whatever the remember-me setting: it is a single-use recovery credential, so it completes this login (and still opens the longer remembered session) without registering the device as trusted. The temp token is **single-use**: it names a challenge that lives five minutes, and the first exchange that presents a correct code consumes it. Presenting a spent token again is refused with 401 `TOKEN_INVALID` before the code is read (nothing counted, no code spent); of two exchanges racing on one token, the one that loses the consumption is refused with 401 `TOKEN_INVALID` before its code is consumed. A wrong code leaves the token usable. A six-digit code is checked only as a TOTP code, anything else only as a backup code.',
+          'Verifies a TOTP code (or backup code) to complete two-factor authentication. Rate limited: 20 req/IP per 15 min, shared with the other credential endpoints, plus the token-verification budget of 20 req/IP per 15 min. When the originating login opted into "remember me" (carried in the signed temp token, not the request body) AND the code submitted was a TOTP code, a successful response additionally sets a httpOnly `trustedDevice` cookie scoped to `/api/v1/auth`, allowing this device to skip the 2FA step on later logins until the trust grant expires. A **backup code** never sets that cookie, whatever the remember-me setting: it is a single-use recovery credential, so it completes this login (and still opens the longer remembered session) without registering the device as trusted. The temp token is **single-use**: it names a challenge that lives five minutes, and the first exchange that presents a correct code consumes it. Presenting a spent token again is refused with 401 `TOKEN_INVALID` before the code is read (nothing counted, no code spent); of two exchanges racing on one token, the one that loses the consumption is refused with 401 `TOKEN_INVALID` before its code is consumed. A code another sign-in spends in the moment after this exchange consumed its challenge is answered 401 `TOKEN_INVALID` too: the challenge is spent, so the sign-in starts again. A password reset, a password change, "log out everywhere" and a detected refresh-token replay cancel every open challenge of the account (401 `TOKEN_INVALID`). A wrong code leaves the token usable. A six-digit code is checked only as a TOTP code, anything else only as a backup code.',
         requestBody: jsonRequestBody('Login2faRequest'),
         responses: {
           200: {
@@ -2913,7 +2913,7 @@ export const swaggerSpec: JsonObject = {
             'The body failed schema validation, or the account no longer has two-factor authentication enabled (`TWO_FA_NOT_ENABLED`).',
           ),
           401: errorResponse(
-            'The temp token is invalid, expired or already spent (`TOKEN_INVALID`, the code unread), or the code is wrong or was already used in this time step (`TWO_FA_INVALID`, counted toward the second-factor lockout).',
+            'The temp token is invalid, expired, already spent or cancelled (`TOKEN_INVALID`, the code unread), or the code is wrong or its time step was already used (`TWO_FA_INVALID`, counted toward the second-factor lockout). A code spent by a concurrent sign-in after this exchange consumed its challenge also answers `TOKEN_INVALID` (not counted; the challenge is spent).',
           ),
           403: errorResponse(
             '`ACCOUNT_LOCKED`: the SECOND factor is locked after too many wrong codes (counted here and at every other code check). The password is already proven at this step, so naming the lock confirms nothing; a PASSWORD lockout does not refuse this step. The same status also answers a missing or invalid CSRF token.',
@@ -2928,7 +2928,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Auth'],
         summary: 'Refresh access token',
         description:
-          'Exchanges a valid refresh token (httpOnly cookie) for a new access token. Implements token rotation with reuse detection (a replayed token revokes its whole family, every trusted device and every device proof of the account, and records one `token_reuse_detected` audit entry with the address and user agent of the replaying request, never a token; a token spent more than 7 days ago is simply refused). The account is evaluated BEFORE the presented token is claimed, so a refusal costs nothing. A lockout of either factor never refuses a refresh: the cookie is itself proof of a prior authentication.',
+          'Exchanges a valid refresh token (httpOnly cookie) for a new access token. Implements token rotation with reuse detection (a replayed token revokes its whole family, every trusted device, every device proof and every open two-factor challenge of the account, and records a `token_reuse_detected` audit entry with the address and user agent of the replaying request, never a token (two replays of one token record one entry; two different spent tokens of a sign-in replayed at the same moment can record one each); a token spent more than 7 days ago is simply refused). The account is evaluated BEFORE the presented token is claimed, so a refusal costs nothing. A lockout of either factor never refuses a refresh: the cookie is itself proof of a prior authentication.',
         responses: {
           200: {
             description:
@@ -2994,7 +2994,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Auth'],
         summary: 'Logout all other sessions',
         description:
-          'Revokes all refresh tokens except the current session, every trusted device, and every `__hv_device` proof, including the one this browser presented; a browser that presented a live proof for the account is given a fresh one in its place (single-use for single-use). Suspends every backup recipient other than the account address until the owner saves the list again (PUT /backup/recipients).',
+          'Revokes all refresh tokens except the current session, every trusted device, and every `__hv_device` proof, including the one this browser presented; a browser that presented a live proof for the account is given a fresh one in its place (single-use for single-use). Cancels every open two-factor challenge of the account. Suspends every backup recipient other than the account address until the owner saves the list again (PUT /backup/recipients).',
         security: [{ bearerAuth: [], csrfToken: [] }],
         responses: {
           200: successResponse('All other sessions revoked'),
@@ -3087,7 +3087,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Auth'],
         summary: 'Reset password with token',
         description:
-          'Resets the master password using a valid reset token. Suspends every backup recipient other than the account address until the owner saves the list again (PUT /backup/recipients). Rate limited: 20 req/IP per 15 min.',
+          'Resets the master password using a valid reset token. Suspends every backup recipient other than the account address until the owner saves the list again (PUT /backup/recipients), and cancels every open two-factor challenge. An account whose deletion has begun is answered 400 `TOKEN_INVALID`, like a dead link, before anything is written (and, when the deletion begins between the read and the write, nothing further is written: no audit entry and no email). Rate limited: 20 req/IP per 15 min.',
         requestBody: jsonRequestBody('ResetPasswordRequest'),
         responses: {
           200: successResponse('Password reset successful'),
@@ -3103,7 +3103,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Auth'],
         summary: 'Unlock locked account',
         description:
-          'Ends the lockout the emailed link names: the password lockout, or the second-factor lockout when the signed token says `factor: "second_factor"` (a link minted before that claim existed is a password link). Only that factor is discharged. The browser that follows the link also receives a single-use `__hv_device` proof valid for 10 minutes, so it can sign in even if the account is re-locked by further guessing. Rate limited: 20 req/IP per 15 min.',
+          'Ends the lockout the emailed link names: the password lockout, or the second-factor lockout when the signed token says `factor: "second_factor"` (a link minted before that claim existed is a password link). Only that factor is discharged. The browser that follows the link also receives a single-use `__hv_device` proof valid for 10 minutes, so it can sign in even if the account is re-locked by further guessing. An account whose deletion has begun is answered 400 `TOKEN_INVALID`, like a dead link, and nothing is discharged. Rate limited: 20 req/IP per 15 min.',
         requestBody: jsonRequestBody('UnlockAccountRequest'),
         responses: {
           200: successResponse('Account unlocked'),
@@ -3509,7 +3509,13 @@ export const swaggerSpec: JsonObject = {
           'Permanently deletes the account and everything it owns: vault items, folders, documents and their stored objects, uploads in progress, sessions, trusted devices, and its own audit and backup logs. Requires the password, and a current TOTP code (not a backup code) when two-factor authentication is enabled. Cannot be undone. Rate limited: 5 req/user per 15 min, one budget per account shared by every request that re-checks the master password.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: jsonRequestBody('ReauthenticateWithCodeRequest'),
-        responses: { ...ACKNOWLEDGED_REAUTH_RESPONSES, 403: SECOND_FACTOR_LOCKED },
+        responses: {
+          ...ACKNOWLEDGED_REAUTH_RESPONSES,
+          403: SECOND_FACTOR_LOCKED,
+          409: errorResponse(
+            'A deletion of this account is already in progress (a second request sent at the same moment); nothing more is done and no second email is sent.',
+          ),
+        },
       },
     },
     '/user/profile': {
@@ -3578,7 +3584,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['User'],
         summary: 'Change master password',
         description:
-          'Changes the master password, re-wrapping the SAME vault key under a key derived from the new one. Requires current auth hash for verification. Every refresh token and every trusted device granted under the old password is revoked, and every backup recipient other than the account address is suspended until the owner saves the list again (PUT /backup/recipients). Rate limited: 5 req/user per 15 min, one budget per account shared by every request that re-checks the master password.',
+          'Changes the master password, re-wrapping the SAME vault key under a key derived from the new one. Requires current auth hash for verification. Every refresh token, every trusted device and device proof granted under the old password, and every open two-factor challenge is revoked, and every backup recipient other than the account address is suspended until the owner saves the list again (PUT /backup/recipients). Rate limited: 5 req/user per 15 min, one budget per account shared by every request that re-checks the master password.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: jsonRequestBody('ChangePasswordRequest'),
         responses: {

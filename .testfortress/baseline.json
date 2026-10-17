@@ -1,9 +1,9 @@
 {
   "version": 1,
   "recordedAt": "2026-10-17",
-  "commit": "977fddc",
+  "commit": "67daba5",
   "tests": {
-    "count": 13458
+    "count": 13497
   },
   "coverage": {
     "diff": 100
@@ -56,11 +56,11 @@
     },
     "packages/server": {
       "coverage": {
-        "line": 99.39,
-        "branch": 94.78,
+        "line": 99.4,
+        "branch": 94.83,
         "function": 98.98,
-        "linesTotal": 6599,
-        "branchesTotal": 3640,
+        "linesTotal": 6635,
+        "branchesTotal": 3677,
         "filesMeasured": [
           "src/app.ts",
           "src/cli/invite.ts",
@@ -194,7 +194,7 @@
         ]
       },
       "tests": {
-        "count": 5914
+        "count": 5953
       }
     },
     "packages/client": {
@@ -657,7 +657,7 @@
       "spectral": 1
     }
   },
-  "reason": "Phase 19 final sweep: four tests pinning migration v4's handling of a list the owner saved before the migration reached the account (incl. the read-to-write race) and the exact budget refusal texts",
+  "reason": "Validation pass over Phases 11-19: npm run ci green (33/33) on the fixed tree; banks the new server tests (reuse race, challenge cancellation, reaper index + migration v7, recovery routes on accounts being erased, completion vs erasure, notice key and wording) and the server coverage growth",
   "bundle": {
     "budgetKb": {
       "VaultItemForm": 230,

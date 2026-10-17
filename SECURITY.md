@@ -76,9 +76,12 @@ security posture, not a disclaimer.
   stored**: a name exists on the server only as ciphertext under a fresh random IV, so the
   stored rows do not show which entries share a name. An earlier release stored such a hash;
   migration v5 removes it from every row and drops every index over it when this release
-  first starts. Two things it cannot reach: a backup or export made before the upgrade still
-  carries the old hashes (a restore or import ignores them), and an entry written in the
-  seconds of a rolling restart by a server process still running the earlier release keeps
+  first starts. What it cannot reach: a backup or export made before the upgrade still
+  carries the old hashes (a restore or import ignores them); so does any copy of the database
+  taken before the upgrade (a dump, a volume snapshot), and so does a replica set's operation
+  log (the Docker stack runs one), which keeps the recent writes that stored them until it wraps;
+  and an entry written in
+  the seconds of a rolling restart by a server process still running the earlier release keeps
   the hash it was given, at rest, until the entry is deleted (no list, read, update answer,
   export or backup returns it).
 - **A passive network attacker.** All traffic is expected to run over TLS terminated by
@@ -208,7 +211,15 @@ security posture, not a disclaimer.
   codes checked, but only one can consume the challenge; the other is refused before its code is consumed, so it spends no backup
   code (a wrong code sent in that race is counted like any other). One correct password
   therefore yields one session, never several, whoever holds the challenge. Using one challenge
-  does not cancel another that was never used; that one still works until it expires. A wrong
+  does not cancel another that was never used; that one still works until it expires. A password
+  reset or change, "log out everywhere" and a detected copy of a session cookie do cancel every
+  challenge open at that moment, so a correct password proven before them can no longer be turned
+  into a session minutes later. A sign-in already under way at that moment can still complete: one
+  whose password check is running can still be handed a challenge, and one that has already
+  consumed its challenge can still be handed its session, as a sign-in on an account without 2FA can. A code that
+  another sign-in spends in the moment between this exchange consuming its
+  challenge and spending the code leaves the challenge spent, and the answer says so (start the
+  sign-in again), not "wrong code". A wrong
   code does not consume a challenge, so a typo costs nothing but the retry. A six-digit code is
   checked only as an authenticator code and anything else only as a backup code, so a wrong
   authenticator code costs the server no backup-code hashing.
@@ -243,13 +254,21 @@ security posture, not a disclaimer.
 - **A copied session cookie.** The refresh cookie is httpOnly and is replaced at every refresh,
   which spends the old value. When a spent value is presented again (the browser it was issued to
   and a copy of it both refreshing), the server treats that sign-in as stolen: it ends every
-  session of that sign-in and revokes every trusted device and device proof on the account, emails
-  the owner (unless they turned that email off, which takes the master password), and writes one
-  security audit entry, `token_reuse_detected` (shown as "Stolen Session
+  session of that sign-in, revokes every trusted device and device proof on the account, cancels
+  every sign-in still waiting for its two-factor code, emails the owner (unless they turned that
+  email off, which takes the master password), and writes a security audit entry,
+  `token_reuse_detected` (shown as "Stolen Session
   Detected"), with the address and browser that presented the spent value, the browser the
   sign-in was issued to, and how many sessions and trusted devices it revoked. The entry never
-  holds a token, a hash of one or the sign-in's identifier (only a short hash of it). Two replays
-  sent at once record one entry, whose counts may miss what the other revoked. A spent value is
+  holds a token, a hash of one or the sign-in's identifier (only a short hash of it). A detected
+  replay is recorded even when replays race: the same value replayed twice at once records one
+  entry, and two different spent values of one sign-in replayed at the same moment can record one
+  each; an entry's counts may miss what a replay racing it revoked first. What can still leave no
+  entry: a failure to write the audit row itself (it is logged), and every session of the account
+  being ended by another request at that very moment (log out everywhere, a password reset or
+  change), which removes the spent values before the replay can claim one. On a database without
+  transactions (a standalone MongoDB behind PM2), a refresh of the same sign-in that completes at
+  that very moment can keep its new session. A spent value is
   remembered for 7 days; one presented later is simply refused, with no entry and nothing revoked.
   An access token already issued to the copy is not revoked: it keeps working until it expires
   (`JWT_ACCESS_EXPIRY`, five minutes by default).
@@ -265,8 +284,8 @@ security posture, not a disclaimer.
   folder's encrypted contents always gets an entry of its own, and edits from two different
   addresses or user agents never share one (two browsers behind one address that send an identical
   user-agent string can). **Security** entries (sign-ins and sign-outs, password, 2FA, session and trusted-device
-  events, among them a replayed refresh token, recorded at most once per stolen sign-in with the address
-  that replayed it and the browser the sign-in was issued to, exports and imports, backup setup, download and restore, settings) are never trimmed and
+  events, among them a replayed refresh token, recorded with the address that replayed it and the
+  browser the sign-in was issued to, exports and imports, backup setup, download and restore, settings) are never trimmed and
   never merged, so flooding edits can push out only older activity (older vault lock and unlock
   entries among it), never a sign-in or any other security entry. The exceptions are the entries a stranger can cause, which are capped
   separately at 5,000 per account and trimmed the same way. The residual, stated at its size:
@@ -484,7 +503,9 @@ security posture, not a disclaimer.
   backup, the id it had in that file. Item _contents_ and _names_, folder names, and document
   names and contents are encrypted; their _existence_ is not. No keyed hash of an item's or a
   folder's name is stored any more, so the database no longer shows which entries share a name
-  (a server process from the previous release, during a rolling upgrade, can still write one).
+  (a server process from the previous release, during a rolling upgrade, can still write one, and
+  database copies taken before the upgrade and a replica set's operation log, until it wraps,
+  still hold the old ones).
   **Tags are stored in plaintext**, so a tag is a label the server can read. Importing from another password manager
   converts that export's folder/group names into tags, which means the server learns your
   source folder taxonomy (for example `Banking`, `Work SSO`). Do not put anything sensitive
@@ -705,18 +726,18 @@ change, two-factor authentication turned on or off, new backup codes, a browser 
 two-factor step, a recognised browser losing that status after wrong passwords, a two-factor
 lockout, the backup recipient list changed or suspended, a backup that could not be sent, a copied
 session detected, and an account deletion. Every one of these goes through one sender with a fixed
-text per event. A notice carries **no token, no link with a parameter and no secret**: its only
-link is the plain Settings address, recipient addresses appear masked, and the only thing taken
+text per event. A notice carries **no token, no link and no secret** (where to choose which emails
+arrive is named in words: Settings in H-Vault), recipient addresses appear masked, and the only thing taken
 from the request is its IP address, shown only when it is one (never the browser's user agent,
 which anyone can set to any text, a link included). A two-factor lockout therefore sends two
 emails: the notice, and the separate unlock link that is the remedy.
 
 Notices go only to a **verified** address, never when email is not configured, and never for an
 account being erased (except the deletion notice, written from the address read before the erasure
-began). The same notice is not sent twice in a row within an hour; any notice that reads differently is.
-Two cases still read alike and are held back: two recipient lists whose masked forms are the same,
-and turning the same notices off a second time within the hour (turning them back on sends
-nothing). That makes a repeated event (the
+began). The same notice is not sent twice in a row within an hour; any notice that reads differently is,
+and so is a change to a different recipient list even when the masked addresses read the same. The
+email saying security emails were turned off is never held back: a second one within the hour is sent
+too, since it may not be the owner's. That makes a repeated event (the
 password guessed right again and again during a lockout, say) one email an hour, but it does not
 bound alternating events: someone able to cause two different events in turn causes an email each
 time. Almost every one of those events needs the master password, a signed-in session, a stolen
@@ -731,8 +752,8 @@ master password, and the account is then emailed once to say which were turned o
 and the deletion notice cannot be turned off. A password reset turns every notice that needs the
 master password back on. A stolen session alone therefore cannot silence the notices about a stolen
 password or session, and someone holding the password who silences them causes an email saying so
-(subject to the same limits as every notice: a verified address, email configured, the relay
-accepting it, and the hourly repeat rule).
+(subject to the same limits as every notice: a verified address, email configured and the relay
+accepting it; the hourly repeat rule does not apply to it).
 
 **A correct password during a lockout is never readable through the API.** The sign-in is refused
 with exactly the answer, the delay, the stored writes and the audit entry a wrong password gets,
@@ -1357,15 +1378,16 @@ the erasure it guards is done. For as long as it stands, **the account cannot be
 existing session is refused, a token refresh is refused, and signing in afresh is refused too,
 with the same answer a wrong password gets so that nothing new is revealed about the address.
 No session row and no audit row is written by any of those three, because the scheduled clean-up
-must find the record exactly as the failed erasure left it. What the marker does **not** stop is
-the three unauthenticated recovery routes, which are reached with an emailed token rather than a
-session: requesting a password reset, completing one, and spending an unlock link. The last two
-still write: a reset rewrites the stored credential and the wrapped vault key, and both write an
-audit row. (Verifying an address is refused for such an account: a verification must
-never mark verified an account whose data is being deleted.) They are left open deliberately, because gating
-them would remove the account's last self-service exit for the sake of a record the clean-up is
-about to delete anyway; but "nothing is written" is true of the three doors a session goes
-through, not of the whole account.
+must find the record exactly as the failed erasure left it. The emailed links are refused the
+same way: completing a password reset, spending an unlock link and verifying an address all answer
+such an account as they answer a dead link, before anything is written (and a reset whose account
+is claimed for erasure between its read and its write records nothing further). None of them could
+help: the account can no longer be signed in to whatever its password or lockout says. Requesting a
+reset link or a new verification link for such an account mails nothing and answers as it does for
+any address, so the answer reveals nothing either. A
+document upload that completes while its own account is being erased (the owner deleting the
+account in another tab) is taken back, its row and its stored file, rather than left behind (a file
+the storage service refuses to delete at that moment is left to the hourly storage clean-up).
 
 Neither deletion is recoverable, and neither is undone by restoring a backup. The same fact
 has an operational consequence that belongs to whoever runs the server rather than to whoever
@@ -1651,7 +1673,8 @@ devices via clipboard sync. H-Vault reduces the exposure window but cannot elimi
   its checkout, so a compromised dependency or tool running there cannot push to the
   repository or move a release tag; the publishing job checks the commit out afresh and runs
   only this repository's own scripts. Every GitHub Action is pinned to a full commit SHA, the
-  three downloaded tools are checked against SHA-256 values committed in the workflow, and
+  five downloaded tools (actionlint, hadolint, oasdiff, gitleaks and osv-scanner) are checked
+  against SHA-256 values committed in the workflow, and
   `diff-cover` is installed from a hash-locked requirements file. Be precise about the limit:
   code that runs in the gauntlet job can still read what that job can read and make it fail
   or pass, and these things it fetches are not pinned by a hash committed here: the runner

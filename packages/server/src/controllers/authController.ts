@@ -66,6 +66,7 @@ import {
   consumeTwoFactorChallenge,
   isChallengeOpen,
   issueTwoFactorChallenge,
+  revokeTwoFactorChallenges,
 } from '../utils/twoFactorChallenge.js';
 import {
   INVITATION_INVALID_MESSAGE,
@@ -1206,7 +1207,10 @@ export const login2fa = catchAsync(async (req: Request, res: Response): Promise<
   // spent by the compare-and-set on `lastTotpTimestamp`, a backup code by pulling
   // it out of the array. A write that matches nothing means another request spent
   // the same code first (or the factor was disabled or replaced since it was
-  // checked), so this one is refused as a replay and receives nothing.
+  // checked), so this one is refused as a replay and receives nothing. It is
+  // answered as the dead token it now is, not as a mistyped code: the challenge was
+  // consumed above, so a retyped code on the same token could never succeed, and
+  // the client discards the key it is holding for this sign-in only on a dead token.
   const usedBackupCode = verdict.kind === 'backup_code';
   const consumed = await User.findOneAndUpdate(
     { _id: user._id, ...verdict.casFilter },
@@ -1221,7 +1225,7 @@ export const login2fa = catchAsync(async (req: Request, res: Response): Promise<
       ip,
       userAgent,
     );
-    throw httpErrors.unauthorized(ERROR_CODES.TWO_FA_INVALID);
+    throw httpErrors.unauthorized(ERROR_CODES.TOKEN_INVALID);
   }
 
   if (usedBackupCode) {
@@ -1595,21 +1599,23 @@ export const refresh = catchAsync(async (req: Request, res: Response): Promise<v
         userId: existingToken.userId.toString(),
         familyId: existingToken.familyId,
       });
-      // The family's live sessions first (counted for the record), then its other
-      // spent rows, then the devices, and only then the replayed row itself, on
-      // its own: exactly one request removes it, so exactly one request records
-      // the detection below, however many replays of one token race here. Last,
-      // so a failure part-way leaves the replayed row where the next replay finds
-      // it and runs all of this again.
+      // The family's live sessions first (counted for the record), then the
+      // devices, and only then the replayed row itself, on its own: that one-row
+      // delete is the claim, and exactly one request removes a given row, so two
+      // replays of ONE value record one detection. The family's OTHER spent rows
+      // are left in place until after the claim: deleting them first is what let
+      // two replays of two DIFFERENT spent values each delete the other's row
+      // before claiming its own, so that neither recorded anything. Now every
+      // replay that found its row claims it, unless another replay's sweep below
+      // (which runs only after that replay's own claim) took it first: a reuse is
+      // recorded at least once, unless the audit write itself fails (it is logged)
+      // or another request ends every session of the account at that moment. And a failure before the claim leaves the
+      // replayed row, and the rest of the family, where the next replay finds them
+      // and runs all of this again.
       const liveSessions = await RefreshToken.deleteMany({
         userId: existingToken.userId,
         familyId: existingToken.familyId,
         usedAt: null,
-      });
-      await RefreshToken.deleteMany({
-        userId: existingToken.userId,
-        familyId: existingToken.familyId,
-        _id: { $ne: existingToken._id },
       });
       // Reuse detection is the strongest compromise signal in the system: the
       // cookie has been replayed after rotation, so the device is presumed
@@ -1619,6 +1625,9 @@ export const refresh = catchAsync(async (req: Request, res: Response): Promise<v
       // The device proofs go too: they share the cookie jar a stolen refresh token
       // came out of, and each one exempts a browser from the password lockout.
       await revokeDeviceProofs(existingToken.userId);
+      // And every sign-in still waiting for its second factor, so none of them
+      // finishes into a session issued after this revocation.
+      await revokeTwoFactorChallenges(existingToken.userId);
       const detection = await RefreshToken.deleteOne({ _id: existingToken._id });
       // And the owner can see why their sessions ended (F-16). The row's own
       // address and user agent are THIS request's, the replayer's; the browser
@@ -1646,6 +1655,16 @@ export const refresh = catchAsync(async (req: Request, res: Response): Promise<v
           ip: reuseCtx.ip,
         });
       }
+      // The rest of the family, in EVERY replay, claimed or not: its other spent
+      // rows, and any successor a rotation running concurrently committed after
+      // the live-session delete above. After this replay's own claim, so the first
+      // spent row to disappear among racing replays is always taken by a claim, and
+      // a claim that lands records: a replay whose row another replay's sweep took
+      // first records nothing, and the other one already did.
+      await RefreshToken.deleteMany({
+        userId: existingToken.userId,
+        familyId: existingToken.familyId,
+      });
       clearRefreshCookie(res);
       throw httpErrors.unauthorized(ERROR_CODES.TOKEN_REUSE_DETECTED);
     }
@@ -1753,6 +1772,9 @@ export const logoutAll = catchAsync(async (req: Request, res: Response): Promise
   const presented = await findPresentedDeviceProof(req);
   const callerProven = provesAccount(presented, new mongoose.Types.ObjectId(userId));
   await revokeDeviceProofs(userId);
+  // And every sign-in still waiting for its second factor: "everywhere" includes
+  // one that proved the password a minute ago and has not typed its code yet.
+  await revokeTwoFactorChallenges(userId);
   if (callerProven) {
     // Like for like: a single-use proof is replaced by a single-use one.
     const id = new mongoose.Types.ObjectId(userId);
@@ -1891,7 +1913,10 @@ export const forgotPassword = catchAsync(async (req: Request, res: Response): Pr
   // bcrypt work (it only sends an email and signs a JWT).
   await bcrypt.compare('dummy-timing-equalization-value', DUMMY_BCRYPT_HASH);
 
-  if (!user) {
+  // An account being erased gets the same answer and no link: completing a reset
+  // is refused for it (see resetPassword), so a link would only promise a way back
+  // that does not exist.
+  if (!user || user.deletionPending === true) {
     // Return generic success to avoid email enumeration
     res.status(200).json({
       success: true,
@@ -1959,7 +1984,12 @@ export const resetPassword = catchAsync(async (req: Request, res: Response): Pro
   }
 
   const user = await User.findById(payload.userId).select('+authHash');
-  if (!user) {
+  // An account being erased is answered as an unknown one, before anything is
+  // written. It cannot be signed in to, refreshed or used with a session, so a new
+  // password would restore nothing; completing the reset would only answer
+  // "success" for an account about to vanish and write rows the erasure has to
+  // find again.
+  if (!user || user.deletionPending === true) {
     throw httpErrors.badRequest(ERROR_CODES.TOKEN_INVALID);
   }
 
@@ -1994,6 +2024,9 @@ export const resetPassword = catchAsync(async (req: Request, res: Response): Pro
   const trustedDevicesRevoked = await revokeTrustedDevices(user._id);
   // And every device proof: a reset changes the footing every one was granted on.
   await revokeDeviceProofs(user._id);
+  // And every sign-in waiting for its second factor: each was granted by a proof
+  // of the password this reset replaces.
+  await revokeTwoFactorChallenges(user._id);
   // And every third-party backup recipient: suspended, its mailed links dead, until
   // the owner approves the list again with the new master password. Before the
   // save, like the revocations: a failure after it leaves the account suspended
@@ -2030,7 +2063,21 @@ export const resetPassword = catchAsync(async (req: Request, res: Response): Pro
   user.rotationInProgress = false;
   clearLockoutStateOnDocument(user, 'password');
   user.passwordChangedAt = new Date();
-  await user.save();
+  try {
+    await user.save();
+  } catch (error) {
+    // The row was erased between the read above and this write: a dead link.
+    if (error instanceof mongoose.Error.DocumentNotFoundError) {
+      throw httpErrors.badRequest(ERROR_CODES.TOKEN_INVALID);
+    }
+    throw error;
+  }
+  // And an erasure that CLAIMED the account in that same interval: the write above
+  // landed on a row that is being deleted, so nothing more is written for it (no
+  // opt-out change, no audit row, no notice) and the link is answered as dead.
+  if (!(await User.exists({ _id: user._id, deletionPending: { $ne: true } }).read('primary'))) {
+    throw httpErrors.badRequest(ERROR_CODES.TOKEN_INVALID);
+  }
   // A reset is how an owner takes the account back, so every CRITICAL security
   // email is turned back on (F-26): whoever held the old password could have turned
   // them off, and the recovered owner must hear about what happens next. The
@@ -2122,7 +2169,10 @@ export const unlockAccount = catchAsync(async (req: Request, res: Response): Pro
   // Both episode fields are `select: false`; without the `+` every link would be
   // compared against `undefined` and rejected.
   const user = await User.findById(payload.userId).select('+lockoutEpisodeId +secondFactorLockout');
-  if (!user) {
+  // An account being erased is answered as an unknown one: it cannot be signed in
+  // to whatever its lockout says, so an unlock restores nothing (and the discharge
+  // below is conditioned on the same, for an erasure that starts meanwhile).
+  if (!user || user.deletionPending === true) {
     throw httpErrors.badRequest(ERROR_CODES.TOKEN_INVALID);
   }
 
@@ -2193,7 +2243,9 @@ export const resendVerification = catchAsync(async (req: Request, res: Response)
   // ~200ms asymmetry and leak account existence.
   await bcrypt.compare('dummy-timing-equalization-value', DUMMY_BCRYPT_HASH);
 
-  if (!user || user.emailVerified) {
+  // An account being erased gets the same answer and no link: verifying it is
+  // refused (see verifyEmail), so a link would only promise what cannot happen.
+  if (!user || user.emailVerified || user.deletionPending === true) {
     // Return generic success to prevent email enumeration
     res.status(200).json({
       success: true,

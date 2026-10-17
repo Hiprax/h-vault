@@ -121,10 +121,21 @@ function noticesTo(address: string, event: SecurityNotificationEvent): SentMail[
   return transport.sent.filter((m) => m.to === address && m.subject === SUBJECTS[event]);
 }
 
+/** No anchor, no link target and no address of this server anywhere in the body. */
+function expectNoLink(html: string): void {
+  expect(html).not.toMatch(/<a[\s>]/i);
+  expect(html).not.toMatch(/href=/i);
+  expect(html).not.toContain(config.APP_URL);
+  expect(html).not.toMatch(/https?:\/\//i);
+  // Where to choose is still said, in words.
+  expect(html).toContain('Settings in H-Vault');
+}
+
 /**
  * Exactly one notice of `event` went to `address`, and it carries nothing worth
- * stealing: its only link is the plain Settings address, nothing in it looks like
- * a URL parameter or a signed token, and none of `secrets` appears in it.
+ * stealing: no link at all (it names Settings in words, so it is never a template
+ * for a copy that asks the reader to click), nothing in it looks like a URL
+ * parameter or a signed token, and none of `secrets` appears in it.
  */
 async function expectOneCleanNotice(
   address: string,
@@ -135,8 +146,7 @@ async function expectOneCleanNotice(
   const notices = noticesTo(address, event);
   expect(notices).toHaveLength(1);
   const html = notices[0]!.html;
-  const hrefs = [...html.matchAll(/href="([^"]*)"/g)].map((m) => m[1]);
-  expect(hrefs).toEqual([`${config.APP_URL}/settings`]);
+  expectNoLink(html);
   expect(html).not.toMatch(/[?#&][A-Za-z_]+=/);
   expect(html).not.toContain('eyJ');
   for (const secret of secrets) expect(html).not.toContain(secret);
@@ -428,6 +438,62 @@ describe('F-26: each security event mails the account owner exactly once', () =>
     await expectOneCleanNotice(user.email, 'account_deletion_requested', [user.rawPassword]);
   });
 
+  it('account deletion requested twice at once: one deletion, one mail, and the second is told it is under way', async () => {
+    const user = await createTestUser();
+    // Both requests are held at the deletion mark until both have reached it, so
+    // both have passed authentication and the password check first: the double
+    // submit that used to mark twice, erase twice and mail twice.
+    const realUpdateOne = User.updateOne.bind(User) as (...args: unknown[]) => unknown;
+    let arrived = 0;
+    let release!: () => void;
+    const both = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.spyOn(User, 'updateOne').mockImplementation(((...args: unknown[]) => {
+      const update = args[1] as { $set?: Record<string, unknown> } | undefined;
+      const query = realUpdateOne(...args);
+      // Only the two marks are held; the erasure's own later writes pass.
+      if (update?.$set?.['deletionPending'] !== true || arrived >= 2) return query;
+      arrived += 1;
+      if (arrived === 2) release();
+      return both.then(() => query);
+    }) as never);
+    const remove = () =>
+      send('delete', '/user', { password: user.rawPassword }, { accessToken: user.accessToken });
+
+    const answers = await Promise.all([remove(), remove()]);
+
+    expect(arrived).toBe(2);
+    expect(answers.map((res) => res.status).sort()).toEqual([200, 409]);
+    const refused = answers.find((res) => res.status === 409)!;
+    expect(refused.body.message).toBe('Account deletion is already in progress.');
+    expect(await User.findById(user.id).lean()).toBeNull();
+    await expectOneCleanNotice(user.email, 'account_deletion_requested', [user.rawPassword]);
+  });
+
+  it('a deletion that finds the account already erased by another one answers 409 and mails nothing', async () => {
+    const user = await createTestUser();
+    // The other request's erasure has finished by the time this one marks: the row
+    // is gone, so the mark matches nothing.
+    const realUpdateOne = User.updateOne.bind(User) as (...args: unknown[]) => unknown;
+    vi.spyOn(User, 'updateOne').mockImplementationOnce((async (...args: unknown[]) => {
+      await User.collection.deleteOne({ _id: new mongoose.Types.ObjectId(user.id) });
+      return realUpdateOne(...args);
+    }) as never);
+
+    const res = await send(
+      'delete',
+      '/user',
+      { password: user.rawPassword },
+      { accessToken: user.accessToken },
+    );
+
+    expect(res.status).toBe(409);
+    expect(res.body.message).toBe('Account deletion is already in progress.');
+    await settle();
+    expect(transport.sent).toEqual([]);
+  });
+
   it('backup not sent: through the helper, and the email module no longer has fixed notices', async () => {
     const user = await createTestUser();
     await recordUndeliverableBackup(user.id, 'no_confirmed_recipient', () => Promise.resolve());
@@ -692,6 +758,63 @@ describe('F-26: when a notice is NOT sent', () => {
     expect(transport.sent[1]!.html).toContain(maskEmail('b@example.org'));
   });
 
+  it('two different recipient lists are two notices even when their masked forms are identical', async () => {
+    const user = await createTestUser();
+    const changed = (recipients: string[]) =>
+      notifications.notifySecurityEvent(user.id, 'backup_recipients_changed', { recipients });
+    // `maskEmail` keeps the first and the last character only, so these two read the
+    // same in the mail; they are still two different lists, and the second change
+    // is exactly the one the owner must hear about.
+    expect(maskEmail('alice@example.org')).toBe(maskEmail('axxxe@example.org'));
+    expect(await changed(['alice@example.org'])).toBe('sent');
+    expect(await changed(['axxxe@example.org'])).toBe('sent');
+    // Negative: the very same list again inside the hour is still one notice.
+    expect(await changed(['axxxe@example.org'])).toBe('debounced');
+    expect(transport.sent).toHaveLength(2);
+  });
+
+  it('the mandatory "notices turned off" mail is never held back, and still records the notice', async () => {
+    const user = await createTestUser();
+    const off = () =>
+      notifications.notifySecurityEvent(user.id, 'security_notices_turned_off', {
+        events: ['password_changed'],
+      });
+    // Off, back on (which mails nothing), off again inside the hour: the second
+    // "turned off" may be someone else holding the password, so it is sent too.
+    expect(await off()).toBe('sent');
+    expect(await off()).toBe('sent');
+    expect(noticesTo(user.email, 'security_notices_turned_off')).toHaveLength(2);
+    const stored = await User.collection.findOne({ _id: new mongoose.Types.ObjectId(user.id) });
+    expect((stored!['securityNotices'] as { key: string }).key).toMatch(
+      /^security_notices_turned_off:/,
+    );
+    // Negative: an ordinary notice repeated inside the hour is still held back.
+    expect(await notifications.notifySecurityEvent(user.id, 'password_changed')).toBe('sent');
+    expect(await notifications.notifySecurityEvent(user.id, 'password_changed')).toBe('debounced');
+  });
+
+  it('a "turned off" notice whose account began to be erased after it was read sends nothing', async () => {
+    const user = await createTestUser();
+    // The erasure's mark lands between the helper's read and its claim.
+    const realUpdateOne = User.updateOne.bind(User) as (...args: unknown[]) => unknown;
+    vi.spyOn(User, 'updateOne').mockImplementationOnce((async (...args: unknown[]) => {
+      await User.collection.updateOne(
+        { _id: new mongoose.Types.ObjectId(user.id) },
+        { $set: { deletionPending: true } },
+      );
+      return realUpdateOne(...args);
+    }) as never);
+
+    const outcome = await notifications.notifySecurityEvent(
+      user.id,
+      'security_notices_turned_off',
+      { events: ['password_changed'] },
+    );
+
+    expect(outcome).toBe('no_account');
+    expect(transport.sent).toEqual([]);
+  });
+
   it('nothing is mailed for an account being erased', async () => {
     const user = await createTestUser();
     await User.updateOne({ _id: user.id }, { $set: { deletionPending: true } });
@@ -738,7 +861,7 @@ describe('F-26: the notice body', () => {
     expect(suspended.html).toContain('Because a security change, 0 backup recipients');
   });
 
-  it('has a fixed text for every event, with the Settings link and nothing else', () => {
+  it('has a fixed text for every event, and no link at all', () => {
     const events = Object.keys(SUBJECTS) as SecurityNotificationEvent[];
     for (const event of events) {
       const { subject, html } = notifications.renderSecurityNotice(
@@ -747,10 +870,22 @@ describe('F-26: the notice body', () => {
         now,
       );
       expect(subject).toBe(SUBJECTS[event]);
-      expect([...html.matchAll(/href="([^"]*)"/g)].map((m) => m[1])).toEqual([
-        `${config.APP_URL}/settings`,
-      ]);
+      expectNoLink(html);
     }
+  });
+
+  it('says a listed recipient that has not confirmed receives nothing, never that every one must confirm', () => {
+    // An address that already confirmed, or one reinstated after a suspension it
+    // had confirmed before, keeps receiving backups: the notice must not promise
+    // the owner that none of the listed addresses gets anything yet.
+    const { html } = notifications.renderSecurityNotice(
+      'backup_recipients_changed',
+      { recipients: ['confirmed-before@example.org'] },
+      now,
+    );
+    expect(html).toContain('An address that has not confirmed yet receives nothing until it does.');
+    expect(html).not.toContain('receives nothing until it confirms');
+    expect(html).not.toContain('other than your own receives nothing');
   });
 });
 

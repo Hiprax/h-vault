@@ -219,8 +219,8 @@ function noticeFor(event: SecurityNotificationEvent, context: SecurityEventConte
             ? 'The list of addresses your encrypted backups are emailed to was changed, and it ' +
               'is now empty: backups are emailed to your own verified address.'
             : 'The list of addresses your encrypted backups are emailed to was changed. It now ' +
-              `holds: ${list.join(', ')}. An address other than your own receives nothing until ` +
-              'it confirms.',
+              `holds: ${list.join(', ')}. An address that has not confirmed yet receives ` +
+              'nothing until it does.',
           'If this was not you, someone knows your master password: ' + SIGNED_IN_REMEDY,
         ],
       };
@@ -293,10 +293,10 @@ function noticeFor(event: SecurityNotificationEvent, context: SecurityEventConte
 }
 
 /**
- * The HTML of one notice. Every interpolated value is escaped. The only link is
- * the plain Settings address, built from configuration: a notice carries no token
- * and no link parameter, so it is never worth stealing and never a template for a
- * phishing copy that asks the reader to click something.
+ * The HTML of one notice. Every interpolated value is escaped. It carries no link
+ * at all, Settings included (it is named in words): no token and nothing to click,
+ * so a notice is never worth stealing and never a template for a phishing copy
+ * that asks the reader to click something.
  */
 export function renderSecurityNotice(
   event: SecurityNotificationEvent,
@@ -307,7 +307,6 @@ export function renderSecurityNotice(
   const when = `${now.toISOString().slice(0, 16).replace('T', ' ')} UTC`;
   const ip = context.ip !== undefined && net.isIP(context.ip) !== 0 ? context.ip : undefined;
   const details = [`Time: ${when}`, ...(ip === undefined ? [] : [`From the address: ${ip}`])];
-  const settingsUrl = escapeHtml(`${config.APP_URL}/settings`);
   const paragraph = (text: string) =>
     `<p style="color: #4a4a4a; line-height: 1.6;">${escapeHtml(text)}</p>`;
   const html = `
@@ -319,7 +318,7 @@ export function renderSecurityNotice(
       ${notice.paragraphs.map(paragraph).join('\n      ')}
       <p style="color: #6b6b6b; font-size: 14px; line-height: 1.6;">${details.map((d) => escapeHtml(d)).join('<br>')}</p>
       <p style="color: #6b6b6b; font-size: 14px; line-height: 1.6;">
-        Choose which of these emails you receive in <a href="${settingsUrl}" style="color: #2563eb;">Settings</a>.
+        Choose which of these emails you receive under Settings in H-Vault.
         Some can be turned off only with your master password, and a few are always sent.
       </p>
       <hr style="border: none; border-top: 1px solid #e5e5e5; margin: 24px 0;">
@@ -331,19 +330,34 @@ export function renderSecurityNotice(
 }
 
 /**
- * What makes two notices the same notice: the event and every word the body says
- * apart from the time and the address it came from. A digest, so the stored key is
- * short and names no recipient.
+ * What makes two notices the same notice: the event, every word the body says
+ * apart from the time and the address it came from, and the recipient addresses
+ * as they were saved. The body shows those masked (first and last character), so
+ * two different lists can read identically; the key must still tell them apart,
+ * or a change to a look-alike address would be held back as a repeat. A digest,
+ * so the stored key is short and names no recipient.
  */
 function noticeKey(event: SecurityNotificationEvent, context: SecurityEventContext): string {
   const notice = noticeFor(event, context);
+  // As stored: the recipient list is already normalised when it is saved.
+  const recipients = context.recipients ?? [];
   const digest = crypto
     .createHash('sha256')
-    .update(JSON.stringify([notice.subject, notice.paragraphs]))
+    .update(JSON.stringify([notice.subject, notice.paragraphs, recipients]))
     .digest('hex')
     .slice(0, 32);
   return `${event}:${digest}`;
 }
+
+/**
+ * The mandatory notices the hourly slot never holds back. `account_deletion_requested`
+ * does not use the slot at all (the row is being erased); `security_notices_turned_off`
+ * still records itself in it, but a repeat inside the hour is sent all the same: the
+ * owner's own "turned off" an hour ago says nothing about the next one, which may be
+ * somebody else holding the password, and its route is behind the master-password
+ * limiter, so it cannot be repeated quickly.
+ */
+const NEVER_HELD_BACK: readonly SecurityNotificationEvent[] = ['security_notices_turned_off'];
 
 /**
  * Emails the account owner about a security event (F-26): the ONE way the server
@@ -358,7 +372,8 @@ function noticeKey(event: SecurityNotificationEvent, context: SecurityEventConte
  * LAST-NOTICE slot is CLAIMED with one conditional update that matches unless the
  * last notice was this same one less than an hour ago, so a repeated event mails
  * once an hour while any different notice, a later change of state included, always
- * goes, and the owner's newest mail is never out of date. Only then is it sent. A
+ * goes, and the owner's newest mail is never out of date (the "notices turned off"
+ * notice is never held back; see {@link NEVER_HELD_BACK}). Only then is it sent. A
  * send that fails keeps the slot.
  *
  * The claim is written with `timestamps: false`. `updatedAt` is part of the profile
@@ -400,17 +415,25 @@ export async function notifySecurityEvent(
         {
           _id: userId,
           deletionPending: { $ne: true },
-          $nor: [
-            {
-              'securityNotices.key': key,
-              'securityNotices.at': { $gt: new Date(now.getTime() - INTERVAL_MS) },
-            },
-          ],
+          ...(NEVER_HELD_BACK.includes(event)
+            ? {}
+            : {
+                $nor: [
+                  {
+                    'securityNotices.key': key,
+                    'securityNotices.at': { $gt: new Date(now.getTime() - INTERVAL_MS) },
+                  },
+                ],
+              }),
         },
         { $set: { securityNotices: { key, at: now } } },
         { timestamps: false },
       );
-      if (claimed.matchedCount === 0) return 'debounced';
+      if (claimed.matchedCount === 0) {
+        // A notice that is never held back can only miss because the account went
+        // away (or began to) since it was read.
+        return NEVER_HELD_BACK.includes(event) ? 'no_account' : 'debounced';
+      }
       address = account.email;
     }
     if (options.beforeSend !== undefined && !(await options.beforeSend())) return 'refused';
