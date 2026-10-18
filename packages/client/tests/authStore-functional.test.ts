@@ -157,6 +157,11 @@ import {
 } from '../src/services/totpImport/scanSession';
 import { ERROR_CODES } from '@hvault/shared';
 import { useAuthStore } from '../src/stores/authStore.js';
+import {
+  StoredVaultKeyUnreadableError,
+  UnlockSessionChangedError,
+} from '../src/services/auth/unlockFailures.js';
+import { useUIStore } from '../src/stores/uiStore.js';
 import { cryptoService } from '../src/services/crypto/cryptoService.js';
 import {
   registerApi,
@@ -1144,6 +1149,216 @@ describe('authStore.unlock', () => {
     expect(state.encryptedVaultKeyData).toEqual(encryptedVaultKeyData);
     expect(state.twoFactorRequired).toBe(false);
     expect(state.tempToken).toBeNull();
+  });
+});
+
+describe('authStore.unlock — the live wrapper verify-unlock answers with', () => {
+  // The cached wrapper is the one this browser was handed at sign-in. A rotation
+  // made in another session re-wraps a NEW key under the same master key, so the
+  // cached one still opens — onto the superseded key, under which no row can be
+  // read. The live wrapper is the account's current one.
+  const cached = { encrypted: 'enc-vk-cached', iv: 'vk-iv-cached', tag: 'vk-tag-cached' };
+  const live = {
+    encryptedVaultKey: 'enc-vk-live',
+    vaultKeyIv: 'vk-iv-live',
+    vaultKeyTag: 'vk-tag-live',
+    vaultKeyVersion: 4,
+  };
+
+  beforeEach(() => {
+    useAuthStore.setState({
+      ...authInitialState,
+      user: { userId: 'user-123', email: 'user@example.com' },
+      isAuthenticated: true,
+      isLocked: true,
+      encryptedVaultKeyData: cached,
+      vaultKeyVersion: 3,
+    });
+    useUIStore.getState().setStaleVaultKeyVersion(null);
+    vi.mocked(cryptoService.decryptVaultKey).mockResolvedValue(new ArrayBuffer(32));
+  });
+
+  it('derives from the live wrapper, never the cached one, and records it with its generation', async () => {
+    await useAuthStore.getState().unlock('Master123!', undefined, live);
+
+    expect(cryptoService.decryptVaultKey).toHaveBeenCalledTimes(1);
+    expect(cryptoService.decryptVaultKey).toHaveBeenCalledWith(
+      'enc-vk-live',
+      'vk-iv-live',
+      'vk-tag-live',
+      mockMek,
+    );
+    const state = useAuthStore.getState();
+    expect(state.vaultKey).toBe(mockVaultKeyCK);
+    expect(state.mek).toBe(mockMek);
+    // The number names the blob the key came from, so both move together.
+    expect(state.encryptedVaultKeyData).toEqual({
+      encrypted: 'enc-vk-live',
+      iv: 'vk-iv-live',
+      tag: 'vk-tag-live',
+    });
+    expect(state.vaultKeyVersion).toBe(4);
+    // Still locked: ProtectedRoute lifts it once a token is in hand.
+    expect(state.isLocked).toBe(true);
+  });
+
+  it('unlocks from a live wrapper even when this browser cached none', async () => {
+    useAuthStore.setState({ encryptedVaultKeyData: null });
+
+    await useAuthStore.getState().unlock('Master123!', undefined, live);
+
+    expect(useAuthStore.getState().vaultKey).toBe(mockVaultKeyCK);
+    expect(useAuthStore.getState().encryptedVaultKeyData?.encrypted).toBe('enc-vk-live');
+  });
+
+  it('keeps the cached wrapper and its generation when no live one is offered', async () => {
+    await useAuthStore.getState().unlock('Master123!');
+
+    expect(cryptoService.decryptVaultKey).toHaveBeenCalledWith(
+      'enc-vk-cached',
+      'vk-iv-cached',
+      'vk-tag-cached',
+      mockMek,
+    );
+    expect(useAuthStore.getState().encryptedVaultKeyData).toEqual(cached);
+    expect(useAuthStore.getState().vaultKeyVersion).toBe(3);
+  });
+
+  it('refuses a live wrapper that will not open, without falling back to the cached one', async () => {
+    vi.mocked(cryptoService.decryptVaultKey).mockRejectedValue(
+      new Error('Failed to decrypt vault key.'),
+    );
+
+    await expect(
+      useAuthStore.getState().unlock('Master123!', undefined, live),
+    ).rejects.toBeInstanceOf(StoredVaultKeyUnreadableError);
+
+    // ONE attempt: the cached wrapper is the superseded key, and opening it would
+    // put this session back on exactly the key the fix exists to retire.
+    expect(cryptoService.decryptVaultKey).toHaveBeenCalledTimes(1);
+    expect(cryptoService.clearCryptoKey).toHaveBeenCalledWith(mockMek);
+    const state = useAuthStore.getState();
+    expect(state.vaultKey).toBeNull();
+    expect(state.mek).toBeNull();
+    expect(state.encryptedVaultKeyData).toEqual(cached);
+    expect(state.vaultKeyVersion).toBe(3);
+  });
+
+  it.each([
+    [
+      'another account is now signed in',
+      { user: { userId: 'user-999', email: 'other@example.com' } },
+    ],
+    ['the session is no longer authenticated', { isAuthenticated: false }],
+    ['the vault was unlocked by something else meanwhile', { isLocked: false }],
+  ])('writes nothing when %s', async (_case, change) => {
+    // Each condition alone ends the unlock: any one of them means the store is no
+    // longer the locked session this unlock began for.
+    vi.mocked(cryptoService.decryptVaultKey).mockImplementation(async () => {
+      useAuthStore.setState(change);
+      return new ArrayBuffer(32);
+    });
+
+    await expect(
+      useAuthStore.getState().unlock('Master123!', undefined, live),
+    ).rejects.toBeInstanceOf(UnlockSessionChangedError);
+
+    expect(useAuthStore.getState().vaultKey).toBeNull();
+    expect(useAuthStore.getState().encryptedVaultKeyData).toEqual(cached);
+    expect(cryptoService.clearCryptoKey).toHaveBeenCalledWith(mockVaultKeyCK);
+  });
+
+  it('writes nothing when the session ended while the key was being opened', async () => {
+    // Another tab signed out (the cross-tab logout clears this store) between the
+    // derivation and the final write. Writing then would re-persist a wrapper into
+    // a signed-out browser and leave a vault key resident with no session.
+    vi.mocked(cryptoService.decryptVaultKey).mockImplementation(async () => {
+      useAuthStore.setState({ user: null, isAuthenticated: false, isLocked: false });
+      return new ArrayBuffer(32);
+    });
+
+    await expect(
+      useAuthStore.getState().unlock('Master123!', undefined, live),
+    ).rejects.toBeInstanceOf(UnlockSessionChangedError);
+
+    expect(cryptoService.clearCryptoKey).toHaveBeenCalledWith(mockVaultKeyCK);
+    expect(cryptoService.clearCryptoKey).toHaveBeenCalledWith(mockMek);
+    const state = useAuthStore.getState();
+    expect(state.vaultKey).toBeNull();
+    expect(state.mek).toBeNull();
+    expect(state.encryptedVaultKeyData).toEqual(cached);
+  });
+
+  it('clears the interrupted-rotation notice on a live unlock, which reads the account as it now is', async () => {
+    // Another session may have finished the rotation; the next failing read
+    // raises the notice again if it still applies.
+    useUIStore.setState({ interruptedRotationNotice: true });
+    await useAuthStore.getState().unlock('Master123!');
+    expect(useUIStore.getState().interruptedRotationNotice).toBe(true);
+
+    useAuthStore.setState({ vaultKey: null, mek: null, isLocked: true });
+    await useAuthStore.getState().unlock('Master123!', undefined, live);
+    expect(useUIStore.getState().interruptedRotationNotice).toBe(false);
+  });
+
+  it('clears a stale-key notice recorded under an older generation, but only on a live unlock', async () => {
+    // A refused write recorded generation 4; the account has since moved on, and
+    // the session now holds its current key, so the "sign in again" notice would
+    // otherwise sit, undismissable, over a session in which every save works.
+    useUIStore.getState().setStaleVaultKeyVersion(4);
+    await useAuthStore.getState().unlock('Master123!');
+    expect(useUIStore.getState().staleVaultKeyVersion).toBe(4);
+
+    useAuthStore.setState({ vaultKey: null, mek: null, isLocked: true });
+    await useAuthStore.getState().unlock('Master123!', undefined, { ...live, vaultKeyVersion: 5 });
+    expect(useUIStore.getState().staleVaultKeyVersion).toBeNull();
+  });
+});
+
+describe('authStore.lock — the reason a vault locked itself', () => {
+  beforeEach(() => {
+    useAuthStore.setState({
+      ...authInitialState,
+      user: { userId: 'user-123', email: 'user@example.com' },
+      isAuthenticated: true,
+      isLocked: false,
+      vaultKey: mockVaultKeyCK,
+      mek: mockMek,
+      encryptedVaultKeyData: { encrypted: 'e', iv: 'i', tag: 't' },
+    });
+    vi.mocked(cryptoService.decryptVaultKey).mockResolvedValue(new ArrayBuffer(32));
+  });
+
+  it('records the reason with the lock, and a successful unlock clears it', async () => {
+    await useAuthStore.getState().lock('vault-key-replaced');
+    expect(useAuthStore.getState().isLocked).toBe(true);
+    expect(useAuthStore.getState().lockReason).toBe('vault-key-replaced');
+
+    await useAuthStore.getState().unlock('Master123!');
+    expect(useAuthStore.getState().lockReason).toBeNull();
+  });
+
+  it('gives an ordinary lock no reason', async () => {
+    await useAuthStore.getState().lock();
+    expect(useAuthStore.getState().lockReason).toBeNull();
+  });
+
+  it('clears the reason on logout', async () => {
+    await useAuthStore.getState().lock('vault-key-replaced');
+    await useAuthStore.getState().logout();
+    expect(useAuthStore.getState().lockReason).toBeNull();
+  });
+
+  it('persists exactly the non-secret session fields, never a key or the lock reason', async () => {
+    await useAuthStore.getState().lock('vault-key-replaced');
+    const persisted = useAuthStore.persist.getOptions().partialize?.(useAuthStore.getState());
+    expect(Object.keys(persisted ?? {}).sort()).toEqual([
+      'encryptedVaultKeyData',
+      'isAuthenticated',
+      'kdfIterations',
+      'user',
+      'vaultKeyVersion',
+    ]);
   });
 });
 

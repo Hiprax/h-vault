@@ -207,18 +207,21 @@ const DOCUMENT_BULK_WRITE_ERRORS = {
  * The standard `{ success, data }` envelope, as a response object.
  *
  * `extraProperties` is spread AFTER `data`, which is where the two responses
- * that carry a `message` already put it.
+ * that carry a `message` already put it. `required`, when given, names the
+ * members the answer always carries.
  */
 const jsonEnvelope = (
   description: string,
   data: Record<string, unknown>,
   extraProperties: Record<string, unknown> = {},
+  required: readonly string[] = [],
 ): Record<string, unknown> => ({
   description,
   content: {
     'application/json': {
       schema: {
         type: 'object',
+        ...(required.length > 0 ? { required: [...required] } : {}),
         properties: {
           success: { type: 'boolean', example: true },
           data,
@@ -384,8 +387,9 @@ const BREACH_LOOKUP_REFUSED = {
 };
 
 /**
- * The answers of a request that re-checks the caller's own credentials and then
- * only acknowledges: verifying an unlock and deleting the account. The 404 is the
+ * The answers of a request that re-checks the caller's own credentials: deleting
+ * the account, which then only acknowledges, and verifying an unlock, which
+ * replaces the 200 with one carrying the live wrapped vault key. The 404 is the
  * account having been deleted in the meantime ("User not found").
  */
 const ACKNOWLEDGED_REAUTH_RESPONSES = {
@@ -977,7 +981,7 @@ export const swaggerSpec: JsonObject = {
           vaultKeyVersion: {
             ...VAULT_KEY_VERSION_PROPERTY,
             description:
-              "Required when reseal is true, and read only then: the generation of the vault key the re-sealed rows were sealed under. Refused with 409, carrying the account's current generation in `data.vaultKeyVersion`, when it is not the current one. An ordinary rotation's commit is conditioned on the credential it authenticated against instead.",
+              "The generation of the vault key this request rotates FROM (for a re-seal, the one its rows were sealed under), checked for every rotation, finish, discard and re-seal. Refused with 409, carrying the account's current generation in `data.vaultKeyVersion`, when it is not the current one, and when it is absent on an account that has rotated at least once (an older page must update first): a rotation from a superseded key would pass every row of the live key through unopened and then retire that key. Required when reseal is true.",
           },
           discardPendingVaultKey: {
             type: 'boolean',
@@ -1517,6 +1521,23 @@ export const swaggerSpec: JsonObject = {
             maxLength: 100,
             description:
               'The auth hash derived from the master password, never the password itself.',
+          },
+        },
+      },
+      VerifyUnlockResult: {
+        type: 'object',
+        description:
+          "The account's current wrapped vault key, exactly as `GET /user/profile` reports it, and the generation it names. The client opens it with the master encryption key it just derived; a session that cached an older wrapper at sign-in uses this one instead and records its generation with it.",
+        required: ['encryptedVaultKey', 'vaultKeyIv', 'vaultKeyTag', 'vaultKeyVersion'],
+        properties: {
+          encryptedVaultKey: { type: 'string', minLength: 1, maxLength: 200 },
+          vaultKeyIv: { type: 'string', minLength: 1, maxLength: 24 },
+          vaultKeyTag: { type: 'string', minLength: 1, maxLength: 32 },
+          vaultKeyVersion: {
+            type: 'integer',
+            minimum: 0,
+            description:
+              'The vault-key generation the wrapper above is. `0` for an account that has never rotated.',
           },
         },
       },
@@ -2982,10 +3003,18 @@ export const swaggerSpec: JsonObject = {
         tags: ['Auth'],
         summary: 'Verify a vault unlock',
         description:
-          'Checks the auth hash derived from the master password, records the unlock (or the failed attempt) in the audit log, and clears the CSRF cookie so the next state-changing request fetches a fresh token. Rate limited: 5 req/user per 5 min.',
+          "Checks the auth hash derived from the master password, records the unlock (or the failed attempt) in the audit log, clears the CSRF cookie so the next state-changing request fetches a fresh token, and answers with the account's current wrapped vault key and its generation. Rate limited: 5 req/user per 5 min.",
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: jsonRequestBody('VerifyUnlockRequest'),
-        responses: ACKNOWLEDGED_REAUTH_RESPONSES,
+        responses: {
+          ...ACKNOWLEDGED_REAUTH_RESPONSES,
+          200: jsonEnvelope(
+            "Unlock verified. `data` is the account's CURRENT wrapped vault key and its generation, which the unlock derives the vault key from instead of the copy the browser cached at sign-in: a rotation made in another session re-wraps a new vault key under the same master key and revokes no session, so that cached copy would open the superseded key. Sent only after the auth hash matched; a 401 carries no `data`.",
+            { $ref: '#/components/schemas/VerifyUnlockResult' },
+            { message: { type: 'string', example: 'Unlock verified' } },
+            ['success', 'data'],
+          ),
+        },
       },
     },
     '/auth/logout-all': {
@@ -3291,7 +3320,7 @@ export const swaggerSpec: JsonObject = {
           400: { $ref: '#/components/responses/ValidationError' },
           404: { $ref: '#/components/responses/NotFound' },
           409: staleVaultKeyConflict(
-            'Only a re-seal (`reseal: true`) is refused for its vault key version. The same status, carrying no `data`, means the rotation was refused and the vault key was NOT changed: another rotation is already running, a named row could not be updated, the payload did not cover every row the account holds, an interrupted rotation is still outstanding and this request neither adopts its pending vault key nor sets discardPendingVaultKey (a re-seal must finish it first), a re-seal named a wrapper that is not the stored one, or the payload carries a field sealed to its row without `vaultFieldFormat: 2`. Re-read the vault and retry. It is also returned before the body is read when this account already has a restore or key rotation in flight.' +
+            "Every rotation is refused for a vault key version that is not the account's current one, or for none once the account has rotated. The same status, carrying no `data`, means the rotation was refused and the vault key was NOT changed: another rotation is already running, a named row could not be updated, the payload did not cover every row the account holds, an interrupted rotation is still outstanding and this request neither adopts its pending vault key nor sets discardPendingVaultKey (a re-seal must finish it first), a re-seal named a wrapper that is not the stored one, or the payload carries a field sealed to its row without `vaultFieldFormat: 2`. Re-read the vault and retry. It is also returned before the body is read when this account already has a restore or key rotation in flight." +
               RESEAL_LOCK_BUSY,
           ),
           429: { $ref: '#/components/responses/RateLimited' },

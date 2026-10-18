@@ -669,6 +669,39 @@ describe('unlock — transient failures must not cost the user their session', (
     expect(localStorage.getItem('__hv_unlock_failed_attempts')).toBeNull();
   });
 
+  it('unlocks from the wrapper the RETRIED verify-unlock answered with', async () => {
+    // The first answer was a 401 (ambiguous on a locally-fresh token) and carries
+    // nothing; the one that succeeded is the authority on the account's current
+    // wrapped vault key, so it is that answer the key is derived from.
+    vi.mocked(useAuthStore.getState).mockReturnValue({
+      setAccessToken: vi.fn(),
+      accessToken: usableToken(),
+    } as unknown as ReturnType<typeof useAuthStore.getState>);
+    const live = {
+      encryptedVaultKey: 'enc-vk-after-retry',
+      vaultKeyIv: 'vk-iv-after-retry',
+      vaultKeyTag: 'vk-tag-after-retry',
+      vaultKeyVersion: 2,
+    };
+    vi.mocked(api.post)
+      .mockRejectedValueOnce(axiosStatusError(401))
+      .mockResolvedValueOnce({ data: { success: true, data: live } });
+    vi.mocked(performTokenRefresh).mockResolvedValueOnce('fresh');
+
+    render(
+      <MemoryRouter>
+        <UnlockScreen />
+      </MemoryRouter>,
+    );
+    submit('right-password');
+
+    await waitFor(() => {
+      expect(mockUnlock).toHaveBeenCalledWith('right-password', fakeMek, live);
+    });
+    expect(api.post).toHaveBeenCalledTimes(2);
+    expect(localStorage.getItem('__hv_unlock_failed_attempts')).toBeNull();
+  });
+
   it('a 401 on a locally-fresh token keeps the session when the refresh fails transiently', async () => {
     vi.mocked(useAuthStore.getState).mockReturnValue({
       setAccessToken: vi.fn(),

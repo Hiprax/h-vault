@@ -23,10 +23,15 @@ import { decodeJwtPayload } from '../lib/accessToken.js';
 import { useVaultStore } from './vaultStore.js';
 import { useUIStore } from './uiStore.js';
 import { useDocumentsStore } from './documentsStore.js';
+import { resetHeldVaultKeyChecks } from './heldVaultKey.js';
 import { isAxiosError } from 'axios';
-import type { SuccessfulLoginResponse } from '@hvault/shared';
+import type { SuccessfulLoginResponse, VerifyUnlockResult } from '@hvault/shared';
 import { KDF_ITERATIONS, KDF_ALGORITHM, ENCRYPTION_VERSION } from '@hvault/shared';
 import { is2faSessionDead } from '../services/auth/sessionFailure.js';
+import {
+  StoredVaultKeyUnreadableError,
+  UnlockSessionChangedError,
+} from '../services/auth/unlockFailures.js';
 import { getDeviceFingerprint } from '../utils/deviceFingerprint.js';
 
 /**
@@ -67,6 +72,16 @@ function writeRememberHint(remember: boolean): void {
   }
 }
 
+/**
+ * Why the vault locked itself, when it was not the user or the idle timer.
+ *
+ * `vault-key-replaced`: this session found that the account's vault key is no
+ * longer the one it holds (a rotation made in another session), so nothing it
+ * reads can be opened and nothing it writes can be saved. Unlocking again loads
+ * the current key; the unlock screen says so.
+ */
+export type LockReason = 'vault-key-replaced';
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -99,10 +114,11 @@ interface AuthState {
    * WHICH vault key `vaultKey` and `encryptedVaultKeyData` are — the account's
    * vault-key generation as it stood in the response that delivered them.
    *
-   * It moves with the wrapped key and never on its own. `unlock()` re-derives
-   * from the very `encryptedVaultKeyData` recorded here, so an unlock cannot
-   * change which generation this session holds; only a sign-in, a cold-start
-   * resume, or this session performing the rotation itself can.
+   * It moves with the wrapped key and never on its own: a sign-in, a cold-start
+   * resume, an unlock (from the live wrapper `verify-unlock` answers with) and
+   * this session's own rotation each record the two from ONE response. An unlock
+   * that got no live wrapper re-derives from the blob recorded here and leaves
+   * both as they are.
    *
    * A rotation started elsewhere revokes no session and refreshes no key, so a
    * session can hold a superseded key indefinitely and has no way to notice.
@@ -112,6 +128,9 @@ interface AuthState {
    */
   vaultKeyVersion: number;
   kdfIterations: number;
+
+  /** Why the vault locked itself, or `null`. Never persisted; see {@link LockReason}. */
+  lockReason: LockReason | null;
 
   // 2FA flow
   twoFactorRequired: boolean;
@@ -134,8 +153,12 @@ interface AuthState {
   ) => Promise<{ emailSent: boolean }>;
   login: (email: string, masterPassword: string, rememberMe?: boolean) => Promise<void>;
   verify2fa: (code: string) => Promise<void>;
-  unlock: (masterPassword: string, preDerivedMek?: CryptoKey) => Promise<void>;
-  lock: () => Promise<void>;
+  unlock: (
+    masterPassword: string,
+    preDerivedMek?: CryptoKey,
+    liveVaultKey?: VerifyUnlockResult,
+  ) => Promise<void>;
+  lock: (reason?: LockReason) => Promise<void>;
   logout: () => Promise<void>;
   setAccessToken: (token: string | null) => void;
 }
@@ -207,6 +230,7 @@ export const useAuthStore = create<AuthState>()(
       encryptedVaultKeyData: null,
       vaultKeyVersion: 0,
       kdfIterations: KDF_ITERATIONS,
+      lockReason: null,
       twoFactorRequired: false,
       tempToken: null,
       _2faTimeoutId: null,
@@ -510,12 +534,31 @@ export const useAuthStore = create<AuthState>()(
       // When the caller has already run PBKDF2 (e.g. for the server-side
       // rate-limited verify-unlock check), the pre-derived MEK can be passed
       // in to avoid a second PBKDF2 round.
+      //
+      // `liveVaultKey` is the account's CURRENT wrapper, as `verify-unlock` (or,
+      // from an older instance, the profile) answered with it, and it is what the
+      // key is derived from whenever it is given. The copy cached at sign-in is a
+      // fallback for an answer that carried none: a rotation made in another
+      // session re-wraps a new key under the SAME master key and signs nothing out,
+      // so the cached copy still opens — onto the superseded key, which opens none
+      // of the rows the rotation rewrote, on every unlock and every reload.
       // -------------------------------------------------------------------
-      unlock: async (masterPassword: string, preDerivedMek?: CryptoKey): Promise<void> => {
-        const { user, encryptedVaultKeyData } = get();
+      unlock: async (
+        masterPassword: string,
+        preDerivedMek?: CryptoKey,
+        liveVaultKey?: VerifyUnlockResult,
+      ): Promise<void> => {
+        const { user, encryptedVaultKeyData: cachedVaultKeyData } = get();
         if (!user?.email) {
           throw new Error('Cannot unlock: user email is not available');
         }
+        const encryptedVaultKeyData: EncryptedVaultKeyData | null = liveVaultKey
+          ? {
+              encrypted: liveVaultKey.encryptedVaultKey,
+              iv: liveVaultKey.vaultKeyIv,
+              tag: liveVaultKey.vaultKeyTag,
+            }
+          : cachedVaultKeyData;
         if (!encryptedVaultKeyData) {
           throw new Error('Cannot unlock: encrypted vault key data is not available');
         }
@@ -541,7 +584,20 @@ export const useAuthStore = create<AuthState>()(
           cryptoService.clearKey(rawVaultKey);
         } catch (error) {
           await cryptoService.clearCryptoKey(masterEncryptionKey);
+          // A live wrapper that will not open is not a wrong password (the server
+          // has just accepted it), and it is never retried with the cached copy.
+          if (liveVaultKey) throw new StoredVaultKeyUnreadableError();
           throw error;
+        }
+
+        // Still the session this unlock began for? Another tab's sign-out clears
+        // this store while the key is being opened, and writing now would leave a
+        // vault key resident (and a wrapper persisted) in a signed-out browser.
+        const now = get();
+        if (now.user?.userId !== user.userId || !now.isAuthenticated || !now.isLocked) {
+          await cryptoService.clearCryptoKey(vaultKey);
+          await cryptoService.clearCryptoKey(masterEncryptionKey);
+          throw new UnlockSessionChangedError();
         }
 
         // Only set crypto material here; isLocked stays true until
@@ -551,13 +607,30 @@ export const useAuthStore = create<AuthState>()(
         set({
           vaultKey,
           mek: masterEncryptionKey,
+          lockReason: null,
+          // The live wrapper and its generation, from the SAME answer, so the
+          // number still names the blob the key came from.
+          ...(liveVaultKey
+            ? { encryptedVaultKeyData, vaultKeyVersion: liveVaultKey.vaultKeyVersion }
+            : {}),
         });
+
+        // This session now holds the account's current key, so a "your key was
+        // replaced" notice recorded under an older generation no longer applies,
+        // and would otherwise sit undismissable over a session that saves fine.
+        // Nor does an interrupted-rotation notice raised before: the account may
+        // have finished it elsewhere, and the next failing read raises it again
+        // if it still applies.
+        if (liveVaultKey) {
+          useUIStore.getState().setStaleVaultKeyVersion(null);
+          useUIStore.getState().setInterruptedRotationNotice(false);
+        }
       },
 
       // -------------------------------------------------------------------
       // Lock (clear crypto material, keep session alive)
       // -------------------------------------------------------------------
-      lock: async (): Promise<void> => {
+      lock: async (reason?: LockReason): Promise<void> => {
         const { vaultKey, mek, accessToken } = get();
 
         // Secure local state FIRST — before ANY network I/O — so a stalled or
@@ -566,7 +639,7 @@ export const useAuthStore = create<AuthState>()(
         // eliminate). Set state before zeroing keys to prevent concurrent
         // readers from seeing zeroed-but-non-null keys (which would cause
         // silent decryption failures).
-        set({ vaultKey: null, mek: null, isLocked: true });
+        set({ vaultKey: null, mek: null, isLocked: true, lockReason: reason ?? null });
         // Erase any secret still on the OS clipboard. The guard's own events
         // (focus / visible / terminal pagehide) never fire when the lock screen
         // replaces the layout in a still-visible tab, so without this the secret
@@ -676,6 +749,7 @@ export const useAuthStore = create<AuthState>()(
           encryptedVaultKeyData: null,
           vaultKeyVersion: 0,
           kdfIterations: KDF_ITERATIONS,
+          lockReason: null,
           twoFactorRequired: false,
           tempToken: null,
           _2faTimeoutId: null,
@@ -700,8 +774,14 @@ export const useAuthStore = create<AuthState>()(
         // generation 0 while the recorded number is whatever the previous account
         // was on, so an undismissable "reload to continue" would sit over a
         // session in which every save works. `lock()` deliberately does NOT do
-        // this: a lock keeps the session, and its key is still the superseded one.
+        // this: a lock keeps the session, and its key is still the superseded one
+        // until the unlock that follows loads the live wrapper, which clears it.
         useUIStore.getState().setStaleVaultKeyVersion(null);
+        // And everything the superseded-key check remembers about this session —
+        // its answers, its loop guard, the interrupted-rotation notice it raised —
+        // so the next session, on this account or another, starts from nothing.
+        useUIStore.getState().setInterruptedRotationNotice(false);
+        resetHeldVaultKeyChecks();
 
         // Then zero the actual key material using the captured references
         if (vaultKey) {
@@ -769,23 +849,25 @@ export const useAuthStore = create<AuthState>()(
       // Only persist non-sensitive data. CryptoKeys, ArrayBuffers, and
       // access tokens must NEVER be written to localStorage.
       //
-      // SECURITY NOTE: `encryptedVaultKeyData` is persisted so that the
-      // unlock screen can re-derive MEK from the master password and
-      // decrypt the vault key without a server round-trip. This ciphertext
+      // SECURITY NOTE: `encryptedVaultKeyData` is persisted as the LAST
+      // fallback an unlock derives from: the Unlock screen takes the live
+      // wrapper verify-unlock answers with, then the profile's, and only when
+      // neither can be read this copy, which goes stale the moment the vault key
+      // is rotated in another session. This ciphertext
       // is AES-256-GCM encrypted under the MEK, which itself is derived
       // from the user's master password via PBKDF2 (600k iterations).
       // An attacker with access to localStorage would still need the
       // master password to derive MEK and decrypt the vault key. The risk
       // is that offline brute-force attacks become possible against the
-      // stored ciphertext — this is an accepted trade-off for enabling
-      // offline unlock and faster UX.
+      // stored ciphertext — the accepted price of keeping a fallback for an
+      // unlock whose server answer carries no live wrapper.
       partialize: (state) => ({
         user: state.user,
         isAuthenticated: state.isAuthenticated,
         encryptedVaultKeyData: state.encryptedVaultKeyData,
-        // Persisted BECAUSE `encryptedVaultKeyData` is: an unlock re-derives the
-        // vault key from that blob, so the generation it belongs to has to
-        // survive the same rehydrate. Dropping it would leave every rehydrated
+        // Persisted BECAUSE `encryptedVaultKeyData` is: an unlock with no live
+        // wrapper re-derives the vault key from that blob, so the generation it
+        // belongs to has to survive the same rehydrate. Dropping it would leave every rehydrated
         // session claiming generation 0, which for a rotated account means every
         // upload taking the recovery path it exists to make rare. It is a
         // monotonic counter, not key material.

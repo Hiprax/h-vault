@@ -568,14 +568,63 @@ export async function registerAndSignInViaUI(
   await markEmailVerified(email);
 
   // 3. Sign in through the real UI — the client re-derives the same authHash.
+  await submitSignIn(page, email, password);
+
+  return { email, password };
+}
+
+/**
+ * Fills and submits the sign-in form already on screen, then waits for the vault.
+ *
+ * One derivation, plus server-side bcrypt on the auth hash. Shared by
+ * {@link registerAndSignInViaUI} and {@link signInViaUI}.
+ */
+async function submitSignIn(page: Page, email: string, password: string): Promise<void> {
   await page.getByLabel(/^email$/i).fill(email);
   await page.getByLabel(/^master password$/i).fill(password);
   await page.getByRole('button', { name: /sign in/i }).click();
-
-  // The second derivation, plus server-side bcrypt on the auth hash.
   await expect(page).toHaveURL(/\/vault/, { timeout: PBKDF2_STEP_TIMEOUT_MS });
+}
 
-  return { email, password };
+/**
+ * Signs an EXISTING, verified account in through the real UI, in a page of its
+ * own — another browser, as far as the account is concerned, since each browser
+ * context has its own storage and its own session.
+ *
+ * One derivation, so the enclosing test's timeout is raised to one step's
+ * budget plus the page loads around it.
+ */
+export async function signInViaUI(page: Page, email: string, password: string): Promise<void> {
+  ensureTestTimeoutAtLeast(PBKDF2_STEP_TIMEOUT_MS + 60_000);
+  await page.addInitScript(() => {
+    localStorage.setItem('hvault_onboarding_completed', 'true');
+  });
+  await page.goto('/login');
+  // LoginPage's own heading, so the form filled below is the mounted one.
+  await expect(page.getByRole('heading', { name: /welcome back/i })).toBeVisible({
+    timeout: LAZY_ROUTE_TIMEOUT_MS,
+  });
+  await submitSignIn(page, email, password);
+}
+
+/**
+ * Creates a note named `name` through the real create dialog, so its fields are
+ * sealed in the browser under the vault key this page holds.
+ */
+export async function createNoteViaUI(page: Page, name: string): Promise<void> {
+  // An empty vault renders only its empty state, whose button is the only way
+  // in; the alternation keeps this working once the floating button is mounted.
+  await page
+    .getByRole('button', { name: /^create (new )?item$/i })
+    .first()
+    .click();
+  const dialog = page.getByRole('dialog', { name: /create new vault item/i });
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole('tab', { name: 'Note' }).click();
+  await dialog.locator('#field-name').fill(name);
+  await dialog.locator('#field-content').fill(`the content of ${name}`);
+  await dialog.getByRole('button', { name: 'Create' }).click();
+  await expect(dialog).toBeHidden();
 }
 
 /**

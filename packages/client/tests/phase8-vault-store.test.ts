@@ -35,6 +35,15 @@ vi.hoisted(() => {
 // Mocks (must come before importing the stores)
 // ---------------------------------------------------------------------------
 
+// The superseded-key check a decryption failure starts. Its own behaviour is
+// `held-vault-key-check.test.ts`; here only that the stores START it, with the key
+// that failed, and never when nothing failed.
+const mockCheckHeldVaultKey = vi.fn();
+vi.mock('../src/stores/heldVaultKey', () => ({
+  checkHeldVaultKey: (...args: unknown[]) => mockCheckHeldVaultKey(...args) as unknown,
+  resetHeldVaultKeyChecks: vi.fn(),
+}));
+
 vi.mock('../src/stores/encryptedStorage', () => ({
   encryptedStorage: {
     getItem: vi.fn().mockResolvedValue(null),
@@ -385,6 +394,9 @@ describe('8.1 — vaultStore fetch methods track lastDecryptionError', () => {
     expect(state.lastDecryptionError).toContain('vault items');
     expect(state.lastDecryptionError).toContain('GCM tag mismatch');
     expect(events).toEqual([1]);
+    // A row this key cannot open starts the check of whether the key was replaced.
+    expect(mockCheckHeldVaultKey).toHaveBeenCalledTimes(1);
+    expect(mockCheckHeldVaultKey).toHaveBeenCalledWith(mockVaultKey);
   });
 
   it('fetchItems clears decryptionFailures on a clean re-fetch', async () => {
@@ -413,6 +425,27 @@ describe('8.1 — vaultStore fetch methods track lastDecryptionError', () => {
     // lastDecryptionError is preserved across successful fetches to keep
     // the diagnostic trail — it is cleared only by clearStore.
     expect(state.lastDecryptionError).toBe('vault items: previous run');
+    // Nothing failed, so nothing is asked of the server.
+    expect(mockCheckHeldVaultKey).not.toHaveBeenCalled();
+  });
+
+  it('fetchTrashItems starts no superseded-key check when every trashed row opens', async () => {
+    setupUnlockedVault();
+    vi.mocked(listTrashApi).mockResolvedValue({
+      data: {
+        success: true,
+        data: [makeRawItemResponse({ _id: '507f1f77bcf86cd799439099' })],
+        pagination: { page: 1, limit: 200, total: 1, totalPages: 1 },
+      },
+    } as unknown as Awaited<ReturnType<typeof listTrashApi>>);
+    vi.mocked(cryptoService.decryptData)
+      .mockResolvedValueOnce('Trashed Item')
+      .mockResolvedValueOnce(JSON.stringify({ username: 'u' }));
+
+    await useVaultStore.getState().fetchTrashItems();
+
+    expect(useVaultStore.getState().trashItems).toHaveLength(1);
+    expect(mockCheckHeldVaultKey).not.toHaveBeenCalled();
   });
 
   it('fetchTrashItems emits event and captures lastDecryptionError on failure', async () => {
@@ -443,6 +476,8 @@ describe('8.1 — vaultStore fetch methods track lastDecryptionError', () => {
     expect(events).toEqual([1]);
     expect(useVaultStore.getState().lastDecryptionError).toContain('trash items');
     expect(useVaultStore.getState().lastDecryptionError).toContain('trash corruption');
+    expect(mockCheckHeldVaultKey).toHaveBeenCalledTimes(1);
+    expect(mockCheckHeldVaultKey).toHaveBeenCalledWith(mockVaultKey);
   });
 
   it('fetchFolders emits event and captures lastDecryptionError on failure', async () => {
@@ -472,6 +507,8 @@ describe('8.1 — vaultStore fetch methods track lastDecryptionError', () => {
     expect(events).toEqual([1]);
     expect(useVaultStore.getState().lastDecryptionError).toContain('folders');
     expect(useVaultStore.getState().lastDecryptionError).toContain('folder cipher invalid');
+    expect(mockCheckHeldVaultKey).toHaveBeenCalledTimes(1);
+    expect(mockCheckHeldVaultKey).toHaveBeenCalledWith(mockVaultKey);
   });
 
   it('fetchItems no longer changes state on success when all decrypt fine (sanity)', async () => {

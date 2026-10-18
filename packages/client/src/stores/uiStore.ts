@@ -54,10 +54,22 @@ interface UIState {
    * and the one that got missed would leave a permanent "reload" banner in
    * front of a session that was perfectly healthy.
    *
-   * Not persisted (`partialize` keeps theme and sidebar only): a reload is the
-   * remedy, so surviving one would be exactly wrong.
+   * Not persisted (`partialize` keeps theme and sidebar only): a reload or a lock
+   * ends in an unlock that loads the account's live wrapper, so surviving one
+   * would be exactly wrong. A live unlock also clears it outright.
    */
   staleVaultKeyVersion: number | null;
+  /**
+   * Whether this session found an INTERRUPTED vault-key rotation behind rows it
+   * could not open: its key is the account's, but a crashed sequential rotation
+   * left entries sealed under the key it was moving to, which only Settings,
+   * Finish Rotation can carry across. Raised and cleared by `heldVaultKey.ts`
+   * from the profile it reads; also cleared by a live unlock, by any profile the
+   * Settings page stores that reports no interruption, by a committed rotation,
+   * and by logout.
+   * Not persisted: it describes what the last profile read said.
+   */
+  interruptedRotationNotice: boolean;
   /**
    * Whether the first-run guide is on screen. The release notes wait while it is,
    * so two modals never open on top of each other; they open once it closes.
@@ -71,6 +83,7 @@ interface UIState {
   toggleCommandPalette: () => void;
   setOfflineCacheError: (error: OfflineCacheErrorType | null) => void;
   setStaleVaultKeyVersion: (vaultKeyVersion: number | null) => void;
+  setInterruptedRotationNotice: (shown: boolean) => void;
   setOnboardingActive: (active: boolean) => void;
 }
 
@@ -130,6 +143,7 @@ export const useUIStore = create<UIState>()(
       commandPaletteOpen: false,
       offlineCacheError: null,
       staleVaultKeyVersion: null,
+      interruptedRotationNotice: false,
       onboardingActive: false,
 
       setTheme: (theme: ThemeValue): void => {
@@ -155,6 +169,10 @@ export const useUIStore = create<UIState>()(
 
       setStaleVaultKeyVersion: (vaultKeyVersion: number | null): void => {
         set({ staleVaultKeyVersion: vaultKeyVersion });
+      },
+
+      setInterruptedRotationNotice: (shown: boolean): void => {
+        set({ interruptedRotationNotice: shown });
       },
 
       setOnboardingActive: (active: boolean): void => {
@@ -215,8 +233,10 @@ if (typeof window !== 'undefined') {
  * memory was decrypted under the current key, and re-deriving mid-session is a
  * decision about the whole session rather than about one save — which is the
  * same reason `documentsStore` uses its one rewrap key for a single completion
- * and throws it away. The remedy offered to the user is therefore a reload,
- * which re-reads everything from a single consistent starting point.
+ * and throws it away. The remedy is therefore to start again from one consistent
+ * starting point: signing in (the banner's button), or an unlock, which derives
+ * the vault key from the live wrapper `verify-unlock` answers with. (A session
+ * whose READS fail for this reason locks itself to that end; `heldVaultKey.ts`.)
  *
  * Returns `true` when the rejection was this refusal, so a caller can tell it
  * apart from an ordinary failure without parsing the error twice.

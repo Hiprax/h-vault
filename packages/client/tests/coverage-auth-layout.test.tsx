@@ -1184,10 +1184,11 @@ describe('AppLayout — the superseded-vault-key notice', () => {
     );
     expect(banner).toHaveAttribute('role', 'alert');
     expect(within(banner).getByRole('button', { name: /sign out/i })).toBeInTheDocument();
-    // The remedy it used to offer, and could not deliver: a reload rehydrates
-    // `isAuthenticated`, so no profile is read, and the Unlock screen re-derives
-    // the vault key from the PERSISTED wrapper — which is exactly as superseded
-    // as the write that was just refused. The banner came straight back.
+    // The remedy it used to offer: a reload. That could not deliver while the
+    // Unlock screen re-derived the vault key from the PERSISTED wrapper, exactly
+    // as superseded as the write just refused; it now derives from the wrapper
+    // verify-unlock answers with, but sign-out remains the one remedy that works
+    // against every server version, so it is the one offered.
     expect(within(banner).queryByRole('button', { name: /^reload$/i })).not.toBeInTheDocument();
     // The negative that matters: there is no way to dismiss it. A session in
     // which nothing can be saved and nothing says so is the state this exists to
@@ -1208,9 +1209,10 @@ describe('AppLayout — the superseded-vault-key notice', () => {
     fireEvent.click(screen.getByRole('button', { name: /sign out/i }));
 
     expect(bannerLogout).toHaveBeenCalledTimes(1);
-    // The negative that pins the fix: a reload is NOT what happens, because a
-    // reload cannot clear this condition. Signing in is the only path that reads
-    // the live wrapper and the live generation from the server.
+    // The negative that pins the remedy: a reload is NOT what happens. Against a
+    // server that predates the live wrapper on verify-unlock, a reload re-derives
+    // the superseded key; signing in reads the live wrapper and generation from
+    // every version.
     expect(reload).not.toHaveBeenCalled();
   });
 
@@ -1240,5 +1242,90 @@ describe('AppLayout — the superseded-vault-key notice', () => {
     serverReported(0);
 
     expect(screen.getByTestId('stale-vault-key-banner')).toBeInTheDocument();
+  });
+});
+
+/**
+ * The interrupted-rotation notice.
+ *
+ * A crashed sequential rotation leaves entries sealed under the key it was moving
+ * to. Those entries fail to open on every visit, and they keep failing after a
+ * sign-in, because the session's key IS the account's: only Settings, Finish
+ * Rotation carries them across, and nothing used to point there. The flag is
+ * raised by the superseded-key check when the profile reports the interruption.
+ */
+describe('AppLayout — the interrupted-rotation notice', () => {
+  function setupLayout(): void {
+    authState = {
+      user: { userId: 'u1', email: 'test@example.com' },
+      logout: vi.fn().mockResolvedValue(undefined),
+      lock: vi.fn(),
+      isLocked: false,
+      vaultKeyVersion: 2,
+    };
+    vaultState = {
+      fetchItems: vi.fn().mockResolvedValue(undefined),
+      fetchFolders: vi.fn().mockResolvedValue(undefined),
+    };
+    installStores();
+    useUIStore.setState({ interruptedRotationNotice: false });
+  }
+
+  function renderLayout() {
+    return render(
+      <MemoryRouter initialEntries={['/vault']}>
+        <Routes>
+          <Route element={<AppLayout />}>
+            <Route path="/vault" element={<div>Vault Content</div>} />
+            <Route path="/settings" element={<div>Settings Content</div>} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+  }
+
+  afterEach(() => {
+    act(() => {
+      useUIStore.setState({ interruptedRotationNotice: false });
+    });
+  });
+
+  it('shows nothing while no interrupted rotation has been found', () => {
+    setupLayout();
+    renderLayout();
+
+    expect(screen.queryByTestId('interrupted-rotation-banner')).not.toBeInTheDocument();
+  });
+
+  it('names the condition and opens Settings, where Finish Rotation is', () => {
+    setupLayout();
+    renderLayout();
+
+    act(() => {
+      useUIStore.setState({ interruptedRotationNotice: true });
+    });
+
+    const banner = screen.getByTestId('interrupted-rotation-banner');
+    expect(banner).toHaveAttribute('role', 'alert');
+    expect(banner).toHaveTextContent(
+      'A vault key rotation was interrupted, so some entries are sealed under the key it was moving to. Open Settings and choose Finish Rotation.',
+    );
+    fireEvent.click(within(banner).getByRole('link', { name: /open settings/i }));
+    expect(screen.getByText('Settings Content')).toBeInTheDocument();
+  });
+
+  it('goes away on its own once the flag is cleared', () => {
+    setupLayout();
+    renderLayout();
+    act(() => {
+      useUIStore.setState({ interruptedRotationNotice: true });
+    });
+    expect(screen.getByTestId('interrupted-rotation-banner')).toBeInTheDocument();
+
+    act(() => {
+      useUIStore.setState({ interruptedRotationNotice: false });
+    });
+
+    expect(screen.queryByTestId('interrupted-rotation-banner')).not.toBeInTheDocument();
   });
 });

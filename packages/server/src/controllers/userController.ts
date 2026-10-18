@@ -207,7 +207,10 @@ function normalisePasswordGenOptions(value: unknown): IUserSettings['defaultPass
 export const getProfile = catchAsync(async (req: Request, res: Response): Promise<void> => {
   const userId = getUserId(req);
 
-  const user = await User.findById(userId).select('-__v -passwordChangedAt').lean();
+  // From the primary: this answer carries the wrapped vault key, which an unlock
+  // falls back to and a session compares its held key against, so a lagging
+  // secondary must not be able to hand back the wrapper a rotation just retired.
+  const user = await User.findById(userId).select('-__v -passwordChangedAt').read('primary').lean();
 
   if (!user) {
     throw httpErrors.notFound('User not found');

@@ -841,31 +841,48 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
     return;
   }
 
-  // ── The re-seal's same-key proof ─────────────────────────────────────────
+  // ── Every rotation proves which key it rotates FROM ─────────────────────
   //
-  // A re-seal stores no key, so nothing in it would notice that the key it sealed
-  // under is no longer the account's. Two readings, both under the lock and before
-  // the fence, and both required. The GENERATION (the one optimistic-concurrency
-  // token every vault-key write carries) catches a rotation that committed after
-  // the client enumerated: without it, every row would be rewritten under a
-  // retired key behind a 200, and the completeness check would pass. The WRAPPER
-  // catches a key replaced without the generation moving, which `resetPassword`
-  // does; it also refuses a re-seal from a tab that has not seen a master-password
-  // change (which re-wraps the same key), and that costs the tab a reload.
+  // The GENERATION (the one optimistic-concurrency token every vault-key write
+  // carries) is checked for EVERY request, under the lock and before the fence and
+  // the quota touch. A rotation from a superseded key is the most destructive write
+  // there is: it re-encrypts what that key opens, passes through unopened every row
+  // it cannot, and then retires the account's key, so every row it passed through
+  // is sealed under a key nothing stores any more. The client's own valve (abort
+  // when NO row opens) does not cover it: a page holding K0 that finishes an
+  // interrupted rotation (live K1, pending K2) opens the K2 rows with its second
+  // candidate, does not abort, and passes every K1 row through. So this fails
+  // CLOSED exactly as `assertVaultKeyVersion` does everywhere else: a rotation that
+  // names no generation is refused once the account has rotated (an older page must
+  // update first), and commits on an account that never has. A retransmission of a
+  // rotation that already committed carries the number its own commit moved past;
+  // it was answered by the idempotency read above, which is why this runs after it.
+  //
+  // A re-seal adds a second reading, the same-key proof. It stores no key, so
+  // nothing in it would notice that the key it sealed under is no longer the
+  // account's. The WRAPPER catches a key replaced without the generation moving,
+  // which `resetPassword` does; it also refuses a re-seal from a tab that has not
+  // seen a master-password change (which re-wraps the same key), and that costs the
+  // tab a reload. The generation catches a rotation that committed after the client
+  // enumerated: without it, every row would be rewritten under a retired key behind
+  // a 200, and the completeness check would pass.
   //
   // Refused the way the idempotency read above is: the lock released first, then
   // the answer, so no response is written inside the span. The stale generation is
   // rendered with its number, which a thrown 409 cannot carry.
-  if (resealing) {
+  {
     let refusal: Error | undefined;
     try {
+      // Read for every request (one small projection) so the re-seal's proof keeps
+      // its place; only a re-seal compares it.
       const stored = await User.findById(userId)
         .select('encryptedVaultKey vaultKeyIv vaultKeyTag')
         .lean();
       if (
-        stored?.encryptedVaultKey !== newEncryptedVaultKey ||
-        stored.vaultKeyIv !== newVaultKeyIv ||
-        stored.vaultKeyTag !== newVaultKeyTag
+        resealing &&
+        (stored?.encryptedVaultKey !== newEncryptedVaultKey ||
+          stored.vaultKeyIv !== newVaultKeyIv ||
+          stored.vaultKeyTag !== newVaultKeyTag)
       ) {
         throw httpErrors.conflict(RESEAL_KEY_MOVED_MESSAGE);
       }

@@ -10,6 +10,7 @@ import type {
   changePasswordSchema,
   unlockAccountSchema,
   verifyUnlockSchema,
+  verifyUnlockResultSchema,
   resendVerificationSchema,
 } from '../schemas/auth.js';
 import type {
@@ -106,6 +107,7 @@ export type VerifyEmailInput = z.infer<typeof verifyEmailSchema>;
 export type ChangePasswordInput = z.infer<typeof changePasswordSchema>;
 export type UnlockAccountInput = z.infer<typeof unlockAccountSchema>;
 export type VerifyUnlockInput = z.infer<typeof verifyUnlockSchema>;
+export type VerifyUnlockResult = z.infer<typeof verifyUnlockResultSchema>;
 export type ResendVerificationInput = z.infer<typeof resendVerificationSchema>;
 
 // 2FA types

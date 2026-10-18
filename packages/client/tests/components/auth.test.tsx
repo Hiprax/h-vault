@@ -9,6 +9,11 @@ import { UnlockScreen } from '../../src/components/auth/UnlockScreen';
 import { useAuthStore } from '../../src/stores/authStore';
 import { api, performTokenRefresh } from '../../src/services/api/client';
 import { cryptoService } from '../../src/services/crypto/cryptoService';
+import { logger } from '../../src/lib/logger';
+import {
+  StoredVaultKeyUnreadableError,
+  UnlockSessionChangedError,
+} from '../../src/services/auth/unlockFailures';
 
 // ---------------------------------------------------------------------------
 // Mocks
@@ -56,6 +61,13 @@ vi.mock('../../src/services/crypto/cryptoService', () => ({
     clearKey: vi.fn(),
     clearCryptoKey: vi.fn(),
   },
+}));
+
+// The unlock screen reads the profile only when verify-unlock answered without the
+// live wrapped vault key (an older instance during a rolling restart).
+const mockGetProfileApi = vi.fn();
+vi.mock('../../src/services/api/userApi', () => ({
+  getProfileApi: (...args: unknown[]) => mockGetProfileApi(...args) as unknown,
 }));
 
 // Mock the LAZY LOADER as well as the library, delegating to whatever this file
@@ -1125,6 +1137,14 @@ describe('RegisterPage', () => {
 // UnlockScreen
 // ---------------------------------------------------------------------------
 
+/** What a current server's verify-unlock answers with once the password is proved. */
+const LIVE_VAULT_KEY = {
+  encryptedVaultKey: 'enc-vk-live',
+  vaultKeyIv: 'vk-iv-live',
+  vaultKeyTag: 'vk-tag-live',
+  vaultKeyVersion: 7,
+};
+
 describe('UnlockScreen', () => {
   const mockUnlock = vi.fn();
   const mockLogout = vi.fn();
@@ -1161,11 +1181,13 @@ describe('UnlockScreen', () => {
 
     vi.mocked(performTokenRefresh).mockResolvedValue('new-token-123');
 
-    // `api.post` is now only ever the authenticated /auth/verify-unlock probe;
-    // its body is not read.
+    // `api.post` is now only ever the authenticated /auth/verify-unlock probe,
+    // and its body carries the account's CURRENT wrapped vault key, which the
+    // unlock derives the key from instead of the copy cached at sign-in.
     vi.mocked(api.post).mockResolvedValue({
-      data: { success: true, data: null },
+      data: { success: true, message: 'Unlock verified', data: LIVE_VAULT_KEY },
     });
+    mockGetProfileApi.mockRejectedValue(new Error('the profile is not read on this path'));
 
     vi.mocked(cryptoService.deriveKeys).mockResolvedValue({
       masterEncryptionKey: fakeMek,
@@ -1245,7 +1267,7 @@ describe('UnlockScreen', () => {
     });
 
     await waitFor(() => {
-      expect(mockUnlock).toHaveBeenCalledWith('myMasterPassword', fakeMek);
+      expect(mockUnlock).toHaveBeenCalledWith('myMasterPassword', fakeMek, LIVE_VAULT_KEY);
     });
 
     // verify-unlock must be invoked BEFORE the local unlock/decrypt step.
@@ -1416,6 +1438,195 @@ describe('UnlockScreen', () => {
         replace: true,
       });
     });
+  });
+
+  async function submitUnlock(password = 'myMasterPassword'): Promise<void> {
+    fireEvent.change(screen.getByLabelText('Master Password'), { target: { value: password } });
+    fireEvent.click(screen.getByRole('button', { name: /unlock vault/i }));
+  }
+
+  it('reads the profile for the live wrapper when verify-unlock answers without one', async () => {
+    // An older instance (a rolling restart) answers 200 with no `data`. Falling
+    // straight back to the cached wrapper would re-derive a superseded key on
+    // exactly the session this fix exists for, so the profile is asked instead.
+    vi.mocked(api.post).mockResolvedValue({ data: { success: true, message: 'Unlock verified' } });
+    mockGetProfileApi.mockResolvedValue({
+      data: {
+        success: true,
+        data: {
+          encryptedVaultKey: 'enc-vk-profile',
+          vaultKeyIv: 'vk-iv-profile',
+          vaultKeyTag: 'vk-tag-profile',
+          vaultKeyVersion: 9,
+        },
+      },
+    });
+    mockUnlock.mockResolvedValue(undefined);
+
+    renderWithRouter(<UnlockScreen />);
+    await submitUnlock();
+
+    await waitFor(() => {
+      expect(mockUnlock).toHaveBeenCalledWith('myMasterPassword', fakeMek, {
+        encryptedVaultKey: 'enc-vk-profile',
+        vaultKeyIv: 'vk-iv-profile',
+        vaultKeyTag: 'vk-tag-profile',
+        vaultKeyVersion: 9,
+      });
+    });
+    await waitFor(() => {
+      expect(useAuthStore.setState).toHaveBeenCalledWith({ isLocked: false });
+    });
+  });
+
+  it.each([
+    ['no body at all', null],
+    ['a bare string', 'Unlock verified'],
+  ])('reads the profile when verify-unlock answers with %s', async (_case, body) => {
+    vi.mocked(api.post).mockResolvedValue({ data: body });
+    mockGetProfileApi.mockResolvedValue({ data: { success: true, data: LIVE_VAULT_KEY } });
+    mockUnlock.mockResolvedValue(undefined);
+
+    renderWithRouter(<UnlockScreen />);
+    await submitUnlock();
+
+    await waitFor(() => {
+      expect(mockUnlock).toHaveBeenCalledWith('myMasterPassword', fakeMek, LIVE_VAULT_KEY);
+    });
+    await waitFor(() => {
+      expect(useAuthStore.setState).toHaveBeenCalledWith({ isLocked: false });
+    });
+    // Not a wrong password: no attempt is charged for an answer it could not use.
+    expect(localStorage.getItem('__hv_unlock_failed_attempts')).toBeNull();
+  });
+
+  it('reads a profile with no stored generation as generation 0', async () => {
+    vi.mocked(api.post).mockResolvedValue({ data: { success: true } });
+    mockGetProfileApi.mockResolvedValue({
+      data: {
+        success: true,
+        data: {
+          encryptedVaultKey: 'enc-vk-profile',
+          vaultKeyIv: 'vk-iv-profile',
+          vaultKeyTag: 'vk-tag-profile',
+        },
+      },
+    });
+    mockUnlock.mockResolvedValue(undefined);
+
+    renderWithRouter(<UnlockScreen />);
+    await submitUnlock();
+
+    await waitFor(() => {
+      expect(mockUnlock).toHaveBeenCalledWith(
+        'myMasterPassword',
+        fakeMek,
+        expect.objectContaining({ encryptedVaultKey: 'enc-vk-profile', vaultKeyVersion: 0 }),
+      );
+    });
+    await waitFor(() => {
+      expect(useAuthStore.setState).toHaveBeenCalledWith({ isLocked: false });
+    });
+  });
+
+  it('falls back to the cached wrapper only when neither answer carries a usable one', async () => {
+    // A malformed live answer is refused by its schema, not handed to the key
+    // derivation; and a failed profile read leaves today's behaviour in place.
+    vi.mocked(api.post).mockResolvedValue({
+      data: { success: true, data: { ...LIVE_VAULT_KEY, vaultKeyIv: '' } },
+    });
+    mockGetProfileApi.mockRejectedValue(new Error('offline'));
+    mockUnlock.mockResolvedValue(undefined);
+
+    renderWithRouter(<UnlockScreen />);
+    await submitUnlock();
+
+    await waitFor(() => {
+      expect(mockUnlock).toHaveBeenCalledWith('myMasterPassword', fakeMek, undefined);
+    });
+    await waitFor(() => {
+      expect(useAuthStore.setState).toHaveBeenCalledWith({ isLocked: false });
+    });
+  });
+
+  it.each([
+    ['a profile answer saying success: false', { data: { success: false } }],
+    [
+      'a profile whose wrapper is malformed',
+      { data: { success: true, data: { ...LIVE_VAULT_KEY, vaultKeyTag: '' } } },
+    ],
+  ])('falls back to the cached wrapper on %s, and says so in the log', async (_case, answer) => {
+    const warn = vi.spyOn(logger, 'warn');
+    vi.mocked(api.post).mockResolvedValue({ data: { success: true } });
+    mockGetProfileApi.mockResolvedValue(answer);
+    mockUnlock.mockResolvedValue(undefined);
+
+    renderWithRouter(<UnlockScreen />);
+    await submitUnlock();
+
+    await waitFor(() => {
+      expect(mockUnlock).toHaveBeenCalledWith('myMasterPassword', fakeMek, undefined);
+    });
+    expect(warn).toHaveBeenCalledWith(
+      'Unlocking from the cached vault key: the live one could not be read',
+      expect.anything(),
+    );
+    warn.mockRestore();
+    await waitFor(() => {
+      expect(useAuthStore.setState).toHaveBeenCalledWith({ isLocked: false });
+    });
+  });
+
+  it.each([
+    [
+      'a stored vault key that will not open',
+      () => new StoredVaultKeyUnreadableError(),
+      'The vault key this account stores could not be opened. Sign out and sign in again.',
+    ],
+    [
+      'a session that ended mid-unlock',
+      () => new UnlockSessionChangedError(),
+      'This session ended while the vault was being unlocked. Sign in again.',
+    ],
+  ])('reports %s in its own words and charges no failed attempt', async (_case, failure, text) => {
+    mockUnlock.mockRejectedValue(failure());
+
+    renderWithRouter(<UnlockScreen />);
+    await submitUnlock();
+
+    await waitFor(() => {
+      expect(screen.getByRole('alert')).toHaveTextContent(text);
+    });
+    // verify-unlock has just accepted this password, so this is no evidence of a
+    // wrong one: the local backoff must not move.
+    expect(screen.getByRole('alert')).not.toHaveTextContent('Incorrect master password');
+    expect(localStorage.getItem('__hv_unlock_failed_attempts')).toBeNull();
+    expect(screen.queryByText(/attempts? remaining/)).not.toBeInTheDocument();
+    expect(useAuthStore.setState).not.toHaveBeenCalledWith({ isLocked: false });
+  });
+
+  it('says why the vault locked itself when its key was replaced elsewhere', () => {
+    vi.mocked(useAuthStore).mockImplementation((selector?: (state: AuthState) => unknown) => {
+      const state = authStateSlice({
+        user: { userId: 'user-1', email: 'vault@example.com' },
+        unlock: mockUnlock,
+        logout: mockLogout,
+        lockReason: 'vault-key-replaced',
+      });
+      return selector ? selector(state) : state;
+    });
+
+    renderWithRouter(<UnlockScreen />);
+
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'Your vault key was changed in another session, so this vault locked itself. Unlock to load it with the current key.',
+    );
+  });
+
+  it('gives an ordinary lock no such notice', () => {
+    renderWithRouter(<UnlockScreen />);
+
+    expect(screen.queryByText(/changed in another session/)).not.toBeInTheDocument();
   });
 
   it('toggles password visibility', () => {

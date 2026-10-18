@@ -105,6 +105,18 @@ const {
   mockDeriveStreamKey: vi.fn(),
 }));
 
+// The superseded-key check's seams. Mocked so the page's own rotation can be
+// seen to mark itself (begin/end, on every way out) and so no background check
+// ever runs inside this suite; the check's behaviour is its own test file's.
+const mockBeginOwnRotation = vi.fn();
+const mockEndOwnRotation = vi.fn();
+vi.mock('../src/stores/heldVaultKey', () => ({
+  beginOwnRotation: () => mockBeginOwnRotation() as unknown,
+  endOwnRotation: () => mockEndOwnRotation() as unknown,
+  checkHeldVaultKey: vi.fn(),
+  resetHeldVaultKeyChecks: vi.fn(),
+}));
+
 vi.mock('../src/stores/encryptedStorage', () => ({
   encryptedStorage: {
     getItem: vi.fn().mockResolvedValue(null),
@@ -1630,9 +1642,11 @@ describe('SettingsPage — error paths and branches', () => {
 
     expect(payload.authHash).toBe('hash:MasterPassword1!');
     // This client writes bound fields and says so; an ordinary rotation is not a
-    // re-seal and names no generation of its own.
+    // re-seal, and it names the generation it rotates FROM — the one this session
+    // holds — so the server can refuse a rotation from a superseded key.
     expect(payload.vaultFieldFormat).toBe(2);
     expect(payload).not.toHaveProperty('reseal');
+    expect((payload as { vaultKeyVersion?: number }).vaultKeyVersion).toBe(4);
     expect(payload.idempotencyKey).toEqual(expect.any(String));
     expect(payload.newEncryptedVaultKey).toBe('newEnc');
     expect(payload.newVaultKeyIv).toBe('newIv');
@@ -2414,9 +2428,426 @@ describe('SettingsPage — error paths and branches', () => {
       );
     });
     expect(useAuthStore.getState().vaultKey).toBe(OLD_VAULT_KEY);
+    // The re-read profile still carries the account's OLD wrapper, so nothing was
+    // committed and nothing is adopted: not the key, its wrapper or its number.
+    expect(useAuthStore.getState().encryptedVaultKeyData).toBeNull();
+    expect(useAuthStore.getState().vaultKeyVersion).toBe(4);
+    // The key minted for a rotation that never landed is cleared.
+    expect(cs.clearCryptoKey).toHaveBeenCalledWith(NEW_VAULT_KEY);
     // The dialog stays open so the user can retry.
     expect(screen.getByText('Confirm Rotation')).toBeInTheDocument();
   });
+
+  /** A request that never got an answer: the connection dropped, or a proxy gave up. */
+  function lostReply(): Error {
+    return Object.assign(new Error('Network Error'), { isAxiosError: true, code: 'ERR_NETWORK' });
+  }
+
+  /** The profile an account shows once THIS request's rotation has committed. */
+  const COMMITTED = {
+    encryptedVaultKey: 'newEnc',
+    vaultKeyIv: 'newIv',
+    vaultKeyTag: 'newTag',
+    vaultKeyVersion: 9,
+  };
+
+  it('switches to the new key when the server saved the rotation but its reply was lost', async () => {
+    // The server committed — every row is under the new key and the account stores
+    // its wrapper — but the answer never arrived. Keeping the old key here left
+    // this tab, and every later unlock of it, reading a vault that would not open.
+    mockBulkReEncrypt.mockRejectedValue(lostReply());
+    await renderSettings();
+    setProfile(COMMITTED);
+
+    await confirmRotation();
+
+    await waitFor(() => {
+      expect(useAuthStore.getState().vaultKey).toBe(NEW_VAULT_KEY);
+    });
+    expect(useAuthStore.getState().encryptedVaultKeyData).toEqual({
+      encrypted: 'newEnc',
+      iv: 'newIv',
+      tag: 'newTag',
+    });
+    // The account's own number, from the same answer as the wrapper it names.
+    expect(useAuthStore.getState().vaultKeyVersion).toBe(9);
+    expect(mockToast).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: 'Vault key rotated successfully',
+        type: 'success',
+        description: "The server's reply did not arrive, but the rotation was saved.",
+      }),
+    );
+    expect(mockToast).not.toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Failed to rotate vault key' }),
+    );
+    expect(cs.clearCryptoKey).not.toHaveBeenCalledWith(NEW_VAULT_KEY);
+    await waitFor(() => {
+      expect(screen.queryByText('Confirm Rotation')).not.toBeInTheDocument();
+    });
+  });
+
+  it('retires the interrupted-rotation notice once the profile reports no interruption', async () => {
+    // Another session may have finished the rotation the notice points at.
+    useUIStore.setState({ interruptedRotationNotice: true });
+
+    await renderSettings();
+
+    await waitFor(() => {
+      expect(useUIStore.getState().interruptedRotationNotice).toBe(false);
+    });
+  });
+
+  it('keeps the interrupted-rotation notice while the profile still reports one', async () => {
+    useUIStore.setState({ interruptedRotationNotice: true });
+    setProfile({ ...PENDING_WRAPPER });
+
+    await renderSettings();
+
+    await waitFor(() => {
+      expect(screen.getByText('Finish Rotation')).toBeInTheDocument();
+    });
+    expect(useUIStore.getState().interruptedRotationNotice).toBe(true);
+    act(() => {
+      useUIStore.setState({ interruptedRotationNotice: false });
+    });
+  });
+
+  it('reports the rows a saved-but-unanswered rotation left behind, beside the lost reply', async () => {
+    mockListItems.mockResolvedValue({
+      data: {
+        success: true,
+        data: [vaultItem('good'), vaultItem('bad')],
+        pagination: { totalPages: 1 },
+      },
+    });
+    cs.decryptData.mockImplementation((enc: string) =>
+      enc.startsWith('bad')
+        ? Promise.reject(new Error('GCM tag mismatch'))
+        : Promise.resolve(`plain:${enc}`),
+    );
+    mockBulkReEncrypt.mockRejectedValue(lostReply());
+    await renderSettings();
+    setProfile(COMMITTED);
+
+    await confirmRotation();
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title:
+            'Vault key rotated successfully. 1 entry could not be decrypted and was left unchanged.',
+          type: 'warning',
+        }),
+      );
+    });
+    const toastArgs = mockToast.mock.calls.map(([arg]) => arg as { description?: string });
+    const description = toastArgs.find((arg) =>
+      arg.description?.includes('Left unchanged'),
+    )?.description;
+    // One description slot, so the two facts share it, the lost reply first.
+    expect(description).toMatch(
+      /^The server's reply did not arrive, but the rotation was saved\. Left unchanged: 1 item\./,
+    );
+    expect(useAuthStore.getState().vaultKey).toBe(NEW_VAULT_KEY);
+  });
+
+  it('re-wraps the backup copy under the committed generation after a lost reply', async () => {
+    mockBulkReEncrypt.mockRejectedValue(lostReply());
+    const backupConfigured = {
+      settings: {
+        ...defaultProfile.settings,
+        backup: {
+          enabled: true,
+          scheduleHour: 3,
+          backupEmails: [],
+          isConfigured: true,
+          encryptedBWK: 'bwk',
+          bwkIv: 'iv',
+          bwkTag: 'tag',
+          bwkSalt: 'salt',
+        },
+      },
+    };
+    setProfile(backupConfigured);
+    await renderSettings();
+    setProfile({ ...backupConfigured, ...COMMITTED });
+
+    fireEvent.click(screen.getByText('Rotate Key'));
+    await waitFor(() => screen.getByPlaceholderText('Backup password'));
+    fireEvent.change(screen.getByPlaceholderText('Master password'), {
+      target: { value: 'MasterPassword1!' },
+    });
+    fireEvent.change(screen.getByPlaceholderText('Backup password'), {
+      target: { value: 'BackupPassword1!' },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText('Confirm Rotation'));
+    });
+
+    await waitFor(() => {
+      expect(mockApiPost).toHaveBeenCalledWith(
+        '/backup/setup',
+        expect.objectContaining({ bwkEncryptedVaultKey: 'bwkEncVK', vaultKeyVersion: 9 }),
+      );
+    });
+    expect(useAuthStore.getState().vaultKey).toBe(NEW_VAULT_KEY);
+  });
+
+  it('does not adopt a key a failed rotation only left PENDING', async () => {
+    // After a failed sequential rotation the pending triple IS what was sent, while
+    // the live one is still the account's old key. Adopting from the pending one
+    // would put this session on a key no row of the account is sealed under.
+    mockBulkReEncrypt.mockRejectedValue(lostReply());
+    await renderSettings();
+    setProfile({
+      interruptedRotation: true,
+      pendingEncryptedVaultKey: 'newEnc',
+      pendingVaultKeyIv: 'newIv',
+      pendingVaultKeyTag: 'newTag',
+    });
+
+    await confirmRotation();
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({ title: 'Failed to rotate vault key', type: 'error' }),
+      );
+    });
+    expect(useAuthStore.getState().vaultKey).toBe(OLD_VAULT_KEY);
+    expect(useAuthStore.getState().vaultKeyVersion).toBe(4);
+  });
+
+  it('shows the refusal of a rotation from a superseded key verbatim, raises the notice, and adopts nothing', async () => {
+    mockBulkReEncrypt.mockRejectedValue(staleGenerationRefusal(6));
+    await renderSettings();
+
+    await confirmRotation();
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title:
+            'The vault key was rotated elsewhere. Reload to pick up vault key version 6, then retry this change.',
+          type: 'error',
+        }),
+      );
+    });
+    expect(useUIStore.getState().staleVaultKeyVersion).toBe(6);
+    expect(useAuthStore.getState().vaultKey).toBe(OLD_VAULT_KEY);
+  });
+
+  it('writes no key into a session that moved on to another key while the rotation committed', async () => {
+    // Unlocked, but no longer the session that started the rotation (a sign-in
+    // elsewhere in this tab replaced its key): the adoption is not this one's.
+    const SOMEONE_ELSES_KEY = { key: 'someone-elses-key' };
+    mockBulkReEncrypt.mockImplementation(() => {
+      useAuthStore.setState({ vaultKey: SOMEONE_ELSES_KEY as never });
+      return Promise.resolve({ data: { success: true } });
+    });
+    await renderSettings();
+
+    await confirmRotation();
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({ title: 'Vault key rotated successfully' }),
+      );
+    });
+    expect(useAuthStore.getState().vaultKey).toBe(SOMEONE_ELSES_KEY);
+    expect(useAuthStore.getState().encryptedVaultKeyData).toBeNull();
+    expect(useAuthStore.getState().vaultKeyVersion).toBe(4);
+  });
+
+  it.each(['encryptedBWK', 'bwkIv', 'bwkTag', 'bwkSalt'] as const)(
+    'leaves the backup copy alone when the backup settings carry no %s',
+    async (missing) => {
+      // A backup whose stored key material is incomplete cannot be re-wrapped, and
+      // posting the incomplete set would be refused or, worse, stored.
+      const backup = Object.fromEntries(
+        Object.entries({
+          enabled: true,
+          scheduleHour: 3,
+          backupEmails: [],
+          isConfigured: true,
+          encryptedBWK: 'bwk',
+          bwkIv: 'iv',
+          bwkTag: 'tag',
+          bwkSalt: 'salt',
+        }).filter(([key]) => key !== missing),
+      );
+      setProfile({ settings: { ...defaultProfile.settings, backup } });
+      await renderSettings();
+
+      fireEvent.click(screen.getByText('Rotate Key'));
+      await waitFor(() => screen.getByPlaceholderText('Master password'));
+      fireEvent.change(screen.getByPlaceholderText('Master password'), {
+        target: { value: 'MasterPassword1!' },
+      });
+      await act(async () => {
+        fireEvent.click(screen.getByText('Confirm Rotation'));
+      });
+
+      await waitFor(() => {
+        expect(mockToast).toHaveBeenCalledWith(
+          expect.objectContaining({ title: 'Vault key rotated successfully', type: 'success' }),
+        );
+      });
+      expect(useAuthStore.getState().vaultKey).toBe(NEW_VAULT_KEY);
+      expect(mockApiPost.mock.calls.map(([url]) => url as string)).not.toContain('/backup/setup');
+    },
+  );
+
+  it.each([
+    ['its wrapped key', { encryptedVaultKey: 'another-wrapped-key' }],
+    ['its IV', { vaultKeyIv: 'another-iv' }],
+    ['its tag', { vaultKeyTag: 'another-tag' }],
+  ])(
+    'does not adopt after a lost reply when the stored wrapper differs from the sent one in %s alone',
+    async (_part, differs) => {
+      mockBulkReEncrypt.mockRejectedValue(lostReply());
+      await renderSettings();
+      setProfile({ ...COMMITTED, ...differs });
+
+      await confirmRotation();
+
+      await waitFor(() => {
+        expect(mockToast).toHaveBeenCalledWith(
+          expect.objectContaining({ title: 'Failed to rotate vault key', type: 'error' }),
+        );
+      });
+      expect(useAuthStore.getState().vaultKey).toBe(OLD_VAULT_KEY);
+      expect(useAuthStore.getState().vaultKeyVersion).toBe(4);
+    },
+  );
+
+  it('reports the failure, and adopts nothing, when the profile cannot be re-read either', async () => {
+    mockBulkReEncrypt.mockRejectedValue(lostReply());
+    await renderSettings();
+    mockGetProfileApi.mockRejectedValue(lostReply());
+
+    await confirmRotation();
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({ title: 'Failed to rotate vault key', type: 'error' }),
+      );
+    });
+    expect(useAuthStore.getState().vaultKey).toBe(OLD_VAULT_KEY);
+    expect(cs.clearCryptoKey).toHaveBeenCalledWith(NEW_VAULT_KEY);
+  });
+
+  it('reports a failure before anything was sent, and adopts nothing', async () => {
+    mockListItems.mockRejectedValue(lostReply());
+    await renderSettings();
+    setProfile(COMMITTED);
+
+    await confirmRotation();
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({ title: 'Failed to rotate vault key', type: 'error' }),
+      );
+    });
+    expect(mockBulkReEncrypt).not.toHaveBeenCalled();
+    expect(useAuthStore.getState().vaultKey).toBe(OLD_VAULT_KEY);
+  });
+
+  it('writes no key into a vault that was locked while the rotation committed', async () => {
+    mockBulkReEncrypt.mockImplementation(async () => {
+      await useAuthStore.getState().lock();
+      return { data: { success: true } };
+    });
+    await renderSettings();
+
+    await confirmRotation();
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({ title: 'Vault key rotated successfully' }),
+      );
+    });
+    // Locked means no key in memory. The unlock that follows loads the committed
+    // wrapper from the server (verify-unlock), so nothing is lost by not writing.
+    expect(useAuthStore.getState().isLocked).toBe(true);
+    expect(useAuthStore.getState().vaultKey).toBeNull();
+    expect(useAuthStore.getState().encryptedVaultKeyData).toBeNull();
+  });
+
+  it('holds the new key BEFORE the backup copy is re-wrapped', async () => {
+    // No await may stand between the commit and the adoption: a tab closed while
+    // the backup password is being stretched used to keep the old wrapper.
+    const backupConfigured = {
+      settings: {
+        ...defaultProfile.settings,
+        backup: {
+          enabled: true,
+          scheduleHour: 3,
+          backupEmails: [],
+          isConfigured: true,
+          encryptedBWK: 'bwk',
+          bwkIv: 'iv',
+          bwkTag: 'tag',
+          bwkSalt: 'salt',
+        },
+      },
+    };
+    setProfile(backupConfigured);
+    let heldWhenBackupPosted: unknown = 'not posted';
+    let generationWhenBackupPosted: unknown;
+    mockApiPost.mockImplementation((url: string) => {
+      if (url === '/backup/setup') {
+        heldWhenBackupPosted = useAuthStore.getState().vaultKey;
+        generationWhenBackupPosted = useAuthStore.getState().vaultKeyVersion;
+      }
+      return Promise.resolve({ data: { success: true } });
+    });
+    await renderSettings();
+
+    fireEvent.click(screen.getByText('Rotate Key'));
+    await waitFor(() => screen.getByPlaceholderText('Backup password'));
+    fireEvent.change(screen.getByPlaceholderText('Master password'), {
+      target: { value: 'MasterPassword1!' },
+    });
+    fireEvent.change(screen.getByPlaceholderText('Backup password'), {
+      target: { value: 'BackupPassword1!' },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText('Confirm Rotation'));
+    });
+
+    await waitFor(() => {
+      expect(heldWhenBackupPosted).toBe(NEW_VAULT_KEY);
+    });
+    // The store's own floor (+1 from 4), while the backup request names the
+    // generation the profile reports (6), each from its own source.
+    expect(generationWhenBackupPosted).toBe(5);
+    expect(mockApiPost).toHaveBeenCalledWith(
+      '/backup/setup',
+      expect.objectContaining({ vaultKeyVersion: 6 }),
+    );
+  });
+
+  it.each([
+    ['a commit', () => mockBulkReEncrypt.mockResolvedValue({ data: { success: true } })],
+    ['a refusal', () => mockBulkReEncrypt.mockRejectedValue(new Error('500'))],
+  ])(
+    'marks its own rotation for the superseded-key check and unmarks it after %s',
+    async (_case, arrange) => {
+      arrange();
+      await renderSettings();
+
+      await confirmRotation();
+
+      await waitFor(() => {
+        expect(mockEndOwnRotation).toHaveBeenCalledTimes(1);
+      });
+      expect(mockBeginOwnRotation).toHaveBeenCalledTimes(1);
+      expect(mockBeginOwnRotation.mock.invocationCallOrder[0]).toBeLessThan(
+        mockBulkReEncrypt.mock.invocationCallOrder[0] ?? 0,
+      );
+    },
+  );
 
   it("shows the server's own 4xx refusal, so a completeness 409 is not collapsed into a generic failure", async () => {
     // The completeness check names which leg fell short and, for documents, that a
@@ -2572,6 +3003,10 @@ describe('SettingsPage — error paths and branches', () => {
     expect(payload.newEncryptedVaultKey).toBe(PENDING_WRAPPER.pendingEncryptedVaultKey);
     expect(payload.newVaultKeyIv).toBe(PENDING_WRAPPER.pendingVaultKeyIv);
     expect(payload.newVaultKeyTag).toBe(PENDING_WRAPPER.pendingVaultKeyTag);
+    // Finishing names the generation it moves FROM too: a page holding a key the
+    // account has replaced would open the pending rows and pass the live ones
+    // through, so the server must be able to refuse it.
+    expect((payload as { vaultKeyVersion?: number }).vaultKeyVersion).toBe(4);
     // ...and it was opened with the account's MEK, not with anything this session
     // happened to be holding.
     expect(cs.decryptVaultKey).toHaveBeenCalledWith(
@@ -2743,6 +3178,7 @@ describe('SettingsPage — error paths and branches', () => {
     expect(cs.rotateVaultKey).toHaveBeenCalledTimes(1);
     expect(payload.newEncryptedVaultKey).toBe('newEnc');
     expect(payload.discardPendingVaultKey).toBe(true);
+    expect((payload as { vaultKeyVersion?: number }).vaultKeyVersion).toBe(4);
     // The row that was already re-sealed cannot be read with the live key, so it
     // crosses unchanged — and is reported.
     expect(payload.items[1]).toMatchObject({
@@ -2752,7 +3188,9 @@ describe('SettingsPage — error paths and branches', () => {
     await waitFor(() => {
       expect(mockToast).toHaveBeenCalledWith(
         expect.objectContaining({
-          description: expect.stringContaining('sealed under the abandoned rotation'),
+          description: expect.stringContaining(
+            "It is sealed under the abandoned rotation's key, which this account no longer stores. Only a backup can recover it.",
+          ),
           type: 'warning',
         }),
       );
@@ -2872,6 +3310,31 @@ describe('SettingsPage — error paths and branches', () => {
       bwkSalt: 'salt',
     },
   };
+
+  it('never mistakes a failed re-seal for a committed rotation, although the account still stores the wrapper it sent', async () => {
+    // A re-seal sends the STORED wrapper, so after any failure the live triple
+    // equals what was sent. That is not a commit of anything: the key never
+    // changed, and nothing may be adopted or re-wrapped.
+    await renderSettings();
+    mockGetProfileApi.mockResolvedValue(heldKeyProfile());
+    mockBulkReEncrypt.mockRejectedValue(lostReply());
+
+    await confirmReseal();
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({ title: 'Failed to re-seal vault entries', type: 'error' }),
+      );
+    });
+    expect(useAuthStore.getState().vaultKey).toBe(OLD_VAULT_KEY);
+    expect(useAuthStore.getState().vaultKeyVersion).toBe(4);
+    expect(mockApiPost.mock.calls.map(([url]) => url as string)).not.toContain('/backup/setup');
+    // The live key is never cleared by a re-seal, failed or not.
+    expect(cs.clearCryptoKey).not.toHaveBeenCalledWith(OLD_VAULT_KEY);
+    expect(mockToast).not.toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Vault entries re-sealed' }),
+    );
+  });
 
   it('re-seals every entry under the key already in use, naming the stored wrapper and the generation read with it', async () => {
     const heldWrapperData = {

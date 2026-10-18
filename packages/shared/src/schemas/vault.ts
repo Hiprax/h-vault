@@ -266,9 +266,10 @@ export const bulkReEncryptSchema = z
      * send it back unchanged, and it would then be left under the retired key.
      */
     vaultFieldFormat: z.literal(2).optional(),
-    // The vault-key generation a re-seal's ciphertext was sealed under. Required
-    // when `reseal` is set (below); ignored by an ordinary rotation, whose commit
-    // is conditioned on the credential it authenticated against instead.
+    // The vault-key generation this request rotates FROM (a re-seal's: the one its
+    // ciphertext was sealed under). Checked for EVERY rotation, and refused when
+    // superseded or, once the account has rotated, absent; required when `reseal`
+    // is set (below). Optional on the wire only so the schema stays non-breaking.
     vaultKeyVersion: optionalVaultKeyVersionSchema,
   })
   /**

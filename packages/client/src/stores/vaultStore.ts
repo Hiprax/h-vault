@@ -20,6 +20,7 @@ import { logger } from '../lib/logger.js';
 import { isRateLimited, retryAfterSeconds } from '../services/auth/sessionFailure.js';
 import { useAuthStore } from './authStore.js';
 import { noteStaleVaultKey, useUIStore } from './uiStore.js';
+import { checkHeldVaultKey } from './heldVaultKey.js';
 // Folders are ONE collection shared by vault items and documents, so deleting a
 // folder has to reach both stores. The cycle this closes (`documentsStore`
 // imports `mapWithConcurrency` from here) is the shape `authStore` already has
@@ -1068,6 +1069,9 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
           } while (currentPage <= totalPages);
 
           const { failedCount, errorMessage } = reportDecryptionFailures(allResults, 'vault items');
+          // Rows this key cannot open may mean the key itself was replaced by a
+          // rotation in another session; that is asked in the background.
+          if (failedCount > 0) checkHeldVaultKey(vaultKey);
           set((state) => ({
             decryptionFailures: failedCount,
             lastDecryptionError: errorMessage ?? state.lastDecryptionError,
@@ -1247,7 +1251,8 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
           throw error;
         }
 
-        const { errorMessage } = reportDecryptionFailures(allResults, 'trash items');
+        const { failedCount, errorMessage } = reportDecryptionFailures(allResults, 'trash items');
+        if (failedCount > 0) checkHeldVaultKey(vaultKey);
         set((state) => ({
           lastDecryptionError: errorMessage ?? state.lastDecryptionError,
         }));
@@ -1311,7 +1316,8 @@ export const useVaultStore = create<VaultState>()((set, get) => ({
           .filter((r): r is PromiseFulfilledResult<DecryptedFolder> => r.status === 'fulfilled')
           .map((r) => r.value);
 
-        const { errorMessage } = reportDecryptionFailures(folderResults, 'folders');
+        const { failedCount, errorMessage } = reportDecryptionFailures(folderResults, 'folders');
+        if (failedCount > 0) checkHeldVaultKey(vaultKey);
         set((state) => ({
           folders: decrypted,
           lastDecryptionError: errorMessage ?? state.lastDecryptionError,

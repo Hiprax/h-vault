@@ -52,6 +52,15 @@ import { installTestClock } from './clock.js';
 // Mocks: only the two modules that would otherwise reach real browser storage.
 // ---------------------------------------------------------------------------
 
+// The superseded-key check a degraded row starts. Its own behaviour is
+// `held-vault-key-check.test.ts`; here only that the store STARTS it, with the key
+// that failed, and never when every row opened.
+const mockCheckHeldVaultKey = vi.fn();
+vi.mock('../src/stores/heldVaultKey', () => ({
+  checkHeldVaultKey: (...args: unknown[]) => mockCheckHeldVaultKey(...args) as unknown,
+  resetHeldVaultKeyChecks: vi.fn(),
+}));
+
 vi.mock('../src/stores/encryptedStorage', () => ({
   encryptedStorage: {
     getItem: vi.fn().mockResolvedValue(null),
@@ -594,6 +603,7 @@ function partRequests(): RecordedRequest[] {
 }
 
 beforeEach(async () => {
+  mockCheckHeldVaultKey.mockClear();
   requests = [];
   listPages = [];
   trashRows = [];
@@ -693,6 +703,8 @@ describe('documentsStore — reading', () => {
     // The name never crossed the wire: the request carried no body at all, and the
     // row the server sent holds only ciphertext.
     expect(JSON.stringify(listPages)).not.toContain('invoice.pdf');
+    // Every row opened, so nothing is asked about the key.
+    expect(mockCheckHeldVaultKey).not.toHaveBeenCalled();
   });
 
   it('lists a row whose key belongs to another document as degraded rather than dropping it', async () => {
@@ -710,6 +722,19 @@ describe('documentsStore — reading', () => {
     // The negative that matters: it is still LISTED, because move, favorite, trash
     // and purge are exactly what a user needs in order to get rid of it.
     expect(documents[0]?.id).toBe(ID_A);
+    // A row this key cannot open starts the check of whether the key was replaced.
+    expect(mockCheckHeldVaultKey).toHaveBeenCalledTimes(1);
+    expect(mockCheckHeldVaultKey).toHaveBeenCalledWith(vaultKey);
+  });
+
+  it('starts the same check for a degraded row in the trash', async () => {
+    trashRows = [await makeRow(ID_A, 'lost.txt', { wrapUnder: ID_B })];
+
+    await useDocumentsStore.getState().fetchTrash();
+
+    expect(useDocumentsStore.getState().trashDegradedCount).toBe(1);
+    expect(mockCheckHeldVaultKey).toHaveBeenCalledTimes(1);
+    expect(mockCheckHeldVaultKey).toHaveBeenCalledWith(vaultKey);
   });
 
   it('drops a row that does not satisfy the response schema, and counts it', async () => {

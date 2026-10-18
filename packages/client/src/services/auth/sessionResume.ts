@@ -107,9 +107,10 @@ export async function resumeSession(): Promise<boolean> {
         tag: profile.vaultKeyTag,
       },
       // Which generation the wrapped key above is, from the same response. The
-      // Unlock screen re-derives from that blob and never re-reads the server,
-      // so if this were left at its default the resumed session would claim
-      // generation 0 while holding whatever the account has rotated to.
+      // Unlock screen replaces both with what verify-unlock answers, and falls
+      // back to this blob only when that answer carries none, so if this were
+      // left at its default such a session would claim generation 0 while
+      // holding whatever the account has rotated to.
       vaultKeyVersion: profile.vaultKeyVersion ?? 0,
       kdfIterations: profile.kdfIterations,
     });

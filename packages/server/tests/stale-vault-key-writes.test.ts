@@ -48,6 +48,7 @@
  * put a security control behind a predicate the caller chooses.
  */
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
+import { Types } from 'mongoose';
 import request from 'supertest';
 import { MAX_FOLDERS_PER_USER } from '@hvault/shared';
 import app from '../src/app.js';
@@ -56,7 +57,11 @@ import { VaultItem } from '../src/models/VaultItem.js';
 import { Folder } from '../src/models/Folder.js';
 import { AuditLog } from '../src/models/AuditLog.js';
 import { JobLock } from '../src/models/JobLock.js';
-import { vaultKeyVersionOf, vaultImportLockName } from '../src/utils/controllerHelpers.js';
+import {
+  vaultKeyVersionOf,
+  vaultImportLockName,
+  vaultRotationLockName,
+} from '../src/utils/controllerHelpers.js';
 import {
   createTestUser,
   authHeader,
@@ -114,6 +119,10 @@ async function rotateVaultKey(): Promise<number> {
 
   const res = await send('post', '/api/v1/vault/items/bulk-reencrypt', {
     authHash: user.rawPassword,
+    // A rotation names the generation it rotates FROM, like every other write
+    // sealed under the vault key: one naming none is refused once the account has
+    // rotated, so a fixture that rotates twice must say where it stands.
+    vaultKeyVersion: vaultKeyVersionOf(await User.findById(user.id).lean()),
     items: items.map((item) => ({
       id: String(item._id),
       encryptedName: ROTATED_CIPHERTEXT,
@@ -743,6 +752,305 @@ describe('POST /vault/items/bulk-reencrypt in re-seal mode refuses a key rotated
     expect(after?.encryptedVaultKey).toBe(ROTATED_VAULT_KEY);
     const [row] = await VaultItem.find({ userId: user.id }).lean();
     expect(row?.nameIv).toBe('v2:resealed-iv');
+  });
+
+  it.each([
+    ['newEncryptedVaultKey', 'a-different-wrapped-key'],
+    ['newVaultKeyIv', 'a-different-iv'],
+    ['newVaultKeyTag', 'a-different-tag'],
+  ])(
+    'refuses a re-seal whose %s alone differs from the stored wrapper, and rewrites nothing',
+    async (field, value) => {
+      // Each of the three must match on its own: a wrapper that agrees on two of
+      // them is still another key's, and sealing under it is a vault nothing opens.
+      await seedItem(user.id);
+      const current = await rotateVaultKey();
+      const before = await snapshot();
+
+      const res = await send('post', '/api/v1/vault/items/bulk-reencrypt', {
+        ...(await resealBody(current)),
+        [field]: value,
+      });
+
+      expect(res.status).toBe(409);
+      expect(res.body.message).toMatch(/^Reload the app, then re-seal again/);
+      await expectNothingWritten(before);
+    },
+  );
+
+  it('answers a re-seal for an account erased mid-request with its 409, not a crash', async () => {
+    // The account row can vanish between the password proof and the stored-wrapper
+    // read (an erasure finishing). That is the "key moved" refusal, never a 500.
+    await seedItem(user.id);
+    const current = await rotateVaultKey();
+    const body = await resealBody(current);
+    const realFindById = User.findById.bind(User);
+    vi.spyOn(User, 'findById').mockImplementation(((...args: Parameters<typeof User.findById>) => {
+      const query = realFindById(...args);
+      const realSelect = query.select.bind(query);
+      query.select = ((projection: unknown) =>
+        projection === 'encryptedVaultKey vaultKeyIv vaultKeyTag'
+          ? { lean: () => Promise.resolve(null) }
+          : realSelect(projection as never)) as never;
+      return query;
+    }) as never);
+
+    const res = await send('post', '/api/v1/vault/items/bulk-reencrypt', body);
+
+    expect(res.status).toBe(409);
+    expect(res.body.message).toMatch(/^Reload the app, then re-seal again/);
+    vi.restoreAllMocks();
+    // The exclusion lock was released on the way out: the next request is not busy.
+    expect(await JobLock.countDocuments({ jobName: vaultRotationLockName(user.id) })).toBe(0);
+  });
+});
+
+/**
+ * A ROTATION is a vault-key write too, and it is the one that can do the most
+ * damage from a superseded key: it re-encrypts what it can open, passes through
+ * unopened every row it cannot, and then replaces the account's key — so every
+ * row it passed through is sealed under a key nothing stores any more.
+ *
+ * The client's own safety valve (abort when NO row opens) does not cover it. A page
+ * holding K0 that presses Finish on an account at K1 with K2 pending (a crashed
+ * sequential rotation) tries `[K0, K2]`, opens the K2 rows, does not abort, and
+ * passes every K1 row through to its death. So the server checks the generation a
+ * rotation names, under the lock, and fails CLOSED on one that names none once the
+ * account has rotated — exactly as it does for every other write in this file.
+ */
+describe('POST /vault/items/bulk-reencrypt refuses a rotation from a superseded vault key', () => {
+  const SUPERSEDED_WRAPPER = {
+    newEncryptedVaultKey: 'wrapper-minted-by-a-superseded-session',
+    newVaultKeyIv: 'superseded-session-iv',
+    newVaultKeyTag: 'superseded-session-tag',
+  };
+
+  /** A rotation of every row the account holds, as a client would send it. */
+  async function rotationBody(
+    extra: Record<string, unknown> = {},
+  ): Promise<Record<string, unknown>> {
+    const items = await VaultItem.find({ userId: user.id }).lean();
+    return {
+      authHash: user.rawPassword,
+      idempotencyKey: crypto.randomUUID(),
+      vaultFieldFormat: 2,
+      items: items.map((item) => ({
+        id: String(item._id),
+        encryptedName: STALE_CIPHERTEXT,
+        nameIv: 'v2:superseded-name-iv',
+        nameTag: 'superseded-name-tag',
+        encryptedData: STALE_CIPHERTEXT,
+        dataIv: 'v2:superseded-data-iv',
+        dataTag: 'superseded-data-tag',
+      })),
+      folders: [],
+      documents: [],
+      ...SUPERSEDED_WRAPPER,
+      ...extra,
+    };
+  }
+
+  /** Everything a refused rotation must leave exactly as it found it. */
+  async function accountState(): Promise<Record<string, unknown>> {
+    const row = await User.findById(user.id).lean();
+    return {
+      wrapper: [row?.encryptedVaultKey, row?.vaultKeyIv, row?.vaultKeyTag],
+      pending: [row?.pendingEncryptedVaultKey, row?.pendingVaultKeyIv, row?.pendingVaultKeyTag],
+      vaultKeyVersion: vaultKeyVersionOf(row),
+      rotationInProgress: row?.rotationInProgress,
+      lastRotationKey: row?.lastRotationKey,
+      vaultBytes: row?.vaultBytes,
+      counters: row?.counters,
+      items: await VaultItem.find({ userId: user.id }).sort({ _id: 1 }).lean(),
+      audits: await AuditLog.countDocuments({ userId: user.id }),
+    };
+  }
+
+  /** Puts the account on generation 1 WITHOUT a rotation, so no quota counter exists yet. */
+  async function bumpGeneration(): Promise<void> {
+    await User.updateOne({ _id: user.id }, { $inc: { vaultKeyVersion: 1 } });
+  }
+
+  /** The state a crashed SEQUENTIAL rotation leaves: its key stored as pending, fence lowered. */
+  async function leaveInterruptedRotation(): Promise<void> {
+    await User.updateOne(
+      { _id: user.id },
+      {
+        $set: {
+          pendingEncryptedVaultKey: 'wrapper-of-the-interrupted-rotation',
+          pendingVaultKeyIv: 'interrupted-iv',
+          pendingVaultKeyTag: 'interrupted-tag',
+        },
+      },
+    );
+  }
+
+  it('refuses an ordinary rotation naming a generation BEHIND the account, and changes nothing', async () => {
+    await seedItem(user.id);
+    const current = await rotateVaultKey();
+    const before = await accountState();
+
+    const res = await send(
+      'post',
+      '/api/v1/vault/items/bulk-reencrypt',
+      await rotationBody({ vaultKeyVersion: current - 1 }),
+    );
+
+    expectRecoverableConflict(res, current, /rotated elsewhere/i);
+    expect(await accountState()).toEqual(before);
+  });
+
+  it('refuses FINISHING an interrupted rotation from a superseded generation, and keeps its pending key', async () => {
+    await seedItem(user.id);
+    const current = await rotateVaultKey();
+    await leaveInterruptedRotation();
+    const before = await accountState();
+
+    const res = await send(
+      'post',
+      '/api/v1/vault/items/bulk-reencrypt',
+      await rotationBody({
+        vaultKeyVersion: current - 1,
+        newEncryptedVaultKey: 'wrapper-of-the-interrupted-rotation',
+        newVaultKeyIv: 'interrupted-iv',
+        newVaultKeyTag: 'interrupted-tag',
+      }),
+    );
+
+    expectRecoverableConflict(res, current, /rotated elsewhere/i);
+    expect(await accountState()).toEqual(before);
+  });
+
+  it('refuses DISCARDING an interrupted rotation from a superseded generation', async () => {
+    await seedItem(user.id);
+    const current = await rotateVaultKey();
+    await leaveInterruptedRotation();
+    const before = await accountState();
+
+    const res = await send(
+      'post',
+      '/api/v1/vault/items/bulk-reencrypt',
+      await rotationBody({ vaultKeyVersion: current - 1, discardPendingVaultKey: true }),
+    );
+
+    expectRecoverableConflict(res, current, /rotated elsewhere/i);
+    expect(await accountState()).toEqual(before);
+  });
+
+  it('refuses a generation the account has never reached', async () => {
+    await seedItem(user.id);
+    const current = await rotateVaultKey();
+    const before = await accountState();
+
+    const res = await send(
+      'post',
+      '/api/v1/vault/items/bulk-reencrypt',
+      await rotationBody({ vaultKeyVersion: current + 1 }),
+    );
+
+    expectRecoverableConflict(res, current, /never had/i);
+    expect(await accountState()).toEqual(before);
+  });
+
+  it('commits a rotation naming the current generation, and moves it on by one', async () => {
+    await seedItem(user.id);
+    const current = await rotateVaultKey();
+
+    const res = await send(
+      'post',
+      '/api/v1/vault/items/bulk-reencrypt',
+      await rotationBody({ vaultKeyVersion: current }),
+    );
+
+    expect(res.status).toBe(200);
+    const after = await User.findById(user.id).lean();
+    expect(vaultKeyVersionOf(after)).toBe(current + 1);
+    expect(after?.encryptedVaultKey).toBe(SUPERSEDED_WRAPPER.newEncryptedVaultKey);
+  });
+
+  it('commits a rotation naming NO generation on an account that has never rotated', async () => {
+    // Generation 0 has no superseded key for anyone to hold, which is the same
+    // reading every other guarded write gives it.
+    await seedItem(user.id);
+
+    const res = await send('post', '/api/v1/vault/items/bulk-reencrypt', await rotationBody());
+
+    expect(res.status).toBe(200);
+    expect(vaultKeyVersionOf(await User.findById(user.id).lean())).toBe(1);
+  });
+
+  it('refuses a rotation naming NO generation once the account has rotated, before the fence or the quota', async () => {
+    await seedItem(user.id);
+    await bumpGeneration();
+    const before = await accountState();
+    // The precondition the "no counter installed" half depends on: nothing has
+    // installed the quota counter yet, so a refusal that reached it would show.
+    expect(before.vaultBytes).toBeUndefined();
+
+    const res = await send('post', '/api/v1/vault/items/bulk-reencrypt', await rotationBody());
+
+    expectRecoverableConflict(res, 1, /did not say which vault key/i);
+    expect(await accountState()).toEqual(before);
+  });
+
+  it('commits generation 0 on a legacy row that stores no generation at all', async () => {
+    await seedItem(user.id);
+    await User.collection.updateOne(
+      { _id: new Types.ObjectId(user.id) },
+      { $unset: { vaultKeyVersion: 1 } },
+    );
+
+    const res = await send(
+      'post',
+      '/api/v1/vault/items/bulk-reencrypt',
+      await rotationBody({ vaultKeyVersion: 0 }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(vaultKeyVersionOf(await User.findById(user.id).lean())).toBe(1);
+  });
+
+  it('answers a replay of a committed rotation with success, although the number it carries is now behind', async () => {
+    // A retry of a rotation whose reply was lost carries the generation it was
+    // sent with, which its own commit has just moved past. The idempotency answer
+    // must win over the generation check, or the retry the API promises is a 409.
+    await seedItem(user.id);
+    const body = await rotationBody({ vaultKeyVersion: 0 });
+    const first = await send('post', '/api/v1/vault/items/bulk-reencrypt', body);
+    expect(first.status).toBe(200);
+
+    const replay = await send('post', '/api/v1/vault/items/bulk-reencrypt', body);
+
+    expect(replay.status).toBe(200);
+    expect(vaultKeyVersionOf(await User.findById(user.id).lean())).toBe(1);
+  });
+
+  it('releases the exclusion lock BEFORE it answers the refusal', async () => {
+    await seedItem(user.id);
+    await bumpGeneration();
+    const order: string[] = [];
+    const realDeleteOne = JobLock.deleteOne.bind(JobLock);
+    vi.spyOn(JobLock, 'deleteOne').mockImplementation(((filter: Record<string, unknown>) => {
+      return (async () => {
+        // Delayed so an answer-then-release ordering is caught, not raced.
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        const result = await realDeleteOne(filter);
+        if (String(filter.jobName) === vaultRotationLockName(user.id)) {
+          order.push('exclusion-lock-released');
+        }
+        return result;
+      })();
+    }) as never);
+
+    const res = await send(
+      'post',
+      '/api/v1/vault/items/bulk-reencrypt',
+      await rotationBody({ vaultKeyVersion: 0 }),
+    );
+    order.push('response-received');
+
+    expect(res.status).toBe(409);
+    expect(order).toEqual(['exclusion-lock-released', 'response-received']);
   });
 });
 

@@ -1175,19 +1175,39 @@ correctness, and these are the things it does not buy:
 Rotating your vault key does not sign out your other sessions, and that is deliberate: it is a
 key operation, not a credential change, and forcing every device to re-authenticate would make a
 routine hygiene step feel like a breach. The consequence is that a browser tab left open
-elsewhere goes on holding the key it was given when it signed in, and nothing tells it the
-account has moved past that key.
+elsewhere goes on holding the key it was given when it signed in until something tells it the
+account has moved past that key, as described below.
 
 Everything encrypted under the vault key is re-encrypted by the rotation itself, so an older
-session only matters when it writes something new. Each sign-in is therefore told which
+session can no longer READ the vault either: every entry the rotation rewrote is sealed under a
+key it does not hold. Such a session used to keep deriving that key from the copy of the wrapped
+key its browser cached at sign-in, which still opens under the same master key, so the vault read
+as empty on every unlock and every reload until the user signed out. Each unlock now takes the
+account's current wrapped key from the server, in the answer to the password check, so the
+session recovers at its next unlock; a session that stays unlocked notices when entries will not
+open, checks its key against the account's, and locks itself with an explanation if the account
+has moved on. It never switches keys mid-session on its own.
+
+Taking the wrapped key from the server at unlock adds no trust that signing in did not already
+give it. The wrapper opens only under a key derived from the master password, so a server can at
+most hand back a wrapper this account's own browsers once sent it, an older one or one from a
+rotation that never finished, bringing that vault key back into use for new writes. It could
+already do exactly that at every sign-in and every cold-start resume, which have always taken the
+wrapper from the server.
+
+An older session matters when it writes, too. Each sign-in and each unlock is therefore told which
 generation of the vault key it received, and a write that seals anything under that key says
 which one it used; if that is no longer the current one the write is refused and the browser is
 handed the current generation so it can recover rather than guess.
 
 Every such write is that case: creating or editing an item, creating or renaming a folder,
 importing, restoring a backup, uploading a document, setting up backup encryption or changing
-the backup password (both store a copy of the vault key sealed under the backup key), and
-changing your master password. The
+the backup password (both store a copy of the vault key sealed under the backup key), changing
+your master password, and rotating or re-sealing the vault key itself. A rotation from a
+superseded key is the most destructive of them: it re-encrypts what that key opens, passes every
+entry it cannot open through unchanged, and then replaces the account's key, so every entry it
+passed through would be sealed under a key nothing stores any more. A page left open from before
+this check existed has to update before it can rotate an account that has rotated before. The
 check fails closed — a request that names no generation at all is refused too, on any account
 that has rotated at least once, because a client that cannot say which key it used may be
 holding the superseded one. An account that has never rotated has no superseded key for anyone
@@ -1264,11 +1284,16 @@ account is on, but the application does not use it to fetch the current key and 
 entries already on screen were read with the key this session holds, so adopting a different one
 partway through a session would leave it working with two. It says instead that your vault key
 was changed on another device, and offers to sign out — which starts again from a single
-consistent state. Reloading the page is deliberately not what that button does: the browser keeps
-its own copy of the replaced key, so a reload would ask for your master password and then hand
-you the same superseded key, with the same notice back in front of it. That notice cannot be
-dismissed, because a session in which nothing can be saved and nothing says so is the state it
-exists to prevent.
+consistent state. An unlock does too now, because it loads the account's current wrapped key
+(before this, the browser kept its own copy of the replaced key, so a reload asked for your master
+password and then handed back the same superseded key); signing out stays the offered remedy
+because it works against every server version. That notice cannot be dismissed, because a session
+in which nothing can be saved and nothing says so is the state it exists to prevent.
+
+A rotation whose answer never arrives (a dropped connection, a proxy timing out on the large
+request) may still have been saved. The page that started it now checks the account's stored
+wrapped key and, if it is the one the rotation sent, continues on the new key rather than staying
+on the replaced one.
 
 If you would rather not rely on any of this, sign out of your other devices from the Sessions
 page before rotating.

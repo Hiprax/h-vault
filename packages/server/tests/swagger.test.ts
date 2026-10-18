@@ -16,6 +16,9 @@ import {
   importSchema,
   MAX_FOLDERS_PER_USER,
   MAX_ITEMS_PER_USER,
+  MAX_VAULT_KEY_IV_LENGTH,
+  MAX_VAULT_KEY_TAG_LENGTH,
+  MAX_WRAPPED_VAULT_KEY_LENGTH,
   restoreBackupSchema,
   updateFolderSchema,
   updateVaultItemSchema,
@@ -642,9 +645,9 @@ describe('API Documentation', () => {
         route: '/tools/import',
         method: 'post',
       },
-      // A rotation reads the generation only in re-seal mode, where it is the one
-      // thing standing between a same-key re-seal and a key rotated away underneath
-      // it; an ordinary rotation conditions its commit on the credential instead.
+      // Every rotation names the generation it rotates FROM, and is refused for a
+      // superseded one (or none, once the account has rotated): a rotation from a
+      // superseded key would pass every live-key row through and then retire it.
       {
         schemaName: 'bulkReEncryptSchema',
         schema: bulkReEncryptSchema,
@@ -1092,5 +1095,72 @@ describe('the answers the documentation names beyond the happy path', () => {
     const properties = ok?.content?.['application/json']?.schema?.properties ?? {};
     expect(Object.keys(properties).sort()).toEqual(['data', 'success']);
     expect(properties['data']?.type).toBe('string');
+  });
+
+  it('documents the live wrapped vault key verify-unlock answers with, and keeps its other answers', () => {
+    // The unlock derives the vault key from this `data`, so a client author must
+    // be told it is there and what it holds. The openapi gate's snapshot predates
+    // this path, so it is this assertion, not oasdiff, that pins the answer.
+    const responses = paths['/auth/verify-unlock']?.['post']?.responses ?? {};
+    const ok = responses['200'] as
+      | {
+          content?: Record<
+            string,
+            { schema?: { required?: string[]; properties?: Record<string, { $ref?: string }> } }
+          >;
+        }
+      | undefined;
+    const schema = ok?.content?.['application/json']?.schema;
+    expect(schema?.required).toEqual(['success', 'data']);
+    expect(Object.keys(schema?.properties ?? {}).sort()).toEqual(['data', 'message', 'success']);
+    expect(schema?.properties?.['data']?.$ref).toBe('#/components/schemas/VerifyUnlockResult');
+
+    const result = (
+      swaggerSpec.components as {
+        schemas: Record<
+          string,
+          {
+            required?: string[];
+            description?: string;
+            properties?: Record<string, Record<string, unknown>>;
+          }
+        >;
+      }
+    ).schemas['VerifyUnlockResult'];
+    expect(result?.required).toEqual([
+      'encryptedVaultKey',
+      'vaultKeyIv',
+      'vaultKeyTag',
+      'vaultKeyVersion',
+    ]);
+    // The documented bounds are the shared schema's, so a client validating the
+    // answer and a reader of this document agree on what a valid one is.
+    expect(result?.properties?.['encryptedVaultKey']).toEqual({
+      type: 'string',
+      minLength: 1,
+      maxLength: MAX_WRAPPED_VAULT_KEY_LENGTH,
+    });
+    expect(result?.properties?.['vaultKeyIv']).toEqual({
+      type: 'string',
+      minLength: 1,
+      maxLength: MAX_VAULT_KEY_IV_LENGTH,
+    });
+    expect(result?.properties?.['vaultKeyTag']).toEqual({
+      type: 'string',
+      minLength: 1,
+      maxLength: MAX_VAULT_KEY_TAG_LENGTH,
+    });
+    expect(result?.properties?.['vaultKeyVersion']).toMatchObject({ type: 'integer', minimum: 0 });
+    expect(result?.properties?.['vaultKeyVersion']?.['description']).toMatch(/generation/);
+    expect(result?.description).toMatch(/current wrapped vault key/);
+
+    // Every other answer the handler can give is still documented: the 404 is a
+    // deleted account, which this route still throws.
+    expect(Object.keys(responses).sort()).toEqual(['200', '400', '401', '404', '429']);
+    // And the account deletion, which shares the reauthentication answers, still
+    // only acknowledges.
+    expect(paths['/user']?.['delete']?.responses?.['200']).toEqual({
+      $ref: '#/components/responses/Acknowledged',
+    });
   });
 });

@@ -633,7 +633,15 @@ describe('the rollback of an aborted sequential rotation and the writers around 
     ) {
       const projection = (args[1] as { projection?: Record<string, unknown> } | undefined)
         ?.projection;
-      if (this.collectionName === 'users' && projection && 'encryptedVaultKey' in projection) {
+      // The rollback's question reads `encryptedVaultKey` ALONE. Every rotation also
+      // reads the whole stored wrapper (`vaultKeyIv` beside it) for the re-seal's
+      // same-key proof, before anything is written; that read is not this question.
+      if (
+        this.collectionName === 'users' &&
+        projection &&
+        'encryptedVaultKey' in projection &&
+        !('vaultKeyIv' in projection)
+      ) {
         committedChecks += 1;
       }
       return realFindOne.apply(this, args as never);

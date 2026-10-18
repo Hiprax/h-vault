@@ -1,9 +1,11 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import mongoose from 'mongoose';
 import request from 'supertest';
 import app from '../src/app.js';
 import authRouter from '../src/routes/auth.js';
 import { createTestUser, authHeader, getCsrf, type CsrfPair, type TestUser } from './helpers.js';
 import { AuditLog } from '../src/models/AuditLog.js';
+import { User } from '../src/models/User.js';
 import { unlockLimiter, authLimiter } from '../src/middleware/rateLimiter.js';
 
 /** Minimal view of an Express router layer for stack introspection. */
@@ -184,5 +186,133 @@ describe('POST /api/v1/auth/verify-unlock — rate limiting', () => {
       .send({ authHash: user.rawPassword });
 
     expect(res.status).toBe(200);
+  });
+});
+
+describe('POST /api/v1/auth/verify-unlock — the live wrapped vault key', () => {
+  // The unlock screen derives the vault key from what this answer carries, not
+  // from the copy its browser cached at sign-in. A rotation made in another
+  // session re-wraps a NEW vault key under the same master key and signs nothing
+  // out, so that cached copy still opens — onto the superseded key, under which no
+  // row the rotation rewrote can be read. Every item then "could not be
+  // decrypted", on every unlock and every reload, until the user signs out.
+  let agent: request.Agent;
+  let csrf: CsrfPair;
+  let user: TestUser;
+
+  const send = (path: string, body: Record<string, unknown>) =>
+    agent
+      .post(path)
+      .set('Authorization', authHeader(user.accessToken))
+      .set('x-csrf-token', csrf.token)
+      .set('Cookie', csrf.cookie)
+      .send(body);
+
+  beforeEach(async () => {
+    agent = request.agent(app);
+    csrf = await getCsrf(agent);
+    user = await createTestUser();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('answers with the wrapper and generation the account holds after a rotation elsewhere', async () => {
+    const rotation = await send('/api/v1/vault/items/bulk-reencrypt', {
+      authHash: user.rawPassword,
+      items: [],
+      folders: [],
+      documents: [],
+      newEncryptedVaultKey: 'rotated-elsewhere-vault-key',
+      newVaultKeyIv: 'rotated-elsewhere-iv',
+      newVaultKeyTag: 'rotated-elsewhere-tag',
+      vaultKeyVersion: 0,
+    });
+    expect(rotation.status).toBe(200);
+
+    const res = await send('/api/v1/auth/verify-unlock', { authHash: user.rawPassword });
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.message).toBe('Unlock verified');
+    // EXACTLY these four: the reply is built field by field, so no credential
+    // (`authHash`) and no interrupted rotation's wrapper rides along with it.
+    expect(res.body.data).toStrictEqual({
+      encryptedVaultKey: 'rotated-elsewhere-vault-key',
+      vaultKeyIv: 'rotated-elsewhere-iv',
+      vaultKeyTag: 'rotated-elsewhere-tag',
+      vaultKeyVersion: 1,
+    });
+  });
+
+  it('reports generation 0 for an account whose row has no generation stored', async () => {
+    // Accounts created before the field existed carry no column at all; the
+    // server reads that as 0 everywhere (`vaultKeyVersionOf`), and so must this.
+    await User.collection.updateOne(
+      { _id: new mongoose.Types.ObjectId(user.id) },
+      { $unset: { vaultKeyVersion: 1 } },
+    );
+
+    const res = await send('/api/v1/auth/verify-unlock', { authHash: user.rawPassword });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toStrictEqual({
+      encryptedVaultKey: 'test-encrypted-vault-key',
+      vaultKeyIv: 'test-vault-key-iv',
+      vaultKeyTag: 'test-vault-key-tag',
+      vaultKeyVersion: 0,
+    });
+  });
+
+  it('carries no wrapper at all when the password is wrong', async () => {
+    const res = await send('/api/v1/auth/verify-unlock', { authHash: 'wrong-auth-hash' });
+
+    expect(res.status).toBe(401);
+    expect(res.body).not.toHaveProperty('data');
+    expect(JSON.stringify(res.body)).not.toContain('test-encrypted-vault-key');
+    expect(await AuditLog.countDocuments({ userId: user.id, action: 'vault_unlock' })).toBe(0);
+  });
+
+  it('reads the account from the primary, so a lagging secondary cannot hand back a retired wrapper', async () => {
+    const pinned: string[] = [];
+    const original = mongoose.Query.prototype.read;
+    vi.spyOn(mongoose.Query.prototype, 'read').mockImplementation(function (
+      this: mongoose.Query<unknown, unknown>,
+      ...args: Parameters<typeof original>
+    ) {
+      if (this.model.modelName === 'User' && args[0] === 'primary')
+        pinned.push((this as unknown as { op?: string }).op ?? '');
+      return original.apply(this, args);
+    });
+
+    const res = await send('/api/v1/auth/verify-unlock', { authHash: user.rawPassword });
+
+    expect(res.status).toBe(200);
+    expect(pinned).toContain('findOne');
+  });
+
+  it('reads the profile from the primary too, since an unlock falls back to its wrapper', async () => {
+    // An instance answering verify-unlock without `data` (a rolling restart) sends
+    // the unlock screen to `GET /user/profile` for the same three fields, and a
+    // session checking whether its key was replaced compares against them too.
+    const pinned: string[] = [];
+    const original = mongoose.Query.prototype.read;
+    vi.spyOn(mongoose.Query.prototype, 'read').mockImplementation(function (
+      this: mongoose.Query<unknown, unknown>,
+      ...args: Parameters<typeof original>
+    ) {
+      if (this.model.modelName === 'User' && args[0] === 'primary')
+        pinned.push((this as unknown as { op?: string }).op ?? '');
+      return original.apply(this, args);
+    });
+
+    const res = await agent
+      .get('/api/v1/user/profile')
+      .set('Authorization', authHeader(user.accessToken));
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.encryptedVaultKey).toBe('test-encrypted-vault-key');
+    expect(pinned).toContain('findOne');
   });
 });

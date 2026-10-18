@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+### Added
+
+- **`POST /auth/verify-unlock` answers with the account's current wrapped vault key.** Once the master password is proved, `data` carries `encryptedVaultKey`, `vaultKeyIv`, `vaultKeyTag` and `vaultKeyVersion`, the same fields `GET /user/profile` already returns; a refused attempt carries none. The unlock screen derives the vault key from it (and from the profile when an older server instance answers without it), instead of from the copy the browser cached at sign-in.
+- **A notice when an interrupted vault key rotation explains entries that will not open.** When this session's key is the account's but the profile reports an interrupted rotation, the app says so and links to Settings, where Finish Rotation moves those entries across.
+
+### Changed
+
+- **Behaviour change: a session whose vault key was replaced in another session locks itself and asks to be unlocked.** When entries fail to decrypt, the app checks its key against the account's (one profile read, reused for a minute once answered); if the account has moved to another key, the vault locks with an explanation, and unlocking loads the current key. While a document upload is running, or if it already locked once for that key, it shows the existing "sign in again" notice instead.
+- **Behaviour change: `POST /vault/items/bulk-reencrypt` refuses a rotation from a superseded vault key.** Every rotation (including finishing or discarding an interrupted one) is checked against the `vaultKeyVersion` it names and answered `409` with the account's current generation when that is not the current one, or when none is named on an account that has rotated before; a retransmission of a rotation that already committed is still answered as a success. A page left open from before this update must update before it can rotate an account that has rotated before. The `409` every vault-key write answers when it names no generation now leads with "Update the app".
+- `GET /user/profile` and `POST /auth/verify-unlock` read the account from the primary, so a deployment that reads from secondaries cannot hand back a vault key wrapper a rotation has just replaced.
+
+### Fixed
+
+- **A browser that was signed in when the vault key was rotated from another browser, device or tab showed an empty vault, with "item(s) could not be decrypted", on every visit, a reload included.** Its unlock re-derived the key from the wrapper it had cached at sign-in, which still opened but onto the superseded key; "Re-sync" refetched under the same key. Unlocking now uses the account's current wrapper, so such a session recovers at its next unlock, and one that stays unlocked locks itself as described above. Nothing was lost on the server: signing out and in again recovered it before this release too.
+- **A vault key rotation whose reply was lost after the server had saved it (a dropped connection, a proxy timeout) left the page that started it on the old key**, with the same empty vault. The page now recognises from the account's stored wrapper that the rotation committed, switches to the new key, re-wraps the backup copy and reports the rotation as saved. It also adopts the new key the moment a rotation commits, before re-wrapping the backup copy, so closing the tab during that step no longer keeps the old key.
+
 ## [0.16.0] - 2026-10-17
 
 ### Added

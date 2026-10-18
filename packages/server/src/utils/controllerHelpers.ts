@@ -617,9 +617,8 @@ const STALE_VAULT_KEY_MESSAGES: Record<StaleVaultKeyReason, (current: number) =>
     'This request reported a vault key version this account has never had. Reload to pick up ' +
     `vault key version ${String(current)}, then retry this change.`,
   unnamed: (current) =>
-    'This request did not say which vault key it used, and this account is on vault key version ' +
-    `${String(current)}. Reload the application and retry: an out-of-date client may be holding ` +
-    'a superseded vault key.',
+    'Update the app, then retry: this request did not say which vault key it used, and this ' +
+    `account is on vault key version ${String(current)}, so it may be holding a superseded one.`,
 };
 
 /**
@@ -760,7 +759,7 @@ export async function assertVaultKeyVersion(
       // attempts, so logging it would emit a line per keystroke-driven save for
       // as long as that tab stays open; `unreached` cannot be produced by any
       // honest client at all, which is why that one is worth saying out loud.
-      // The refusal itself is what tells the user, and it tells them to reload.
+      // The refusal itself is what tells the user, and it tells them to update.
       throw new StaleVaultKeyError(current, 'unnamed');
     }
     return current;

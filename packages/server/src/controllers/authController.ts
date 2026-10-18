@@ -91,6 +91,7 @@ import type {
   Login2faInput,
   ResetPasswordInput,
   VerifyUnlockInput,
+  VerifyUnlockResult,
 } from '@hvault/shared';
 
 const logger = createModuleLogger('auth');
@@ -2305,7 +2306,19 @@ export const resendVerification = catchAsync(async (req: Request, res: Response)
  * preventing an attacker with XSS from clearing client-side lockout state.
  *
  * The client still performs the actual crypto derivation locally — this
- * endpoint only validates the derived auth hash against bcrypt.
+ * endpoint validates the derived auth hash against bcrypt and, once it has,
+ * answers with the account's CURRENT wrapped vault key and its generation.
+ *
+ * The unlock derives the vault key from that answer, not from the copy its
+ * browser cached at sign-in. A rotation made in another session re-wraps a new
+ * vault key under the same master key and revokes nothing, so the cached copy
+ * still opens there — onto the superseded key, which opens none of the rows the
+ * rotation rewrote: an empty vault on every unlock and every reload. The wrapper
+ * is no new exposure (`GET /user/profile` hands the same fields to any access
+ * token), and it is sent only after the proof, never with the 401.
+ *
+ * Read from the primary: on a deployment that reads from secondaries, a lagging
+ * one could answer with the wrapper a rotation has just retired.
  */
 export const verifyUnlock = catchAsync(async (req: Request, res: Response): Promise<void> => {
   const user = req.user;
@@ -2315,7 +2328,7 @@ export const verifyUnlock = catchAsync(async (req: Request, res: Response): Prom
 
   const { authHash } = req.body as VerifyUnlockInput;
 
-  const fullUser = await User.findById(user._id).select('+authHash');
+  const fullUser = await User.findById(user._id).select('+authHash').read('primary');
   if (!fullUser) {
     throw httpErrors.notFound('User not found');
   }
@@ -2344,9 +2357,20 @@ export const verifyUnlock = catchAsync(async (req: Request, res: Response): Prom
 
   clearCsrfCookie(res);
 
+  // Built field by field rather than picked off the document, so neither the
+  // credential this request just proved nor an interrupted rotation's wrapper can
+  // ever ride along with it.
+  const data: VerifyUnlockResult = {
+    encryptedVaultKey: fullUser.encryptedVaultKey,
+    vaultKeyIv: fullUser.vaultKeyIv,
+    vaultKeyTag: fullUser.vaultKeyTag,
+    vaultKeyVersion: vaultKeyVersionOf(fullUser),
+  };
+
   res.status(200).json({
     success: true,
     message: 'Unlock verified',
+    data,
   });
 });
 

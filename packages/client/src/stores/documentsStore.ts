@@ -109,6 +109,7 @@ import {
   uploadDocumentPartApi,
 } from '../services/api/documentsApi.js';
 import { getProfileApi } from '../services/api/userApi.js';
+import { checkHeldVaultKey } from './heldVaultKey.js';
 import { ensureCsrfToken } from '../services/api/client.js';
 import { isSessionGone } from '../services/auth/sessionFailure.js';
 import { cryptoService } from '../services/crypto/cryptoService.js';
@@ -815,6 +816,9 @@ export const useDocumentsStore = create<DocumentsState>((set, get) => ({
           degradedCount: opened.degraded,
           invalidCount: opened.invalid,
         });
+        // A row whose key this vault key cannot unwrap may mean the vault key itself
+        // was replaced by a rotation in another session; asked in the background.
+        if (opened.degraded > 0) checkHeldVaultKey(vaultKey);
       } finally {
         if (myGeneration === fetchDocumentsGeneration) set({ documentsLoading: false });
       }
@@ -876,6 +880,7 @@ export const useDocumentsStore = create<DocumentsState>((set, get) => ({
           trashInvalidCount: opened.invalid,
           trashLoaded: true,
         });
+        if (opened.degraded > 0) checkHeldVaultKey(vaultKey);
       } finally {
         if (myGeneration === fetchTrashGeneration) set({ trashLoading: false });
       }

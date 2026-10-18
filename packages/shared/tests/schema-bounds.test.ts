@@ -41,6 +41,7 @@ import {
   login2faSchema,
   registerSchema,
   resetPasswordSchema,
+  verifyUnlockResultSchema,
 } from '../src/schemas/auth.js';
 import {
   createFolderSchema,
@@ -798,5 +799,43 @@ describe('defaults are applied, because an absent field is not an empty one', ()
     // that reaches it — the PBKDF2 salt is the email, so a case difference is a
     // permanently different vault key.
     expect(emailSchema.parse('User@Example.COM')).toBe('user@example.com');
+  });
+});
+
+describe('verifyUnlockResultSchema: the live wrapper an unlock derives the vault key from', () => {
+  /**
+   * The unlock screen opens the vault key from this answer, so a malformed one
+   * must be REFUSED (the screen then reads the profile instead) rather than handed
+   * to the key derivation. Each bound is probed at the limit and one past it, and
+   * the generation is refused as a negative or a fraction: it names which key the
+   * wrapper is, and a session recording a wrong one sends it with every write.
+   */
+  const live = {
+    encryptedVaultKey: chars(80),
+    vaultKeyIv: chars(16),
+    vaultKeyTag: chars(24),
+    vaultKeyVersion: 3,
+  };
+
+  it('keeps all four fields of a well-formed answer', () => {
+    expect(verifyUnlockResultSchema.parse(live)).toEqual(live);
+  });
+
+  it.each([
+    ['encryptedVaultKey', 200],
+    ['vaultKeyIv', 24],
+    ['vaultKeyTag', 32],
+  ] as const)('holds %s at %i characters and refuses one more, or none', (field, max) => {
+    expect(accepts(verifyUnlockResultSchema, { ...live, [field]: chars(max) })).toBe(true);
+    expect(accepts(verifyUnlockResultSchema, { ...live, [field]: chars(max + 1) })).toBe(false);
+    expect(accepts(verifyUnlockResultSchema, { ...live, [field]: '' })).toBe(false);
+  });
+
+  it('accepts generation 0 and refuses a negative, a fraction or an absent generation', () => {
+    expect(accepts(verifyUnlockResultSchema, { ...live, vaultKeyVersion: 0 })).toBe(true);
+    expect(accepts(verifyUnlockResultSchema, { ...live, vaultKeyVersion: -1 })).toBe(false);
+    expect(accepts(verifyUnlockResultSchema, { ...live, vaultKeyVersion: 1.5 })).toBe(false);
+    const { vaultKeyVersion: _omitted, ...withoutGeneration } = live;
+    expect(accepts(verifyUnlockResultSchema, withoutGeneration)).toBe(false);
   });
 });

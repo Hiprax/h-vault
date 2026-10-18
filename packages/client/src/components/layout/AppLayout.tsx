@@ -171,8 +171,13 @@ export function AppLayout() {
   // explicit `true`: an entry that appeared and then vanished would be worse than
   // one that appeared a beat late.
   const documentsConfig = useDocumentsConfig();
-  const { sidebarCollapsed, toggleSidebarCollapsed, offlineCacheError, staleVaultKeyVersion } =
-    useUIStore();
+  const {
+    sidebarCollapsed,
+    toggleSidebarCollapsed,
+    offlineCacheError,
+    staleVaultKeyVersion,
+    interruptedRotationNotice,
+  } = useUIStore();
   const fetchItems = useVaultStore((s) => s.fetchItems);
   const fetchFolders = useVaultStore((s) => s.fetchFolders);
   const releaseStatus = useReleaseStore((s) => releaseStatusFor(s, user?.userId));
@@ -574,16 +579,17 @@ export function AppLayout() {
             reason: dismissing it would leave a session in which nothing can be
             saved and nothing says so.
 
-            That remedy is a SIGN-OUT and not a reload, and the difference is
-            not cosmetic. A reload rehydrates `isAuthenticated` from persisted
-            state, so `shouldAttemptResume()` is false and no profile is read;
-            the Unlock screen then re-derives the vault key from the PERSISTED
-            `encryptedVaultKeyData`, which moves with the key this session holds
-            and is therefore exactly as superseded as the writes that were just
-            refused. The banner came straight back, and the button that promised
-            to fix it was the thing that could not. Signing in reads the live
-            wrapper and the live generation from the server unconditionally,
-            which is the only path that does. */}
+            The remedy offered is a SIGN-OUT. Signing in reads the live wrapper
+            and the live generation from the server unconditionally. A lock or a
+            reload now does too, because the Unlock screen derives the vault key
+            from the wrapper `verify-unlock` answers with; before that, both
+            re-derived from the PERSISTED `encryptedVaultKeyData`, which moves
+            with the key this session holds and was therefore exactly as
+            superseded as the writes just refused. Sign-out stays the button
+            because it is the remedy that works against every server version.
+            A session whose READS fail for this reason locks itself instead
+            (`heldVaultKey.ts`), and raises this banner only where a lock would
+            cost more (a running upload) or would repeat itself. */}
         {holdingSupersededVaultKey && (
           <div
             role="alert"
@@ -605,6 +611,33 @@ export function AppLayout() {
               <RefreshCw className="h-3 w-3" />
               Sign out
             </button>
+          </div>
+        )}
+
+        {/* An interrupted vault-key rotation, found behind rows this session
+            could not open (`heldVaultKey.ts`). The session's key IS the
+            account's, so neither a sign-in nor a re-sync helps: the entries a
+            crashed sequential rotation had already moved are sealed under the
+            key it was moving to, and only Settings, Finish Rotation carries them
+            across. Cleared when a later check, a live unlock, a Settings profile
+            read, a committed rotation or a logout says it no longer applies. */}
+        {interruptedRotationNotice && (
+          <div
+            role="alert"
+            data-testid="interrupted-rotation-banner"
+            className="mx-4 mt-2 flex items-center gap-2 rounded-md border border-amber-300 bg-amber-50 px-4 py-2 text-sm text-amber-900 dark:border-amber-700 dark:bg-amber-900/20 dark:text-amber-200 lg:mx-6"
+          >
+            <AlertTriangle className="h-4 w-4 flex-shrink-0" />
+            <span className="flex-1">
+              A vault key rotation was interrupted, so some entries are sealed under the key it was
+              moving to. Open Settings and choose Finish Rotation.
+            </span>
+            <Link
+              to="/settings"
+              className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs font-medium text-amber-900 hover:bg-amber-100 dark:text-amber-200 dark:hover:bg-amber-800/30"
+            >
+              Open Settings
+            </Link>
           </div>
         )}
 

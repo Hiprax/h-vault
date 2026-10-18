@@ -1,5 +1,11 @@
 import { z } from '../zod.js';
-import { ENCRYPTION_VERSION, MAX_INVITATION_TOKEN_LENGTH } from '../constants/index.js';
+import {
+  ENCRYPTION_VERSION,
+  MAX_INVITATION_TOKEN_LENGTH,
+  MAX_VAULT_KEY_IV_LENGTH,
+  MAX_VAULT_KEY_TAG_LENGTH,
+  MAX_WRAPPED_VAULT_KEY_LENGTH,
+} from '../constants/index.js';
 import { optionalVaultKeyVersionSchema } from './common.js';
 
 export const emailSchema = z
@@ -153,6 +159,23 @@ export const unlockAccountSchema = z.object({
 
 export const verifyUnlockSchema = z.object({
   authHash: z.string().min(1).max(100),
+});
+
+/**
+ * What `POST /auth/verify-unlock` answers with once the password is proved: the
+ * account's CURRENT wrapped vault key and the generation it names.
+ *
+ * The unlock derives the vault key from this rather than from the copy the
+ * browser cached at sign-in. A rotation made in another session re-wraps a NEW
+ * key under the same master key and signs nothing out, so the cached copy still
+ * opens there — onto the superseded key, which opens no row the rotation
+ * rewrote. Bounds are the request side's for the same three fields (`registerSchema`).
+ */
+export const verifyUnlockResultSchema = z.object({
+  encryptedVaultKey: z.string().min(1).max(MAX_WRAPPED_VAULT_KEY_LENGTH),
+  vaultKeyIv: z.string().min(1).max(MAX_VAULT_KEY_IV_LENGTH),
+  vaultKeyTag: z.string().min(1).max(MAX_VAULT_KEY_TAG_LENGTH),
+  vaultKeyVersion: z.number().int().min(0),
 });
 
 export const resendVerificationSchema = z.object({

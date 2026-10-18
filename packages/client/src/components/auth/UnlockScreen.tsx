@@ -4,11 +4,19 @@ import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from '@hvault/shared/zod';
 import { Lock, Eye, EyeOff, LogOut, AlertCircle, Shield, Clock } from 'lucide-react';
+import { verifyUnlockResultSchema } from '@hvault/shared';
+import type { VerifyUnlockResult } from '@hvault/shared';
 import { useAuthStore } from '../../stores/authStore';
 import { api, performTokenRefresh } from '../../services/api/client';
+import { getProfileApi } from '../../services/api/userApi';
 import { isSessionGone, describeTransientFailure } from '../../services/auth/sessionFailure';
+import {
+  StoredVaultKeyUnreadableError,
+  UnlockSessionChangedError,
+} from '../../services/auth/unlockFailures';
 import { isAccessTokenUsable } from '../../lib/accessToken';
 import { getApiErrorMessage } from '../../lib/utils';
+import { logger } from '../../lib/logger';
 import { cryptoService } from '../../services/crypto/cryptoService';
 import { Button } from '../ui/Button';
 import { Input } from '../ui/Input';
@@ -120,9 +128,50 @@ function clearPersistedRateLimitState(): void {
   }
 }
 
+/**
+ * The live wrapped vault key a `verify-unlock` answer carries, or `undefined`.
+ *
+ * Parsed rather than trusted: a malformed answer is refused here, never handed to
+ * the key derivation, and the screen then asks the profile instead.
+ */
+function liveVaultKeyIn(body: unknown): VerifyUnlockResult | undefined {
+  if (typeof body !== 'object' || body === null || !('data' in body)) return undefined;
+  const parsed = verifyUnlockResultSchema.safeParse(body.data);
+  return parsed.success ? parsed.data : undefined;
+}
+
+/**
+ * The account's current wrapped vault key from the profile, for an answer that
+ * carried none: an instance older than this client (a rolling restart) answers
+ * verify-unlock without it, and every version serves the profile.
+ *
+ * `undefined` when that read fails too, and only then does the unlock fall back
+ * to the copy cached at sign-in, which is what every unlock did before.
+ */
+async function liveVaultKeyFromProfile(): Promise<VerifyUnlockResult | undefined> {
+  let failure: unknown = 'the profile answer carried no usable wrapped vault key';
+  try {
+    const body = (await getProfileApi()).data;
+    if (body.success) {
+      const parsed = verifyUnlockResultSchema.safeParse({
+        encryptedVaultKey: body.data.encryptedVaultKey,
+        vaultKeyIv: body.data.vaultKeyIv,
+        vaultKeyTag: body.data.vaultKeyTag,
+        // An account that has never rotated stores no generation, and is on 0.
+        vaultKeyVersion: body.data.vaultKeyVersion ?? 0,
+      });
+      if (parsed.success) return parsed.data;
+    }
+  } catch (error) {
+    failure = error;
+  }
+  logger.warn('Unlocking from the cached vault key: the live one could not be read', failure);
+  return undefined;
+}
+
 export function UnlockScreen() {
   const navigate = useNavigate();
-  const { user, unlock, logout } = useAuthStore();
+  const { user, unlock, logout, lockReason } = useAuthStore();
 
   const [showPassword, setShowPassword] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -290,9 +339,11 @@ export function UnlockScreen() {
       // Step 3: Verify the auth hash server-side BEFORE doing any local crypto
       // with the master password, so every wrong-password attempt is counted by
       // the server-side `unlockLimiter` — including attempts that would fail
-      // locally and never reach the API.
+      // locally and never reach the API. The answer that succeeded carries the
+      // account's current wrapped vault key (see `liveVaultKeyIn`).
+      let verifiedBody: unknown;
       try {
-        await verifyUnlock(authHash);
+        verifiedBody = (await verifyUnlock(authHash)).data;
       } catch (err) {
         // A 429 from `unlockLimiter` is the server saying "too many tries, wait".
         // It is not a verdict on this password and must not count as a failed
@@ -326,7 +377,7 @@ export function UnlockScreen() {
 
         await refreshOrUnwind();
         try {
-          await verifyUnlock(authHash);
+          verifiedBody = (await verifyUnlock(authHash)).data;
         } catch (retryErr) {
           const retryTransient = describeTransientFailure(retryErr);
           if (retryTransient !== null) throw handled(retryTransient);
@@ -334,9 +385,27 @@ export function UnlockScreen() {
         }
       }
 
-      // Step 4: Decrypt the vault key locally using the cached MEK. `unlock`
+      // Step 4: Decrypt the vault key locally using the cached MEK, from the
+      // account's LIVE wrapper rather than the copy cached at sign-in: a rotation
+      // made in another session re-wraps a new key under the same master key, so
+      // the cached copy would open the superseded one and no row with it. `unlock`
       // takes ownership of the key on success, so it must not be zeroed after.
-      await unlock(values.masterPassword, masterEncryptionKey);
+      const liveVaultKey = liveVaultKeyIn(verifiedBody) ?? (await liveVaultKeyFromProfile());
+      try {
+        await unlock(values.masterPassword, masterEncryptionKey, liveVaultKey);
+      } catch (unlockErr) {
+        // Neither is a wrong password: the server has just accepted this one, so
+        // each is reported in its own words and charges no attempt. `unlock` has
+        // already cleared the key it was given on both paths.
+        if (
+          unlockErr instanceof StoredVaultKeyUnreadableError ||
+          unlockErr instanceof UnlockSessionChangedError
+        ) {
+          masterEncryptionKey = null;
+          throw handled(unlockErr.message);
+        }
+        throw unlockErr;
+      }
       masterEncryptionKey = null;
 
       // Step 5: Now that the token is available, unlock the UI so children render.
@@ -397,6 +466,19 @@ export function UnlockScreen() {
                 <span>
                   Too many failed attempts. Please wait <strong>{cooldownRemaining}s</strong> before
                   trying again.
+                </span>
+              </div>
+            )}
+
+            {lockReason === 'vault-key-replaced' && (
+              <div
+                role="status"
+                className="flex items-center gap-2 rounded-md border border-[hsl(var(--warning,40_96%_40%)/0.3)] bg-[hsl(var(--warning,40_96%_40%)/0.05)] p-3 text-sm text-[hsl(var(--warning,40_96%_40%))]"
+              >
+                <AlertCircle className="h-4 w-4 shrink-0" />
+                <span>
+                  Your vault key was changed in another session, so this vault locked itself. Unlock
+                  to load it with the current key.
                 </span>
               </div>
             )}

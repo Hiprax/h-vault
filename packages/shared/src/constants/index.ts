@@ -131,6 +131,16 @@ export const MAX_PASSWORD_LENGTH = 128;
 export const MAX_PASSWORD_CLASS_MINIMUM = 5;
 export const MAX_TAGS_PER_ITEM = 20;
 export const MAX_TAG_LENGTH = 50;
+
+/**
+ * The bounds of a wrapped vault key as the server stores and returns it: the
+ * vault key sealed under the master key (`encryptedVaultKey`), and that seal's
+ * IV and tag. The request schemas carry the same numbers inline; these name them
+ * for the answer an unlock derives its key from (`verifyUnlockResultSchema`).
+ */
+export const MAX_WRAPPED_VAULT_KEY_LENGTH = 200;
+export const MAX_VAULT_KEY_IV_LENGTH = 24;
+export const MAX_VAULT_KEY_TAG_LENGTH = 32;
 export const MAX_BULK_OPERATIONS = 100;
 export const PASSWORD_HISTORY_MAX = 10;
 export const LOCKOUT_DURATION_MINUTES = 30;
