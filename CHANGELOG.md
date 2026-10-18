@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-10-18
+
 ### Added
 
 - **`POST /auth/verify-unlock` answers with the account's current wrapped vault key.** Once the master password is proved, `data` carries `encryptedVaultKey`, `vaultKeyIv`, `vaultKeyTag` and `vaultKeyVersion`, the same fields `GET /user/profile` already returns; a refused attempt carries none. The unlock screen derives the vault key from it (and from the profile when an older server instance answers without it), instead of from the copy the browser cached at sign-in.
@@ -979,7 +981,8 @@ First public release.
 - Progressive Web App with offline read access via IndexedDB, dark/light/system themes, keyboard shortcuts, virtualized lists and WAI-ARIA-conformant components.
 - Local CI pipeline (`npm run ci`) running eleven gates — including container builds with Trivy scanning and CodeQL — from the `pre-push` hook.
 
-[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.16.1...HEAD
+[0.16.1]: https://github.com/Hiprax/h-vault/compare/v0.16.0...v0.16.1
 [0.16.0]: https://github.com/Hiprax/h-vault/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/Hiprax/h-vault/compare/v0.14.1...v0.15.0
 [0.14.1]: https://github.com/Hiprax/h-vault/compare/v0.14.0...v0.14.1

@@ -2,6 +2,39 @@ import type { ReleaseNote } from '@hvault/shared';
 
 export const RELEASE_NOTES: readonly ReleaseNote[] = [
   {
+    version: '0.16.1',
+    date: '2026-10-18',
+    title: 'Your vault opens everywhere after a key change',
+    summary:
+      'Rotating your vault key on one device no longer leaves your other devices and tabs showing an empty vault. They load the new key the next time they unlock, and a page that stayed open locks itself and asks for your master password.',
+    highlights: [
+      {
+        icon: 'key',
+        title: 'Every device follows a vault key rotation',
+        body: 'If you rotate your vault key on one device, your other browsers, devices and tabs now load the new key the next time they unlock, instead of showing an empty vault that said your items could not be decrypted. A page that was open at the time locks itself and asks for your master password.',
+      },
+    ],
+    changes: [
+      {
+        kind: 'fixed',
+        text: 'A key rotation whose confirmation was lost on the way back, for example to a dropped connection, now finishes on the page that started it instead of leaving that page on the old key.',
+      },
+      {
+        kind: 'added',
+        text: 'When entries cannot be opened because an earlier key rotation was interrupted, the app now says so and takes you to Settings, where Finish Rotation brings them back.',
+      },
+      {
+        kind: 'changed',
+        text: 'A page left open since before an update has to be updated before it can rotate the vault key again.',
+      },
+      {
+        kind: 'changed',
+        text: 'Unlocking now takes the current vault key from the server after checking the master password, and a key rotation sent from a page holding an outdated key is refused.',
+        audience: 'administrators',
+      },
+    ],
+  },
+  {
     version: '0.16.0',
     date: '2026-10-17',
     title: 'Safer sign-in, confirmed backup recipients and security emails',
