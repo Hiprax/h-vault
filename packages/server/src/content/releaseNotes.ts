@@ -2,6 +2,43 @@ import type { ReleaseNote } from '@hvault/shared';
 
 export const RELEASE_NOTES: readonly ReleaseNote[] = [
   {
+    version: '0.17.0',
+    date: '2026-10-18',
+    title: 'Get your entries back after a password reset',
+    summary:
+      'Entries saved before a master password reset no longer open afterwards. If you set up encrypted backups before the reset, your backup password may now bring them back, and anything that cannot be recovered can be deleted so it stops using your storage.',
+    highlights: [
+      {
+        icon: 'key',
+        title: 'Recover entries after a password reset',
+        body: 'After a master password reset, Settings now finds the entries that no longer open. If you set up encrypted backups before the reset, Recover with backup password can open them again with your current key. Entries that already open, and your other devices, are not affected.',
+      },
+      {
+        icon: 'database',
+        title: 'Delete entries that can no longer be opened',
+        body: 'Entries that cannot be recovered can now be deleted for good with your master password, so they stop counting toward your storage. Anything changed since they were checked is kept.',
+      },
+    ],
+    changes: [
+      {
+        kind: 'fixed',
+        text: 'An entry edited on another device while you rotate your vault key is no longer overwritten with its older version. The rotation stops instead, and you can try again.',
+      },
+      {
+        kind: 'fixed',
+        text: 'An entry saved at the very moment a key rotation finishes on another device is now refused instead of being stored where it could no longer be opened.',
+      },
+      {
+        kind: 'added',
+        text: 'When some entries cannot be opened, the warning in your vault now offers a Review link that takes you to them in Settings.',
+      },
+      {
+        kind: 'changed',
+        text: 'Rotating your vault key with your backup password now also brings back entries only your backup could open, and rotating without it asks first before removing that way back.',
+      },
+    ],
+  },
+  {
     version: '0.16.1',
     date: '2026-10-18',
     title: 'Your vault opens everywhere after a key change',

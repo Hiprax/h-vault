@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-10-18
+
 ### Added
 
 - **Recover the entries a master password reset left unreadable.** Settings, Unreadable Entries (also opened from a new Review link on the vault's "could not be decrypted" banner) checks every entry in the browser, after proving the session holds the account's current vault key, and lists those no stored key opens. When encrypted backups were set up before the reset, "Recover with backup password" opens the copy of the earlier vault key the backup holds and re-seals under the current key exactly what that copy opens (items, folders and document keys), sent as an ordinary re-seal: the vault key does not change, entries the current key opens are left as they are, and the backup's copy is replaced with the current key only once every entry was written. `GET /user/profile` gains `settings.backup.bwkEncryptedVaultKey`, `bwkVaultKeyIv` and `bwkVaultKeyTag`.
@@ -1001,7 +1003,8 @@ First public release.
 - Progressive Web App with offline read access via IndexedDB, dark/light/system themes, keyboard shortcuts, virtualized lists and WAI-ARIA-conformant components.
 - Local CI pipeline (`npm run ci`) running eleven gates — including container builds with Trivy scanning and CodeQL — from the `pre-push` hook.
 
-[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.16.1...HEAD
+[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/Hiprax/h-vault/compare/v0.16.1...v0.17.0
 [0.16.1]: https://github.com/Hiprax/h-vault/compare/v0.16.0...v0.16.1
 [0.16.0]: https://github.com/Hiprax/h-vault/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/Hiprax/h-vault/compare/v0.14.1...v0.15.0
