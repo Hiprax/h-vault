@@ -3084,6 +3084,11 @@ To cut a release: bump the version everywhere it appears, rename `## [Unreleased
 [CHANGELOG.md](CHANGELOG.md) to `## [X.Y.Z] - <date>`, and push. The Release body is that section,
 verbatim; a release whose section is missing or empty fails rather than publishing empty notes.
 
+**A named runner image.** Both jobs run on `ubuntu-26.04`, named outright and never as
+`ubuntu-latest`, so the image only changes when this file does. The pinned `actionlint` predates
+that label, so `.github/actionlint.yaml` declares it, and nothing else; delete the file once an
+`actionlint` release knows the label.
+
 **Least privilege, and pinned tools.** Only the second job can write to the repository: the
 gauntlet job, which installs every dependency and runs third-party code, gets a read-only token and
 does not keep it in its checkout. Every action is pinned to a full commit SHA, every tool the

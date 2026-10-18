@@ -1,0 +1,9 @@
+# actionlint's built-in list of GitHub-hosted runner labels predates
+# `ubuntu-26.04`, the image both jobs in workflows/release.yml run on, and it
+# reports any label it does not know as an error. This declares that one label
+# and nothing else: it is not a place to silence a finding, and
+# packages/server/tests/local-pipeline.test.ts holds it to exactly the label the
+# workflow uses. Delete this file once an actionlint release knows the label.
+self-hosted-runner:
+  labels:
+    - ubuntu-26.04

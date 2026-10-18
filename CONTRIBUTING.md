@@ -402,8 +402,8 @@ is listed in SECURITY.md; those are not pins this procedure moves.)
 - **An action.** Resolve the tag to the commit it points at, with read-only calls:
 
   ```bash
-  gh api repos/actions/checkout/git/ref/tags/v4.4.0 --jq '.object.type + " " + .object.sha'
-  git ls-remote https://github.com/actions/checkout 'refs/tags/v4.4.0' 'refs/tags/v4.4.0^{}'
+  gh api repos/actions/checkout/git/ref/tags/v7.0.1 --jq '.object.type + " " + .object.sha'
+  git ls-remote https://github.com/actions/checkout 'refs/tags/v7.0.1' 'refs/tags/v7.0.1^{}'
   ```
 
   If the type is `commit`, that SHA is the pin. If it is `tag`, the tag is annotated:
@@ -412,6 +412,16 @@ is listed in SECURITY.md; those are not pins this procedure moves.)
   is also the `^{}` line of `git ls-remote`, is the pin. Both calls must agree. Replace
   every occurrence of the action (one action is pinned one way everywhere) and update the
   comment. Moving to a new MAJOR is a dependency upgrade: read its release notes first.
+
+- **The runner image.** Both jobs name it outright (`runs-on: ubuntu-26.04`), never a
+  `*-latest` label, so the image changes only with an edit here; `local-pipeline.test.ts`
+  refuses a `*-latest` label, two different labels, and an `actions/checkout` or
+  `actions/setup-node` release still on the Node 20 runtime. The pinned `actionlint`
+  predates the `ubuntu-26.04` label, so `.github/actionlint.yaml` declares it, and only it
+  (the same test holds the file to that one label). Moving to another image: try it first
+  on a throwaway branch with
+  `gh workflow run release.yml --ref <branch>`, then change both jobs and that file
+  together, and delete the file once an `actionlint` release knows the label.
 
 - **A downloaded binary.** Change its `*_VERSION` and its checksum line together; a
   version bumped alone fails the checksum on purpose. Take the hash from the checksum file

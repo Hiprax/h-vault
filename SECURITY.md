@@ -1703,7 +1703,8 @@ devices via clipboard sync. H-Vault reduces the exposure window but cannot elimi
   `diff-cover` is installed from a hash-locked requirements file. Be precise about the limit:
   code that runs in the gauntlet job can still read what that job can read and make it fail
   or pass, and these things it fetches are not pinned by a hash committed here: the runner
-  image itself (`ubuntu-latest`); the Node toolchain `actions/setup-node` downloads; the
+  image itself (`ubuntu-26.04`, named outright so it changes only with the workflow, but not
+  pinned to a digest); the Node toolchain `actions/setup-node` downloads; the
   Playwright browsers and the system packages `playwright install --with-deps` installs
   through apt; the Alpine packages `apk upgrade` pulls into the images the image gate builds
   (their base images, `node:24-alpine3.23`, `mongo:8.0`, Nginx and Garage, are all pinned by

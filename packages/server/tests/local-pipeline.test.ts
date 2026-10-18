@@ -86,6 +86,7 @@ interface ReleaseWorkflow {
     string,
     {
       needs?: string[];
+      'runs-on'?: unknown;
       permissions?: Record<string, string>;
       'timeout-minutes'?: number;
       steps: {
@@ -439,6 +440,44 @@ describe('release workflow supply chain (F-01): nothing it runs can change under
     for (const [action, refs] of refsByAction) {
       expect([...refs], `${action} is pinned more than one way`).toHaveLength(1);
     }
+  });
+
+  it('runs every job on one explicitly versioned runner image, never a moving -latest label', () => {
+    // `ubuntu-latest` moves to a new Ubuntu release on GitHub's schedule, which
+    // changes the operating system, kernel and Docker under the gauntlet with no
+    // commit here (it moved to 26.04 from 2026-10-19). A named image moves only by
+    // an edit to this file, like every other pin.
+    const labels = Object.values(release.jobs).map((job) => job['runs-on']);
+    expect(labels.length).toBeGreaterThan(1);
+    for (const label of labels) {
+      expect(label).toMatch(/^ubuntu-\d{2}\.\d{2}$/);
+    }
+    expect(new Set(labels).size).toBe(1);
+  });
+
+  it('pins actions that run on a supported Node runtime (checkout and setup-node v5 or later)', () => {
+    // Their v4 releases run on Node 20, which GitHub has deprecated for actions
+    // and forces onto Node 24 with a warning; v5 is the first of each on Node 24.
+    for (const action of ['actions/checkout', 'actions/setup-node']) {
+      const majors = [
+        ...releaseYaml.matchAll(
+          new RegExp(`uses:\\s*${action}@[0-9a-f]{40}\\s+#\\s*v(\\d+)\\.`, 'g'),
+        ),
+      ].map((match) => Number(match[1]));
+      expect(majors.length, action).toBeGreaterThan(0);
+      for (const major of majors) expect(major, action).toBeGreaterThanOrEqual(5);
+    }
+  });
+
+  it('declares to actionlint exactly the runner label the workflow uses, and nothing else', () => {
+    // actionlint's built-in list of hosted labels predates `ubuntu-26.04`, and it
+    // reports an unknown label as an error. `.github/actionlint.yaml` declares that
+    // one label; holding it to exactly the workflow's label, with no other key,
+    // keeps it from ever becoming a place to silence a finding.
+    const config = parse(read('.github', 'actionlint.yaml')) as Record<string, unknown>;
+    expect(Object.keys(config)).toEqual(['self-hosted-runner']);
+    const labels = [...new Set(Object.values(release.jobs).map((job) => job['runs-on']))];
+    expect(config['self-hosted-runner']).toEqual({ labels });
   });
 
   it('verifies every downloaded binary against a committed checksum before using it', () => {

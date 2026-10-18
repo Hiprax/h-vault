@@ -31,6 +31,14 @@ on:
 # downloads is checked against a SHA-256 committed here before it is installed.
 # CONTRIBUTING.md, "Refreshing the release workflow's pins", is the procedure
 # for moving any of them.
+#
+# The runner image is named, never `ubuntu-latest`: that label moves to a new
+# Ubuntu release on GitHub's schedule, which would change the operating system,
+# kernel and Docker the gauntlet runs on without a commit here. Both jobs run on
+# `ubuntu-26.04`, the release the local gauntlet is run on, and moving off it is a
+# deliberate edit like any other pin. actionlint's built-in list of hosted labels
+# predates it, so `.github/actionlint.yaml` declares it; delete that file once an
+# actionlint release knows the label.
 
 # Serialised, and deliberately NOT cancel-in-progress. Two pushes landing
 # seconds apart would otherwise both read the same tag state and race, and the
@@ -56,7 +64,7 @@ jobs:
   # ---------------------------------------------------------------------------
   verify:
     name: Verify (the full local gauntlet)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 90
     # Read-only: this job publishes nothing, and it is the one that runs code
     # this repository did not write.
@@ -65,7 +73,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # The secret scan's history leg reads every blob ever committed, and
           # the coverage gate diffs against `main`. Both need the whole history.
@@ -76,7 +84,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Node
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -170,7 +178,7 @@ jobs:
   release:
     name: Tag and release
     needs: verify
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     # The minimum that lets GITHUB_TOKEN push a tag and publish a Release, and
     # only here: this job installs nothing and runs only this repository's own
@@ -181,7 +189,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # The release decision reads every existing tag, so a shallow clone
           # (the default) would see none and re-mint a version already released.
