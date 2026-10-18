@@ -217,25 +217,34 @@ function parseAccessTokenUserId(accessToken: string): string {
 // Store
 // ---------------------------------------------------------------------------
 
+/**
+ * The state of a store holding no session: what it starts as, and what
+ * `logout()` returns it to. One definition, so a field added to the session
+ * cannot be reset in one place and forgotten in the other.
+ */
+const SIGNED_OUT_STATE = {
+  accessToken: null,
+  user: null,
+  isAuthenticated: false,
+  isLocked: false,
+  vaultKey: null,
+  mek: null,
+  encryptedVaultKeyData: null,
+  vaultKeyVersion: 0,
+  kdfIterations: KDF_ITERATIONS,
+  lockReason: null,
+  twoFactorRequired: false,
+  tempToken: null,
+  _2faTimeoutId: null,
+  _rememberMe: false,
+  isLoading: false,
+} satisfies Partial<AuthState>;
+
 export const useAuthStore = create<AuthState>()(
   persist(
     (set, get) => ({
       // State
-      accessToken: null,
-      user: null,
-      isAuthenticated: false,
-      isLocked: false,
-      vaultKey: null,
-      mek: null,
-      encryptedVaultKeyData: null,
-      vaultKeyVersion: 0,
-      kdfIterations: KDF_ITERATIONS,
-      lockReason: null,
-      twoFactorRequired: false,
-      tempToken: null,
-      _2faTimeoutId: null,
-      _rememberMe: false,
-      isLoading: false,
+      ...SIGNED_OUT_STATE,
 
       // -------------------------------------------------------------------
       // Register
@@ -739,23 +748,7 @@ export const useAuthStore = create<AuthState>()(
         const { _2faTimeoutId } = get();
         if (_2faTimeoutId) clearTimeout(_2faTimeoutId);
 
-        set({
-          accessToken: null,
-          user: null,
-          isAuthenticated: false,
-          isLocked: false,
-          vaultKey: null,
-          mek: null,
-          encryptedVaultKeyData: null,
-          vaultKeyVersion: 0,
-          kdfIterations: KDF_ITERATIONS,
-          lockReason: null,
-          twoFactorRequired: false,
-          tempToken: null,
-          _2faTimeoutId: null,
-          _rememberMe: false,
-          isLoading: false,
-        });
+        set(SIGNED_OUT_STATE);
 
         // Remove the cold-start remember hint: a full logout ends the remembered
         // session, so the next boot must land on the login screen. lock() must
