@@ -422,6 +422,8 @@ describe('the security class is never coalesced and never trimmed (bar the stran
     expect(classes['settings_update']).toBe('security');
     expect(classes['item_update']).toBe('activity');
     expect(classes['trash_auto_purge']).toBe('activity');
+    // An irreversible bulk deletion behind the master password: never trimmed.
+    expect(classes['unreadable_entries_purged']).toBe('security');
   });
 
   it('only activity actions are ever coalesced, and exactly the three the allowlist names', () => {

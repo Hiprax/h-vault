@@ -329,6 +329,38 @@ describe('the key itself', () => {
     expect(mockCopySecret.mock.calls[0]?.[1]).toBe(30_000);
   });
 
+  it('shows the key as copied, then puts the copy icon back after two seconds', async () => {
+    // The revert is a timer, and it used to be covered only when some other test
+    // happened to outlive it: a coverage figure that moved with the machine's
+    // speed. Driven here on a faked clock, so it runs on every machine.
+    await renderFlow();
+    await readExport();
+    await screen.findByText('Acme');
+    const button = screen.getAllByRole('button', { name: /Copy secret key for Acme/ })[0]!;
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      await act(async () => {
+        fireEvent.click(button);
+      });
+      expect(mockCopySecret).toHaveBeenCalledTimes(1);
+      expect(button.querySelector('.lucide-check')).not.toBeNull();
+      expect(button.querySelector('.lucide-copy')).toBeNull();
+
+      act(() => {
+        vi.advanceTimersByTime(1999);
+      });
+      expect(button.querySelector('.lucide-check')).not.toBeNull();
+
+      act(() => {
+        vi.advanceTimersByTime(1);
+      });
+      expect(button.querySelector('.lucide-check')).toBeNull();
+      expect(button.querySelector('.lucide-copy')).not.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('reports a refused clipboard write rather than claiming the key was copied', async () => {
     mockCopySecret.mockRejectedValueOnce(new Error('refused'));
     await renderFlow();

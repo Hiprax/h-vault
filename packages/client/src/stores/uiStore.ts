@@ -71,6 +71,15 @@ interface UIState {
    */
   interruptedRotationNotice: boolean;
   /**
+   * Whether this session found rows that no key the account stores opens, with
+   * its own key proved to be the account's and no interrupted rotation to blame:
+   * the entries a master password reset leaves behind. It shows the "Review" link
+   * on the decryption banner, which leads to Settings, Unreadable entries. Raised by
+   * `heldVaultKey.ts` and by a check that finds such rows; cleared by a clean
+   * check, a live unlock and logout. Not persisted.
+   */
+  unreadableEntriesNotice: boolean;
+  /**
    * Whether the first-run guide is on screen. The release notes wait while it is,
    * so two modals never open on top of each other; they open once it closes.
    * Not persisted: it describes what is on screen now.
@@ -84,6 +93,7 @@ interface UIState {
   setOfflineCacheError: (error: OfflineCacheErrorType | null) => void;
   setStaleVaultKeyVersion: (vaultKeyVersion: number | null) => void;
   setInterruptedRotationNotice: (shown: boolean) => void;
+  setUnreadableEntriesNotice: (shown: boolean) => void;
   setOnboardingActive: (active: boolean) => void;
 }
 
@@ -144,6 +154,7 @@ export const useUIStore = create<UIState>()(
       offlineCacheError: null,
       staleVaultKeyVersion: null,
       interruptedRotationNotice: false,
+      unreadableEntriesNotice: false,
       onboardingActive: false,
 
       setTheme: (theme: ThemeValue): void => {
@@ -171,6 +182,9 @@ export const useUIStore = create<UIState>()(
         set({ staleVaultKeyVersion: vaultKeyVersion });
       },
 
+      setUnreadableEntriesNotice: (shown: boolean): void => {
+        set({ unreadableEntriesNotice: shown });
+      },
       setInterruptedRotationNotice: (shown: boolean): void => {
         set({ interruptedRotationNotice: shown });
       },

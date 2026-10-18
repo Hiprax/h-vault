@@ -230,8 +230,9 @@ export default function ResetPasswordPage() {
             >
               <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
               <span>
-                Resetting your password generates a new encryption key. Any previously stored vault
-                items will become unrecoverable.
+                Resetting your password creates a new encryption key, so what your vault holds can
+                no longer be opened with it. If you set up encrypted backups before this, your
+                backup password may let you recover it afterwards in Settings.
               </span>
             </div>
 

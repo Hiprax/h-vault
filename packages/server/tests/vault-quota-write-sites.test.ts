@@ -96,15 +96,15 @@ const ACCOUNTED_SITES: Record<string, { count: number; reason: string }> = {
     count: 1,
     reason: 'cycle repair: unsets `parentId` (placement)',
   },
-  'controllers/folderController.ts#execute#VaultItem.updateMany': {
+  'controllers/folderController.ts#rehomeFolderContents#VaultItem.updateMany': {
     count: 1,
     reason: "a deleted folder's items, trashed or moved: `deletedAt` / `folderId` only (placement)",
   },
-  'controllers/folderController.ts#execute#Folder.updateMany': {
+  'controllers/folderController.ts#rehomeFolderContents#Folder.updateMany': {
     count: 1,
     reason: "a deleted folder's children, moved up: `parentId` only (placement)",
   },
-  'controllers/folderController.ts#deleteFolder#VaultItem.updateMany': {
+  'controllers/folderController.ts#sweepOrphanedFolderReferences#VaultItem.updateMany': {
     count: 1,
     reason: 'items left pointing at a folder that no longer exists: unsets `folderId` (placement)',
   },

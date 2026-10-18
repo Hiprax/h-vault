@@ -82,6 +82,7 @@ import { User } from '../src/models/User.js';
 import { buildObjectKey } from '../src/utils/documentObjects.js';
 import { createInMemoryStorage } from './helpers/inMemoryStorage.js';
 import { authHeader, createTestUser, getCsrf, sampleFolder, type TestUser } from './helpers.js';
+import { expectReadFromPrimary, recordReads } from './support/primaryReads.js';
 
 const BYTES_PER_MB = 1024 * 1024;
 const UPLOADS_PATH = '/api/v1/documents/uploads';
@@ -191,6 +192,18 @@ beforeEach(async () => {
 });
 
 describe('POST /documents/uploads opens a transfer', () => {
+  it('reads the generation it echoes from the primary', async () => {
+    const reads = recordReads();
+    try {
+      const res = await call('post', UPLOADS_PATH, user, initBody(1));
+
+      expect(res.status, JSON.stringify(res.body)).toBe(201);
+      expectReadFromPrimary(reads, 'User', 'vaultKeyVersion');
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
   it('mints the future document id and frames the transfer from the SERVER constant', async () => {
     const res = await call('post', UPLOADS_PATH, user, initBody(1));
 

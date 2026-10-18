@@ -71,6 +71,9 @@ function maximalItemEntry(): Record<string, unknown> {
     dataIv: 'i'.repeat(MAX_IV_LENGTH),
     dataTag: 't'.repeat(MAX_TAG_LENGTH),
     searchHash: 'a'.repeat(64),
+    // The read precondition every current page sends with each row.
+    priorNameIv: 'i'.repeat(MAX_IV_LENGTH),
+    priorDataIv: 'i'.repeat(MAX_IV_LENGTH),
     passwordHistory: Array.from({ length: PASSWORD_HISTORY_MAX }, () => ({
       encryptedPassword: 'p'.repeat(MAX_ENCRYPTED_DATA_LENGTH),
       iv: 'i'.repeat(MAX_IV_LENGTH),
@@ -86,6 +89,7 @@ function maximalFolderEntry(): Record<string, string> {
     encryptedName: 'n'.repeat(MAX_ENCRYPTED_NAME_LENGTH),
     nameIv: 'i'.repeat(MAX_IV_LENGTH),
     nameTag: 't'.repeat(MAX_TAG_LENGTH),
+    priorNameIv: 'i'.repeat(MAX_IV_LENGTH),
   };
 }
 

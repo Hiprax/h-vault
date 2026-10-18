@@ -1,5 +1,5 @@
 import type { Request, Response } from 'express';
-import mongoose from 'mongoose';
+import mongoose, { type ClientSession } from 'mongoose';
 import { catchAsync, httpErrors } from '@hiprax/errors';
 import { createModuleLogger, errorMessage } from '../utils/logger.js';
 import { Folder } from '../models/Folder.js';
@@ -8,8 +8,11 @@ import { Document } from '../models/Document.js';
 import { createAuditLog } from '../services/auditService.js';
 import {
   assertVaultNotRotating,
+  assertVaultWritable,
+  confirmCreatedRow,
   getRequestContext,
   getUserId,
+  orStaleVaultKey,
   pickAllowedFields,
   resolveVaultKeyVersion,
 } from '../utils/controllerHelpers.js';
@@ -179,6 +182,10 @@ export const createFolder = catchAsync(async (req: Request, res: Response): Prom
     throw err;
   }
 
+  // Checked again now that the row exists, and withdrawn on a refusal, for the
+  // reason `vaultController.createItem` gives.
+  if (!(await confirmCreatedRow(res, 'folder', userId, folder, body.vaultKeyVersion))) return;
+
   const createCtx = getRequestContext(req);
   await createAuditLog(
     userId,
@@ -273,7 +280,18 @@ export const updateFolder = catchAsync(async (req: Request, res: Response): Prom
   // Through the quota (F-24): a rename that grows the row is reserved first, the
   // write is pinned on the row it measured, and the change is settled. No unique
   // index covers a field an update can write, so a rename never conflicts.
-  const updated = await updateCountedRow({ kind: 'folder', userId, id, update: updateOp });
+  // The vault key re-checked after every measure, as in `vaultController.updateItem`.
+  const written = await orStaleVaultKey(res, () =>
+    updateCountedRow({
+      kind: 'folder',
+      userId,
+      id,
+      update: updateOp,
+      beforeWrite: () => assertVaultWritable(userId, body.vaultKeyVersion),
+    }),
+  );
+  if (written === null) return;
+  const updated = written.value;
 
   if (!updated) {
     throw httpErrors.notFound('Folder not found');
@@ -328,6 +346,180 @@ export const updateFolder = catchAsync(async (req: Request, res: Response): Prom
   });
 });
 
+/** Where a removed folder's members go: to the trash with it, or up to its parent. */
+type FolderRemovalAction = 'delete' | 'move';
+
+/**
+ * Re-homes what a folder being removed holds, inside `session` when one is given.
+ *
+ * The folder's MEMBERS are vault items and documents, and both are treated
+ * identically: `action=delete` trashes them, `action=move` re-parents them to the
+ * folder's parent or to the root. Writing the filter and the update ONCE and
+ * applying them to both collections is what makes that identity structural rather
+ * than a coincidence of two copied blocks: a branch added to one copy and not the
+ * other would leave documents stranded in a folder that no longer exists. Child
+ * folders always move up to the same parent.
+ *
+ * `deletedAt: { $eq: null }` matches an ABSENT field as well as a null one, which is
+ * what both models rely on: an already-trashed row keeps the timestamp it was
+ * trashed with rather than being re-stamped now.
+ */
+async function rehomeFolderContents(
+  userId: string,
+  folderId: string,
+  parentId: unknown,
+  action: FolderRemovalAction,
+  session: ClientSession | undefined,
+): Promise<void> {
+  const sessionOpt = session ? { session } : {};
+  const memberFilter =
+    action === 'delete' ? { folderId, userId, deletedAt: { $eq: null } } : { folderId, userId };
+  const memberUpdate =
+    action === 'delete'
+      ? { $set: { deletedAt: new Date() } }
+      : parentId
+        ? { $set: { folderId: parentId } }
+        : { $unset: { folderId: 1 } };
+
+  await VaultItem.updateMany(memberFilter, memberUpdate, sessionOpt);
+  await Document.updateMany(memberFilter, memberUpdate, sessionOpt);
+
+  // Move child folders to the parent as well
+  const parentUpdate = parentId ? { $set: { parentId } } : { $unset: { parentId: 1 } };
+  await Folder.updateMany({ parentId: folderId, userId }, parentUpdate, sessionOpt);
+}
+
+/**
+ * Runs `execute` in a transaction when the topology supports one, else directly.
+ *
+ * On standalone MongoDB (no replica set) a folder removal is non-atomic: a crash
+ * mid-operation could leave orphaned items pointing to a deleted folder, which
+ * {@link sweepOrphanedFolderReferences} mitigates. The topology check is
+ * `utils/transactionSupport.ts` and nothing else: it used to be inlined here, and an
+ * inlined copy is a second answer to a question every multi-collection writer has to
+ * answer the same way (see `tests/topology-predicate.test.ts`). `withTransaction`
+ * may run `execute` again after a transient error, so it must reset what it records.
+ */
+async function inFolderTransaction(
+  execute: (session: ClientSession | undefined) => Promise<void>,
+): Promise<void> {
+  const session = supportsTransactions(mongoose.connection) ? await mongoose.startSession() : null;
+  try {
+    if (session) {
+      await session.withTransaction(() => execute(session));
+    } else {
+      await execute(undefined);
+    }
+  } finally {
+    if (session) {
+      await session.endSession();
+    }
+  }
+}
+
+/**
+ * Clears any orphaned `folderId` references a non-atomic (standalone) removal may
+ * leave on the folder's ACTIVE members (trashed rows may legitimately keep the
+ * removed folder's id from the `action=delete` path).
+ *
+ * AWAITED, deliberately. This used to be a floating `void ....then()`, which gave the
+ * mitigation the very failure mode it exists to mitigate: a process that dies just
+ * after answering loses the sweep exactly as it lost the write the sweep was
+ * compensating for, and the orphan survives. Two indexed `updateMany`s issued together
+ * cost a single round trip and make the reference provably gone by the time the caller
+ * is told the folder is. It also removed a race the suite could see but not control:
+ * whether the floating promise resolved before the worker moved on decided whether
+ * this branch ran at all, so `packages/server` line and branch coverage differed run
+ * to run and the ratchet gate flickered. Documents are swept alongside items, for the
+ * same reason.
+ *
+ * Never fails the removal: the folder IS gone, and a stale `folderId` on an item is a
+ * cosmetic inconsistency that the client's tree builder and the next delete both
+ * tolerate. Turning it into a 500 would report the whole operation as failed when the
+ * part the caller asked for succeeded.
+ */
+async function sweepOrphanedFolderReferences(userId: string, folderId: string): Promise<void> {
+  try {
+    const orphaned = { userId, folderId, deletedAt: null };
+    const [itemCleanup, documentCleanup] = await Promise.all([
+      VaultItem.updateMany(orphaned, { $unset: { folderId: 1 } }),
+      Document.updateMany(orphaned, { $unset: { folderId: 1 } }),
+    ]);
+    const cleared = itemCleanup.modifiedCount + documentCleanup.modifiedCount;
+    if (cleared > 0) {
+      logger.info(`Cleaned up ${String(cleared)} orphaned folderId references`, {
+        userId,
+        folderId,
+      });
+    }
+  } catch (err: unknown) {
+    logger.warn('Failed to clean orphaned folderId references', { error: errorMessage(err) });
+  }
+}
+
+/** The folder row of `folderId` owned by `userId`, as a counted-delete filter. */
+function ownedFolderFilter(userId: string, folderId: string): Record<string, unknown> {
+  return {
+    _id: new mongoose.Types.ObjectId(folderId),
+    userId: new mongoose.Types.ObjectId(userId),
+  };
+}
+
+/**
+ * Removes ONE folder only while its sealed name is still the ciphertext `readPin`
+ * names (`{ nameIv: { $eq } }`), and moves what it holds up to its parent. Resolves
+ * to whether the folder went, and calls `onRemoved` once the removal is final (also when
+ * a later step throws after it). Used by the unreadable-entry purge, whose client
+ * judged that exact ciphertext unreadable.
+ *
+ * CLAIM FIRST: the pinned, counted delete is the first write, so a folder renamed or
+ * re-sealed since the check (fresh IVs) misses it and nothing at all is moved, on
+ * either topology. Only after a hit are its members and child folders re-parented, to
+ * the `parentId` read off the row that delete removed. On a replica set the claim and
+ * the moves commit together; on a standalone deployment a crash between them leaves
+ * members pointing at a folder that is gone, which the sweep and the client's tree
+ * builder both tolerate.
+ */
+export async function removeFolderIfUnchanged(
+  userId: string,
+  folderId: string,
+  readPin: Record<string, unknown>,
+  onRemoved: () => void,
+): Promise<boolean> {
+  const reservation = await reserveVaultWrite(userId, { bytes: 0 });
+  const claim = { bytes: 0, removed: false, inTransaction: false, committed: false };
+  try {
+    await inFolderTransaction(async (session) => {
+      claim.bytes = 0;
+      claim.removed = false;
+      claim.inTransaction = session !== undefined;
+      const gone = await deleteCountedRow(
+        'folder',
+        { ...ownedFolderFilter(userId, folderId), ...readPin },
+        session,
+      );
+      if (!gone) return;
+      claim.bytes = gone.counted;
+      claim.removed = true;
+      await rehomeFolderContents(userId, folderId, gone.row.parentId, 'move', session);
+    });
+    claim.committed = true;
+  } finally {
+    // A transaction that threw committed nothing, so it subtracts nothing (as in
+    // `deleteFolder`). Without one, a claim that ran is final although a later step
+    // failed, and is subtracted exactly.
+    const removed = claim.removed && (claim.committed || !claim.inTransaction);
+    // Told here, not by the return value, so a removal that is final is reported
+    // even when a later step throws.
+    if (removed) onRemoved();
+    await settleVaultWrite(reservation, removed ? -claim.bytes : 0, {
+      folders: removed ? -1 : 0,
+    });
+  }
+  if (claim.removed) await sweepOrphanedFolderReferences(userId, folderId);
+  return claim.removed;
+}
+
 export const deleteFolder = catchAsync(async (req: Request, res: Response): Promise<void> => {
   const userId = getUserId(req);
   const { id } = req.params as { id: string };
@@ -339,19 +531,6 @@ export const deleteFolder = catchAsync(async (req: Request, res: Response): Prom
     throw httpErrors.notFound('Folder not found');
   }
 
-  // Use a transaction for atomicity when replica set is available.
-  // Falls back to non-transactional operations for standalone deployments.
-  //
-  // WARNING: On standalone MongoDB (no replica set), folder deletion is non-atomic.
-  // A crash mid-operation could leave orphaned items pointing to a deleted folder.
-  // A post-delete cleanup step below clears any stale folderId references to mitigate this.
-  //
-  // The topology check is `utils/transactionSupport.ts` and nothing else: it used
-  // to be inlined here, and an inlined copy is a second answer to a question every
-  // multi-collection writer has to answer the same way (see
-  // `tests/topology-predicate.test.ts`).
-  const useTransaction = supportsTransactions(mongoose.connection);
-
   // Touch first (F-24): the folder row is counted, so its removal is subtracted
   // once it is gone, by the bytes the database measured on the row it removed,
   // and from the folder cap's count (F-15): without that, the count only grew and
@@ -360,116 +539,25 @@ export const deleteFolder = catchAsync(async (req: Request, res: Response): Prom
   let folderBytes = 0;
   let foldersRemoved = 0;
 
-  const session = useTransaction ? await mongoose.startSession() : null;
-  const sessionOpt = session ? { session } : {};
+  await inFolderTransaction(async (session) => {
+    // Reset per attempt: `withTransaction` may run this again after a transient
+    // error, and the aborted attempt removed nothing.
+    folderBytes = 0;
+    foldersRemoved = 0;
+    await rehomeFolderContents(userId, id, folder.parentId, action, session);
 
-  try {
-    const execute = async (): Promise<void> => {
-      // Reset per attempt: `withTransaction` may run this again after a transient
-      // error, and the aborted attempt removed nothing.
-      folderBytes = 0;
-      foldersRemoved = 0;
-      // The folder's MEMBERS are vault items and documents, and both are treated
-      // identically: `action=delete` trashes them, `action=move` re-parents them
-      // to this folder's parent or to the root. Writing the filter and the update
-      // ONCE and applying them to both collections is what makes that identity
-      // structural rather than a coincidence of two copied blocks — a branch added
-      // to one copy and not the other would leave documents stranded in a folder
-      // that no longer exists.
-      //
-      // `deletedAt: { $eq: null }` matches an ABSENT field as well as a null one,
-      // which is what both models rely on: an already-trashed row keeps the
-      // timestamp it was trashed with rather than being re-stamped now.
-      const memberFilter =
-        action === 'delete'
-          ? { folderId: id, userId, deletedAt: { $eq: null } }
-          : { folderId: id, userId };
-      const memberUpdate =
-        action === 'delete'
-          ? { $set: { deletedAt: new Date() } }
-          : folder.parentId
-            ? { $set: { folderId: folder.parentId } }
-            : { $unset: { folderId: 1 } };
+    // Delete the folder itself, measured by the database as it goes.
+    const gone = await deleteCountedRow('folder', ownedFolderFilter(userId, id), session);
+    folderBytes = gone?.counted ?? 0;
+    foldersRemoved = gone ? 1 : 0;
+  });
+  // Only now is the removal certain: the transaction committed (or, standalone, the
+  // folder's delete, the last step, ran). A transaction that threw removed nothing,
+  // or nothing anyone can be sure of, so it subtracts nothing; an overcount is what
+  // the hourly recount corrects.
+  await settleVaultWrite(reservation, -folderBytes, { folders: -foldersRemoved });
 
-      await VaultItem.updateMany(memberFilter, memberUpdate, sessionOpt);
-      await Document.updateMany(memberFilter, memberUpdate, sessionOpt);
-
-      // Move child folders to the parent as well
-      const parentUpdate = folder.parentId
-        ? { $set: { parentId: folder.parentId } }
-        : { $unset: { parentId: 1 } };
-      await Folder.updateMany({ parentId: id, userId }, parentUpdate, sessionOpt);
-
-      // Delete the folder itself, measured by the database as it goes.
-      const gone = await deleteCountedRow(
-        'folder',
-        { _id: new mongoose.Types.ObjectId(id), userId: new mongoose.Types.ObjectId(userId) },
-        session ?? undefined,
-      );
-      folderBytes = gone?.counted ?? 0;
-      foldersRemoved = gone ? 1 : 0;
-    };
-
-    if (session) {
-      await session.withTransaction(execute);
-    } else {
-      await execute();
-    }
-    // Only now is the removal certain: the transaction committed (or, standalone,
-    // the folder's delete, the last step, ran). A transaction that threw removed
-    // nothing, or nothing anyone can be sure of, so it subtracts nothing; an
-    // overcount is what the hourly recount corrects.
-    await settleVaultWrite(reservation, -folderBytes, { folders: -foldersRemoved });
-  } finally {
-    if (session) {
-      await session.endSession();
-    }
-  }
-
-  // Clean up any orphaned folderId references that may remain after non-atomic
-  // deletion on standalone MongoDB (no replica set). This is targeted to the
-  // just-deleted folder rather than scanning all folders on every list request.
-  // Only targets non-trashed items — trashed items may legitimately retain
-  // the deleted folder's ID from the action=delete soft-delete path.
-  //
-  // AWAITED, deliberately. This used to be a floating `void ....then()`, which
-  // gave the mitigation the very failure mode it exists to mitigate: a process
-  // that dies just after answering loses the sweep exactly as it lost the write
-  // the sweep was compensating for, and the orphan survives. Two indexed
-  // `updateMany`s issued together before the audit row cost a single round trip
-  // of latency and make the reference provably gone by the time the caller is
-  // told the folder is.
-  //
-  // It also removed a race the suite could see but not control: whether the
-  // floating promise resolved before the worker moved on decided whether this
-  // branch was executed at all, so `packages/server` line and branch coverage
-  // differed run to run (measured: 3012 vs 3013 lines, 1417 vs 1418 branches on
-  // two runs of the same tree at the same seed) and the ratchet gate flickered.
-  //
-  // Documents are swept alongside items, and for the same reason: the window is
-  // the gap between the member update and the folder delete, which exists for
-  // both collections on a standalone deployment.
-  try {
-    const orphaned = { userId, folderId: id, deletedAt: null };
-    const [itemCleanup, documentCleanup] = await Promise.all([
-      VaultItem.updateMany(orphaned, { $unset: { folderId: 1 } }),
-      Document.updateMany(orphaned, { $unset: { folderId: 1 } }),
-    ]);
-    const cleared = itemCleanup.modifiedCount + documentCleanup.modifiedCount;
-    if (cleared > 0) {
-      logger.info(`Cleaned up ${String(cleared)} orphaned folderId references`, {
-        userId,
-        folderId: id,
-      });
-    }
-  } catch (err: unknown) {
-    // Never fail the delete over the sweep, which is what the previous `.catch`
-    // did too: the folder IS gone, and a stale folderId on an item is a
-    // cosmetic inconsistency that the client's tree builder and the next delete
-    // both tolerate. Turning it into a 500 would report the whole operation as
-    // failed when the part the caller asked for succeeded.
-    logger.warn('Failed to clean orphaned folderId references', { error: errorMessage(err) });
-  }
+  await sweepOrphanedFolderReferences(userId, id);
 
   const deleteCtx = getRequestContext(req);
   await createAuditLog(

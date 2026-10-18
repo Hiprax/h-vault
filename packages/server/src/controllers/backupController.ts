@@ -359,7 +359,9 @@ async function sendSupersededBackupWrite(
   guarded: number,
   endpoint: string,
 ): Promise<void> {
-  const current = vaultKeyVersionOf(await User.findById(userId).select('vaultKeyVersion').lean());
+  const current = vaultKeyVersionOf(
+    await User.findById(userId).read('primary').select('vaultKeyVersion').lean(),
+  );
   logger.warn('A backup key write was refused: the vault key was rotated mid-request', {
     userId,
     endpoint,

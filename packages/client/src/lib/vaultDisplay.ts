@@ -2,6 +2,26 @@ import type { ItemType } from '@hvault/shared';
 import { normalizeHost, siteUri } from '../services/import/identity';
 import { isUndecodableData } from './vaultData';
 
+/** The display name of each item type: ONE copy for the list, the search and Settings. */
+export const ITEM_TYPE_LABELS: Readonly<Record<ItemType, string>> = {
+  login: 'Login',
+  note: 'Note',
+  card: 'Card',
+  identity: 'Identity',
+  secret: 'Secret',
+};
+
+/**
+ * An item type's display name, or a neutral one for a type this client does not
+ * know: a row read off the wire may name one, and a plain index would render
+ * `undefined` (or, for an inherited key, something worse).
+ */
+export function itemTypeLabel(itemType: string): string {
+  return Object.hasOwn(ITEM_TYPE_LABELS, itemType)
+    ? ITEM_TYPE_LABELS[itemType as ItemType]
+    : 'Entry';
+}
+
 /**
  * Presentation helpers for a DECRYPTED vault item.
  *

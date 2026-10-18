@@ -141,6 +141,14 @@ export const MAX_TAG_LENGTH = 50;
 export const MAX_WRAPPED_VAULT_KEY_LENGTH = 200;
 export const MAX_VAULT_KEY_IV_LENGTH = 24;
 export const MAX_VAULT_KEY_TAG_LENGTH = 32;
+/**
+ * The longest IV a sealed vault field carries on the wire: twelve random bytes in
+ * base64, behind the `v2:` marker of a field bound to its row. The bound the
+ * existing field schemas spell inline as `.max(24)`; named here for the fields
+ * that echo an IV back to the server as a precondition (a rotation's `prior*Iv`,
+ * the unreadable-entry purge's `nameIv`/`dataIv`).
+ */
+export const MAX_FIELD_IV_LENGTH = 24;
 export const MAX_BULK_OPERATIONS = 100;
 export const PASSWORD_HISTORY_MAX = 10;
 export const LOCKOUT_DURATION_MINUTES = 30;
@@ -1371,6 +1379,11 @@ export const AUDIT_ACTIONS = [
   'backup_recipients_update',
   'backup_recipient_confirmed',
   'backup_recipients_suspended',
+  // The owner permanently deleting the entries no key the account stores can
+  // open (left behind by a master password reset), with the master password. One
+  // row per request, carrying the counts; security, because it is an irreversible
+  // bulk deletion.
+  'unreadable_entries_purged',
 ] as const;
 export type AuditAction = (typeof AUDIT_ACTIONS)[number];
 

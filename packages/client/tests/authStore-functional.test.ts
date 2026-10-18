@@ -1301,6 +1301,16 @@ describe('authStore.unlock — the live wrapper verify-unlock answers with', () 
     expect(useUIStore.getState().interruptedRotationNotice).toBe(false);
   });
 
+  it('clears the unreadable-entries review on a live unlock only', async () => {
+    useUIStore.setState({ unreadableEntriesNotice: true });
+    await useAuthStore.getState().unlock('Master123!');
+    expect(useUIStore.getState().unreadableEntriesNotice).toBe(true);
+
+    useAuthStore.setState({ vaultKey: null, mek: null, isLocked: true });
+    await useAuthStore.getState().unlock('Master123!', undefined, live);
+    expect(useUIStore.getState().unreadableEntriesNotice).toBe(false);
+  });
+
   it('clears a stale-key notice recorded under an older generation, but only on a live unlock', async () => {
     // A refused write recorded generation 4; the account has since moved on, and
     // the session now holds its current key, so the "sign in again" notice would
@@ -1347,6 +1357,15 @@ describe('authStore.lock — the reason a vault locked itself', () => {
     await useAuthStore.getState().lock('vault-key-replaced');
     await useAuthStore.getState().logout();
     expect(useAuthStore.getState().lockReason).toBeNull();
+  });
+
+  it('clears the unreadable-entries review on logout, but not on a lock', async () => {
+    useUIStore.setState({ unreadableEntriesNotice: true });
+    await useAuthStore.getState().lock();
+    expect(useUIStore.getState().unreadableEntriesNotice).toBe(true);
+
+    await useAuthStore.getState().logout();
+    expect(useUIStore.getState().unreadableEntriesNotice).toBe(false);
   });
 
   it('persists exactly the non-secret session fields, never a key or the lock reason', async () => {

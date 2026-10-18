@@ -46,6 +46,12 @@ import {
   MAX_ADDRESS_COUNTRY_LENGTH,
   MAX_ADDRESS_DELIVERY_NOTES_LENGTH,
   MAX_DOCUMENTS_PER_ROTATION,
+  MAX_FIELD_IV_LENGTH,
+  MAX_FOLDERS_PER_USER,
+  MAX_ITEMS_PER_USER,
+  MAX_WRAPPED_VAULT_KEY_LENGTH,
+  MAX_VAULT_KEY_IV_LENGTH,
+  MAX_VAULT_KEY_TAG_LENGTH,
 } from '../constants/index.js';
 import type { ItemType } from '../constants/index.js';
 import { normalizeUri } from '../utils/index.js';
@@ -174,6 +180,20 @@ function duplicateIds(entries: { id: string }[]): string[] {
   return [...repeated];
 }
 
+/** Adds one issue per leg that names a row twice, at that leg's path. */
+function refuseRepeatedIds(ctx: z.RefinementCtx, legs: Record<string, { id: string }[]>): void {
+  for (const [leg, entries] of Object.entries(legs)) {
+    const repeated = duplicateIds(entries);
+    if (repeated.length > 0) {
+      ctx.addIssue({
+        code: 'custom',
+        path: [leg],
+        message: `${leg} contains duplicate ids: ${repeated.join(', ')}`,
+      });
+    }
+  }
+}
+
 export const bulkReEncryptSchema = z
   .object({
     authHash: z.string().min(1).max(100),
@@ -189,6 +209,17 @@ export const bulkReEncryptSchema = z
           dataIv: z.string().min(1).max(24),
           dataTag: z.string().min(1).max(32),
           passwordHistory: passwordHistoryWriteSchema,
+          /**
+           * The IVs the row carried when this client READ it, sent back as a
+           * precondition: every ciphertext write mints fresh IVs, so a row whose
+           * stored IVs differ was rewritten (an edit on another device or tab)
+           * after the enumeration this payload was built from, and rotating it
+           * would overwrite that edit with the older content. The server refuses
+           * such a rotation with a 409 and writes nothing. Both or neither (see
+           * below); optional so an older page keeps rotating as it always did.
+           */
+          priorNameIv: z.string().min(1).max(MAX_FIELD_IV_LENGTH).optional(),
+          priorDataIv: z.string().min(1).max(MAX_FIELD_IV_LENGTH).optional(),
         }),
       )
       .min(0)
@@ -200,6 +231,8 @@ export const bulkReEncryptSchema = z
           encryptedName: z.string().min(1).max(MAX_ENCRYPTED_NAME_LENGTH),
           nameIv: z.string().min(1).max(24),
           nameTag: z.string().min(1).max(32),
+          /** The name IV the folder carried when this client read it; see the items leg. */
+          priorNameIv: z.string().min(1).max(MAX_FIELD_IV_LENGTH).optional(),
         }),
       )
       .max(1000)
@@ -309,16 +342,67 @@ export const bulkReEncryptSchema = z
         message: 'A re-seal cannot abandon an interrupted rotation',
       });
     }
-    for (const leg of ['items', 'folders', 'documents'] as const) {
-      const repeated = duplicateIds(data[leg]);
-      if (repeated.length > 0) {
+    // An item's two prior IVs are one precondition: a half pair would pin the
+    // write on one field while the other changed unseen.
+    data.items.forEach((item, index) => {
+      if ((item.priorNameIv === undefined) !== (item.priorDataIv === undefined)) {
         ctx.addIssue({
           code: 'custom',
-          path: [leg],
-          message: `${leg} contains duplicate ids: ${repeated.join(', ')}`,
+          path: ['items', index, item.priorNameIv === undefined ? 'priorNameIv' : 'priorDataIv'],
+          message: 'priorNameIv and priorDataIv must be sent together or not at all',
         });
       }
+    });
+    refuseRepeatedIds(ctx, { items: data.items, folders: data.folders, documents: data.documents });
+  });
+
+/**
+ * `POST /vault/items/purge-unreadable`: the owner permanently deleting the entries
+ * no key the account stores can open (the ones a master password reset leaves
+ * behind).
+ *
+ * The server cannot tell which rows those are (it never holds a key), so the
+ * owner's client names them after checking each one, and every name carries the
+ * IVs the row had when it was judged: the server deletes a row only while its
+ * stored IVs are still those, so a row re-sealed, recovered or edited since the
+ * check (each mints fresh IVs) is kept. The wrapper is the one the client judged
+ * readability under, and the deletion is refused unless it is still the account's
+ * (a reset replaces the key without moving `vaultKeyVersion`, so the generation
+ * cannot prove it). Strict objects: an unexpected key is refused, never stripped.
+ */
+export const purgeUnreadableSchema = z
+  .strictObject({
+    authHash: z.string().min(1).max(100),
+    encryptedVaultKey: z.string().min(1).max(MAX_WRAPPED_VAULT_KEY_LENGTH),
+    vaultKeyIv: z.string().min(1).max(MAX_VAULT_KEY_IV_LENGTH),
+    vaultKeyTag: z.string().min(1).max(MAX_VAULT_KEY_TAG_LENGTH),
+    items: z
+      .array(
+        z.strictObject({
+          id: objectIdSchema,
+          nameIv: z.string().min(1).max(MAX_FIELD_IV_LENGTH),
+          dataIv: z.string().min(1).max(MAX_FIELD_IV_LENGTH),
+        }),
+      )
+      .max(MAX_ITEMS_PER_USER),
+    folders: z
+      .array(
+        z.strictObject({
+          id: objectIdSchema,
+          nameIv: z.string().min(1).max(MAX_FIELD_IV_LENGTH),
+        }),
+      )
+      .max(MAX_FOLDERS_PER_USER),
+  })
+  .superRefine((data, ctx) => {
+    if (data.items.length + data.folders.length === 0) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['items'],
+        message: 'Name at least one entry or folder to delete',
+      });
     }
+    refuseRepeatedIds(ctx, { items: data.items, folders: data.folders });
   });
 
 // ---------------------------------------------------------------------------

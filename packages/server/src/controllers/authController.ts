@@ -618,9 +618,11 @@ export const login = catchAsync(async (req: Request, res: Response): Promise<voi
     clearDeviceProofCookie(res);
   }
 
-  const user = await User.findOne({ email }).select(
-    '+authHash +twoFactorSecret +backupCodes +secondFactorLockout',
-  );
+  // From the primary: this read answers crash recovery's fence question and hands
+  // the session the wrapper and generation it derives its vault key from.
+  const user = await User.findOne({ email })
+    .read('primary')
+    .select('+authHash +twoFactorSecret +backupCodes +secondFactorLockout');
   if (!user) {
     // Perform a dummy bcrypt compare to equalize response time with the
     // existing-user path, preventing email enumeration via timing side-channel,
@@ -1128,9 +1130,12 @@ export const login2fa = catchAsync(async (req: Request, res: Response): Promise<
     throw httpErrors.unauthorized(ERROR_CODES.TOKEN_INVALID);
   }
 
-  const user = await User.findById(payload.userId).select(
-    '+twoFactorSecret +backupCodes +encryptedVaultKey +vaultKeyIv +vaultKeyTag +secondFactorLockout',
-  );
+  // From the primary, as `login`'s read is: it hands the session its wrapper.
+  const user = await User.findById(payload.userId)
+    .read('primary')
+    .select(
+      '+twoFactorSecret +backupCodes +encryptedVaultKey +vaultKeyIv +vaultKeyTag +secondFactorLockout',
+    );
   if (!user) {
     throw httpErrors.unauthorized(ERROR_CODES.TOKEN_INVALID);
   }
@@ -2045,10 +2050,14 @@ export const resetPassword = catchAsync(async (req: Request, res: Response): Pro
   // `changePassword` re-wraps that key under the new MEK because the key is still
   // the only way to read the rows the crashed rotation had already re-sealed. A
   // RESET cannot: it is reached without the old master password, so the old MEK
-  // does not exist anywhere and the client mints a brand-new vault key. Every row
-  // in the account is already unreadable at this point — `ResetPasswordPage` says
-  // so before the user confirms — so the pending wrapper is not a key any more,
-  // just ciphertext nothing can open.
+  // does not exist anywhere and the client mints a brand-new vault key. No row in
+  // the account opens under that key (`ResetPasswordPage` says so before the user
+  // confirms), and the pending wrapper is sealed under the lost MEK, so it is not
+  // a key any more, just ciphertext nothing can open: the rows the crashed rotation
+  // had moved under it are lost with it. Rows still under the OLD live key are
+  // not necessarily lost: `settings.backup` keeps the copy of that key sealed
+  // under the backup wrapping key, which this reset deliberately leaves alone, and
+  // Settings recovers them with it (a re-seal under the new key).
   //
   // Keeping it is not neutral. `getProfile` derives `interruptedRotation` from
   // its presence, so the Settings page would offer to finish a rotation that can

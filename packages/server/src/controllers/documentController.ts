@@ -774,8 +774,9 @@ async function openTransferUnderLock(
   }
 
   // Read as 0 when absent: an account created before this column existed, and the
-  // `upgrade` gate's 0.7.0 fixture, both carry no value at all.
-  const user = await User.findById(userId).select('vaultKeyVersion').lean();
+  // `upgrade` gate's 0.7.0 fixture, both carry no value at all. From the primary,
+  // like every generation read: a lagging secondary would answer a superseded one.
+  const user = await User.findById(userId).read('primary').select('vaultKeyVersion').lean();
   const vaultKeyVersion = vaultKeyVersionOf(user);
 
   const uploadId = new mongoose.Types.ObjectId();
@@ -1711,7 +1712,7 @@ async function completeUnderLock(
     // and the version catches one that has already committed, which the fence cannot
     // see because the flag is cleared by then.
     await assertVaultNotRotating(userId);
-    const user = await User.findById(userId).select('vaultKeyVersion').lean();
+    const user = await User.findById(userId).read('primary').select('vaultKeyVersion').lean();
     const currentVaultKeyVersion = vaultKeyVersionOf(user);
     // ABOVE the current version is named separately from merely different, even
     // though the comparison below would refuse it anyway, because the two mean

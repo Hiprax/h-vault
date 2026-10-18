@@ -923,6 +923,35 @@ describe('User routes', () => {
       expect(backup.bwkIv).toBe('opaque-bwk-iv');
       expect(backup.bwkTag).toBe('opaque-bwk-tag');
       expect(backup.bwkSalt).toBe('opaque-bwk-salt');
+      // No vault key sealed under that backup key is stored here, so none is sent.
+      expect(backup).not.toHaveProperty('bwkEncryptedVaultKey');
+      expect(backup).not.toHaveProperty('bwkVaultKeyIv');
+      expect(backup).not.toHaveProperty('bwkVaultKeyTag');
+    });
+
+    it('includes the vault key sealed under the backup key, the copy a recovery after a reset opens', async () => {
+      const { User } = await import('../src/models/User.js');
+      await User.findByIdAndUpdate(user.id, {
+        $set: {
+          'settings.backup.encryptedBWK': 'opaque-bwk-ciphertext',
+          'settings.backup.bwkIv': 'opaque-bwk-iv',
+          'settings.backup.bwkTag': 'opaque-bwk-tag',
+          'settings.backup.bwkSalt': 'opaque-bwk-salt',
+          'settings.backup.bwkEncryptedVaultKey': 'previous-vault-key-under-the-bwk',
+          'settings.backup.bwkVaultKeyIv': 'previous-vault-key-iv',
+          'settings.backup.bwkVaultKeyTag': 'previous-vault-key-tag',
+        },
+      });
+
+      const res = await agent
+        .get('/api/v1/user/profile')
+        .set('Authorization', authHeader(user.accessToken));
+
+      expect(res.status).toBe(200);
+      const backup = res.body.data.settings?.backup;
+      expect(backup.bwkEncryptedVaultKey).toBe('previous-vault-key-under-the-bwk');
+      expect(backup.bwkVaultKeyIv).toBe('previous-vault-key-iv');
+      expect(backup.bwkVaultKeyTag).toBe('previous-vault-key-tag');
     });
   });
 

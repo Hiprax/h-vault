@@ -62,7 +62,9 @@ import {
 } from '../src/schemas/user.js';
 import {
   bulkDeleteSchema,
+  bulkReEncryptSchema,
   createVaultItemSchema,
+  purgeUnreadableSchema,
   updateVaultItemSchema,
 } from '../src/schemas/vault.js';
 import {
@@ -70,7 +72,10 @@ import {
   HIBP_BATCH_MAX_PREFIXES,
   MAX_BULK_OPERATIONS,
   MAX_ENCRYPTED_NAME_LENGTH,
+  MAX_FIELD_IV_LENGTH,
+  MAX_FOLDERS_PER_USER,
   MAX_IMPORT_ITEMS,
+  MAX_ITEMS_PER_USER,
   MAX_TAGS_PER_ITEM,
   MAX_TAG_LENGTH,
 } from '../src/constants/index.js';
@@ -837,5 +842,202 @@ describe('verifyUnlockResultSchema: the live wrapper an unlock derives the vault
     expect(accepts(verifyUnlockResultSchema, { ...live, vaultKeyVersion: 1.5 })).toBe(false);
     const { vaultKeyVersion: _omitted, ...withoutGeneration } = live;
     expect(accepts(verifyUnlockResultSchema, withoutGeneration)).toBe(false);
+  });
+});
+
+describe('a rotation names the IVs each row carried when it was read', () => {
+  /**
+   * `priorNameIv`/`priorDataIv` are the precondition the server pins every row
+   * write on, so an edit saved elsewhere after the page read the vault refuses
+   * the rotation instead of being overwritten. A half pair would pin one field
+   * while the other changed unseen, so it is refused here, before any work.
+   */
+  const rotation = (item: Record<string, unknown>, folder: Record<string, unknown> = {}) => ({
+    authHash: chars(64),
+    items: [
+      {
+        id: OID,
+        encryptedName: chars(20),
+        nameIv: chars(16),
+        nameTag: chars(24),
+        encryptedData: chars(40),
+        dataIv: chars(16),
+        dataTag: chars(24),
+        ...item,
+      },
+    ],
+    folders: [
+      {
+        id: hex(24, '2'),
+        encryptedName: chars(20),
+        nameIv: chars(16),
+        nameTag: chars(24),
+        ...folder,
+      },
+    ],
+    newEncryptedVaultKey: chars(80),
+    newVaultKeyIv: chars(16),
+    newVaultKeyTag: chars(24),
+  });
+
+  it('keeps both item priors and the folder prior when they are sent', () => {
+    const parsed = bulkReEncryptSchema.parse(
+      rotation({ priorNameIv: 'v2:n', priorDataIv: 'v2:d' }, { priorNameIv: 'v2:f' }),
+    );
+    expect(parsed.items[0]).toMatchObject({ priorNameIv: 'v2:n', priorDataIv: 'v2:d' });
+    expect(parsed.folders[0]).toMatchObject({ priorNameIv: 'v2:f' });
+  });
+
+  it('accepts a row with no priors at all, as an older page sends it', () => {
+    const parsed = bulkReEncryptSchema.parse(rotation({}));
+    expect(parsed.items[0]).not.toHaveProperty('priorNameIv');
+    expect(parsed.folders[0]).not.toHaveProperty('priorNameIv');
+  });
+
+  it.each([
+    ['priorNameIv', { priorNameIv: 'v2:n' }, 'priorDataIv'],
+    ['priorDataIv', { priorDataIv: 'v2:d' }, 'priorNameIv'],
+  ] as const)('refuses an item that sends only %s, naming the missing half', (_, half, missing) => {
+    const result = bulkReEncryptSchema.safeParse(rotation(half));
+    expect(result.success).toBe(false);
+    expect(result.error?.issues.map((issue) => issue.path)).toEqual([['items', 0, missing]]);
+  });
+
+  it.each(['priorNameIv', 'priorDataIv'] as const)(
+    'holds item %s at MAX_FIELD_IV_LENGTH and refuses one more, or none',
+    (field) => {
+      const pair = { priorNameIv: chars(8), priorDataIv: chars(8) };
+      expect(
+        accepts(bulkReEncryptSchema, rotation({ ...pair, [field]: chars(MAX_FIELD_IV_LENGTH) })),
+      ).toBe(true);
+      expect(
+        accepts(
+          bulkReEncryptSchema,
+          rotation({ ...pair, [field]: chars(MAX_FIELD_IV_LENGTH + 1) }),
+        ),
+      ).toBe(false);
+      expect(accepts(bulkReEncryptSchema, rotation({ ...pair, [field]: '' }))).toBe(false);
+    },
+  );
+
+  it('holds a folder prior at MAX_FIELD_IV_LENGTH and refuses one more', () => {
+    expect(
+      accepts(bulkReEncryptSchema, rotation({}, { priorNameIv: chars(MAX_FIELD_IV_LENGTH) })),
+    ).toBe(true);
+    expect(
+      accepts(bulkReEncryptSchema, rotation({}, { priorNameIv: chars(MAX_FIELD_IV_LENGTH + 1) })),
+    ).toBe(false);
+  });
+});
+
+describe('purgeUnreadableSchema: what the owner may ask to delete for good', () => {
+  const purge = (overrides: Record<string, unknown> = {}) => ({
+    authHash: chars(64),
+    encryptedVaultKey: chars(80),
+    vaultKeyIv: chars(16),
+    vaultKeyTag: chars(24),
+    items: [{ id: OID, nameIv: chars(16), dataIv: chars(16) }],
+    folders: [{ id: hex(24, '2'), nameIv: chars(16) }],
+    ...overrides,
+  });
+  const itemRows = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({
+      id: i.toString(16).padStart(24, '0'),
+      nameIv: chars(16),
+      dataIv: chars(16),
+    }));
+  const folderRows = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({
+      id: i.toString(16).padStart(24, '0'),
+      nameIv: chars(16),
+    }));
+
+  it('keeps every field of a well-formed request', () => {
+    expect(purgeUnreadableSchema.parse(purge())).toEqual(purge());
+  });
+
+  it('accepts a request naming only items, or only folders', () => {
+    expect(accepts(purgeUnreadableSchema, purge({ folders: [] }))).toBe(true);
+    expect(accepts(purgeUnreadableSchema, purge({ items: [] }))).toBe(true);
+  });
+
+  it('refuses a request naming nothing at all', () => {
+    expect(issues(purgeUnreadableSchema, purge({ items: [], folders: [] }))).toEqual([
+      { path: 'items', m: 'Name at least one entry or folder to delete' },
+    ]);
+  });
+
+  it('holds the items leg at MAX_ITEMS_PER_USER and the folders leg at MAX_FOLDERS_PER_USER', () => {
+    expect(accepts(purgeUnreadableSchema, purge({ items: itemRows(MAX_ITEMS_PER_USER) }))).toBe(
+      true,
+    );
+    expect(accepts(purgeUnreadableSchema, purge({ items: itemRows(MAX_ITEMS_PER_USER + 1) }))).toBe(
+      false,
+    );
+    expect(
+      accepts(purgeUnreadableSchema, purge({ folders: folderRows(MAX_FOLDERS_PER_USER) })),
+    ).toBe(true);
+    expect(
+      accepts(purgeUnreadableSchema, purge({ folders: folderRows(MAX_FOLDERS_PER_USER + 1) })),
+    ).toBe(false);
+  });
+
+  it.each([
+    ['encryptedVaultKey', 200],
+    ['vaultKeyIv', 24],
+    ['vaultKeyTag', 32],
+  ] as const)(
+    'holds the wrapper field %s at %i characters and refuses one more, or none',
+    (field, max) => {
+      expect(accepts(purgeUnreadableSchema, purge({ [field]: chars(max) }))).toBe(true);
+      expect(accepts(purgeUnreadableSchema, purge({ [field]: chars(max + 1) }))).toBe(false);
+      expect(accepts(purgeUnreadableSchema, purge({ [field]: '' }))).toBe(false);
+    },
+  );
+
+  it('holds every row IV at MAX_FIELD_IV_LENGTH and refuses one more', () => {
+    const at = chars(MAX_FIELD_IV_LENGTH);
+    const over = chars(MAX_FIELD_IV_LENGTH + 1);
+    expect(
+      accepts(purgeUnreadableSchema, purge({ items: [{ id: OID, nameIv: at, dataIv: at }] })),
+    ).toBe(true);
+    expect(
+      accepts(purgeUnreadableSchema, purge({ items: [{ id: OID, nameIv: over, dataIv: at }] })),
+    ).toBe(false);
+    expect(
+      accepts(purgeUnreadableSchema, purge({ items: [{ id: OID, nameIv: at, dataIv: over }] })),
+    ).toBe(false);
+    expect(accepts(purgeUnreadableSchema, purge({ folders: [{ id: OID, nameIv: over }] }))).toBe(
+      false,
+    );
+  });
+
+  it('refuses a leg that names the same row twice', () => {
+    const row = { id: OID, nameIv: chars(16), dataIv: chars(16) };
+    expect(issues(purgeUnreadableSchema, purge({ items: [row, row] }))).toEqual([
+      { path: 'items', m: `items contains duplicate ids: ${OID}` },
+    ]);
+    const folder = { id: OID, nameIv: chars(16) };
+    expect(issues(purgeUnreadableSchema, purge({ folders: [folder, folder] }))).toEqual([
+      { path: 'folders', m: `folders contains duplicate ids: ${OID}` },
+    ]);
+  });
+
+  it('refuses an unexpected key at the top or in a row instead of stripping it', () => {
+    expect(accepts(purgeUnreadableSchema, purge({ vaultKeyVersion: 3 }))).toBe(false);
+    expect(
+      accepts(
+        purgeUnreadableSchema,
+        purge({ items: [{ id: OID, nameIv: chars(16), dataIv: chars(16), deletedAt: null }] }),
+      ),
+    ).toBe(false);
+  });
+
+  it('refuses a request without the master-password proof or with a malformed id', () => {
+    const { authHash: _omitted, ...withoutProof } = purge();
+    expect(accepts(purgeUnreadableSchema, withoutProof)).toBe(false);
+    expect(
+      accepts(purgeUnreadableSchema, purge({ items: [{ id: 'nope', nameIv: 'a', dataIv: 'b' }] })),
+    ).toBe(false);
   });
 });

@@ -633,6 +633,7 @@ export const useAuthStore = create<AuthState>()(
         if (liveVaultKey) {
           useUIStore.getState().setStaleVaultKeyVersion(null);
           useUIStore.getState().setInterruptedRotationNotice(false);
+          useUIStore.getState().setUnreadableEntriesNotice(false);
         }
       },
 
@@ -774,6 +775,7 @@ export const useAuthStore = create<AuthState>()(
         // its answers, its loop guard, the interrupted-rotation notice it raised —
         // so the next session, on this account or another, starts from nothing.
         useUIStore.getState().setInterruptedRotationNotice(false);
+        useUIStore.getState().setUnreadableEntriesNotice(false);
         resetHeldVaultKeyChecks();
 
         // Then zero the actual key material using the captured references

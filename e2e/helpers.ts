@@ -9,12 +9,14 @@ import {
 } from '@playwright/test';
 import { AxeBuilder } from '@axe-core/playwright';
 import { execFile } from 'node:child_process';
+import { createHash, createHmac } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { seededRandom } from '../tests/harness/determinism.js';
 import { A11Y_BLOCKING_IMPACTS } from './a11yViews.js';
-import { MongoClient, type Db } from 'mongodb';
+import { MongoClient, type Db, type ObjectId } from 'mongodb';
+import { E2E_JWT_REFRESH_SECRET } from './serverSecrets';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -122,6 +124,59 @@ async function getMongoDb() {
  */
 export async function testDb(): Promise<Db> {
   return getMongoDb();
+}
+
+/** `base64url` of a string or buffer. */
+function b64url(value: string | Buffer): string {
+  return Buffer.from(value).toString('base64url');
+}
+
+/**
+ * The password-reset token `forgotPassword` would mail for this account right now.
+ *
+ * There is no SMTP under E2E, so a spec mints the link the server's mailer would
+ * have sent: an HS256 JWT under the server's own purpose key, bound to the
+ * account's current credential exactly as `forgotPassword` binds it.
+ */
+export async function mintResetToken(email: string): Promise<string> {
+  const user = await (
+    await testDb()
+  )
+    .collection<{ _id: ObjectId; email: string; authHash: string }>('users')
+    .findOne({ email });
+  expect(user, `no account for ${email}`).not.toBeNull();
+  const key = createHmac('sha256', E2E_JWT_REFRESH_SECRET).update('password_reset').digest('hex');
+  const now = Math.floor(Date.now() / 1000);
+  const header = b64url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
+  const payload = b64url(
+    JSON.stringify({
+      userId: user!._id.toHexString(),
+      purpose: 'password_reset',
+      stateHash: createHash('sha256').update(user!.authHash).digest('hex'),
+      iat: now,
+      exp: now + 3600,
+    }),
+  );
+  const signature = createHmac('sha256', key).update(`${header}.${payload}`).digest('base64url');
+  return `${header}.${payload}.${signature}`;
+}
+
+/**
+ * Fills the reset form already on screen with `password` and submits it, waiting
+ * for the completion screen (one PBKDF2 derivation in the browser).
+ */
+export async function submitPasswordReset(
+  page: Page,
+  email: string,
+  password: string = E2E_STRONG_PASSWORD,
+): Promise<void> {
+  await page.getByLabel('Email').fill(email);
+  await page.getByLabel('New Master Password').fill(password);
+  await page.getByLabel('Confirm New Password').fill(password);
+  await page.getByRole('button', { name: /reset password/i }).click();
+  await expect(page.getByRole('heading', { name: 'Password Reset Complete' })).toBeVisible({
+    timeout: PBKDF2_STEP_TIMEOUT_MS,
+  });
 }
 
 /**

@@ -87,19 +87,6 @@
       "approvedBy": ["judge:readonly"]
     },
     {
-      "id": "SUP-0010",
-      "rule": "LINT-SUPPRESS",
-      "kind": "lint-suppression",
-      "file": "packages/client/src/pages/SettingsPage.tsx",
-      "symbol": "no-unnecessary-condition -- pagination loop",
-      "maxHits": 2,
-      "reason": "The audit-log pagination loop reads a response field the API types as required; the linter therefore calls the guard redundant, while the server can legitimately omit it on an empty page.",
-      "owner": "maintainer",
-      "created": "2026-08-12",
-      "expires": "2026-11-10",
-      "approvedBy": ["judge:readonly"]
-    },
-    {
       "id": "SUP-0011",
       "rule": "LINT-SUPPRESS",
       "kind": "lint-suppression",

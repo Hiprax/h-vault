@@ -1,12 +1,5 @@
 import type { ItemType } from '@hvault/shared';
-
-const TYPE_LABELS: Record<ItemType, string> = {
-  login: 'Login',
-  note: 'Note',
-  card: 'Card',
-  identity: 'Identity',
-  secret: 'Secret',
-};
+import { ITEM_TYPE_LABELS } from './vaultDisplay';
 
 /**
  * How many times {@link valueMatches} may DESCEND into a container.
@@ -66,7 +59,7 @@ export function itemMatchesSearch(
   if (item.tags.some((tag) => tag.toLowerCase().includes(lowerQuery))) return true;
 
   // Search item type label
-  if (TYPE_LABELS[item.itemType].toLowerCase().includes(lowerQuery)) return true;
+  if (ITEM_TYPE_LABELS[item.itemType].toLowerCase().includes(lowerQuery)) return true;
 
   // Search through decrypted data fields, including nested objects and arrays
   // (see `valueMatches`). Every string is matched, including the secret ones: a

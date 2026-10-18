@@ -36,6 +36,10 @@ import {
   MAX_IMPORT_ITEMS,
   MAX_ITEMS_PER_USER,
   MAX_FOLDERS_PER_USER,
+  MAX_FIELD_IV_LENGTH,
+  MAX_WRAPPED_VAULT_KEY_LENGTH,
+  MAX_VAULT_KEY_IV_LENGTH,
+  MAX_VAULT_KEY_TAG_LENGTH,
   SECURITY_NOTIFICATION_PREFERENCE_EVENTS,
   CRITICAL_SECURITY_NOTIFICATION_EVENTS,
 } from '@hvault/shared';
@@ -471,6 +475,15 @@ const ROW_LIMIT_NOTE = (kind: 'item' | 'folder', cap: number): string =>
 /** The answer to an update that lost its row to other writers on every attempt. */
 const ROW_CHANGED_CONFLICT =
   'The same status, carrying no `data`, also answers an update whose row other requests kept changing while it was being saved (three attempts); reload and retry.';
+
+/** A rotation row's optional precondition: the IV the row carried when the client read it. */
+const PRIOR_IV_PROPERTY = { type: 'string', minLength: 1, maxLength: MAX_FIELD_IV_LENGTH };
+const PRIOR_IV_DESCRIPTION =
+  'The IV this row carried when the client READ it (`priorNameIv` and `priorDataIv` for an item, sent together or not at all; `priorNameIv` for a folder). The row is rewritten only while its stored IVs are still these: every ciphertext write mints fresh IVs, so a row an edit rewrote after the enumeration refuses the whole request with 409, and no entry is changed. Moving, favouriting, tagging and reordering never change an IV. Optional: a row without them is rewritten as before.';
+
+/** The refusal a rotation meets when a row it names changed after the page read it. */
+const ROW_CHANGED_SINCE_READ_CONFLICT =
+  ' The same status, carrying no `data`, also answers a request naming a row whose stored IVs are no longer its prior ones: an edit on another device or tab saved after the page read the vault. No entry was changed (without transactions, a refusal that arrives after the rotation started writing also leaves its new key stored as an interrupted rotation, which finishing it completes); re-read the vault and retry.';
 
 /** The list budget both vault list routes share, quoted from its constant. */
 const VAULT_LIST_BUDGET = `Rate limited: 3,100 req/user per 15 min, one budget shared by this route and the other vault list route (one full read of the largest vault every fifteen seconds). A page is sent as it is read from the database, in batches of 16 rows; its rows, their order and \`pagination\` are exactly what the query returns.`;
@@ -918,6 +931,67 @@ export const swaggerSpec: JsonObject = {
         },
       },
 
+      PurgeUnreadableRequest: {
+        type: 'object',
+        additionalProperties: false,
+        required: [
+          'authHash',
+          'encryptedVaultKey',
+          'vaultKeyIv',
+          'vaultKeyTag',
+          'items',
+          'folders',
+        ],
+        properties: {
+          authHash: {
+            type: 'string',
+            minLength: 1,
+            maxLength: 100,
+            description: 'Current auth hash, the master-password proof.',
+          },
+          encryptedVaultKey: {
+            type: 'string',
+            minLength: 1,
+            maxLength: MAX_WRAPPED_VAULT_KEY_LENGTH,
+            description:
+              "The account's wrapped vault key as the client read it when it judged the entries; refused with 409 unless it is still the stored one.",
+          },
+          vaultKeyIv: { type: 'string', minLength: 1, maxLength: MAX_VAULT_KEY_IV_LENGTH },
+          vaultKeyTag: { type: 'string', minLength: 1, maxLength: MAX_VAULT_KEY_TAG_LENGTH },
+          items: {
+            type: 'array',
+            maxItems: MAX_ITEMS_PER_USER,
+            description:
+              'Items to delete, each with the IVs it had when it was judged. No id twice.',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              required: ['id', 'nameIv', 'dataIv'],
+              properties: {
+                id: { type: 'string' },
+                nameIv: { type: 'string', minLength: 1, maxLength: MAX_FIELD_IV_LENGTH },
+                dataIv: { type: 'string', minLength: 1, maxLength: MAX_FIELD_IV_LENGTH },
+              },
+            },
+          },
+          folders: {
+            type: 'array',
+            maxItems: MAX_FOLDERS_PER_USER,
+            description:
+              'Folders to delete, each with the name IV it had when it was judged. No id twice. Together with items, at least one row.',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              required: ['id', 'nameIv'],
+              properties: {
+                id: { type: 'string' },
+                nameIv: { type: 'string', minLength: 1, maxLength: MAX_FIELD_IV_LENGTH },
+              },
+            },
+          },
+        },
+      },
+
       BulkReEncryptRequest: {
         type: 'object',
         required: ['authHash', 'items', 'newEncryptedVaultKey', 'newVaultKeyIv', 'newVaultKeyTag'],
@@ -957,6 +1031,8 @@ export const swaggerSpec: JsonObject = {
                   description:
                     "The item's previous passwords, each re-encrypted under the new key. Omit to leave the stored history as it is.",
                 },
+                priorNameIv: { ...PRIOR_IV_PROPERTY, description: PRIOR_IV_DESCRIPTION },
+                priorDataIv: { ...PRIOR_IV_PROPERTY, description: PRIOR_IV_DESCRIPTION },
               },
             },
             maxItems: 10000,
@@ -1000,6 +1076,7 @@ export const swaggerSpec: JsonObject = {
                 encryptedName: { type: 'string' },
                 nameIv: { type: 'string' },
                 nameTag: { type: 'string' },
+                priorNameIv: { ...PRIOR_IV_PROPERTY, description: PRIOR_IV_DESCRIPTION },
               },
             },
             maxItems: 1000,
@@ -1181,6 +1258,13 @@ export const swaggerSpec: JsonObject = {
               bwkIv: { type: 'string' },
               bwkTag: { type: 'string' },
               bwkSalt: { type: 'string' },
+              bwkEncryptedVaultKey: {
+                type: 'string',
+                description:
+                  'The vault key sealed under the backup wrapping key (opaque ciphertext). A master password reset leaves it alone, so afterwards it may be the only copy of the PREVIOUS vault key: the browser opens it with the backup password to recover the entries the reset left unreadable. Absent when no copy is stored.',
+              },
+              bwkVaultKeyIv: { type: 'string' },
+              bwkVaultKeyTag: { type: 'string' },
             },
           },
           autoLockTimeout: { type: 'integer', description: 'Idle minutes before lock (1-1440)' },
@@ -3321,7 +3405,47 @@ export const swaggerSpec: JsonObject = {
           404: { $ref: '#/components/responses/NotFound' },
           409: staleVaultKeyConflict(
             "Every rotation is refused for a vault key version that is not the account's current one, or for none once the account has rotated. The same status, carrying no `data`, means the rotation was refused and the vault key was NOT changed: another rotation is already running, a named row could not be updated, the payload did not cover every row the account holds, an interrupted rotation is still outstanding and this request neither adopts its pending vault key nor sets discardPendingVaultKey (a re-seal must finish it first), a re-seal named a wrapper that is not the stored one, or the payload carries a field sealed to its row without `vaultFieldFormat: 2`. Re-read the vault and retry. It is also returned before the body is read when this account already has a restore or key rotation in flight." +
+              ROW_CHANGED_SINCE_READ_CONFLICT +
               RESEAL_LOCK_BUSY,
+          ),
+          429: { $ref: '#/components/responses/RateLimited' },
+        },
+      },
+    },
+    '/vault/items/purge-unreadable': {
+      post: {
+        operationId: 'purgeUnreadableEntries',
+        tags: ['Vault'],
+        summary: 'Permanently delete entries no stored key can open',
+        description:
+          "Permanently deletes the vault items and folders the owner's browser found it cannot open with any key the account stores (what a master password reset leaves behind: it replaces the vault key and keeps every row, which still counts against the storage quota). The server holds no key and cannot tell which rows those are, so it trusts the owner's client and bounds what that can do: the master password is required; the wrapper the client judged under must still be the account's (409 otherwise, nothing deleted); nothing is deleted while an interrupted rotation is outstanding or a rotation is running (409); and each row is deleted only while its stored IVs are the ones named, so a row rewritten since the check (re-sealed, recovered, restored or edited) is kept and counted as skipped, as is another account's id. A deleted folder's items, documents and child folders move to its parent. Cannot be undone. Rate limited: 5 req/user per 15 min, one budget per account shared by every request that re-checks the master password.",
+        security: [{ bearerAuth: [], csrfToken: [] }],
+        requestBody: jsonRequestBody('PurgeUnreadableRequest'),
+        responses: {
+          200: jsonEnvelope(
+            'Unreadable entries deleted',
+            {
+              type: 'object',
+              required: ['deletedItems', 'deletedFolders', 'skippedItems', 'skippedFolders'],
+              properties: {
+                deletedItems: { type: 'integer', minimum: 0 },
+                deletedFolders: { type: 'integer', minimum: 0 },
+                skippedItems: {
+                  type: 'integer',
+                  minimum: 0,
+                  description:
+                    "Named items kept: already gone, not this account's, or rewritten since the check.",
+                },
+                skippedFolders: { type: 'integer', minimum: 0 },
+              },
+            },
+            { message: { type: 'string' } },
+            ['success', 'data'],
+          ),
+          400: { $ref: '#/components/responses/ValidationError' },
+          401: { $ref: '#/components/responses/Unauthorized' },
+          409: errorResponse(
+            "Nothing was deleted: the account's vault key changed since the entries were checked (check again), an interrupted vault key rotation is outstanding (finish it first: its key may open these entries), or a vault key rotation is running. No `data`.",
           ),
           429: { $ref: '#/components/responses/RateLimited' },
         },

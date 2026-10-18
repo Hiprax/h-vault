@@ -108,6 +108,7 @@ const SERVER_ROUTES = new Set<string>([
   'POST /vault/items/bulk-delete',
   'POST /vault/items/bulk-move',
   'POST /vault/items/bulk-reencrypt',
+  'POST /vault/items/purge-unreadable',
   'DELETE /vault/items/trash/empty',
   // routes/folders.ts
   'GET /folders',
@@ -533,6 +534,21 @@ describe('vaultApi wire contract — items', () => {
     await vaultApi.bulkReEncryptApi(payload);
     expectCall(mockPost, 'POST', '/vault/items/bulk-reencrypt', payload);
   });
+
+  it('POSTs the unreadable-entry deletion, ids and IVs in the body, to its own route', async () => {
+    const payload = {
+      authHash: 'h',
+      encryptedVaultKey: 'k',
+      vaultKeyIv: 'kiv',
+      vaultKeyTag: 'ktag',
+      items: [{ id: 'a'.repeat(24), nameIv: 'n', dataIv: 'd' }],
+      folders: [],
+    };
+    await vaultApi.purgeUnreadableApi(payload);
+    expectCall(mockPost, 'POST', '/vault/items/purge-unreadable', payload);
+    // Never the soft or permanent delete of a single row.
+    expect(mockDelete).not.toHaveBeenCalled();
+  });
 });
 
 // ===========================================================================
@@ -671,6 +687,7 @@ describe('API surface', () => {
       'listTrashApi',
       'emptyTrashApi',
       'bulkReEncryptApi',
+      'purgeUnreadableApi',
       'listFoldersApi',
       'createFolderApi',
       'updateFolderApi',

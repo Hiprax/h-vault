@@ -56,6 +56,8 @@ export default function VaultPage() {
   useEffect(() => {
     const handler = (e: Event) => {
       const count = (e as CustomEvent<{ count: number }>).detail.count;
+      // A zero is Settings' clean check lowering the banner, not a failure to report.
+      if (count < 1) return;
       toast({
         title: `${String(count)} item(s) could not be decrypted`,
         description: 'These items may be corrupted or encrypted with a different key.',

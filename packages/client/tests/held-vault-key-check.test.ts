@@ -121,7 +121,11 @@ beforeEach(async () => {
   mek = await freshMek();
   heldKey = await freshVaultKey();
   unlockedSession(heldKey);
-  useUIStore.setState({ staleVaultKeyVersion: null, interruptedRotationNotice: false });
+  useUIStore.setState({
+    staleVaultKeyVersion: null,
+    interruptedRotationNotice: false,
+    unreadableEntriesNotice: false,
+  });
   useDocumentsStore.setState({ uploads: {} });
   mockGetProfileApi.mockReset();
 });
@@ -409,6 +413,9 @@ describe('a session that holds the account key', () => {
     await settleHeldVaultKeyChecks();
 
     expect(useUIStore.getState().interruptedRotationNotice).toBe(true);
+    // The rows may open under the key that rotation was moving to: they are not
+    // offered for review as unreadable while it is outstanding.
+    expect(useUIStore.getState().unreadableEntriesNotice).toBe(false);
     expect(useAuthStore.getState().isLocked).toBe(false);
 
     now += HELD_KEY_RECHECK_MS;
@@ -417,6 +424,27 @@ describe('a session that holds the account key', () => {
     await settleHeldVaultKeyChecks();
 
     expect(useUIStore.getState().interruptedRotationNotice).toBe(false);
+  });
+
+  it('offers the unreadable entries for review when the key is the account’s and nothing explains the failures', async () => {
+    mockGetProfileApi.mockResolvedValue(await profileHolding(heldKey, mek));
+
+    checkHeldVaultKey(heldKey);
+    await settleHeldVaultKeyChecks();
+
+    expect(useUIStore.getState().unreadableEntriesNotice).toBe(true);
+    expect(useUIStore.getState().interruptedRotationNotice).toBe(false);
+    expect(useAuthStore.getState().isLocked).toBe(false);
+  });
+
+  it('never offers the review for a key that was replaced elsewhere', async () => {
+    mockGetProfileApi.mockResolvedValue(await profileHolding(await freshVaultKey(), mek));
+
+    checkHeldVaultKey(heldKey);
+    await settleHeldVaultKeyChecks();
+
+    expect(useAuthStore.getState().lockReason).toBe('vault-key-replaced');
+    expect(useUIStore.getState().unreadableEntriesNotice).toBe(false);
   });
 });
 

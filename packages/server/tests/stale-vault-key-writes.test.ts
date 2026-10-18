@@ -72,6 +72,7 @@ import {
   seedFolder,
   type TestUser,
 } from './helpers.js';
+import { expectReadFromPrimary, recordReads } from './support/primaryReads.js';
 
 /** What a rotation leaves stored as the account's wrapped vault key. */
 const ROTATED_VAULT_KEY = 'wrapper-minted-by-the-rotation';
@@ -1251,11 +1252,14 @@ describe('the two backup writes that also seal the vault key', () => {
   it('refuses a setup whose generation moved between the guard and the write', async () => {
     await seedWrapper('wrapper-the-rotation-wrote');
     racingARotation();
+    const reads = recordReads();
 
     const res = await setupBackup({ vaultKeyVersion: 0 });
 
     expect(res.status, JSON.stringify(res.body)).toBe(409);
     expect(res.body.data).toEqual({ vaultKeyVersion: 1 });
+    // The diagnosis that supplies that number reads from the primary.
+    expectReadFromPrimary(reads, 'User', 'vaultKeyVersion');
     expect(res.body.message).toMatch(/rotated elsewhere/i);
     vi.restoreAllMocks();
     expect(await storedWrapper()).toBe('wrapper-the-rotation-wrote');

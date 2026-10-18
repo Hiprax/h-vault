@@ -920,6 +920,19 @@ describe('VaultPage - decryption failure notifications', () => {
     ).toBeInTheDocument();
   });
 
+  it('says nothing for the zero a clean Settings check reports', async () => {
+    primeVaultStore();
+
+    await act(async () => {
+      renderPage(<VaultPage />);
+    });
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent('vault-decryption-failures', { detail: { count: 0 } }));
+    });
+
+    expect(screen.queryByText(/could not be decrypted/)).not.toBeInTheDocument();
+  });
+
   it('stops listening after unmount', async () => {
     primeVaultStore();
 

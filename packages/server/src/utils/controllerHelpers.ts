@@ -5,7 +5,8 @@ import { User } from '../models/User.js';
 import { Folder } from '../models/Folder.js';
 import { JobLock } from '../models/JobLock.js';
 import { acquireJobLock, releaseJobLock } from './jobLock.js';
-import { createModuleLogger } from './logger.js';
+import { createModuleLogger, errorMessage } from './logger.js';
+import { withdrawCountedRow, type CountedKind } from './vaultQuota.js';
 import { createAuditLog } from '../services/auditService.js';
 import { SESSION_INVALID_MESSAGE } from '../constants/index.js';
 
@@ -147,6 +148,10 @@ export function buildFolderAwareUpdate(update: Record<string, unknown>): Record<
   return updateOp;
 }
 
+/** The refusal a write meets while the rotation fence is raised; one sentence for every guard. */
+const VAULT_ROTATION_IN_PROGRESS_MESSAGE =
+  'Vault key rotation is in progress. Please wait and retry.';
+
 /**
  * Rejects a write that would persist NEW ciphertext under the caller's vault
  * key while a vault-key rotation is being processed for that user.
@@ -186,10 +191,15 @@ export function buildFolderAwareUpdate(update: Record<string, unknown>): Record<
  * than assumed here.
  */
 export async function assertVaultNotRotating(userId: string): Promise<void> {
-  const user = await User.findById(userId).select('rotationInProgress deletionPending').lean();
+  // From the PRIMARY, whatever the connection string prefers: a lagging secondary
+  // could still show a fence the rotation has raised as lowered.
+  const user = await User.findById(userId)
+    .read('primary')
+    .select('rotationInProgress deletionPending')
+    .lean();
   assertTenantRowLive(user);
   if (user.rotationInProgress) {
-    throw httpErrors.conflict('Vault key rotation is in progress. Please wait and retry.');
+    throw httpErrors.conflict(VAULT_ROTATION_IN_PROGRESS_MESSAGE);
   }
 }
 
@@ -748,10 +758,26 @@ export async function assertVaultKeyVersion(
   userId: string,
   supplied: number | undefined,
 ): Promise<number> {
-  const user = await User.findById(userId).select('vaultKeyVersion deletionPending').lean();
+  // From the primary: a secondary that has not seen a rotation's commit would
+  // answer the superseded generation and admit exactly the write this refuses.
+  const user = await User.findById(userId)
+    .read('primary')
+    .select('vaultKeyVersion deletionPending')
+    .lean();
   assertTenantRowLive(user);
-  const current = vaultKeyVersionOf(user);
+  return judgeVaultKeyVersion(userId, vaultKeyVersionOf(user), supplied);
+}
 
+/**
+ * The four branches of {@link assertVaultKeyVersion}'s table, given the account's
+ * current generation: ONE definition for that guard and for
+ * {@link assertVaultWritable}, which reads the generation together with the fence.
+ */
+function judgeVaultKeyVersion(
+  userId: string,
+  current: number,
+  supplied: number | undefined,
+): number {
   if (supplied === undefined) {
     if (current > 0) {
       // NOT logged, unlike `unreached` below, and the asymmetry is deliberate.
@@ -779,6 +805,47 @@ export async function assertVaultKeyVersion(
   }
 
   return current;
+}
+
+/**
+ * {@link assertVaultNotRotating} and {@link assertVaultKeyVersion} in ONE read
+ * from the primary: refuses while the rotation fence is raised (409), refuses a
+ * superseded, unreached or unnamed generation ({@link StaleVaultKeyError}), and
+ * refuses a gone or erasing account (401). Returns the current generation.
+ *
+ * ## What it is for: the check AFTER the read a write trusts
+ *
+ * The two guards above are reads taken at the top of a handler, and an item or
+ * folder save has work between them and its write. A rotation that commits in
+ * that gap used to be invisible: an update re-measured the rotated row and wrote
+ * its old-key ciphertext over it, and a create inserted a row the rotation's
+ * coverage count had already been taken without. Both stranded the row under a
+ * key the account had retired.
+ *
+ * So this runs again where the gap closes. An update calls it after every
+ * measure of the row it will write pinned on that measure's `__v`
+ * (`updateCountedRow`'s `beforeWrite`); a create calls it after its insert and
+ * withdraws the row on a refusal (`withdrawCountedRow`). That is enough without a
+ * lock, because every rotation, re-seal and rollback row write bumps `__v` AFTER
+ * the fence is raised, and the fence comes down only with (sequential path) or
+ * after (transactional path) the generation `$inc`, or after a rollback has put
+ * the old ciphertext back: a measure taken before a rotation's write misses its
+ * pin and is taken again, and one taken after it, like an insert landing after the
+ * coverage count, sees the raised fence or the new generation here.
+ */
+export async function assertVaultWritable(
+  userId: string,
+  supplied: number | undefined,
+): Promise<number> {
+  const user = await User.findById(userId)
+    .read('primary')
+    .select('rotationInProgress vaultKeyVersion deletionPending')
+    .lean();
+  assertTenantRowLive(user);
+  if (user.rotationInProgress) {
+    throw httpErrors.conflict(VAULT_ROTATION_IN_PROGRESS_MESSAGE);
+  }
+  return judgeVaultKeyVersion(userId, vaultKeyVersionOf(user), supplied);
 }
 
 /**
@@ -878,8 +945,22 @@ export async function resolveVaultKeyVersion(
   userId: string,
   supplied: number | undefined,
 ): Promise<number | null> {
+  const resolved = await orStaleVaultKey(res, () => assertVaultKeyVersion(userId, supplied));
+  return resolved === null ? null : resolved.value;
+}
+
+/**
+ * Runs `step`; a {@link StaleVaultKeyError} it throws is ANSWERED with the
+ * recoverable 409 ({@link sendStaleVaultKey}) and `null` is returned, so the
+ * caller returns at once. Any other error propagates. The value is boxed so a
+ * step that resolves to `null` itself stays distinguishable from the refusal.
+ */
+export async function orStaleVaultKey<T>(
+  res: Response,
+  step: () => Promise<T>,
+): Promise<{ value: T } | null> {
   try {
-    return await assertVaultKeyVersion(userId, supplied);
+    return { value: await step() };
   } catch (error) {
     if (error instanceof StaleVaultKeyError) {
       sendStaleVaultKey(res, error);
@@ -887,4 +968,52 @@ export async function resolveVaultKeyVersion(
     }
     throw error;
   }
+}
+
+/**
+ * The check a CREATE runs after its insert ({@link assertVaultWritable}), and
+ * what it does when that check refuses: the row it has just inserted is taken
+ * back (`withdrawCountedRow`) before the refusal is answered, so a create sealed
+ * under a key a rotation retired meanwhile leaves nothing behind and is never
+ * acknowledged. Resolves `true` when the row may stand; `false` once the
+ * recoverable 409 has been answered; otherwise throws the refusal (the fence's
+ * 409, a dead session's 401) or the error the check itself failed with, after the
+ * withdrawal. A create is never answered 201 without a passing check.
+ *
+ * A withdrawal that fails is logged with the row's id and does not change the
+ * answer: the row is then sealed under a superseded key, and it is exactly the
+ * kind of entry Settings, Unreadable entries lets the owner delete.
+ */
+export async function confirmCreatedRow(
+  res: Response,
+  kind: CountedKind,
+  userId: string,
+  row: { _id: unknown; createdAt?: unknown },
+  supplied: number | undefined,
+): Promise<boolean> {
+  let refusal: unknown;
+  try {
+    await assertVaultWritable(userId, supplied);
+    return true;
+  } catch (error) {
+    refusal = error;
+  }
+  // A gone or erasing account (the 401 `assertTenantRowLive` raises) has no
+  // counters to settle; the erasure's sweep accounts for what is left.
+  const accountLive = !(refusal instanceof ErrorHandler && refusal.statusCode === 401);
+  try {
+    await withdrawCountedRow(kind, userId, row, accountLive);
+  } catch (withdrawError) {
+    logger.error('Could not withdraw a row whose vault-key check refused it after the insert', {
+      userId,
+      kind,
+      rowId: String(row._id),
+      error: errorMessage(withdrawError),
+    });
+  }
+  if (refusal instanceof StaleVaultKeyError) {
+    sendStaleVaultKey(res, refusal);
+    return false;
+  }
+  throw refusal instanceof Error ? refusal : new Error(String(refusal));
 }

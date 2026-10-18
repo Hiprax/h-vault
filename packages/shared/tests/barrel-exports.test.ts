@@ -24,6 +24,7 @@ import {
   bulkDeleteSchema,
   bulkMoveSchema,
   bulkReEncryptSchema,
+  purgeUnreadableSchema,
   loginDataSchema,
   secretDataSchema,
   noteDataSchema,
@@ -207,6 +208,7 @@ describe('barrel exports (src/index.ts)', () => {
     expect(bulkDeleteSchema).toBeDefined();
     expect(bulkMoveSchema).toBeDefined();
     expect(bulkReEncryptSchema).toBeDefined();
+    expect(purgeUnreadableSchema).toBeDefined();
   });
 
   it('exports all decrypted vault item data schemas', () => {

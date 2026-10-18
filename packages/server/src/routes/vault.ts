@@ -23,6 +23,7 @@ import {
   bulkDeleteSchema,
   bulkMoveSchema,
   bulkReEncryptSchema,
+  purgeUnreadableSchema,
 } from '@hvault/shared';
 import {
   listItems,
@@ -37,6 +38,7 @@ import {
   listTrash,
   emptyTrash,
   bulkReEncrypt,
+  purgeUnreadable,
 } from '../controllers/vaultController.js';
 
 const router = Router();
@@ -93,6 +95,17 @@ router.post(
   sanitizeRequestBody,
   validate(bulkReEncryptSchema, 'body'),
   holdingLargeBodySlot(bulkReEncrypt),
+);
+
+// Permanently delete the entries no key the account stores can open. A
+// re-authentication endpoint (the master password is in the body), so it carries
+// `passwordVerifyLimiter` and never a looser budget. Its body is at most ~1.1 MB at
+// the row caps, inside the global 2 MB parser.
+router.post(
+  '/items/purge-unreadable',
+  passwordVerifyLimiter,
+  validate(purgeUnreadableSchema, 'body'),
+  purgeUnreadable,
 );
 
 // ── Trash ────────────────────────────────────────────────────────────

@@ -225,7 +225,9 @@ security posture, not a disclaimer.
   authenticator code costs the server no backup-code hashing.
 
   This matters more here than it would elsewhere, because resetting the master password mints a
-  new vault key, so "just reset it" is not a recovery path but total data loss; the sign-in page,
+  new vault key, so "just reset it" is not a recovery path: nothing stored before the reset opens
+  afterwards, unless encrypted backups were set up first (see
+  [After a master password reset](#after-a-master-password-reset)); the sign-in page,
   the forgot-password page and the lockout mail all point at the unlock link instead. The
   credential budget is kept separate from the budgets for token refresh and vault unlock, so that
   ordinary use of the app can never spend the allowance you need in order to sign in. No budget
@@ -486,9 +488,11 @@ security posture, not a disclaimer.
   password, with a random salt for the backup password). That raises the cost of every guess; it
   does not rescue a guessable password. Use a long, unique master password and a different,
   equally strong backup password.
-- **A lost master password.** There is no recovery path and no reset that preserves data,
-  by design — the server cannot decrypt the vault for you. The same applies to the file
-  encryption tool's password and the backup password.
+- **A lost master password.** The server cannot decrypt the vault for you, by design, and a
+  reset keeps your entries but not the key that opens them. The one way back is the backup
+  password, and only if encrypted backups were set up before the reset (see
+  [After a master password reset](#after-a-master-password-reset)). The file encryption tool's
+  password and the backup password themselves have no recovery path at all.
 - **Malware on the device.** A keylogger, a hostile browser extension, or an attacker with
   the unlocked machine defeats any password manager.
 - **Metadata.** The server necessarily learns what it must in order to function, and stores
@@ -1298,6 +1302,33 @@ on the replaced one.
 If you would rather not rely on any of this, sign out of your other devices from the Sessions
 page before rotating.
 
+### A save that races a rotation, and an edit a rotation would overwrite
+
+The generation check runs when a save arrives, and the saves that take no lock (creating or
+editing one entry or folder) kept a narrow window between that check and their write: a rotation
+committing inside it left the save's ciphertext stored under the key it had just retired. Such a
+save is now checked again once its write is decided. An edit re-reads the fence and the generation
+after its entry is pinned for writing; a rotation's rewrite of that entry always changes what it is
+pinned on, so an edit that raced one is measured again and sees the new state. A create re-reads
+both right after its insert and, if they moved, withdraws the entry it has just inserted (and its
+share of the storage quota) and answers exactly as a refused save does. Nothing is acknowledged
+that this second check did not pass, and saves still take no lock, so one account's saves keep
+running side by side.
+
+The opposite window was wider. A rotation re-encrypts what its page READ, so an entry edited on
+another device after that read was silently overwritten with the older content when the rotation
+committed. Every entry a rotation sends now carries the IVs it had when the page read it, and since
+every save seals with fresh IVs, the server rewrites an entry only while those are still the
+stored ones; otherwise the whole rotation is refused (re-read the vault and retry), no entry is
+changed and the fence comes down. On a server without transactions, a refusal that arrives once
+the rotation has started writing also leaves its new key stored as an interrupted rotation, which
+Finish Rotation completes. Moving, favouriting, tagging and reordering never change an IV,
+so they never refuse a rotation. A page from an earlier release sends no IVs and behaves as before.
+
+Every read that decides one of these writes, or hands a session the wrapped key it unlocks with,
+is made against the primary of a replica set, so a deployment whose connection string prefers
+secondaries cannot answer it from a node that has not yet seen the latest rotation.
+
 ### A rotation stopped part way through
 
 A rotation re-encrypts every entry and then swaps the vault key, and on a database that cannot
@@ -1319,8 +1350,10 @@ there is, because the browser that generated it is gone. Your account reports th
 interrupted rotation is outstanding, and finishing it re-encrypts everything under that same key
 rather than generating a third one. Until a rotation commits, nothing removes the stored key: not
 signing in, and not a rotation that fails or is refused. The one exception is a password reset,
-which replaces the vault key outright, so the old key and anything sealed under the outstanding
-one were beyond reach already.
+which replaces the vault key outright and discards the outstanding one, so whatever the crashed
+rotation had already re-sealed under it is lost for good. What was still sealed under the old
+live key may be recovered with the backup's copy of that key (see
+[After a master password reset](#after-a-master-password-reset)).
 
 Two consequences follow, and both are deliberate:
 
@@ -1349,6 +1382,51 @@ no second key is kept, because there is none. The next sign-in lowers the write 
 after any interrupted rotation, and running the re-seal again completes it. The server refuses a
 re-seal that names a key or a key generation other than the account's current one, so a page that
 has not seen a rotation made elsewhere cannot rewrite entries under a key the account has retired.
+
+### After a master password reset
+
+A reset cannot keep the vault key, because that key is sealed under a key derived from the password
+being replaced. It mints a new one and keeps every entry, so everything sealed before it stays
+stored but no longer opens: the vault hides those entries, and they still count against the
+storage quota.
+
+**One copy of the earlier key usually survives.** Setting up backup encryption stores a copy of the
+vault key sealed under the backup wrapping key, which only the backup password opens, and a reset
+does not touch it. Unless a rotation made since then replaced it, that copy is the key in use before
+the reset. Settings, **Unreadable Entries**, offers to recover with it: the browser opens the copy
+with your backup password, re-seals under your current key exactly the entries only that copy opens
+(for a document, by re-wrapping its key), and sends that as an ordinary re-seal. Your current key does
+not change, an entry it already opens is carried byte for byte, and your other devices keep working.
+Only once the server reports every entry written, and a fresh read proves the key is unchanged, is
+the backup's copy replaced with your current key; after any failure it stays as it was, to try
+again. A rotation given the backup password recovers the same way before it moves to its new key; a
+rotation without it, whose commit would remove that copy, stops and asks first; and changing the
+backup password, which also replaces it, says so.
+
+Recovery trusts the server no further than restoring a backup does. The server cannot forge the
+copy, since it never has the backup password, only hand back an older one, and recovery re-seals
+only what that copy actually opens. That is also its limit: it cannot tell an entry a reset left
+behind from an older version of an entry that a server put back, sealed under an earlier key this
+account once used. Either way it restores the content that key opens, the same rollback the row
+binding cannot prevent.
+
+**What is left can be deleted.** The server cannot tell which entries are unreadable, so the check
+runs in your browser, only after it proves that the key the session holds is the account's current
+one, and never while an interrupted rotation, whose key may open them, is outstanding. An entry is
+offered for deletion only when every field the check reads fails AES-GCM authentication under that
+key; one that partly opens, or is malformed, is reported as damaged and never offered. Deleting
+needs your master password, checked in the browser first, so a typo sends nothing and spends none
+of the re-authentication budget. The request names the wrapped key the entries were judged under,
+and the server refuses it if the account's key has changed since, while an interrupted rotation is
+outstanding, or while a rotation runs. It deletes each entry only while its IVs are still the ones
+judged, so anything saved since the check is kept and counted as such, and it records one audit
+entry with the counts, also when a later row fails after some were deleted. A stolen session without the master password cannot use it. Documents that
+no key opens are listed, and deleted, on the Documents page as before.
+
+**What stays lost.** Entries sealed before the reset when no copy was stored, or when a later
+rotation had replaced it (a backup file made before the reset may still restore them, restored with
+Overwrite); and entries a crashed rotation had already re-sealed under the key it was moving to,
+because a reset discards that key.
 
 ### Deleting a document, and why it cannot be undone
 

@@ -177,6 +177,7 @@ export function AppLayout() {
     offlineCacheError,
     staleVaultKeyVersion,
     interruptedRotationNotice,
+    unreadableEntriesNotice,
   } = useUIStore();
   const fetchItems = useVaultStore((s) => s.fetchItems);
   const fetchFolders = useVaultStore((s) => s.fetchFolders);
@@ -653,6 +654,19 @@ export function AppLayout() {
               {decryptionFailureCount} item(s) could not be decrypted. This may indicate data
               corruption or a key mismatch.
             </span>
+            {/*
+              Only once this session's key is proved to be the account's (the
+              held-key check): the rows then open under no key the account
+              stores, and Settings can recover or delete them.
+            */}
+            {unreadableEntriesNotice && (
+              <Link
+                to="/settings#unreadable-entries"
+                className="rounded px-2 py-1 text-xs font-medium text-red-700 underline hover:bg-red-100 dark:text-red-300 dark:hover:bg-red-800/30"
+              >
+                Review
+              </Link>
+            )}
             <button
               type="button"
               onClick={handleResync}

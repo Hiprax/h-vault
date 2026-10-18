@@ -156,6 +156,9 @@ async function act(failedKey: CryptoKey, verdict: Verdict): Promise<void> {
   const ui = useUIStore.getState();
   if (verdict.kind === 'current') {
     ui.setInterruptedRotationNotice(verdict.interruptedRotation);
+    // The key is the account's and no interrupted rotation explains the failures:
+    // these rows open under no key the account stores, which Settings can review.
+    ui.setUnreadableEntriesNotice(!verdict.interruptedRotation);
     return;
   }
 

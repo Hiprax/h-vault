@@ -37,6 +37,7 @@ import { cryptoManager } from '../src/utils/cryptoManager.js';
 import { TWO_FACTOR_CHALLENGE_SECONDS } from '../src/utils/twoFactorChallenge.js';
 import { cascadeDeleteUser } from '../src/utils/cascadeDelete.js';
 import { supportsTransactions } from '../src/utils/transactionSupport.js';
+import { expectReadFromPrimary, recordReads } from './support/primaryReads.js';
 import {
   authHeader,
   createTestUser,
@@ -154,6 +155,24 @@ describe('I-01: login issues a challenge row that backs the token', () => {
     const second = await passwordStep(user);
     expect((jwt.decode(second) as { jti: string }).jti).not.toBe(claims.jti);
     expect(await Challenge.countDocuments({ userId: user.id })).toBe(2);
+  });
+});
+
+describe('the second step reads the account from the primary', () => {
+  it('reads the account whose wrapper it hands the session from the primary', async () => {
+    const { user, secret } = await createTwoFactorAccount();
+    const tempToken = await passwordStep(user);
+    const reads = recordReads();
+
+    const res = await secondFactorStep(tempToken, totpNow(secret));
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body.data.encryptedVaultKey).toBe('test-encrypted-vault-key');
+    expectReadFromPrimary(
+      reads,
+      'User',
+      '+twoFactorSecret +backupCodes +encryptedVaultKey +vaultKeyIv +vaultKeyTag +secondFactorLockout',
+    );
   });
 });
 

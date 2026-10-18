@@ -480,6 +480,16 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     note: 'Takes owned ids in the BODY; covered by phase7-cross-user-edge-cases.test.ts. Admission is pinned by large-body-admission.test.ts.',
   },
   {
+    method: 'post',
+    path: '/api/v1/vault/items/purge-unreadable',
+    auth: 'required',
+    csrf: 'required',
+    limiters: ['passwordVerifyLimiter'],
+    owned: null,
+    when: 'always',
+    note: "Takes owned ids in the BODY; another account's ids are skipped, covered by purge-unreadable.test.ts.",
+  },
+  {
     method: 'delete',
     path: '/api/v1/vault/items/trash/empty',
     auth: 'required',

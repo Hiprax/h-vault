@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+### Added
+
+- **Recover the entries a master password reset left unreadable.** Settings, Unreadable Entries (also opened from a new Review link on the vault's "could not be decrypted" banner) checks every entry in the browser, after proving the session holds the account's current vault key, and lists those no stored key opens. When encrypted backups were set up before the reset, "Recover with backup password" opens the copy of the earlier vault key the backup holds and re-seals under the current key exactly what that copy opens (items, folders and document keys), sent as an ordinary re-seal: the vault key does not change, entries the current key opens are left as they are, and the backup's copy is replaced with the current key only once every entry was written. `GET /user/profile` gains `settings.backup.bwkEncryptedVaultKey`, `bwkVaultKeyIv` and `bwkVaultKeyTag`.
+- **Delete what no key opens: `POST /vault/items/purge-unreadable`.** It takes the master-password proof (`authHash`, on the password-verify budget), the stored wrapped vault key the entries were judged under, and up to 10,000 items (`id`, `nameIv`, `dataIv`) and 500 folders (`id`, `nameIv`). Each is deleted only while those IVs are still the stored ones (any other is counted as skipped), the contents of a deleted folder move to its parent, and the request is refused with `409` when the account's vault key changed since the check, while an interrupted rotation is outstanding, or while a rotation runs. The reply counts deleted and skipped items and folders; one audit entry per request, with the new action `unreadable_entries_purged` (a request that fails part-way still records what it deleted). Settings checks the master password in the browser before sending, so a typo sends nothing.
+- **A vault key rotation given the backup password also recovers what the backup's copy of an earlier key opens**, carrying those entries to the new key instead of leaving them behind.
+- **`priorNameIv` and `priorDataIv` on `POST /vault/items/bulk-reencrypt`**: per item (both or neither) and `priorNameIv` per folder, the IVs the rotating client read; see Changed.
+
+### Changed
+
+- **Behaviour change: a save that races a vault key rotation is refused instead of being stored under the key the rotation retired.** Creating or editing an item or folder now checks the rotation fence and the vault-key generation again once its write is decided; a create that fails that check removes the entry it has just inserted (storage counter included) and answers like any refused save (`409`, carrying `data.vaultKeyVersion` when the key moved).
+- **Behaviour change: a vault key rotation no longer overwrites an entry edited elsewhere after its page read the vault.** When a rotation carries the IVs its page read, the server rewrites each entry only while those are still the stored ones and otherwise refuses the whole rotation with `409` ("Re-read the vault and retry: ..."), leaving every entry as it was (on a server without transactions, a rotation refused after it started writing also leaves its new key stored as an interrupted rotation, which Finish Rotation completes). Moving, favouriting, tagging and reordering never refuse a rotation; a client that sends no IVs behaves as before.
+- **Behaviour change: a rotation that would remove the backup's copy of a vault key stops first while entries stay unreadable.** Without the backup password, a new, finished or abandoning rotation that cannot open some entries asks for the backup password, or for an explicit confirmation, before sending anything; a wrong backup password now stops a rotation before any entry is read.
+- The vault-key checks on saves, a rotation's account and document snapshots and its rollback check, the master-password change, the backup and document stale-key diagnoses, the document upload checks and both sign-in steps read the account from the primary.
+- The password reset page says what a reset does to the entries stored before it and that the backup password may recover them; the backup page says that changing the backup password replaces the stored copy of the vault key.
+- The release workflow runs on `ubuntu-26.04`, named outright instead of `ubuntu-latest`, with `actions/checkout` v7.0.1 and `actions/setup-node` v7.0.0, which run on Node 24 instead of the deprecated Node 20.
+
+### Security
+
+- SECURITY.md no longer says entries sealed before a master password reset are beyond reach: the backup's copy of the earlier key survives a reset. Its new sections set out recovery's trust model (a server can hand back an older copy but cannot forge one, and recovery restores only what that copy opens), the deletion's guards, and the save and rotation races closed in this release.
+
 ## [0.16.1] - 2026-10-18
 
 ### Added

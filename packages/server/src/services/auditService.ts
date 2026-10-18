@@ -102,6 +102,8 @@ export const AUDIT_ACTION_CLASS = {
   backup_recipients_update: 'security',
   backup_recipient_confirmed: 'security',
   backup_recipients_suspended: 'security',
+  // An irreversible bulk deletion behind the master password: never trimmed.
+  unreadable_entries_purged: 'security',
 } as const satisfies Record<AuditAction, AuditClass>;
 
 /** The actions whose class is `activity`, as a type: what the allowlist may name. */

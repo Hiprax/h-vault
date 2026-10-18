@@ -77,6 +77,7 @@ import { buildObjectKey } from '../src/utils/documentObjects.js';
 import { cascadeDeleteUser } from '../src/utils/cascadeDelete.js';
 import { createInMemoryStorage } from './helpers/inMemoryStorage.js';
 import { authHeader, createTestUser, getCsrf, type TestUser } from './helpers.js';
+import { expectReadFromPrimary, recordReads } from './support/primaryReads.js';
 
 const BYTES_PER_MB = 1024 * 1024;
 const QUOTA_BYTES = config.DOCUMENT_STORAGE_QUOTA_MB_PER_USER * BYTES_PER_MB;
@@ -681,6 +682,16 @@ describe('POST /documents/uploads/:id/complete', () => {
   // -------------------------------------------------------------------------
 
   describe('the vault-key fence and version check', () => {
+    it('reads the generation it checks from the primary, under the exclusion lock', async () => {
+      const seeded = await seedTransfer(user);
+      const reads = recordReads();
+
+      const res = await complete(user, seeded.id);
+
+      expect(res.status, JSON.stringify(res.body)).toBe(201);
+      expectReadFromPrimary(reads, 'User', 'vaultKeyVersion');
+    });
+
     it('answers 409 with the CURRENT version, keeps the transfer, and creates no row', async () => {
       const seeded = await seedTransfer(user);
       // Raised directly: the rotation that increments it commits the new vault key

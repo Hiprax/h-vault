@@ -600,6 +600,39 @@ describe('AppLayout — decryption-failure banner and reconnect sync', () => {
     );
   });
 
+  it('offers Review only once the held-key check has found the key current, linking to the Settings card', () => {
+    setupLayout();
+    renderLayout();
+    emitDecryptionFailures(2);
+    const banner = screen.getByTestId('decryption-failure-banner');
+    expect(within(banner).queryByRole('link', { name: 'Review' })).not.toBeInTheDocument();
+
+    act(() => {
+      useUIStore.setState({ unreadableEntriesNotice: true });
+    });
+
+    expect(within(banner).getByRole('link', { name: 'Review' })).toHaveAttribute(
+      'href',
+      '/settings#unreadable-entries',
+    );
+    // Re-sync and Dismiss are still there beside it.
+    expect(within(banner).getByRole('button', { name: /re-sync/i })).toBeInTheDocument();
+    expect(within(banner).getByLabelText('Dismiss decryption warning')).toBeInTheDocument();
+    act(() => {
+      useUIStore.setState({ unreadableEntriesNotice: false });
+    });
+  });
+
+  it('hides the banner when a clean check reports zero', () => {
+    setupLayout();
+    renderLayout();
+    emitDecryptionFailures(2);
+
+    emitDecryptionFailures(0);
+
+    expect(screen.queryByTestId('decryption-failure-banner')).not.toBeInTheDocument();
+  });
+
   it('re-syncs the vault and hides the banner when Re-sync is clicked', () => {
     setupLayout();
     renderLayout();

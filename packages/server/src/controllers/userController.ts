@@ -303,6 +303,14 @@ export const getProfile = catchAsync(async (req: Request, res: Response): Promis
         bwkIv: backupSettings.bwkIv,
         bwkTag: backupSettings.bwkTag,
         bwkSalt: backupSettings.bwkSalt,
+        // And the vault key sealed under that BWK. A master password reset replaces
+        // the vault key and leaves this copy alone, so after a reset it is the one
+        // remaining copy of the PREVIOUS key: what Settings' recovery opens, with the
+        // backup password, to re-seal the entries the reset left unreadable. Opaque
+        // ciphertext as well, and already in every backup file and download.
+        bwkEncryptedVaultKey: backupSettings.bwkEncryptedVaultKey,
+        bwkVaultKeyIv: backupSettings.bwkVaultKeyIv,
+        bwkVaultKeyTag: backupSettings.bwkVaultKeyTag,
       },
     },
   };
@@ -529,7 +537,8 @@ export const changePassword = catchAsync(async (req: Request, res: Response): Pr
   const userId = getUserId(req);
   const body = req.body as ChangePasswordInput;
 
-  const user = await User.findById(userId).select('+authHash');
+  // From the primary, like every vault-key read on this path (`assertVaultKeyVersion`).
+  const user = await User.findById(userId).read('primary').select('+authHash');
 
   if (!user) {
     throw httpErrors.notFound('User not found');
@@ -675,7 +684,10 @@ export const changePassword = catchAsync(async (req: Request, res: Response): Pr
     //   * pending wrapper, request carries its replacement -> move both together.
     //   * pending wrapper, request carries nothing -> refuse. See
     //     {@link InterruptedRotationNotCarried}.
-    const outstanding = await User.findById(userId).select('pendingEncryptedVaultKey').lean();
+    const outstanding = await User.findById(userId)
+      .read('primary')
+      .select('pendingEncryptedVaultKey')
+      .lean();
     const interruptedRotationOutstanding = outstanding?.pendingEncryptedVaultKey !== undefined;
     if (interruptedRotationOutstanding && rewrappedPendingVaultKey === null) {
       throw new InterruptedRotationNotCarried();
@@ -852,7 +864,9 @@ export const changePassword = catchAsync(async (req: Request, res: Response): Pr
     // over a change that did not happen — the same cost that branch's ordering
     // already accepts for a crash between its two steps, and the reason the
     // transactional branch aborts instead.
-    const current = vaultKeyVersionOf(await User.findById(userId).select('vaultKeyVersion').lean());
+    const current = vaultKeyVersionOf(
+      await User.findById(userId).read('primary').select('vaultKeyVersion').lean(),
+    );
     logger.warn('A master-password change was refused: the vault key was rotated mid-request', {
       userId,
       guarded: guardedVaultKeyVersion,

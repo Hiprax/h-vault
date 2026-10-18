@@ -182,15 +182,19 @@ describe('the vault byte counter on a replica set (transactional branches)', () 
     expect(await expectCounterExact(user)).toBe(before);
   });
 
-  it('an update that measured a row before a rotation rewrote it measures it again', async () => {
+  it('an update that measured a row before a re-seal rewrote it measures it again', async () => {
     const user = await createTestUser();
     const id = await createQuotaItem(user, 1_000);
     await expectCounterExact(user);
 
-    // Between the update's measure and its pinned write, a rotation rewrites the
-    // row (and only bumps `__v` to tell it so).
+    // Between the update's measure and its pinned write, a RE-SEAL rewrites the
+    // row under the same key (and only bumps `__v` to tell it so). A re-seal and
+    // not a rotation: after a rotation the update's re-check refuses it, because
+    // its ciphertext is sealed under the key the rotation retired
+    // (save-rotation-race.test.ts holds that); the same key leaves it valid, and
+    // what this case pins is that its second measure is counted exactly once.
     const real = mongoose.mongo.Collection.prototype.findOneAndUpdate;
-    let rotation: Awaited<ReturnType<typeof apiCall>> | undefined;
+    let reseal: Awaited<ReturnType<typeof apiCall>> | undefined;
     let updateWrites = 0;
     vi.spyOn(mongoose.mongo.Collection.prototype, 'findOneAndUpdate').mockImplementation(
       async function (this: mongoose.mongo.Collection, ...args: Parameters<typeof real>) {
@@ -201,11 +205,21 @@ describe('the vault byte counter on a replica set (transactional branches)', () 
         ) {
           updateWrites += 1;
           if (updateWrites === 1) {
-            rotation = await apiCall(
+            const stored = await User.findById(user.id)
+              .select('encryptedVaultKey vaultKeyIv vaultKeyTag')
+              .lean();
+            reseal = await apiCall(
               user,
               'post',
               '/vault/items/bulk-reencrypt',
-              rotationBody(user, [rotatedItem(id, 7_000)], []),
+              rotationBody(user, [rotatedItem(id, 7_000, 'v2:')], [], {
+                newEncryptedVaultKey: stored?.encryptedVaultKey,
+                newVaultKeyIv: stored?.vaultKeyIv,
+                newVaultKeyTag: stored?.vaultKeyTag,
+                reseal: true,
+                idempotencyKey: '00000000-0000-4000-8000-000000000017',
+                vaultKeyVersion: await vaultKeyVersionOf(user.id),
+              }),
             );
           }
         }
@@ -219,7 +233,7 @@ describe('the vault byte counter on a replica set (transactional branches)', () 
       dataTag: 'test-data-tag',
     });
 
-    expect(rotation?.status).toBe(200);
+    expect(reseal?.status).toBe(200);
     expect(updated.status).toBe(200);
     expect(updateWrites).toBe(2);
     expect((await VaultItem.findById(id).lean())?.encryptedData).toBe('u'.repeat(3_000));

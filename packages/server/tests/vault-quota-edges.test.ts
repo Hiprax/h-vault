@@ -778,3 +778,34 @@ describe('the heavy responses read rows sixteen at a time', () => {
     expect(await storedVaultBytes(user.id)).toBeGreaterThan(0);
   });
 });
+
+describe('a folder another request deletes while its own delete runs', () => {
+  it('answers success and subtracts nothing a second time', async () => {
+    const user = await createTestUser();
+    const folder = await apiCall(user, 'post', '/folders', sampleFolder());
+    const folderId = String(folder.body.data._id);
+    await createQuotaItem(user, 100, { folderId });
+    await expectCounterExact(user);
+    // The first claim of the folder row is this request's: another delete of the
+    // same folder runs to completion first, so this one finds nothing to remove.
+    const real = mongoose.mongo.Collection.prototype.findOneAndDelete;
+    let raced = false;
+    vi.spyOn(mongoose.mongo.Collection.prototype, 'findOneAndDelete').mockImplementation(
+      async function (this: mongoose.mongo.Collection, ...args: Parameters<typeof real>) {
+        if (!raced && this.collectionName === 'folders') {
+          raced = true;
+          expect((await apiCall(user, 'delete', `/folders/${folderId}`)).status).toBe(200);
+        }
+        return real.apply(this, args);
+      } as never,
+    );
+
+    const res = await apiCall(user, 'delete', `/folders/${folderId}`);
+
+    expect(raced).toBe(true);
+    expect(res.status).toBe(200);
+    expect(await Folder.countDocuments({ userId: user.id })).toBe(0);
+    expect(await VaultItem.countDocuments({ userId: user.id, folderId })).toBe(0);
+    await expectCounterExact(user);
+  });
+});

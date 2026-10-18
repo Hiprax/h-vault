@@ -39,6 +39,13 @@ import { decryptVaultField, isBoundField } from '../services/crypto/vaultField';
 import { useAuthStore } from '../stores/authStore';
 import { noteStaleVaultKey } from '../stores/uiStore';
 import { resolveBackupSignature, type BackupSignatureVerdict } from '../lib/backupSignature';
+import {
+  completeBwkWrapper,
+  hasBackupKeyCopy,
+  sameBwkWrapper,
+  unwrapBwk,
+  type BwkWrapper,
+} from '../services/crypto/backupKeyCopy';
 import { MAX_BACKUP_EMAILS } from '@hvault/shared';
 import type { IBackupLogEntry, IBackupRecipient, ItemType } from '@hvault/shared';
 
@@ -60,75 +67,6 @@ function historyCarriesBoundEntry(history: unknown): boolean {
 }
 
 const MIN_BACKUP_PASSWORD_SCORE = 3;
-
-/**
- * The four fields that make a backup-wrapping-key wrapper usable.
- *
- * The same shape arrives from two places — the account's `settings.backup` and
- * the `backupEncryption` block inside a backup file — and restore now unwraps
- * both, so the completeness test lives here once rather than twice at the call
- * site, where the two copies drifted apart.
- */
-interface BwkWrapper {
-  encryptedBWK: string;
-  bwkIv: string;
-  bwkTag: string;
-  bwkSalt: string;
-}
-
-function completeBwkWrapper(block: Partial<BwkWrapper> | undefined): BwkWrapper | null {
-  if (!block?.encryptedBWK || !block.bwkIv || !block.bwkTag || !block.bwkSalt) return null;
-  return {
-    encryptedBWK: block.encryptedBWK,
-    bwkIv: block.bwkIv,
-    bwkTag: block.bwkTag,
-    bwkSalt: block.bwkSalt,
-  };
-}
-
-/** Whether two wrappers name the same key, so it is derived once and not twice. */
-function sameBwkWrapper(a: BwkWrapper, b: BwkWrapper): boolean {
-  return (
-    a.encryptedBWK === b.encryptedBWK &&
-    a.bwkIv === b.bwkIv &&
-    a.bwkTag === b.bwkTag &&
-    a.bwkSalt === b.bwkSalt
-  );
-}
-
-/**
- * Unwrap one backup wrapping key, or `null` when this password does not open
- * THIS wrapper.
- *
- * `null` rather than a throw, because restore now tries up to two wrappers and a
- * password that opens neither is the only thing that means "incorrect backup
- * password". A failure to DERIVE, by contrast, still propagates: that is Web
- * Crypto refusing, or a hostile file's unparseable salt, and reporting either as
- * a wrong password would be a lie.
- *
- * The salt and the derived BEK are zeroed here on every exit; the unwrapped key
- * belongs to the caller, which zeroes it in its own `finally`.
- */
-async function unwrapBwk(wrapper: BwkWrapper, password: string): Promise<ArrayBuffer | null> {
-  const salt = cryptoService.base64ToArrayBuffer(wrapper.bwkSalt);
-  let bek: CryptoKey | undefined;
-  try {
-    bek = await cryptoService.deriveBEK(password, salt);
-    try {
-      return await cryptoService.decryptBWK(
-        wrapper.encryptedBWK,
-        wrapper.bwkIv,
-        wrapper.bwkTag,
-        bek,
-      );
-    } catch {
-      return null;
-    }
-  } finally {
-    cryptoService.clearKey(salt);
-    if (bek) await cryptoService.clearCryptoKey(bek);
-  }
-}
 
 /** Why a restore needs an answer before it runs. */
 type UnverifiedRestoreReason = Extract<BackupSignatureVerdict, { kind: 'unconfirmed' }>['reason'];
@@ -197,6 +135,8 @@ export default function BackupSettingsPage() {
   const [savingRecipients, setSavingRecipients] = useState(false);
   const [newEmailInput, setNewEmailInput] = useState('');
   const [isConfigured, setIsConfigured] = useState(false);
+  /** Whether the account stores a copy of a vault key under its backup key. */
+  const [backupKeyCopyStored, setBackupKeyCopyStored] = useState(false);
   const [backupPassword, setBackupPassword] = useState('');
   const [confirmBackupPassword, setConfirmBackupPassword] = useState('');
   const [setupMasterPassword, setSetupMasterPassword] = useState('');
@@ -318,6 +258,7 @@ export default function BackupSettingsPage() {
         setRecipients(stored);
         setBackupEmails(stored.map((entry) => entry.email));
         setIsConfigured(backup.isConfigured);
+        setBackupKeyCopyStored(hasBackupKeyCopy(backup));
       } catch {
         toast({ title: 'Failed to load backup settings', type: 'error' });
       } finally {
@@ -1835,6 +1776,19 @@ export default function BackupSettingsPage() {
           <CardContent>
             {showChangePassword ? (
               <div className="space-y-4">
+                {/*
+                  Changing the backup password re-seals the CURRENT vault key under
+                  a new backup key, replacing the copy stored now. After a master
+                  password reset that copy may be the only key that still opens
+                  the entries the reset left unreadable, so say so before it goes.
+                */}
+                {backupKeyCopyStored && (
+                  <p className="text-xs text-[hsl(var(--muted-foreground))]">
+                    This replaces the copy of your vault key your backup holds. If a master password
+                    reset left entries you cannot open, recover them first under Settings,
+                    Unreadable Entries.
+                  </p>
+                )}
                 <div>
                   <label htmlFor="change-backup-current-password" className="sr-only">
                     Current master password

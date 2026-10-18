@@ -73,6 +73,7 @@ import { vaultKeyVersionOf, vaultRotationLockName } from '../src/utils/controlle
 import * as jobLock from '../src/utils/jobLock.js';
 import { JobLock } from '../src/models/JobLock.js';
 import { createTestUser, authHeader, getCsrf, type TestUser } from './helpers.js';
+import { expectReadFromPrimary, recordReads } from './support/primaryReads.js';
 import { useReplicaSetConnection } from './mongoHarness.js';
 
 /** The wrapper a stale session would upload: built from the key it still holds. */
@@ -582,10 +583,14 @@ function defineChangePasswordGuardCases(expectTransactions: boolean): void {
   }
 
   it('refuses when a rotation commits between the guard read and the write', async () => {
+    const reads = recordReads();
     const res = await changePasswordRacingARotation();
 
     expect(res.status).toBe(409);
     expect(res.body.data).toEqual({ vaultKeyVersion: 1 });
+    // The number the refusal hands back is read from the primary, or a lagging
+    // secondary would send the client back with the generation it already holds.
+    expectReadFromPrimary(reads, 'User', 'vaultKeyVersion');
     const after = await User.findById(user.id).lean();
     // The wrapper the request carried was legitimate when it was built and is
     // stale by the time it arrives, so it must not be stored.

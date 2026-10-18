@@ -98,6 +98,8 @@ const ACTION_COLORS: Record<string, string> = {
   backup_recipient_confirmed: 'bg-cyan-100 text-cyan-800 dark:bg-cyan-900/30 dark:text-cyan-400',
   backup_recipients_suspended:
     'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400',
+  // An irreversible bulk deletion: red, like the other permanent losses.
+  unreadable_entries_purged: 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400',
 };
 
 const ACTION_LABELS: Record<string, string> = {
@@ -137,6 +139,7 @@ const ACTION_LABELS: Record<string, string> = {
   backup_recipients_update: 'Backup Recipients Changed',
   backup_recipient_confirmed: 'Backup Recipient Confirmed',
   backup_recipients_suspended: 'Backup Recipients Suspended',
+  unreadable_entries_purged: 'Unreadable Entries Deleted',
 };
 
 /**

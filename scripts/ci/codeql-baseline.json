@@ -13,7 +13,7 @@
       "file": "packages/client/tests/fuzz/parsers.fuzz.test.ts"
     },
     {
-      "fingerprint": "js/sql-injection::packages/server/src/controllers/authController.ts::9413d9f8ea340fd2:1",
+      "fingerprint": "js/sql-injection::packages/server/src/controllers/authController.ts::423f6edebd4979ae:1",
       "rule": "js/sql-injection",
       "file": "packages/server/src/controllers/authController.ts"
     },
@@ -51,16 +51,6 @@
       "fingerprint": "js/sql-injection::packages/server/src/controllers/userController.ts::eb84f82c7f70a8be:1",
       "rule": "js/sql-injection",
       "file": "packages/server/src/controllers/userController.ts"
-    },
-    {
-      "fingerprint": "js/sql-injection::packages/server/src/controllers/vaultController.ts::1f9732490e3513d2:1",
-      "rule": "js/sql-injection",
-      "file": "packages/server/src/controllers/vaultController.ts"
-    },
-    {
-      "fingerprint": "js/sql-injection::packages/server/src/controllers/vaultController.ts::2ae09e33d1fe9270:1",
-      "rule": "js/sql-injection",
-      "file": "packages/server/src/controllers/vaultController.ts"
     },
     {
       "fingerprint": "js/sql-injection::packages/server/src/controllers/vaultController.ts::7216de67c39b77ae:1",

@@ -145,7 +145,7 @@ globalThis.ResizeObserver = StubResizeObserver as unknown as typeof ResizeObserv
 // Imports (AFTER mocks)
 // ---------------------------------------------------------------------------
 
-import { getItemSubtitle } from '../src/lib/vaultDisplay';
+import { ITEM_TYPE_LABELS, getItemSubtitle, itemTypeLabel } from '../src/lib/vaultDisplay';
 import { useVaultStore, type DecryptedVaultItem } from '../src/stores/vaultStore';
 import { VaultList } from '../src/components/vault/VaultList';
 
@@ -739,5 +739,20 @@ describe('VaultList ordering — subtitle-then-id tiebreaker', () => {
     expect(names()[0]).toContain('Bravo');
     expect(names()[1]).toContain('Charlie');
     expect(names()[2]).toContain('Alpha');
+  });
+});
+
+describe('itemTypeLabel', () => {
+  it('names every known type from the one label table', () => {
+    for (const [type, label] of Object.entries(ITEM_TYPE_LABELS)) {
+      expect(itemTypeLabel(type)).toBe(label);
+    }
+    expect(itemTypeLabel('login')).toBe('Login');
+  });
+
+  it('names a type this client does not know neutrally, never by an inherited key', () => {
+    expect(itemTypeLabel('passkey')).toBe('Entry');
+    expect(itemTypeLabel('toString')).toBe('Entry');
+    expect(itemTypeLabel('__proto__')).toBe('Entry');
   });
 });

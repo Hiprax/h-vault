@@ -265,6 +265,9 @@ const LOGGABLE_BODY_KEYS = new Map<string, string>([
   ['parentId', METADATA],
   ['passwordHistory', METADATA],
   ['portableFormat', METADATA],
+  // A rotation's precondition: the IVs each row carried when the page read it.
+  ['priorDataIv', PUBLIC_PARAMETER],
+  ['priorNameIv', PUBLIC_PARAMETER],
   ['rememberMe', METADATA],
   // A rotation's re-seal flag: rewrite under the same key.
   ['reseal', METADATA],
@@ -503,6 +506,7 @@ describe('Request Logger Sensitive Field Masking', () => {
       shared.login2faSchema,
       shared.restoreBackupSchema,
       shared.bulkReEncryptSchema,
+      shared.purgeUnreadableSchema,
       shared.backupChangePasswordSchema,
       shared.changePasswordSchema,
     ]) {

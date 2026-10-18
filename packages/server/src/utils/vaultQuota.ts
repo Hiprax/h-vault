@@ -761,6 +761,12 @@ const PINNED_UPDATE_ATTEMPTS = 3;
  * edit was made to the row that went, and is not applied to its successor. An error from the write
  * propagates, after the reservation is handed back when the write certainly did
  * not apply.
+ *
+ * `beforeWrite` runs on the pinned path after EVERY measure (a retry's included)
+ * and before anything is reserved, so a refusal it throws leaves nothing to hand
+ * back. It is where a ciphertext write re-checks the vault key it was sealed
+ * under: anything that rewrote the row before this measure is visible to that
+ * check, and anything after it misses the pin (see `assertVaultWritable`).
  */
 export async function updateCountedRow(options: {
   kind: CountedKind;
@@ -768,8 +774,9 @@ export async function updateCountedRow(options: {
   id: string;
   update: CountedUpdate;
   extraFilter?: Record<string, unknown>;
+  beforeWrite?: () => Promise<unknown>;
 }): Promise<Record<string, unknown> | null> {
-  const { kind, userId, id, update, extraFilter = {} } = options;
+  const { kind, userId, id, update, extraFilter = {}, beforeWrite } = options;
   if (!mongoose.isObjectIdOrHexString(id)) return null;
   const rowId = new mongoose.Types.ObjectId(id);
   const owner = new mongoose.Types.ObjectId(userId);
@@ -793,6 +800,7 @@ export async function updateCountedRow(options: {
     if (!measure) return null;
     first ??= measure;
     if (!sameIncarnation(measure, first)) return null;
+    if (beforeWrite) await beforeWrite();
     const reservation = await reserveVaultWrite(userId, {
       bytes: Math.max(0, deltaOfPinnedUpdate(kind, measure, update)),
     });
@@ -866,11 +874,51 @@ export async function deleteCountedRow(
   session?: ClientSession,
 ): Promise<{ counted: number; row: Record<string, unknown> } | null> {
   const removed = await MODEL_OF[kind].collection.findOneAndDelete(filter, {
-    projection: { itemType: 1, counted: countedBytesExpression(kind) },
+    // `parentId` (a folder's): where a removed folder's contents go, read from the
+    // row this call removed rather than from an earlier read of it.
+    projection: { itemType: 1, parentId: 1, counted: countedBytesExpression(kind) },
     ...(session ? { session } : {}),
   });
   if (!removed) return null;
   return { counted: Number(removed.counted), row: removed };
+}
+
+/**
+ * Takes back ONE row this request has just created, keeping the counters exact:
+ * the row named by its id and its creation (`createdAt`, so a row created again
+ * under a reused derived id is never the one removed), its bytes and its place in
+ * the cap handed back only when the delete actually removed it.
+ *
+ * For an account that is still live it touches first, like every counted delete.
+ * For one that is gone or being erased (`accountLive: false`) it does not: the
+ * touch would refuse with 404, and the erasure's own sweep accounts for whatever
+ * is left, so the row is only deleted. Resolves to whether a row went; throws
+ * whatever the delete throws, for the caller to log.
+ */
+export async function withdrawCountedRow(
+  kind: CountedKind,
+  userId: string,
+  row: { _id: unknown; createdAt?: unknown },
+  accountLive: boolean,
+): Promise<boolean> {
+  const filter = {
+    _id: row._id,
+    userId: new mongoose.Types.ObjectId(userId),
+    createdAt: row.createdAt,
+  };
+  if (!accountLive) return (await deleteCountedRow(kind, filter)) !== null;
+  const reservation = await reserveVaultWrite(userId, { bytes: 0 });
+  const gone = await deleteCountedRow(kind, filter);
+  if (gone) {
+    await settleVaultWrite(
+      reservation,
+      -gone.counted,
+      kind === 'item' ? { items: -1 } : { folders: -1 },
+    );
+  } else {
+    await releaseVaultWrite(reservation);
+  }
+  return gone !== null;
 }
 
 /** Candidate ids one call of {@link deleteCountedItems} reads per round. */

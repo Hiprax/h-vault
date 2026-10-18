@@ -763,10 +763,13 @@ describe('ResetPasswordPage', () => {
     expect(screen.getByRole('button', { name: /reset password/i })).toBeInTheDocument();
   });
 
-  it('shows data loss warning', async () => {
+  it('warns that the vault can no longer be opened, and where a backup password may recover it', async () => {
     await renderResetPassword('/reset-password#token=test-token');
 
-    expect(screen.getByText(/vault items will become unrecoverable/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/what your vault holds can no longer be opened with it/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/your backup password may let you recover it/i)).toBeInTheDocument();
   });
 
   it('shows validation error for mismatched passwords', async () => {
@@ -1944,6 +1947,33 @@ describe('AuditLogPage', () => {
       expect(within(table).getByText(label)).toHaveClass(colour);
     }
     expect(within(table).queryByText('backup_recipients_update')).not.toBeInTheDocument();
+  });
+
+  it('names the deletion of unreadable entries in words, styled as the permanent loss it is', async () => {
+    mockGetAuditLogApi.mockResolvedValue({
+      data: {
+        success: true,
+        data: [
+          {
+            _id: 'p1',
+            action: 'unreadable_entries_purged',
+            ipAddress: '192.168.1.1',
+            userAgent: 'Chrome/120',
+            timestamp: '2026-10-18T12:00:00.000Z',
+          },
+        ],
+        pagination: { page: 1, limit: 20, total: 1, totalPages: 1 },
+      },
+    });
+
+    const { default: AuditLogPage } = await import('../src/pages/AuditLogPage');
+    await act(async () => {
+      renderWithRouter(<AuditLogPage />);
+    });
+
+    const table = await screen.findByRole('table');
+    expect(within(table).getByText('Unreadable Entries Deleted')).toHaveClass('bg-red-100');
+    expect(within(table).queryByText('unreadable_entries_purged')).not.toBeInTheDocument();
   });
 
   it('renders "Audit Log" heading', async () => {

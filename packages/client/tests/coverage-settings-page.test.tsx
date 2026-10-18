@@ -144,9 +144,34 @@ vi.mock('../src/services/crypto/cryptoService', () => ({
     deriveBEK: vi.fn(),
     decryptBWK: vi.fn(),
     encryptVaultKeyWithBWK: vi.fn(),
+    decryptVaultKeyWithBWK: vi.fn(),
     base64ToArrayBuffer: vi.fn(),
   },
 }));
+
+/**
+ * The Unreadable Entries card, replaced by its seam: the button that opens the
+ * recovery, and the props the page hands it. The card's own behaviour is
+ * `components/unreadable-entries-card.test.tsx`'s; what is under test here is the
+ * page's side of the wiring (recover mode, and the re-check it asks for after a
+ * recovery request was sent).
+ */
+const cardProps = vi.hoisted(() => ({
+  current: null as null | { recoveryAttempts: number; onRecover: () => void },
+}));
+vi.mock('../src/components/settings/UnreadableEntriesCard', async () => {
+  const { createElement } = await import('react');
+  return {
+    UnreadableEntriesCard: (props: { recoveryAttempts: number; onRecover: () => void }) => {
+      cardProps.current = props;
+      return createElement(
+        'button',
+        { type: 'button', onClick: props.onRecover },
+        'Recover with backup password',
+      );
+    },
+  };
+});
 
 vi.mock('../src/services/api/authApi', () => ({
   registerApi: vi.fn(),
@@ -465,6 +490,11 @@ const ROW_IDS = {
   'pending-row': '66c0f1a2b3c4d5e6f7a8c007',
   'pending-row-2': '66c0f1a2b3c4d5e6f7a8c008',
   f1: '66c0f1a2b3c4d5e6f7a8c009',
+  // Rows a master password reset left under the key the backup still holds a
+  // copy of, and one that no key opens at all.
+  'lost-1': '66c0f1a2b3c4d5e6f7a8c00a',
+  gone: '66c0f1a2b3c4d5e6f7a8c00b',
+  'lost-f': '66c0f1a2b3c4d5e6f7a8c00c',
 } as const;
 type RowLabel = keyof typeof ROW_IDS;
 
@@ -542,6 +572,9 @@ function installCryptoStubs() {
     tag: 'bwkVKTag',
   });
   cs.base64ToArrayBuffer.mockReturnValue(new Uint8Array(16));
+  // No fixture outside the recovery tests stores a copy of a vault key under the
+  // backup key; one that reached for it would be opening something that is not there.
+  cs.decryptVaultKeyWithBWK.mockRejectedValue(new Error('no backup copy in this fixture'));
   // The wrapped-key round trip the stale-generation retry performs. `decryptVaultKey`
   // names the wrapper AND the MEK it opened it with, and `importVaultKey` refuses
   // anything else, so a retry that unwrapped the session's own stale wrapper — or
@@ -1673,6 +1706,10 @@ describe('SettingsPage — error paths and branches', () => {
           changedAt: '2026-01-01T00:00:00.000Z',
         },
       ],
+      // The IVs the row carried when this page read it: the server rewrites it
+      // only while they are still the stored ones.
+      priorNameIv: 'i1-nameIv',
+      priorDataIv: 'i1-dataIv',
     });
     // The trashed row is bound to ITS id, not the first row's.
     expect(payload.items[2]).toMatchObject({
@@ -1685,6 +1722,7 @@ describe('SettingsPage — error paths and branches', () => {
         encryptedName: 'enc:plain:f1-name',
         nameIv: 'v2:iv:new-vault-key',
         nameTag: boundTag('new-vault-key', folderAad(ROW_IDS.f1)),
+        priorNameIv: 'f1-iv',
       },
     ]);
 
@@ -1790,6 +1828,9 @@ describe('SettingsPage — error paths and branches', () => {
             tag: boundTag('new-vault-key', historyAad(id)),
           }),
         ],
+        // The stored IVs exactly as read, the `v2:` marker included.
+        priorNameIv: 'v2:b-nameIv',
+        priorDataIv: 'v2:b-dataIv',
       }),
     ]);
     expect(payload.folders).toEqual([
@@ -1798,6 +1839,7 @@ describe('SettingsPage — error paths and branches', () => {
         encryptedName: 'enc:plain:bf-name',
         nameIv: 'v2:iv:new-vault-key',
         nameTag: boundTag('new-vault-key', folderAad(folderId)),
+        priorNameIv: 'v2:bf-iv',
       }),
     ]);
 
@@ -1864,6 +1906,10 @@ describe('SettingsPage — error paths and branches', () => {
       encryptedData: 'bad-data',
       dataIv: 'bad-dataIv',
       dataTag: 'bad-dataTag',
+      // A pass-through is pinned on what was read as well: an edit saved
+      // elsewhere after the read must refuse the rotation, not be overwritten.
+      priorNameIv: 'bad-nameIv',
+      priorDataIv: 'bad-dataIv',
     });
 
     // And the user is told, by count and by kind, rather than left to discover it.
@@ -1911,7 +1957,13 @@ describe('SettingsPage — error paths and branches', () => {
       folders: Record<string, unknown>[];
     };
     expect(payload.folders).toEqual([
-      { id: ROW_IDS.f1, encryptedName: 'f1-name', nameIv: 'f1-iv', nameTag: 'f1-tag' },
+      {
+        id: ROW_IDS.f1,
+        encryptedName: 'f1-name',
+        nameIv: 'f1-iv',
+        nameTag: 'f1-tag',
+        priorNameIv: 'f1-iv',
+      },
     ]);
     await waitFor(() => {
       expect(mockToast).toHaveBeenCalledWith(
@@ -1966,6 +2018,8 @@ describe('SettingsPage — error paths and branches', () => {
       dataIv: 'bad-dataIv',
       dataTag: 'bad-dataTag',
       passwordHistory: poisoned.passwordHistory,
+      priorNameIv: 'bad-nameIv',
+      priorDataIv: 'bad-dataIv',
     });
     // The optional field was not re-encrypted on the way through.
     expect(cs.encryptDataWithAad).not.toHaveBeenCalledWith(
@@ -3087,6 +3141,7 @@ describe('SettingsPage — error paths and branches', () => {
         encryptedName: 'enc:plain:pending-row-f1',
         nameIv: 'v2:iv:pending-vault-key',
         nameTag: boundTag('pending-vault-key', folderAad(ROW_IDS.f1)),
+        priorNameIv: 'f1-iv',
       },
     ]);
     expect(payload.documents).toEqual([
@@ -3431,6 +3486,8 @@ describe('SettingsPage — error paths and branches', () => {
           changedAt: '2026-01-01T00:00:00.000Z',
         },
       ],
+      priorNameIv: 'i1-nameIv',
+      priorDataIv: 'i1-dataIv',
     });
     expect(payload.folders).toEqual([
       {
@@ -3438,6 +3495,7 @@ describe('SettingsPage — error paths and branches', () => {
         encryptedName: 'enc:plain:f1-name',
         nameIv: 'v2:iv:old-vault-key',
         nameTag: boundTag('old-vault-key', folderAad(ROW_IDS.f1)),
+        priorNameIv: 'f1-iv',
       },
     ]);
     expect(cs.encryptData).not.toHaveBeenCalled();
@@ -4265,5 +4323,741 @@ describe('SettingsPage — error paths and branches', () => {
       clipboardClearTimeout: 30,
       theme: 'dark',
     });
+  });
+
+  // -------------------------------------------------------------------------
+  // Recovery: entries a master password reset left unreadable, re-sealed under
+  // the live key with the backup's copy of the earlier one
+  // -------------------------------------------------------------------------
+
+  const BACKUP_COPY_KEY = { key: 'backup-copy-key' } as unknown as CryptoKey;
+  const BACKUP_PASSWORD = 'BackupPass1!';
+  /** A backup that holds a copy of a vault key beside its wrapping key. */
+  const COPY_BACKUP = {
+    enabled: true,
+    scheduleHour: 3,
+    backupEmails: [],
+    isConfigured: true,
+    encryptedBWK: 'bwk',
+    bwkIv: 'iv',
+    bwkTag: 'tag',
+    bwkSalt: 'salt',
+    bwkEncryptedVaultKey: 'copy',
+    bwkVaultKeyIv: 'copy-iv',
+    bwkVaultKeyTag: 'copy-tag',
+  };
+  const COPY_SETTINGS = { ...defaultProfile.settings, backup: COPY_BACKUP };
+
+  /** AES-GCM refusing a key, as WebCrypto names it. */
+  function gcmRefusal(): Error {
+    return Object.assign(new Error('The operation failed for an operation-specific reason'), {
+      name: 'OperationError',
+    });
+  }
+
+  /**
+   * Which key opens which stored row: `lost-*` only under the backup's copy,
+   * `gone` under none, everything else under the live key.
+   */
+  function opensUnder(ciphertext: string, keyName: string): boolean {
+    if (ciphertext.startsWith('lost')) return keyName === 'backup-copy-key';
+    if (ciphertext.startsWith('gone')) return false;
+    return keyName === 'old-vault-key';
+  }
+
+  /**
+   * The crypto a recovery reaches, on top of the suite's stubs: the typed master
+   * password derives the account's MEK only when it is the right one, the backup
+   * password opens the backup wrapping key only when it is the right one, and the
+   * copy under it is a key distinct from the live one.
+   */
+  function installRecoveryStubs() {
+    cs.decryptVaultKey.mockImplementation(
+      (encrypted: string, _iv: string, _tag: string, mek: { key?: string; mek?: string }) =>
+        Promise.resolve(
+          `raw:${encrypted}:under:${mek.key ?? (mek.mek === 'MasterPassword1!' ? 'mek' : String(mek.mek))}`,
+        ),
+    );
+    cs.deriveBEK.mockImplementation((password: string) =>
+      Promise.resolve({ key: `bek:${password}` }),
+    );
+    cs.decryptBWK.mockImplementation((_e: string, _i: string, _t: string, bek: { key: string }) =>
+      bek.key === `bek:${BACKUP_PASSWORD}`
+        ? Promise.resolve(new Uint8Array(32).fill(9).buffer)
+        : Promise.reject(gcmRefusal()),
+    );
+    cs.decryptVaultKeyWithBWK.mockResolvedValue('raw:backup-copy');
+    const importSuite = cs.importVaultKey.getMockImplementation()!;
+    cs.importVaultKey.mockImplementation((raw: string) =>
+      raw === 'raw:backup-copy' ? Promise.resolve(BACKUP_COPY_KEY) : importSuite(raw),
+    );
+    const equalsSuite = cs.vaultKeyEqualsRaw.getMockImplementation()!;
+    cs.vaultKeyEqualsRaw.mockImplementation((key: unknown, raw: unknown) =>
+      raw === 'raw:backup-copy' ? Promise.resolve(false) : equalsSuite(key, raw),
+    );
+    cs.decryptData.mockImplementation(
+      (enc: string, _iv: string, _tag: string, key: { key: string }) =>
+        opensUnder(enc, key.key) ? Promise.resolve(`plain:${enc}`) : Promise.reject(gcmRefusal()),
+    );
+    mockUnwrapDek.mockImplementation(
+      (wrapped: { encryptedDek: string }, wrapKey: { wrapFor: string; under: string }) => {
+        const owner = wrapped.encryptedDek.startsWith(docId(2)) ? 'lost' : 'live';
+        const opens =
+          (owner === 'live' &&
+            wrapKey.under === 'old-vault-key' &&
+            wrapped.encryptedDek.startsWith(docId(1))) ||
+          (owner === 'lost' && wrapKey.under === 'backup-copy-key');
+        if (!opens) return Promise.reject(gcmRefusal());
+        const dek = new Uint8Array(32).fill(7);
+        issuedDeks.set(`${wrapKey.wrapFor}@${wrapKey.under}`, dek);
+        return Promise.resolve(dek);
+      },
+    );
+  }
+
+  /** The vault a reset left behind: one good row, rows only the copy opens, and one lost for good. */
+  function installStrandedVault() {
+    mockListItems.mockResolvedValue({
+      data: {
+        success: true,
+        data: [vaultItem('good'), vaultItem('lost-1', true), vaultItem('gone')],
+        pagination: { totalPages: 1 },
+      },
+    });
+    mockListFolders.mockResolvedValue({
+      data: {
+        success: true,
+        data: [
+          { _id: ROW_IDS.f1, encryptedName: 'f1-name', nameIv: 'f1-iv', nameTag: 'f1-tag' },
+          {
+            _id: ROW_IDS['lost-f'],
+            encryptedName: 'lost-f-name',
+            nameIv: 'lost-f-iv',
+            nameTag: 'lost-f-tag',
+          },
+        ],
+      },
+    });
+    mockReadDocumentsConfigFresh.mockResolvedValue({ enabled: true });
+    mockListDocuments.mockResolvedValue(
+      documentPage([documentRow(docId(1)), documentRow(docId(2)), documentRow(docId(3))]),
+    );
+  }
+
+  /** Opens the dialog from the card in recovery mode and confirms it. */
+  async function confirmRecovery(password = 'MasterPassword1!', backupPassword = BACKUP_PASSWORD) {
+    fireEvent.click(screen.getByRole('button', { name: 'Recover with backup password' }));
+    await waitFor(() => screen.getByText('Recover Unreadable Entries'));
+    fireEvent.change(screen.getByPlaceholderText('Master password'), {
+      target: { value: password },
+    });
+    fireEvent.change(screen.getByPlaceholderText('Backup password'), {
+      target: { value: backupPassword },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText('Confirm Recovery'));
+    });
+  }
+
+  /** What a recovery must leave alone: the session's key, generation and wrapper. */
+  function expectSessionUntouched() {
+    const after = useAuthStore.getState();
+    expect(after.vaultKey).toBe(OLD_VAULT_KEY);
+    expect(after.vaultKeyVersion).toBe(4);
+    expect(cs.rotateVaultKey).not.toHaveBeenCalled();
+    expect(cs.clearCryptoKey).not.toHaveBeenCalledWith(OLD_VAULT_KEY);
+  }
+
+  it('asks for the backup password a recovery needs, reading nothing without it', async () => {
+    setProfile({ settings: COPY_SETTINGS });
+    await renderSettings();
+    fireEvent.click(screen.getByRole('button', { name: 'Recover with backup password' }));
+    await waitFor(() => screen.getByText('Recover Unreadable Entries'));
+
+    expect(screen.getByText('(required)')).toBeInTheDocument();
+    fireEvent.change(screen.getByPlaceholderText('Master password'), {
+      target: { value: 'MasterPassword1!' },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText('Confirm Recovery'));
+    });
+
+    expect(mockToast).toHaveBeenCalledWith({ title: 'Backup password is required', type: 'error' });
+    expect(mockGetProfileApi).toHaveBeenCalledTimes(1);
+    expect(mockListItems).not.toHaveBeenCalled();
+    expect(mockBulkReEncrypt).not.toHaveBeenCalled();
+  });
+
+  it('re-seals under the live key only what the backup copy opens, leaving every good row as it is', async () => {
+    installRecoveryStubs();
+    installStrandedVault();
+    setProfile({ settings: COPY_SETTINGS });
+    mockBulkReEncrypt.mockResolvedValue({ data: { success: true, data: { updatedCount: 8 } } });
+    await renderSettings();
+    mockGetProfileApi.mockResolvedValue(heldKeyProfile({ settings: COPY_SETTINGS }));
+
+    await confirmRecovery();
+
+    await waitFor(() => {
+      expect(mockBulkReEncrypt).toHaveBeenCalledTimes(1);
+    });
+    const payload = mockBulkReEncrypt.mock.calls[0]![0] as Record<string, unknown> & {
+      items: Record<string, unknown>[];
+      folders: Record<string, unknown>[];
+      documents: Record<string, unknown>[];
+    };
+    // An ordinary re-seal to the server: the stored wrapper, the generation read
+    // with it, the proof of the typed password; no key is minted.
+    expect(payload).toMatchObject({
+      authHash: 'hash:MasterPassword1!',
+      reseal: true,
+      vaultKeyVersion: 7,
+      newEncryptedVaultKey: HELD_WRAPPER.encryptedVaultKey,
+      newVaultKeyIv: HELD_WRAPPER.vaultKeyIv,
+      newVaultKeyTag: HELD_WRAPPER.vaultKeyTag,
+      vaultFieldFormat: 2,
+    });
+    expect(payload.idempotencyKey).toEqual(expect.any(String));
+    const verbatim = (label: 'good' | 'gone') => ({
+      id: ROW_IDS[label],
+      encryptedName: `${label}-name`,
+      nameIv: `${label}-nameIv`,
+      nameTag: `${label}-nameTag`,
+      encryptedData: `${label}-data`,
+      dataIv: `${label}-dataIv`,
+      dataTag: `${label}-dataTag`,
+      priorNameIv: `${label}-nameIv`,
+      priorDataIv: `${label}-dataIv`,
+    });
+    const lost = ROW_IDS['lost-1'];
+    expect(payload.items).toEqual([
+      // The live key opens it: carried byte for byte.
+      verbatim('good'),
+      // Only the copy opens it: sealed again under the LIVE key, bound to its row.
+      {
+        id: lost,
+        encryptedName: 'enc:plain:lost-1-name',
+        nameIv: 'v2:iv:old-vault-key',
+        nameTag: boundTag('old-vault-key', nameAad(lost)),
+        encryptedData: 'enc:plain:lost-1-data',
+        dataIv: 'v2:iv:old-vault-key',
+        dataTag: boundTag('old-vault-key', dataAad('login', lost)),
+        passwordHistory: [
+          {
+            encryptedPassword: 'enc:plain:lost-1-pw',
+            iv: 'v2:iv:old-vault-key',
+            tag: boundTag('old-vault-key', historyAad(lost)),
+            changedAt: '2026-01-01T00:00:00.000Z',
+          },
+        ],
+        priorNameIv: 'lost-1-nameIv',
+        priorDataIv: 'lost-1-dataIv',
+      },
+      // Neither opens it: carried byte for byte and reported.
+      verbatim('gone'),
+    ]);
+    expect(payload.folders).toEqual([
+      // The live key opens it: carried byte for byte.
+      {
+        id: ROW_IDS.f1,
+        encryptedName: 'f1-name',
+        nameIv: 'f1-iv',
+        nameTag: 'f1-tag',
+        priorNameIv: 'f1-iv',
+      },
+      {
+        id: ROW_IDS['lost-f'],
+        encryptedName: 'enc:plain:lost-f-name',
+        nameIv: 'v2:iv:old-vault-key',
+        nameTag: boundTag('old-vault-key', folderAad(ROW_IDS['lost-f'])),
+        priorNameIv: 'lost-f-iv',
+      },
+    ]);
+    expect(payload.documents).toEqual([
+      {
+        id: docId(1),
+        encryptedDek: `${docId(1)}-dek`,
+        dekIv: `${docId(1)}-dekIv`,
+        dekTag: `${docId(1)}-dekTag`,
+      },
+      {
+        id: docId(2),
+        encryptedDek: `dek@old-vault-key:${docId(2)}`,
+        dekIv: 'dekIv:old-vault-key',
+        dekTag: 'dekTag:old-vault-key',
+      },
+      {
+        id: docId(3),
+        encryptedDek: `${docId(3)}-dek`,
+        dekIv: `${docId(3)}-dekIv`,
+        dekTag: `${docId(3)}-dekTag`,
+      },
+    ]);
+    // Every document key that was opened was zeroed.
+    expect([...issuedDeks.values()].every((dek) => dek.every((byte) => byte === 0))).toBe(true);
+
+    // A full count and a fresh proof: the backup's copy now holds the LIVE key.
+    await waitFor(() => {
+      expect(mockApiPost).toHaveBeenCalledWith(
+        '/backup/setup',
+        expect.objectContaining({
+          authHash: 'hash:MasterPassword1!',
+          bwkEncryptedVaultKey: 'bwkEncVK',
+          vaultKeyVersion: 7,
+        }),
+      );
+    });
+    expect(cs.encryptVaultKeyWithBWK.mock.calls[0]![0]).toBe(OLD_VAULT_KEY);
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith({
+        title: 'Recovered 3 unreadable entries',
+        description:
+          '1 item, 1 document could not be opened with either key and were left unchanged. Your backup now holds a copy of your current vault key.',
+        type: 'warning',
+      });
+    });
+    expectSessionUntouched();
+    expect(cs.clearCryptoKey).toHaveBeenCalledWith(BACKUP_COPY_KEY);
+    // The card is asked to check again.
+    expect(cardProps.current?.recoveryAttempts).toBe(1);
+  });
+
+  it('leaves the backup copy alone when the reply counts fewer rows than were sent', async () => {
+    installRecoveryStubs();
+    installStrandedVault();
+    setProfile({ settings: COPY_SETTINGS });
+    mockBulkReEncrypt.mockResolvedValue({ data: { success: true, data: { updatedCount: 7 } } });
+    await renderSettings();
+    mockGetProfileApi.mockResolvedValue(heldKeyProfile({ settings: COPY_SETTINGS }));
+
+    await confirmRecovery();
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: 'Recovered 3 unreadable entries',
+          description: expect.stringContaining(
+            'Your backup still holds the copy of the earlier key',
+          ),
+          type: 'warning',
+        }),
+      );
+    });
+    expect(mockApiPost.mock.calls.map(([url]) => url as string)).not.toContain('/backup/setup');
+    expect(cardProps.current?.recoveryAttempts).toBe(1);
+  });
+
+  it('reports the copy unchanged when updating it fails, the recovery itself being saved', async () => {
+    installRecoveryStubs();
+    installStrandedVault();
+    setProfile({ settings: COPY_SETTINGS });
+    mockBulkReEncrypt.mockResolvedValue({ data: { success: true, data: { updatedCount: 8 } } });
+    mockApiPost.mockRejectedValueOnce(new Error('the copy could not be stored'));
+    await renderSettings();
+    mockGetProfileApi.mockResolvedValue(heldKeyProfile({ settings: COPY_SETTINGS }));
+
+    await confirmRecovery();
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: 'Recovered 3 unreadable entries',
+          description: expect.stringContaining(
+            'Your backup still holds the copy of the earlier key',
+          ),
+          type: 'warning',
+        }),
+      );
+    });
+    expect(mockApiPost).toHaveBeenCalledWith('/backup/setup', expect.anything());
+    expectSessionUntouched();
+  });
+
+  it('leaves the backup copy alone when the account’s key moved before the copy could be updated', async () => {
+    installRecoveryStubs();
+    installStrandedVault();
+    setProfile({ settings: COPY_SETTINGS });
+    mockBulkReEncrypt.mockResolvedValue({ data: { success: true, data: { updatedCount: 8 } } });
+    await renderSettings();
+    mockGetProfileApi
+      .mockResolvedValueOnce(heldKeyProfile({ settings: COPY_SETTINGS }))
+      // The read after the commit: another device rotated in between.
+      .mockResolvedValue({
+        data: { success: true, data: { ...defaultProfile, settings: COPY_SETTINGS } },
+      });
+
+    await confirmRecovery();
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({ title: 'Recovered 3 unreadable entries', type: 'warning' }),
+      );
+    });
+    expect(mockApiPost.mock.calls.map(([url]) => url as string)).not.toContain('/backup/setup');
+  });
+
+  it('shows a refusal verbatim, keeps the copy, and still asks the card to check again', async () => {
+    installRecoveryStubs();
+    installStrandedVault();
+    setProfile({ settings: COPY_SETTINGS });
+    const headers = new AxiosHeaders();
+    mockBulkReEncrypt.mockRejectedValue(
+      new AxiosError('conflict', 'ERR_BAD_REQUEST', { headers }, null, {
+        status: 409,
+        statusText: 'Conflict',
+        headers: {},
+        config: { headers },
+        data: { success: false, message: 'Re-read the vault and retry.' },
+      }),
+    );
+    await renderSettings();
+    mockGetProfileApi.mockResolvedValue(heldKeyProfile({ settings: COPY_SETTINGS }));
+
+    await confirmRecovery();
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith({
+        title: 'Re-read the vault and retry.',
+        type: 'error',
+        description: 'Your backup still holds the copy of the earlier key, so you can try again.',
+      });
+    });
+    expect(mockApiPost.mock.calls.map(([url]) => url as string)).not.toContain('/backup/setup');
+    expectSessionUntouched();
+    expect(cs.clearCryptoKey).toHaveBeenCalledWith(BACKUP_COPY_KEY);
+    expect(cardProps.current?.recoveryAttempts).toBe(1);
+  });
+
+  it('says a lost reply may have been saved, and how to update the copy then', async () => {
+    installRecoveryStubs();
+    installStrandedVault();
+    setProfile({ settings: COPY_SETTINGS });
+    mockBulkReEncrypt.mockRejectedValue(lostReply());
+    await renderSettings();
+    mockGetProfileApi.mockResolvedValue(heldKeyProfile({ settings: COPY_SETTINGS }));
+
+    await confirmRecovery();
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith({
+        title: 'Failed to recover entries',
+        type: 'error',
+        description: expect.stringContaining(
+          'If the entries open after a reload, the recovery was saved',
+        ),
+      });
+    });
+    expect(mockApiPost.mock.calls.map(([url]) => url as string)).not.toContain('/backup/setup');
+  });
+
+  it('refuses a wrong master password in the browser, reading and sending nothing', async () => {
+    installRecoveryStubs();
+    setProfile({ settings: COPY_SETTINGS });
+    await renderSettings();
+    mockGetProfileApi.mockResolvedValue(heldKeyProfile({ settings: COPY_SETTINGS }));
+
+    await confirmRecovery('WrongPassword1!');
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith({
+        title: 'Recovery aborted: the master password is incorrect. Nothing was changed.',
+        type: 'error',
+      });
+    });
+    expect(cs.deriveBEK).not.toHaveBeenCalled();
+    expect(mockListItems).not.toHaveBeenCalled();
+    expect(mockBulkReEncrypt).not.toHaveBeenCalled();
+    expect(cardProps.current?.recoveryAttempts).toBe(0);
+  });
+
+  it('stops on a wrong backup password, reading and sending nothing', async () => {
+    installRecoveryStubs();
+    setProfile({ settings: COPY_SETTINGS });
+    await renderSettings();
+    mockGetProfileApi.mockResolvedValue(heldKeyProfile({ settings: COPY_SETTINGS }));
+
+    await confirmRecovery('MasterPassword1!', 'not-the-backup-password');
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith({
+        title: 'Recovery aborted: the backup password is incorrect. Nothing was changed.',
+        type: 'error',
+      });
+    });
+    expect(mockListItems).not.toHaveBeenCalled();
+    expect(mockBulkReEncrypt).not.toHaveBeenCalled();
+    // The dialog stays open for another try.
+    expect(screen.getByText('Confirm Recovery')).toBeInTheDocument();
+  });
+
+  it('has nothing to recover when the copy is the key the vault already uses', async () => {
+    installRecoveryStubs();
+    cs.vaultKeyEqualsRaw.mockImplementation((key: unknown, raw: unknown) =>
+      Promise.resolve(
+        key === OLD_VAULT_KEY &&
+          (raw === 'raw:backup-copy' || raw === `raw:${HELD_WRAPPER.encryptedVaultKey}:under:mek`),
+      ),
+    );
+    setProfile({ settings: COPY_SETTINGS });
+    await renderSettings();
+    mockGetProfileApi.mockResolvedValue(heldKeyProfile({ settings: COPY_SETTINGS }));
+
+    await confirmRecovery();
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith({
+        title:
+          'Nothing to recover: the backup copy is the vault key you already use, so it opens nothing more.',
+        type: 'error',
+      });
+    });
+    expect(mockListItems).not.toHaveBeenCalled();
+    expect(mockBulkReEncrypt).not.toHaveBeenCalled();
+  });
+
+  it('will not recover while an interrupted rotation could open the entries', async () => {
+    installRecoveryStubs();
+    setProfile({ settings: COPY_SETTINGS });
+    await renderSettings();
+    mockGetProfileApi.mockResolvedValue(
+      heldKeyProfile({ settings: COPY_SETTINGS, ...PENDING_WRAPPER }),
+    );
+
+    await confirmRecovery();
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: expect.stringContaining('finish the interrupted vault key rotation first'),
+          type: 'error',
+        }),
+      );
+    });
+    expect(cs.deriveBEK).not.toHaveBeenCalled();
+    expect(mockBulkReEncrypt).not.toHaveBeenCalled();
+  });
+
+  it('sends nothing when the copy opens none of the rows', async () => {
+    installRecoveryStubs();
+    // Every row is fine under the live key: the copy adds nothing.
+    mockListItems.mockResolvedValue({
+      data: { success: true, data: [vaultItem('good')], pagination: { totalPages: 1 } },
+    });
+    setProfile({ settings: COPY_SETTINGS });
+    await renderSettings();
+    mockGetProfileApi.mockResolvedValue(heldKeyProfile({ settings: COPY_SETTINGS }));
+
+    await confirmRecovery();
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title:
+            'Recovery aborted: the backup copy opened none of these entries, so nothing was changed.',
+          type: 'error',
+        }),
+      );
+    });
+    expect(mockBulkReEncrypt).not.toHaveBeenCalled();
+    expect(cs.clearCryptoKey).toHaveBeenCalledWith(BACKUP_COPY_KEY);
+    expect(cardProps.current?.recoveryAttempts).toBe(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // A rotation must not remove, unasked, the copy that may still recover rows
+  // -------------------------------------------------------------------------
+
+  it('stops a rotation before sending when rows stay unopened and the backup holds a copy', async () => {
+    installRecoveryStubs();
+    mockListItems.mockResolvedValue({
+      data: {
+        success: true,
+        data: [vaultItem('good'), vaultItem('lost-1')],
+        pagination: { totalPages: 1 },
+      },
+    });
+    setProfile({ settings: COPY_SETTINGS });
+    mockApiPost.mockResolvedValue({ data: { success: true } });
+    await renderSettings();
+
+    await confirmRotation();
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith({
+        title:
+          'Rotation aborted: 1 item cannot be opened in full with the keys this rotation holds, so nothing was changed.',
+        description: expect.stringContaining(
+          'Your backup holds a copy of a vault key that may open them',
+        ),
+        type: 'warning',
+      });
+    });
+    expect(mockBulkReEncrypt).not.toHaveBeenCalled();
+    // The key minted for it is destroyed; the session keeps its own.
+    expect(cs.clearCryptoKey).toHaveBeenCalledWith(NEW_VAULT_KEY);
+    expect(useAuthStore.getState().vaultKey).toBe(OLD_VAULT_KEY);
+
+    // The dialog stays open and asks: Confirm waits for the decision.
+    const confirm = screen.getByText('Confirm Rotation').closest('button')!;
+    expect(confirm).toBeDisabled();
+    fireEvent.click(screen.getByRole('checkbox', { name: /Rotate anyway/ }));
+    expect(confirm).toBeEnabled();
+    await act(async () => {
+      fireEvent.click(confirm);
+    });
+
+    await waitFor(() => {
+      expect(mockBulkReEncrypt).toHaveBeenCalledTimes(1);
+    });
+    // Rotated anyway, as confirmed: the copy is dropped, since no backup password was given.
+    await waitFor(() => {
+      expect(mockApiPost).toHaveBeenCalledWith(
+        '/backup/setup',
+        expect.not.objectContaining({ bwkEncryptedVaultKey: expect.anything() }),
+      );
+    });
+  });
+
+  it('stops a FINISHING rotation the same way, releasing the pending key it opened', async () => {
+    installHalfRotatedVault();
+    setProfile({ ...PENDING_WRAPPER, settings: COPY_SETTINGS });
+    mockListItems.mockResolvedValue({
+      data: {
+        success: true,
+        data: [vaultItem('old-row'), vaultItem('pending-row'), vaultItem('gone')],
+        pagination: { totalPages: 1 },
+      },
+    });
+    // `gone` opens under neither the live key nor the pending one.
+    cs.decryptData.mockImplementation(
+      (enc: string, _iv: string, _tag: string, key: { key: string }) => {
+        if (enc.startsWith('gone')) return Promise.reject(gcmRefusal());
+        const sealedUnder = enc.startsWith('pending-row') ? 'pending-vault-key' : 'old-vault-key';
+        return key.key === sealedUnder
+          ? Promise.resolve(`plain:${enc}`)
+          : Promise.reject(gcmRefusal());
+      },
+    );
+    await renderSettings();
+
+    await confirmFinishRotation();
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: expect.stringContaining('Rotation aborted: 1 item cannot be opened in full'),
+          type: 'warning',
+        }),
+      );
+    });
+    expect(mockBulkReEncrypt).not.toHaveBeenCalled();
+    expect(cs.clearCryptoKey).toHaveBeenCalledWith(PENDING_VAULT_KEY);
+    expect(useAuthStore.getState().vaultKey).toBe(OLD_VAULT_KEY);
+    expect(screen.getByRole('checkbox', { name: /Rotate anyway/ })).toBeInTheDocument();
+  });
+
+  it('lets a typed backup password carry what only the copy opens into the new key', async () => {
+    installRecoveryStubs();
+    mockListItems.mockResolvedValue({
+      data: {
+        success: true,
+        data: [vaultItem('good'), vaultItem('lost-1')],
+        pagination: { totalPages: 1 },
+      },
+    });
+    setProfile({ settings: COPY_SETTINGS });
+    mockApiPost.mockResolvedValue({ data: { success: true } });
+    await renderSettings();
+
+    fireEvent.click(screen.getByText('Rotate Key'));
+    await waitFor(() => screen.getByPlaceholderText('Backup password'));
+    fireEvent.change(screen.getByPlaceholderText('Master password'), {
+      target: { value: 'MasterPassword1!' },
+    });
+    fireEvent.change(screen.getByPlaceholderText('Backup password'), {
+      target: { value: BACKUP_PASSWORD },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText('Confirm Rotation'));
+    });
+
+    await waitFor(() => {
+      expect(mockBulkReEncrypt).toHaveBeenCalledTimes(1);
+    });
+    const payload = mockBulkReEncrypt.mock.calls[0]![0] as { items: Record<string, unknown>[] };
+    const lost = ROW_IDS['lost-1'];
+    // Opened with the copy, sealed under the NEW key: nothing left behind.
+    expect(payload.items[1]).toMatchObject({
+      id: lost,
+      encryptedName: 'enc:plain:lost-1-name',
+      nameTag: boundTag('new-vault-key', nameAad(lost)),
+      priorNameIv: 'lost-1-nameIv',
+    });
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({ title: 'Vault key rotated successfully', type: 'success' }),
+      );
+    });
+    expect(cs.clearCryptoKey).toHaveBeenCalledWith(BACKUP_COPY_KEY);
+  });
+
+  it('stops a rotation on a wrong backup password before reading a row', async () => {
+    installRecoveryStubs();
+    setProfile({ settings: COPY_SETTINGS });
+    await renderSettings();
+
+    fireEvent.click(screen.getByText('Rotate Key'));
+    await waitFor(() => screen.getByPlaceholderText('Backup password'));
+    fireEvent.change(screen.getByPlaceholderText('Master password'), {
+      target: { value: 'MasterPassword1!' },
+    });
+    fireEvent.change(screen.getByPlaceholderText('Backup password'), {
+      target: { value: 'not-the-backup-password' },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText('Confirm Rotation'));
+    });
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith({
+        title: 'Rotation aborted: the backup password is incorrect, so nothing was changed.',
+        type: 'error',
+      });
+    });
+    expect(mockListItems).not.toHaveBeenCalled();
+    expect(mockBulkReEncrypt).not.toHaveBeenCalled();
+    expect(cs.clearCryptoKey).toHaveBeenCalledWith(NEW_VAULT_KEY);
+  });
+
+  it('names a row whose password history alone will not open in the stop', async () => {
+    installRecoveryStubs();
+    // Name and data open under the live key; one retained password does not.
+    cs.decryptData.mockImplementation(
+      (enc: string, _iv: string, _tag: string, key: { key: string }) =>
+        enc === 'i1-pw' || key.key !== 'old-vault-key'
+          ? Promise.reject(gcmRefusal())
+          : Promise.resolve(`plain:${enc}`),
+    );
+    mockListItems.mockResolvedValue({
+      data: {
+        success: true,
+        data: [vaultItem('good'), vaultItem('i1', true)],
+        pagination: { totalPages: 1 },
+      },
+    });
+    setProfile({ settings: COPY_SETTINGS });
+    await renderSettings();
+
+    await confirmRotation();
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: expect.stringContaining('1 item cannot be opened in full'),
+          type: 'warning',
+        }),
+      );
+    });
+    expect(mockBulkReEncrypt).not.toHaveBeenCalled();
   });
 });

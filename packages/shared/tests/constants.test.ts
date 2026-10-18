@@ -872,16 +872,19 @@ describe('Enum arrays', () => {
     expect(AUDIT_ACTIONS.length).toBeGreaterThanOrEqual(26);
   });
 
-  it('AUDIT_ACTIONS has exactly 54 distinct operations (keep README in sync)', () => {
+  it('AUDIT_ACTIONS has exactly 55 distinct operations (keep README in sync)', () => {
     // The README "Audit Logging" feature line documents this exact count
-    // ("54 distinct operations"). If a new audit action is added, bump both
+    // ("55 distinct operations"). If a new audit action is added, bump both
     // this assertion and the README number together. 48th: `device_proof_revoked`
     // (F-03, a device proof revoked by its failure budget); 49th:
     // `invitation_create` (F-24); 50th-52nd: the backup recipient list approved,
     // a recipient confirmed, recipients suspended by a recovery (F-05); 53rd:
     // `token_reuse_detected` (F-16, a replayed refresh token); 54th:
-    // `unverified_account_reaped` (F-21, the system row of a reaped account).
-    expect(AUDIT_ACTIONS.length).toBe(54);
+    // `unverified_account_reaped` (F-21, the system row of a reaped account);
+    // 55th: `unreadable_entries_purged` (the owner deleting entries no stored key
+    // opens).
+    expect(AUDIT_ACTIONS.length).toBe(55);
+    expect(AUDIT_ACTIONS).toContain('unreadable_entries_purged');
     expect(AUDIT_ACTIONS).toContain('unverified_account_reaped');
     expect(AUDIT_ACTIONS).toContain('token_reuse_detected');
     expect(AUDIT_ACTIONS).toContain('device_proof_revoked');

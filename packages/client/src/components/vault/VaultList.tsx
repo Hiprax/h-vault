@@ -23,7 +23,7 @@ import {
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { itemMatchesSearch } from '../../lib/vaultSearch';
-import { getItemSubtitle } from '../../lib/vaultDisplay';
+import { ITEM_TYPE_LABELS, getItemSubtitle } from '../../lib/vaultDisplay';
 import { VAULT_SEARCH_RESULTS_ID } from './SearchBar';
 import {
   sendPaced,
@@ -73,14 +73,6 @@ const ICON_MAP: Record<ItemType, typeof Key> = {
   card: CreditCard,
   identity: User,
   secret: Lock,
-};
-
-const TYPE_LABELS: Record<ItemType, string> = {
-  login: 'Login',
-  note: 'Note',
-  card: 'Card',
-  identity: 'Identity',
-  secret: 'Secret',
 };
 
 const TYPE_BADGE_COLORS: Record<ItemType, string> = {
@@ -348,7 +340,7 @@ const VaultListItem = memo(function VaultListItem({
                 TYPE_BADGE_COLORS[item.itemType],
               )}
             >
-              {TYPE_LABELS[item.itemType]}
+              {ITEM_TYPE_LABELS[item.itemType]}
             </span>
             {subtitle && (
               <span

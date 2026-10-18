@@ -13,6 +13,8 @@ import type {
   CreateVaultItemInput,
   UpdateVaultItemInput,
   BulkReEncryptInput,
+  PurgeUnreadableInput,
+  PurgeUnreadableResult,
   CreateFolderInput,
   UpdateFolderInput,
 } from '@hvault/shared';
@@ -106,6 +108,16 @@ export function bulkReEncryptApi(
   data: BulkReEncryptInput,
 ): Promise<AxiosResponse<ApiResponse<{ updatedCount: number }>>> {
   return api.post('/vault/items/bulk-reencrypt', data);
+}
+
+/**
+ * Permanently deletes the entries no key the account stores can open, each only
+ * while its stored IVs are still the ones named. Requires the master-password proof.
+ */
+export function purgeUnreadableApi(
+  data: PurgeUnreadableInput,
+): Promise<AxiosResponse<ApiResponse<PurgeUnreadableResult>>> {
+  return api.post('/vault/items/purge-unreadable', data);
 }
 
 // ---------------------------------------------------------------------------

@@ -21,6 +21,7 @@ import type {
   bulkDeleteSchema,
   bulkMoveSchema,
   bulkReEncryptSchema,
+  purgeUnreadableSchema,
   loginDataSchema,
   secretDataSchema,
   noteDataSchema,
@@ -125,6 +126,19 @@ export type ListTrashInput = z.infer<typeof listTrashSchema>;
 export type BulkDeleteInput = z.infer<typeof bulkDeleteSchema>;
 export type BulkMoveInput = z.infer<typeof bulkMoveSchema>;
 export type BulkReEncryptInput = z.infer<typeof bulkReEncryptSchema>;
+export type PurgeUnreadableInput = z.infer<typeof purgeUnreadableSchema>;
+
+/** What `POST /vault/items/purge-unreadable` answers in `data`. */
+export interface PurgeUnreadableResult {
+  /** Item rows deleted. */
+  deletedItems: number;
+  /** Folder rows deleted (their contents moved to the folder's parent). */
+  deletedFolders: number;
+  /** Named items kept: gone already, another account's, or rewritten since the check. */
+  skippedItems: number;
+  /** Named folders kept, for the same reasons. */
+  skippedFolders: number;
+}
 
 // Folder types
 export type CreateFolderInput = z.infer<typeof createFolderSchema>;

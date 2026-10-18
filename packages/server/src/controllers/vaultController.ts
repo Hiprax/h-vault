@@ -11,11 +11,15 @@ import { createAuditLog } from '../services/auditService.js';
 import {
   acquireVaultRotationLock,
   assertFolderOwned,
+  assertMasterPasswordProof,
   assertVaultNotRotating,
+  assertVaultWritable,
   buildFolderAwareUpdate,
+  confirmCreatedRow,
   getRequestContext,
   getUserId,
   pickAllowedFields,
+  orStaleVaultKey,
   releaseVaultRotationLock,
   resolveVaultKeyVersion,
   assertVaultKeyVersion,
@@ -58,7 +62,11 @@ import type {
   BulkDeleteInput,
   BulkMoveInput,
   BulkReEncryptInput,
+  PurgeUnreadableInput,
+  PurgeUnreadableResult,
 } from '@hvault/shared';
+import { SESSION_INVALID_MESSAGE } from '../constants/index.js';
+import { removeFolderIfUnchanged } from './folderController.js';
 
 const logger = createModuleLogger('vault-controller');
 
@@ -155,6 +163,53 @@ const RESEAL_KEY_MOVED_MESSAGE =
 const ROTATION_TRANSACTION_OPTIONS = {
   readConcern: { level: 'snapshot' },
 } as const;
+
+/**
+ * What a rotation (or re-seal, finish, discard) is told when a row it names was
+ * rewritten after the page enumerated it. Under 200 characters, remedy first.
+ */
+const ROW_CHANGED_SINCE_READ_MESSAGE =
+  'Re-read the vault and retry: an entry changed on another device or tab after this page ' +
+  'read it, and continuing would undo that edit. No entry was changed.';
+
+/** The IV preconditions of one rotation row write, as filter fragments. */
+type ReadPin = Partial<Record<'nameIv' | 'dataIv', { $eq: string }>>;
+
+/**
+ * The precondition a rotation's write of one item carries when the client named
+ * the IVs the item had when it was READ (`priorNameIv`, `priorDataIv`).
+ *
+ * Every ciphertext write mints fresh IVs, so stored IVs equal to those mean the
+ * ciphertext this client opened and re-sealed is still the one stored. A row an
+ * edit rewrote after the enumeration no longer matches, and the rotation is
+ * refused rather than overwriting that edit with the older content. Moving,
+ * favouriting, tagging and reordering never touch an IV, so they never refuse
+ * one. An older page names no priors and gets no precondition, as before. The
+ * values go through `$eq` so a request value can only ever be compared.
+ */
+function itemReadPin(item: {
+  priorNameIv?: string | undefined;
+  priorDataIv?: string | undefined;
+}): ReadPin {
+  return item.priorNameIv !== undefined && item.priorDataIv !== undefined
+    ? { nameIv: { $eq: item.priorNameIv }, dataIv: { $eq: item.priorDataIv } }
+    : {};
+}
+
+/** {@link itemReadPin} for a folder, whose one sealed field is its name. */
+function folderReadPin(folder: { priorNameIv?: string | undefined }): ReadPin {
+  return folder.priorNameIv !== undefined ? { nameIv: { $eq: folder.priorNameIv } } : {};
+}
+
+/** Whether a stored row still carries the IVs `pin` requires (an empty pin always does). */
+function matchesReadPin(
+  row: { nameIv?: unknown; dataIv?: unknown } | undefined,
+  pin: ReadPin,
+): boolean {
+  return Object.entries(pin).every(
+    ([field, condition]) => row?.[field as keyof ReadPin] === condition.$eq,
+  );
+}
 
 /**
  * Lifts the rotation fence, and NOTHING ELSE.
@@ -370,6 +425,13 @@ export const createItem = catchAsync(async (req: Request, res: Response): Promis
     throw err;
   }
 
+  // Checked again now that the row exists. A rotation that raised its fence
+  // after the checks above, and counted the account's rows before this insert,
+  // would commit without it and leave it sealed under the key it retires; the
+  // fence or the moved generation is visible here, and the row is withdrawn
+  // before the refusal is answered (`assertVaultWritable`, `confirmCreatedRow`).
+  if (!(await confirmCreatedRow(res, 'item', userId, item, body.vaultKeyVersion))) return;
+
   const createCtx = getRequestContext(req);
   await createAuditLog(
     userId,
@@ -416,7 +478,21 @@ export const updateItem = catchAsync(async (req: Request, res: Response): Promis
 
   // Through the quota (F-24): a growing update is reserved and refused past the
   // quota, the write is pinned on the row it measured, and the change is settled.
-  const updated = await updateCountedRow({ kind: 'item', userId, id, update: updateOp });
+  // The vault key is checked again after EVERY measure (`beforeWrite`): a rotation
+  // that rewrote this row before the measure is visible to that check, and one
+  // that rewrites it after misses the pin, so old-key ciphertext never lands on a
+  // rotated row. A stale generation found there is answered with its number.
+  const written = await orStaleVaultKey(res, () =>
+    updateCountedRow({
+      kind: 'item',
+      userId,
+      id,
+      update: updateOp,
+      beforeWrite: () => assertVaultWritable(userId, body.vaultKeyVersion),
+    }),
+  );
+  if (written === null) return;
+  const updated = written.value;
 
   if (!updated) {
     throw httpErrors.notFound('Vault item not found');
@@ -740,7 +816,11 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
   }
 
   // Verify the user's password before allowing vault key rotation
-  const user = await User.findById(userId).select('+authHash');
+  // Every read of the account in this handler is from the PRIMARY: the hash here
+  // becomes the commit's credential filter, and a lagging secondary would answer
+  // the idempotency, wrapper, outstanding-rotation and rollback questions below
+  // with a state a committed write has already moved past.
+  const user = await User.findById(userId).read('primary').select('+authHash');
   if (!user) {
     throw httpErrors.notFound('User not found');
   }
@@ -823,7 +903,10 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
   let alreadyRotated = false;
   try {
     if (idempotencyKey !== undefined) {
-      const committed = await User.findById(userId).select('lastRotationKey').lean();
+      const committed = await User.findById(userId)
+        .read('primary')
+        .select('lastRotationKey')
+        .lean();
       alreadyRotated = committed?.lastRotationKey === idempotencyKey;
     }
   } catch (readError) {
@@ -876,6 +959,7 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
       // Read for every request (one small projection) so the re-seal's proof keeps
       // its place; only a re-seal compares it.
       const stored = await User.findById(userId)
+        .read('primary')
         .select('encryptedVaultKey vaultKeyIv vaultKeyTag')
         .lean();
       if (
@@ -976,7 +1060,10 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
     // Placed after the authoritative idempotency check so a retransmission of a
     // rotation that already committed is still answered as a success rather than
     // refused for a wrapper its own commit removed.
-    const outstanding = await User.findById(userId).select('pendingEncryptedVaultKey').lean();
+    const outstanding = await User.findById(userId)
+      .read('primary')
+      .select('pendingEncryptedVaultKey')
+      .lean();
     const pendingWrapper = outstanding?.pendingEncryptedVaultKey;
     if (
       pendingWrapper !== undefined &&
@@ -1143,20 +1230,27 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
           // rotation's change a second time.
           for (const item of items) {
             const result = await VaultItem.updateOne(
-              { _id: item.id, userId },
+              { _id: new mongoose.Types.ObjectId(item.id), userId, ...itemReadPin(item) },
               { $set: buildItemSet(item), $inc: { __v: 1 } },
               { session: txnSession },
             );
 
             if (result.matchedCount === 0) {
-              throw httpErrors.notFound(`Vault item ${item.id} not found`);
+              // A row that is still there missed only the read pin: it changed
+              // after the page read it.
+              throw (await VaultItem.exists({
+                _id: new mongoose.Types.ObjectId(item.id),
+                userId,
+              }).session(txnSession))
+                ? httpErrors.conflict(ROW_CHANGED_SINCE_READ_MESSAGE)
+                : httpErrors.notFound(`Vault item ${item.id} not found`);
             }
           }
 
           // Update all folders with new encrypted names
           for (const folder of folders) {
             const folderResult = await Folder.updateOne(
-              { _id: folder.id, userId },
+              { _id: new mongoose.Types.ObjectId(folder.id), userId, ...folderReadPin(folder) },
               {
                 $set: {
                   encryptedName: folder.encryptedName,
@@ -1169,7 +1263,12 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
             );
 
             if (folderResult.matchedCount === 0) {
-              throw httpErrors.notFound(`Folder ${folder.id} not found`);
+              throw (await Folder.exists({
+                _id: new mongoose.Types.ObjectId(folder.id),
+                userId,
+              }).session(txnSession))
+                ? httpErrors.conflict(ROW_CHANGED_SINCE_READ_MESSAGE)
+                : httpErrors.notFound(`Folder ${folder.id} not found`);
             }
           }
 
@@ -1323,6 +1422,7 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
       // no second copy of its plaintext anywhere. Only the three wrap fields are
       // read, because only those three are ever written.
       const documentSnapshots = await Document.find({ _id: { $in: documentIds }, userId })
+        .read('primary')
         .select('_id encryptedDek dekIv dekTag')
         .lean();
 
@@ -1351,11 +1451,32 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
         throw httpErrors.conflict(rotationFailureMessage());
       }
 
+      const itemSnapshotById = new Map(itemSnapshots.map((s) => [String(s._id), s]));
+      const folderSnapshotById = new Map(folderSnapshots.map((s) => [String(s._id), s]));
+      const documentSnapshotById = new Map(documentSnapshots.map((s) => [String(s._id), s]));
+
+      // The read pins (`itemReadPin`), checked against the snapshot BEFORE the
+      // fence goes up: a row an edit rewrote after the page enumerated it refuses
+      // the rotation here, before anything is written. An edit landing between
+      // this snapshot and a row's write misses that write's pin instead
+      // (`writePinnedRow`), which aborts and rolls back as any failed write does.
+      if (
+        items.some((item) => !matchesReadPin(itemSnapshotById.get(item.id), itemReadPin(item))) ||
+        folders.some(
+          (folder) => !matchesReadPin(folderSnapshotById.get(folder.id), folderReadPin(folder)),
+        )
+      ) {
+        logger.warn('Vault key rotation refused: a row changed after the page read it', { userId });
+        throw httpErrors.conflict(ROW_CHANGED_SINCE_READ_MESSAGE);
+      }
+
       // Track items and folders successfully written with NEW ciphertext so we
       // can roll them back to the snapshot if a later write fails.
       const writtenItemIds: string[] = [];
       const writtenFolderIds: string[] = [];
       const writtenDocumentIds: string[] = [];
+      /** Whether the abort is a row's read pin missing, which has its own refusal. */
+      let changedSinceRead = false;
       /**
        * The IVs this rotation wrote into each row (`item:<id>` / `folder:<id>`).
        * Every IV is fresh, so a row that still carries them still holds exactly
@@ -1399,9 +1520,6 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
       // (item, folder) cap of ~10k × 1k respectively — fine on success (rollback
       // never runs) but several seconds wall-time when an unlucky late failure
       // forced a large rollback.
-      const itemSnapshotById = new Map(itemSnapshots.map((s) => [String(s._id), s]));
-      const folderSnapshotById = new Map(folderSnapshots.map((s) => [String(s._id), s]));
-      const documentSnapshotById = new Map(documentSnapshots.map((s) => [String(s._id), s]));
 
       // ── The byte quota's view of each rewritten row (F-24) ──────────────
       //
@@ -1493,10 +1611,11 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
         id: string,
         update: { $set: Record<string, unknown> },
         first: RowMeasure,
-      ): Promise<RowMeasure | null> => {
+        readPin: ReadPin,
+      ): Promise<RowMeasure | 'changed' | null> => {
         let measure: RowMeasure | undefined = first;
         for (let attempt = 0; attempt < 3 && measure !== undefined; attempt += 1) {
-          const filter = { _id: id, userId, ...versionPin(measure) };
+          const filter = { _id: id, userId, ...versionPin(measure), ...readPin };
           const result = await pinnedRotationWrite(kind, filter, update, measure);
           if (result.matchedCount === 1) {
             quotaDelta += deltaOfPinnedUpdate(kind, measure, update);
@@ -1525,10 +1644,19 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
             {
               _id: new mongoose.Types.ObjectId(id),
               userId: new mongoose.Types.ObjectId(userId),
+              ...readPin,
             },
             itemSnap ? measuredFields(update, itemRollbackUpdate(itemSnap)) : update,
           );
           measure = sameIncarnation(again, first) ? again : undefined;
+        }
+        // Still there, but no longer carrying the IVs the page read: an edit
+        // rewrote it between the snapshot and this write.
+        if (Object.keys(readPin).length > 0) {
+          const rowFilter = { _id: new mongoose.Types.ObjectId(id), userId };
+          const present =
+            kind === 'item' ? await VaultItem.exists(rowFilter) : await Folder.exists(rowFilter);
+          if (present) return 'changed';
         }
         return null;
       };
@@ -1601,7 +1729,10 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
        */
       const rollbackWouldDestroyACommittedRotation = async (): Promise<boolean> => {
         try {
-          const committed = await User.findById(userId).select('encryptedVaultKey').lean();
+          const committed = await User.findById(userId)
+            .read('primary')
+            .select('encryptedVaultKey')
+            .lean();
           return committed?.encryptedVaultKey === newEncryptedVaultKey;
         } catch (readErr) {
           logger.error(
@@ -1759,11 +1890,17 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
                   item.id,
                   update,
                   measureImage('item', snap, measuredFields(update, itemRollbackUpdate(snap))),
+                  itemReadPin(item),
                 )
               : null;
 
             if (written === null) {
               rotationItemErrors.push({ id: item.id, error: 'Vault item not found' });
+              break;
+            }
+            if (written === 'changed') {
+              rotationItemErrors.push({ id: item.id, error: 'Changed after the vault was read' });
+              changedSinceRead = true;
               break;
             }
             writtenItemIds.push(item.id);
@@ -1792,11 +1929,20 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
                     folder.id,
                     update,
                     measureImage('folder', snap, update),
+                    folderReadPin(folder),
                   )
                 : null;
 
               if (written === null) {
                 rotationFolderErrors.push({ id: folder.id, error: 'Folder not found' });
+                break;
+              }
+              if (written === 'changed') {
+                rotationFolderErrors.push({
+                  id: folder.id,
+                  error: 'Changed after the vault was read',
+                });
+                changedSinceRead = true;
                 break;
               }
               writtenFolderIds.push(folder.id);
@@ -1871,7 +2017,9 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
           // as whatever was last successfully committed (i.e. unchanged).
           await lowerRotationFence(userId);
 
-          throw httpErrors.conflict(rotationFailureMessage());
+          throw httpErrors.conflict(
+            changedSinceRead ? ROW_CHANGED_SINCE_READ_MESSAGE : rotationFailureMessage(),
+          );
         }
 
         // Conditioned on the credential this request authenticated against — see
@@ -2007,5 +2155,143 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
       ...(rotationFolderErrors.length > 0 ? { folderErrors: rotationFolderErrors } : {}),
       ...(rotationDocumentErrors.length > 0 ? { documentErrors: rotationDocumentErrors } : {}),
     },
+  });
+});
+
+/**
+ * What a purge is told when the account's vault key is no longer the one its client
+ * judged the entries under. Under 200 characters, remedy first.
+ */
+const PURGE_KEY_MOVED_MESSAGE =
+  "Check the entries again, then retry: this account's vault key changed since they were " +
+  'checked, so nothing was deleted.';
+
+/** What a purge is told while an interrupted rotation's key could still open the entries. */
+const PURGE_INTERRUPTED_ROTATION_MESSAGE =
+  'Finish the interrupted vault key rotation first: these entries may open under the key it ' +
+  'was moving to. Nothing was deleted.';
+
+/**
+ * `POST /vault/items/purge-unreadable`: permanently deletes the entries and folders
+ * no key the account stores can open, which a master password reset leaves behind
+ * (it replaces the vault key and touches no row), so they stop filling the quota.
+ *
+ * ## What the server can and cannot know
+ *
+ * It holds no key, so it cannot tell which rows are unreadable: the owner's client
+ * decides, after proving it holds the account's current key, and names each row
+ * with the IVs it had when it was judged. The server's part is to make that
+ * judgement impossible to apply to anything else:
+ *
+ * - the master password (`passwordVerifyLimiter` on the route; a wrong one is
+ *   audited as `password_verification_failed`), so a stolen session alone cannot
+ *   delete anything here;
+ * - the same-key proof: the wrapper the client judged under must still be the
+ *   account's, because a reset replaces the key WITHOUT moving `vaultKeyVersion`;
+ * - no interrupted rotation (its pending key may open these rows) and no rotation
+ *   running (its fence);
+ * - every row deleted ONLY while its stored IVs are the ones named. Every ciphertext
+ *   write mints fresh IVs, so a row re-sealed, recovered, restored or edited since
+ *   the check is kept and counted as skipped, and another account's id matches
+ *   nothing. That pin is what makes this safe without the rotation lock: whether a
+ *   given ciphertext opens can only change by rewriting it.
+ *
+ * Items are deleted row by row through the quota (each row's bytes subtracted by
+ * the call that removed it, settled in a `finally`). Folders go through
+ * `removeFolderIfUnchanged`, which claims the folder first and only then moves its
+ * members and child folders up to its parent. One `unreadable_entries_purged` audit
+ * row carries the four counts.
+ */
+export const purgeUnreadable = catchAsync(async (req: Request, res: Response): Promise<void> => {
+  const userId = getUserId(req);
+  const body = req.body as PurgeUnreadableInput;
+
+  const user = await User.findById(userId).read('primary').select('+authHash').lean();
+  if (!user || user.deletionPending === true) {
+    throw httpErrors.unauthorized(SESSION_INVALID_MESSAGE);
+  }
+  await assertMasterPasswordProof(req, user, body.authHash, 'purge_unreadable');
+  if (
+    user.encryptedVaultKey !== body.encryptedVaultKey ||
+    user.vaultKeyIv !== body.vaultKeyIv ||
+    user.vaultKeyTag !== body.vaultKeyTag
+  ) {
+    throw httpErrors.conflict(PURGE_KEY_MOVED_MESSAGE);
+  }
+  if (user.pendingEncryptedVaultKey !== undefined) {
+    throw httpErrors.conflict(PURGE_INTERRUPTED_ROTATION_MESSAGE);
+  }
+  await assertVaultNotRotating(userId);
+
+  const owner = new mongoose.Types.ObjectId(userId);
+  const result: PurgeUnreadableResult = {
+    deletedItems: 0,
+    deletedFolders: 0,
+    skippedItems: 0,
+    skippedFolders: 0,
+  };
+
+  // Every deletion here is irreversible, so it is audited whatever happens after it:
+  // a request that fails part-way still records what it removed, marked as not
+  // completed. (`createAuditLog` never throws, so it cannot mask the failure.)
+  const ctx = getRequestContext(req);
+  let completed = false;
+  try {
+    // Touch first (F-24), settle what went in a `finally`: a failure part-way still
+    // settles the rows it removed.
+    const reservation = await reserveVaultWrite(userId, { bytes: 0 });
+    let removedBytes = 0;
+    try {
+      for (const row of body.items) {
+        const gone = await deleteCountedRow('item', {
+          _id: new mongoose.Types.ObjectId(row.id),
+          userId: owner,
+          nameIv: { $eq: row.nameIv },
+          dataIv: { $eq: row.dataIv },
+        });
+        if (gone) {
+          result.deletedItems += 1;
+          removedBytes += gone.counted;
+        } else {
+          result.skippedItems += 1;
+        }
+      }
+    } finally {
+      await settleVaultWrite(reservation, -removedBytes, { items: -result.deletedItems });
+    }
+
+    for (const folder of body.folders) {
+      // The canonical hex of the id the schema proved is an ObjectId: the folder
+      // helpers build their filters from a string, never from a value off the body.
+      const folderId = new mongoose.Types.ObjectId(folder.id).toHexString();
+      const removed = await removeFolderIfUnchanged(
+        userId,
+        folderId,
+        { nameIv: { $eq: folder.nameIv } },
+        () => {
+          result.deletedFolders += 1;
+        },
+      );
+      if (!removed) result.skippedFolders += 1;
+    }
+    completed = true;
+  } finally {
+    if (completed || result.deletedItems + result.deletedFolders > 0) {
+      await createAuditLog(
+        userId,
+        'unreadable_entries_purged',
+        { ...result, ...(completed ? {} : { completed: false }) },
+        ctx.ip,
+        ctx.userAgent,
+      );
+    }
+  }
+
+  logger.info('Unreadable entries purged', { userId, ...result });
+
+  res.status(200).json({
+    success: true,
+    data: result,
+    message: `${String(result.deletedItems + result.deletedFolders)} unreadable entries deleted`,
   });
 });

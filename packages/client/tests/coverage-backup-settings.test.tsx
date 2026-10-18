@@ -2434,6 +2434,29 @@ describe('BackupSettingsPage — emails, download, restore branches', () => {
     expect(body.bwkEncryptedVaultKey).toBeDefined();
   });
 
+  it('warns that a backup-password change replaces the stored copy of the vault key, only when one is stored', async () => {
+    const NOTE = /This replaces the copy of your vault key your backup holds/;
+    mockGetProfileApi.mockResolvedValue(
+      profileWith({
+        ...CONFIGURED_BACKUP,
+        bwkEncryptedVaultKey: 'copy',
+        bwkVaultKeyIv: 'copy-iv',
+        bwkVaultKeyTag: 'copy-tag',
+      }),
+    );
+    const view = await renderBackup();
+    await waitFor(() => screen.getByText('Change backup encryption password'));
+    fireEvent.click(screen.getByText('Change backup encryption password'));
+    expect(screen.getByText(NOTE)).toBeInTheDocument();
+    view.unmount();
+
+    mockGetProfileApi.mockResolvedValue(profileWith(CONFIGURED_BACKUP));
+    await renderBackup();
+    await waitFor(() => screen.getByText('Change backup encryption password'));
+    fireEvent.click(screen.getByText('Change backup encryption password'));
+    expect(screen.queryByText(NOTE)).not.toBeInTheDocument();
+  });
+
   it('names the vault-key generation when it re-keys backup encryption', async () => {
     await renderBackup();
     await waitFor(() => screen.getByText('Change backup encryption password'));
