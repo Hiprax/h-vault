@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useParams, Navigate, useNavigate } from 'react-router';
 import { Loader2 } from 'lucide-react';
 import { VaultItemDetail } from '../components/vault/VaultItemDetail';
-import { VaultItemForm } from '../components/vault/VaultItemForm';
+import { VaultItemForm, useCustomFieldsLimit } from '../components/vault/VaultItemForm';
 import { isUndecodableData } from '../lib/vaultData';
 import { useVaultStore } from '../stores/vaultStore';
 
@@ -15,6 +15,8 @@ export default function VaultItemPage() {
   const fetchItems = useVaultStore((s) => s.fetchItems);
   const fetchTrashItems = useVaultStore((s) => s.fetchTrashItems);
   const [editing, setEditing] = useState(false);
+  // Read here and handed to the editor, so the form itself issues no request.
+  const customFieldsLimit = useCustomFieldsLimit();
   const initialFetchDone = useRef(false);
 
   // If items haven't loaded yet, try to fetch (only once to avoid infinite loop on empty vaults)
@@ -90,6 +92,7 @@ export default function VaultItemPage() {
           titleLevel="h1"
           onSaved={handleFormSaved}
           onCancel={() => setEditing(false)}
+          customFieldsLimit={customFieldsLimit}
         />
       </div>
     );

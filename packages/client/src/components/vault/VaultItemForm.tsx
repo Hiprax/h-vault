@@ -2,6 +2,8 @@ import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } fro
 import {
   useForm,
   useFieldArray,
+  useController,
+  type Control,
   type SubmitHandler,
   type UseFormRegister,
   type FieldErrors,
@@ -22,6 +24,7 @@ import {
   EyeOff,
   Undo2,
   X,
+  AlertTriangle,
 } from 'lucide-react';
 import { cn, getApiErrorMessage } from '../../lib/utils';
 import { hasAnyValue, isUndecodableData } from '../../lib/vaultData';
@@ -43,6 +46,27 @@ import {
   type DecryptedVaultItem,
 } from '../../stores/vaultStore';
 import { useToast } from '../ui/Toast';
+import { FormAlert } from '../ui/FormAlert';
+import { CardExpiryNotice } from './CardExpiry';
+import { readCardExpiry } from '../../lib/cardExpiry';
+import { describeTotpFailure, parseTotpValue } from '../../lib/totp';
+import {
+  CARD_CVV_PATTERN,
+  CARD_MONTH_PATTERN,
+  CARD_NUMBER_INPUT_MAX_LENGTH,
+  CARD_YEAR_PATTERN,
+  cardNumberDigits,
+  countFieldErrors,
+  customFieldHasContent,
+  expandCardYear,
+  formatCardNumber,
+  isCardNumberLength,
+  isCleanCardNumber,
+  isUntouched,
+  isValidLuhn,
+  shouldRecheckPartner,
+  utf8ByteLength,
+} from '../../lib/itemFormRules';
 import { PasswordGenerator } from './PasswordGenerator';
 import { BackupCodesEditor } from './BackupCodesEditor';
 import { SavedAddressPicker, type SavedAddressOption } from './SavedAddressPicker';
@@ -64,6 +88,7 @@ import {
   MAX_IDENTITY_PASSPORT_LENGTH,
   MAX_IDENTITY_PHONE_LENGTH,
   MAX_IDENTITY_SSN_LENGTH,
+  MAX_ITEM_NAME_BYTES,
   MAX_LOGIN_BACKUP_CODES,
   MAX_LOGIN_BACKUP_CODE_LENGTH,
   MAX_LOGIN_PASSWORD_LENGTH,
@@ -72,6 +97,7 @@ import {
   MAX_NOTE_CONTENT_LENGTH,
   MAX_SECRET_DESCRIPTION_LENGTH,
   MAX_TAGS_PER_ITEM,
+  DEFAULT_CUSTOM_FIELDS_LIMIT,
   URI_TOO_LONG_MESSAGE,
   isValidIdentityEmail,
   isValidIdentityPhone,
@@ -79,6 +105,16 @@ import {
   normalizeUri,
 } from '@hvault/shared';
 import type { INoteData, ItemType } from '@hvault/shared';
+
+/**
+ * The custom-field limit hook, re-exported so the two pages that host the editor
+ * import it FROM HERE. Not a convenience: the bundler gives code shared by the same
+ * set of importers one chunk named after one of its modules, and with the pages
+ * importing the hook directly that shared chunk (this editor plus the hook) was
+ * named after the hook and measured against the default chunk budget instead of
+ * the editor's own.
+ */
+export { useCustomFieldsLimit } from '../../hooks/useCustomFieldsLimit';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -181,27 +217,107 @@ const uriEntrySchema = z
 // filled in is STRIPPED before encryption (`stripEmptyCustomFields`) rather than
 // blocking the save. The two length bounds do mirror the stored schema, and
 // `CustomFieldsSection` renders their messages per row.
-const customFieldSchema = z.object({
+const customFieldBaseSchema = z.object({
   name: boundedField(MAX_CUSTOM_FIELD_NAME_LENGTH, 'Field name'),
   value: boundedField(MAX_NOTE_CONTENT_LENGTH, 'Field value'),
   type: z.enum(['text', 'hidden', 'boolean']).default('text'),
 });
 
-const loginSchema = z.object({
-  name: z.string().min(1, 'Name is required'),
-  username: boundedField(MAX_LOGIN_USERNAME_LENGTH, 'Username'),
-  password: boundedField(MAX_LOGIN_PASSWORD_LENGTH, 'Password'),
-  uris: z.array(uriEntrySchema).optional().default([]),
-  totp: boundedField(MAX_LOGIN_TOTP_LENGTH, 'TOTP secret'),
-  // Declaring this is not optional: zodResolver returns the PARSED values, so a
-  // field the form schema does not know is stripped before `buildDataPayload` ever
-  // sees it, and editing a login would silently destroy its stored codes. Kept
-  // lenient (no bounds) like every other field here; `parseBackupCodes` gates what
-  // can enter the array, and `sanitizeBackupCodes` bounds what leaves it.
-  backupCodes: z.array(z.string()).optional().default([]),
-  notes: boundedField(MAX_NOTE_CONTENT_LENGTH, 'Notes'),
-  customFields: z.array(customFieldSchema).optional().default([]),
-});
+/**
+ * A row with something in it must have a name.
+ *
+ * Only a COMPLETELY blank row is stripped before encryption. A row whose value was
+ * filled in but whose name was left empty used to be stripped too, which threw away
+ * what the person typed with no word about it; it is now refused, on the name, where
+ * the fix goes. The message sits on the name rather than the value because the value
+ * is the part that is right.
+ */
+function requireNameForContent(
+  row: { name: string; value: string; type: string },
+  ctx: z.RefinementCtx,
+): void {
+  if (row.name.trim() === '' && customFieldHasContent(row)) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['name'],
+      message: 'Give this field a name, or remove it',
+    });
+  }
+}
+
+const customFieldSchema = customFieldBaseSchema.superRefine(requireNameForContent);
+
+/**
+ * What the per-type schemas need to know about the entry being edited: the values
+ * the form OPENED with (`getDefaultValues` for the stored item), or `null` while
+ * creating. A blocking rule passes a control that still holds its opening value (see
+ * `isUntouched`), so a field the person never touched can never stop them saving an
+ * edit somewhere else in the entry.
+ */
+interface FormRuleContext {
+  initial: Readonly<Record<string, unknown>> | null;
+}
+
+const CREATE_RULES: FormRuleContext = { initial: null };
+
+/**
+ * The item name, shared by all five types: required, and short enough to encrypt.
+ *
+ * The length is measured in UTF-8 BYTES because that is what the name's ciphertext is
+ * as long as, and the bound is derived from the stored ciphertext cap
+ * (`MAX_ITEM_NAME_BYTES`). Before, an over-long name was refused only after it had
+ * been encrypted, in a toast, with nothing on the Name control. No stored name can
+ * exceed it (its ciphertext fit the cap), so this never blocks an existing entry.
+ */
+function itemNameSchema(rules: FormRuleContext) {
+  return z
+    .string()
+    .refine((value) => value.trim() !== '' || isUntouched(rules.initial, 'name', value), {
+      message: 'Name is required',
+    })
+    .refine((value) => utf8ByteLength(value) <= MAX_ITEM_NAME_BYTES, {
+      message: 'Name is too long. Shorten it to save this item.',
+    });
+}
+
+/**
+ * A required text field that tolerates an UNTOUCHED stored blank: imports store
+ * these verbatim and may store them empty, and a value the person did not touch must
+ * not block an edit elsewhere in the entry.
+ */
+function requiredText(rules: FormRuleContext, key: string, max: number, label: string) {
+  return z
+    .string()
+    .max(max, `${label} must be ${String(max)} characters or fewer`)
+    .refine((value) => value.trim() !== '' || isUntouched(rules.initial, key, value), {
+      message: `${label} is required`,
+    });
+}
+
+const loginSchema = (rules: FormRuleContext) =>
+  z.object({
+    name: itemNameSchema(rules),
+    username: boundedField(MAX_LOGIN_USERNAME_LENGTH, 'Username'),
+    password: boundedField(MAX_LOGIN_PASSWORD_LENGTH, 'Password'),
+    uris: z.array(uriEntrySchema).optional().default([]),
+    // Checked with the SAME parser the code display uses (`lib/totp.ts`), so a value
+    // the editor accepts is one that can actually generate codes. A stored value that
+    // fails it and was not touched is left alone (a warning under the control says
+    // so) rather than blocking the save.
+    totp: boundedField(MAX_LOGIN_TOTP_LENGTH, 'TOTP secret').superRefine((value, ctx) => {
+      if (value.trim() === '' || isUntouched(rules.initial, 'totp', value)) return;
+      const parsed = parseTotpValue(value);
+      if (!parsed.ok) ctx.addIssue({ code: 'custom', message: describeTotpFailure(parsed.reason) });
+    }),
+    // Declaring this is not optional: zodResolver returns the PARSED values, so a
+    // field the form schema does not know is stripped before `buildDataPayload` ever
+    // sees it, and editing a login would silently destroy its stored codes. Kept
+    // lenient (no bounds) like every other field here; `parseBackupCodes` gates what
+    // can enter the array, and `sanitizeBackupCodes` bounds what leaves it.
+    backupCodes: z.array(z.string()).optional().default([]),
+    notes: boundedField(MAX_NOTE_CONTENT_LENGTH, 'Notes'),
+    customFields: z.array(customFieldSchema).optional().default([]),
+  });
 
 // A secret's custom fields keep the NARROWER two-value type enum the form has always
 // offered (`SecretDetail` has no boolean renderer), so its rows are driven with
@@ -218,57 +334,127 @@ const loginSchema = z.object({
 // type. Widening the enum would be mildly WORSE, not better: `SecretDetail` would
 // then render the value as a bare "true"/"false". Revisit the day a secret-producing
 // parser is added — that is the day it becomes reachable.
-const secretCustomFieldSchema = customFieldSchema.extend({
-  type: z.enum(['text', 'hidden']).default('text'),
-});
+//
+// Extended from the UNREFINED base and refined afterwards: zod refuses `.extend()`
+// that overwrites a key of a schema that already carries a refinement.
+const secretCustomFieldSchema = customFieldBaseSchema
+  .extend({ type: z.enum(['text', 'hidden']).default('text') })
+  .superRefine(requireNameForContent);
 
-const secretSchema = z.object({
-  name: z.string().min(1, 'Name is required'),
-  value: z
-    .string()
-    .min(1, 'Value is required')
-    .max(
-      MAX_NOTE_CONTENT_LENGTH,
-      `Value must be ${String(MAX_NOTE_CONTENT_LENGTH)} characters or fewer`,
-    ),
-  description: boundedField(MAX_SECRET_DESCRIPTION_LENGTH, 'Description'),
-  // Bounded to a FOUR-digit year, which is all `secretDataSchema.expiresAt` can
-  // represent. Chrome's date picker accepts years up to 275760, and without this the
-  // value failed `EXPIRY_DATE_PATTERN`, `combineExpiry` returned `undefined`, and the
-  // expiry was SILENTLY DELETED by a save that reported success — the exact class of
-  // failure this whole area exists to eliminate. Now it is an inline message on the
-  // control, which is where every other bound in this form reports itself. A `max`
-  // attribute would stop it a step earlier, but only via the browser's own bubble —
-  // and that bubble suppresses the submit before any of our validation runs, so the
-  // in-app message would become unreachable and untestable.
-  expiryDate: z
-    .string()
-    .refine((value) => value === '' || EXPIRY_DATE_PATTERN.test(value), {
-      message: 'Enter a date between 0001-01-01 and 9999-12-31',
+/**
+ * What an incomplete `<input type="date">` or `type="time"` is recorded as.
+ *
+ * The form validates itself (`noValidate`), so the browser no longer blocks a save
+ * on a half-typed date, and a half-typed date READS as empty. Left alone, saving
+ * would silently store "no expiry" (or midnight) for a date the person was in the
+ * middle of entering. The control's own `validity.badInput` is the only signal, so
+ * the form records it as this value, which no real date or time can equal and which
+ * the schema refuses with a message on the control.
+ */
+const INCOMPLETE_INPUT = '\u0000incomplete';
+
+const secretSchema = (rules: FormRuleContext) =>
+  z
+    .object({
+      name: itemNameSchema(rules),
+      value: z
+        .string()
+        .max(
+          MAX_NOTE_CONTENT_LENGTH,
+          `Value must be ${String(MAX_NOTE_CONTENT_LENGTH)} characters or fewer`,
+        )
+        .refine((value) => value !== '' || isUntouched(rules.initial, 'value', value), {
+          message: 'Value is required',
+        }),
+      description: boundedField(MAX_SECRET_DESCRIPTION_LENGTH, 'Description'),
+      // Bounded to a FOUR-digit year, which is all `secretDataSchema.expiresAt` can
+      // represent. Chrome's date picker accepts years up to 275760, and without this the
+      // value failed `EXPIRY_DATE_PATTERN`, `combineExpiry` returned `undefined`, and the
+      // expiry was SILENTLY DELETED by a save that reported success — the exact class of
+      // failure this whole area exists to eliminate. Now it is an inline message on the
+      // control, which is where every other bound in this form reports itself. No `max`
+      // attribute: the form is `noValidate`, so the browser would only mark the control
+      // invalid without saying why, and the in-app message is the one that explains it.
+      // A HALF-typed date reads as empty to script; `INCOMPLETE_INPUT` is how it is
+      // told apart from a cleared one (see `syncIncompleteInputs`).
+      expiryDate: z
+        .string()
+        .superRefine((value, ctx) => {
+          if (value === INCOMPLETE_INPUT) {
+            ctx.addIssue({ code: 'custom', message: 'Enter a complete date, or clear it' });
+          } else if (value !== '' && !EXPIRY_DATE_PATTERN.test(value)) {
+            ctx.addIssue({
+              code: 'custom',
+              message: 'Enter a date between 0001-01-01 and 9999-12-31',
+            });
+          }
+        })
+        .optional()
+        .default(''),
+      expiryTime: z
+        .string()
+        .refine((value) => value !== INCOMPLETE_INPUT, {
+          message: 'Enter a complete time, or clear it',
+        })
+        .optional()
+        .default(''),
+      customFields: z.array(secretCustomFieldSchema).optional().default([]),
     })
-    .optional()
-    .default(''),
-  expiryTime: z.string().optional().default(''),
-  customFields: z.array(secretCustomFieldSchema).optional().default([]),
-});
+    .superRefine((values, ctx) => {
+      // A time on its own was silently ignored: `combineExpiry` needs a date, so the
+      // save reported success and stored no expiry. The message goes on the DATE,
+      // the control that is missing. A time left as it was is exempt: clearing the
+      // DATE of a stored expiry is how its owner removes the expiry, and the stored
+      // time must not turn that into an error.
+      if (
+        values.expiryTime !== '' &&
+        values.expiryDate === '' &&
+        !isUntouched(rules.initial, 'expiryTime', values.expiryTime)
+      ) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['expiryDate'],
+          message: 'Add a date for this time, or clear the time',
+        });
+      }
+    });
 
-const noteSchema = z.object({
-  name: z.string().min(1, 'Name is required'),
-  content: z
-    .string()
-    .min(1, 'Content is required')
-    .max(
-      MAX_NOTE_CONTENT_LENGTH,
-      `Content must be ${String(MAX_NOTE_CONTENT_LENGTH)} characters or fewer`,
-    ),
-  // `format` is an undotted non-array root, so a store-side issue on it WOULD be
-  // claimed by `formFieldForStoredPath` — and the `<select>` renders no message, so
-  // it would be swallowed. Unreachable, and the reason is worth stating: the local
-  // enum and `noteDataSchema.format` hold the same two values, and the only sources
-  // are the two `<option>`s or already-parsed stored data. Widening either enum
-  // without giving the control an error line would make it reachable.
-  format: z.enum(['markdown', 'plaintext']).default('markdown'),
-});
+const noteSchema = (rules: FormRuleContext) =>
+  z
+    .object({
+      name: itemNameSchema(rules),
+      content: z
+        .string()
+        .max(
+          MAX_NOTE_CONTENT_LENGTH,
+          `Content must be ${String(MAX_NOTE_CONTENT_LENGTH)} characters or fewer`,
+        ),
+      // `format` is an undotted non-array root, so a store-side issue on it WOULD be
+      // claimed by `formFieldForStoredPath` — and the `<select>` renders no message, so
+      // it would be swallowed. Unreachable, and the reason is worth stating: the local
+      // enum and `noteDataSchema.format` hold the same two values, and the only sources
+      // are the two `<option>`s or already-parsed stored data. Widening either enum
+      // without giving the control an error line would make it reachable.
+      format: z.enum(['markdown', 'plaintext']).default('markdown'),
+      customFields: z.array(customFieldSchema).optional().default([]),
+    })
+    .superRefine((values, ctx) => {
+      // A note needs SOMETHING in it: its text, or at least one named custom field (a
+      // note can now be nothing but fields, which is what a Bitwarden secure note with
+      // fields and no text imports as). An untouched empty note is left alone.
+      const hasNamedField = values.customFields.some((field) => field.name.trim() !== '');
+      if (
+        values.content === '' &&
+        !hasNamedField &&
+        !isUntouched(rules.initial, 'content', values.content)
+      ) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['content'],
+          message: 'Write the note, or add a custom field',
+        });
+      }
+    });
 
 /** Convert empty string to undefined while preserving non-empty string values. */
 function emptyToUndefined(value: unknown): string | undefined {
@@ -276,141 +462,140 @@ function emptyToUndefined(value: unknown): string | undefined {
   return value;
 }
 
-/** Luhn checksum validation for card numbers. Returns true if the number passes. */
-function isValidLuhn(value: string): boolean {
-  const digits = value.replace(/[\s-]/g, '');
-  if (!/^\d+$/.test(digits) || digits.length < 8) return false;
-  let sum = 0;
-  let double = false;
-  for (let i = digits.length - 1; i >= 0; i--) {
-    let digit = Number(digits[i]);
-    if (double) {
-      digit *= 2;
-      if (digit > 9) digit -= 9;
-    }
-    sum += digit;
-    double = !double;
-  }
-  return sum % 10 === 0;
-}
-
-/** Format a card number string with spaces every 4 digits */
-function formatCardNumber(value: string): string {
-  const digits = value.replace(/\D/g, '').slice(0, 19);
-  const groups: string[] = [];
-  for (let i = 0; i < digits.length; i += 4) {
-    groups.push(digits.slice(i, i + 4));
-  }
-  return groups.join(' ');
-}
-
-const cardSchema = z.object({
-  name: z.string().min(1, 'Name is required'),
-  cardholderName: z
+/**
+ * A card field with a FORMAT rule that an untouched stored value is exempt from:
+ * empty passes (whether a value is required is decided elsewhere), an untouched
+ * value passes, and anything else must match `pattern`.
+ */
+function cardFormatField(rules: FormRuleContext, key: string, pattern: RegExp, message: string) {
+  return z
     .string()
-    .min(1, 'Cardholder name is required')
-    .max(
-      MAX_CARD_CARDHOLDER_NAME_LENGTH,
-      `Cardholder name must be ${String(MAX_CARD_CARDHOLDER_NAME_LENGTH)} characters or fewer`,
-    ),
-  number: z
-    .string()
-    .min(1, 'Card number is required')
     .refine(
-      (val) => /^\d[\d ]*\d$/.test(val) && val.replace(/\s/g, '').length >= 13,
-      'Must be at least 13 digits',
+      (value) => value === '' || isUntouched(rules.initial, key, value) || pattern.test(value),
+      { message },
     )
-    .refine((val) => val.replace(/\s/g, '').length <= 19, 'Must be at most 19 digits')
-    .refine((val) => /^\d+$/.test(val.replace(/\s/g, '')), 'Must contain only digits')
-    .refine((val) => isValidLuhn(val), 'Card number fails Luhn check — verify the number')
-    // Strip spaces before the value reaches buildDataPayload / encryption
-    .transform((val) => val.replace(/\s/g, '')),
-  expMonth: z
-    .string()
-    .regex(/^$|^(0[1-9]|1[0-2])$/, 'Invalid month (01-12)')
     .optional()
-    .default(''),
-  expYear: z
-    .string()
-    .regex(/^$|^\d{4}$/, 'Invalid year')
-    .optional()
-    .default(''),
-  cvv: z
-    .string()
-    .regex(/^$|^\d{3,4}$/, 'Must be 3-4 digits')
-    .optional()
-    .default(''),
-  brand: boundedField(MAX_CARD_BRAND_LENGTH, 'Brand'),
-  notes: boundedField(MAX_NOTE_CONTENT_LENGTH, 'Notes'),
-  billingStreet: boundedField(MAX_ADDRESS_STREET_LENGTH, 'Street address'),
-  billingStreet2: boundedField(MAX_ADDRESS_STREET_LENGTH, 'Street address line 2'),
-  billingCity: boundedField(MAX_ADDRESS_CITY_LENGTH, 'City'),
-  billingState: boundedField(MAX_ADDRESS_STATE_LENGTH, 'State'),
-  billingZip: boundedField(MAX_ADDRESS_ZIP_LENGTH, 'ZIP'),
-  billingCountry: boundedField(MAX_ADDRESS_COUNTRY_LENGTH, 'Country'),
-});
+    .default('');
+}
 
-const identitySchema = z.object({
-  name: z.string().min(1, 'Name is required'),
-  firstName: z
-    .string()
-    .min(1, 'Required')
-    .max(
-      MAX_IDENTITY_NAME_LENGTH,
-      `First name must be ${String(MAX_IDENTITY_NAME_LENGTH)} characters or fewer`,
-    ),
-  lastName: z
-    .string()
-    .min(1, 'Required')
-    .max(
-      MAX_IDENTITY_NAME_LENGTH,
-      `Last name must be ${String(MAX_IDENTITY_NAME_LENGTH)} characters or fewer`,
-    ),
-  // The FORMAT check is the shared predicate `identityDataSchema` itself uses, not
-  // a local regex that approximates it. The old local regexes admitted values the
-  // stored refines reject — a quoted email local part, a `+` that is not leading, a
-  // punctuation-only phone with no digit — so the form accepted them, they were
-  // encrypted, and the next decrypt degraded the whole identity to the "could not
-  // be fully decoded" notice. Only the user-facing MESSAGE is local now.
-  email: z
-    .string()
-    .max(MAX_IDENTITY_EMAIL_LENGTH, 'Email too long')
-    .refine(isValidIdentityEmail, 'Invalid email address')
-    .optional()
-    .default(''),
-  phone: z
-    .string()
-    .max(MAX_IDENTITY_PHONE_LENGTH, 'Phone number too long')
-    .refine(isValidIdentityPhone, 'Invalid phone number')
-    .optional()
-    .default(''),
-  street: boundedField(MAX_ADDRESS_STREET_LENGTH, 'Street address'),
-  street2: boundedField(MAX_ADDRESS_STREET_LENGTH, 'Street address line 2'),
-  city: boundedField(MAX_ADDRESS_CITY_LENGTH, 'City'),
-  state: boundedField(MAX_ADDRESS_STATE_LENGTH, 'State'),
-  zip: boundedField(MAX_ADDRESS_ZIP_LENGTH, 'ZIP'),
-  country: boundedField(MAX_ADDRESS_COUNTRY_LENGTH, 'Country'),
-  deliveryNotes: boundedField(MAX_ADDRESS_DELIVERY_NOTES_LENGTH, 'Delivery notes'),
-  company: boundedField(MAX_IDENTITY_COMPANY_LENGTH, 'Company'),
-  ssn: boundedField(MAX_IDENTITY_SSN_LENGTH, 'Social Security number'),
-  passport: boundedField(MAX_IDENTITY_PASSPORT_LENGTH, 'Passport number'),
-  notes: boundedField(MAX_NOTE_CONTENT_LENGTH, 'Notes'),
-  customFields: z.array(customFieldSchema).optional().default([]),
-});
+const cardSchema = (rules: FormRuleContext) =>
+  z
+    .object({
+      name: itemNameSchema(rules),
+      cardholderName: requiredText(
+        rules,
+        'cardholderName',
+        MAX_CARD_CARDHOLDER_NAME_LENGTH,
+        'Cardholder name',
+      ),
+      // The RAW control text, never transformed here: the "untouched" test compares it
+      // with the text the form opened with, and `buildModelledFields` is the one place
+      // it is normalised for storage. 12 to 19 digits, because real cards span that
+      // range (some Maestro cards have 12). The Luhn checksum is NOT a rule here: a
+      // failure is shown as a warning beside the control, because some brands carry no
+      // check digit and the vault must be able to store the card a person holds.
+      number: z.string().superRefine((value, ctx) => {
+        if (isUntouched(rules.initial, 'number', value)) return;
+        const digits = cardNumberDigits(value);
+        if (digits === '') {
+          ctx.addIssue({ code: 'custom', message: 'Card number is required' });
+        } else if (!isCardNumberLength(digits)) {
+          ctx.addIssue({ code: 'custom', message: 'Card numbers have 12 to 19 digits' });
+        }
+      }),
+      expMonth: cardFormatField(
+        rules,
+        'expMonth',
+        CARD_MONTH_PATTERN,
+        'Enter a month from 1 to 12',
+      ),
+      expYear: cardFormatField(rules, 'expYear', CARD_YEAR_PATTERN, 'Enter a year like 2029 or 29'),
+      cvv: cardFormatField(rules, 'cvv', CARD_CVV_PATTERN, 'CVV must be 3 or 4 digits'),
+      brand: boundedField(MAX_CARD_BRAND_LENGTH, 'Brand'),
+      notes: boundedField(MAX_NOTE_CONTENT_LENGTH, 'Notes'),
+      billingStreet: boundedField(MAX_ADDRESS_STREET_LENGTH, 'Street address'),
+      billingStreet2: boundedField(MAX_ADDRESS_STREET_LENGTH, 'Street address line 2'),
+      billingCity: boundedField(MAX_ADDRESS_CITY_LENGTH, 'City'),
+      billingState: boundedField(MAX_ADDRESS_STATE_LENGTH, 'State'),
+      billingZip: boundedField(MAX_ADDRESS_ZIP_LENGTH, 'ZIP'),
+      billingCountry: boundedField(MAX_ADDRESS_COUNTRY_LENGTH, 'Country'),
+      customFields: z.array(customFieldSchema).optional().default([]),
+    })
+    .superRefine((values, ctx) => {
+      // An expiry is a month AND a year: either alone cannot say when the card expires,
+      // so the expiry warnings could never fire for it. The message goes on the MISSING
+      // half. A stored pair the person did not touch is left as it is.
+      const month = values.expMonth;
+      const year = values.expYear;
+      if (
+        isUntouched(rules.initial, 'expMonth', month) &&
+        isUntouched(rules.initial, 'expYear', year)
+      ) {
+        return;
+      }
+      if (month !== '' && year === '') {
+        ctx.addIssue({ code: 'custom', path: ['expYear'], message: 'Add the expiry year too' });
+      } else if (year !== '' && month === '') {
+        ctx.addIssue({ code: 'custom', path: ['expMonth'], message: 'Add the expiry month too' });
+      }
+    });
 
-/** Return the Zod schema that corresponds to a given item type. */
-function getSchemaForType(itemType: ItemType) {
+const identitySchema = (rules: FormRuleContext) =>
+  z.object({
+    name: itemNameSchema(rules),
+    firstName: requiredText(rules, 'firstName', MAX_IDENTITY_NAME_LENGTH, 'First name'),
+    lastName: requiredText(rules, 'lastName', MAX_IDENTITY_NAME_LENGTH, 'Last name'),
+    // The FORMAT check is the shared predicate `identityDataSchema` itself uses, not
+    // a local regex that approximates it. The old local regexes admitted values the
+    // stored refines reject — a quoted email local part, a `+` that is not leading, a
+    // punctuation-only phone with no digit — so the form accepted them, they were
+    // encrypted, and the next decrypt degraded the whole identity to the "could not
+    // be fully decoded" notice. Only the user-facing MESSAGE is local now.
+    email: z
+      .string()
+      .max(MAX_IDENTITY_EMAIL_LENGTH, 'Email too long')
+      .refine(isValidIdentityEmail, 'Enter a valid email address, like name@example.com')
+      .optional()
+      .default(''),
+    phone: z
+      .string()
+      .max(MAX_IDENTITY_PHONE_LENGTH, 'Phone number too long')
+      .refine(
+        isValidIdentityPhone,
+        'Enter a valid phone number: digits, spaces, ( ) . - and an optional leading +',
+      )
+      .optional()
+      .default(''),
+    street: boundedField(MAX_ADDRESS_STREET_LENGTH, 'Street address'),
+    street2: boundedField(MAX_ADDRESS_STREET_LENGTH, 'Street address line 2'),
+    city: boundedField(MAX_ADDRESS_CITY_LENGTH, 'City'),
+    state: boundedField(MAX_ADDRESS_STATE_LENGTH, 'State'),
+    zip: boundedField(MAX_ADDRESS_ZIP_LENGTH, 'ZIP'),
+    country: boundedField(MAX_ADDRESS_COUNTRY_LENGTH, 'Country'),
+    deliveryNotes: boundedField(MAX_ADDRESS_DELIVERY_NOTES_LENGTH, 'Delivery notes'),
+    company: boundedField(MAX_IDENTITY_COMPANY_LENGTH, 'Company'),
+    ssn: boundedField(MAX_IDENTITY_SSN_LENGTH, 'Social Security number'),
+    passport: boundedField(MAX_IDENTITY_PASSPORT_LENGTH, 'Passport number'),
+    notes: boundedField(MAX_NOTE_CONTENT_LENGTH, 'Notes'),
+    customFields: z.array(customFieldSchema).optional().default([]),
+  });
+
+/**
+ * Return the Zod schema that corresponds to a given item type, built for the entry
+ * being edited (`rules.initial`) or for a new one (`CREATE_RULES`).
+ */
+function getSchemaForType(itemType: ItemType, rules: FormRuleContext = CREATE_RULES) {
   switch (itemType) {
     case 'login':
-      return loginSchema;
+      return loginSchema(rules);
     case 'secret':
-      return secretSchema;
+      return secretSchema(rules);
     case 'note':
-      return noteSchema;
+      return noteSchema(rules);
     case 'card':
-      return cardSchema;
+      return cardSchema(rules);
     case 'identity':
-      return identitySchema;
+      return identitySchema(rules);
     default:
       return z.object({ name: z.string().min(1, 'Name is required') });
   }
@@ -462,8 +647,9 @@ function getSchemaForType(itemType: ItemType) {
  * `HH:MM`, matched as a PREFIX rather than anchored at the end.
  *
  * `<input type="time">` with no `step` produces exactly `HH:MM` (a seconds-bearing
- * value is natively INVALID on such a control, so the browser blocks the submit
- * before React sees it — which is why there is no seconds group to parse). The
+ * value is not one such a control yields, and a half-typed time is recorded as
+ * `INCOMPLETE_INPUT` and refused by the schema — which is why there is no seconds
+ * group to parse). The
  * prefix match is what keeps that true if a `step` is ever added: `HH:MM:SS` would
  * then still yield the right hour and minute, dropping only the precision this
  * control cannot express, instead of failing to match and silently collapsing the
@@ -559,6 +745,41 @@ export function combineExpiry(date: string, time: string, stored: string): strin
 }
 
 // ---------------------------------------------------------------------------
+// Card number: shown grouped, stored as it was unless the person changed it
+// ---------------------------------------------------------------------------
+
+/** The item's stored card number as a string, or `''` when it has none. */
+function storedCardNumber(data: Record<string, unknown>): string {
+  return typeof data.number === 'string' ? data.number : '';
+}
+
+/**
+ * The text the card-number control opens with: the stored number grouped in fours
+ * when that changes nothing but spacing, and EXACTLY as stored otherwise.
+ *
+ * Formatting every stored number used to cost data: the formatter kept only 19
+ * digits, so opening an imported 20-digit card and saving a change to its notes
+ * silently stored a different number. A value that cannot be shown grouped without
+ * changing it (letters, more than 19 digits) is now shown as it is, and
+ * `buildModelledFields` writes it back byte for byte while the control is untouched.
+ */
+function cardNumberForDisplay(stored: string): string {
+  return isCleanCardNumber(stored) ? formatCardNumber(stored) : stored;
+}
+
+/**
+ * A custom-field list as a note or a card stores it: the rows worth keeping, or
+ * `undefined` when there are none, which DELETES the key rather than storing `[]`.
+ * The two older owners of the key default it to `[]` in their stored schema; these
+ * two deliberately do not (see `noteDataSchema`), so an untouched note or card keeps
+ * the byte-identical payload, and import identity, it had before the key existed.
+ */
+function storedCustomFieldsOrNothing(fields: unknown): unknown {
+  const kept = stripEmptyCustomFields(fields);
+  return Array.isArray(kept) && kept.length > 0 ? kept : undefined;
+}
+
+// ---------------------------------------------------------------------------
 // Default values helper
 // ---------------------------------------------------------------------------
 
@@ -595,13 +816,14 @@ function getDefaultValues(itemType: ItemType, item?: DecryptedVaultItem): Record
         name: item?.name ?? '',
         content: data.content ?? '',
         format: data.format ?? 'markdown',
+        customFields: data.customFields ?? [],
       };
     case 'card': {
       const billing = (data.billingAddress as Record<string, string> | undefined) ?? {};
       return {
         name: item?.name ?? '',
         cardholderName: data.cardholderName ?? '',
-        number: formatCardNumber((data.number as string | undefined) ?? ''),
+        number: cardNumberForDisplay(storedCardNumber(data)),
         expMonth: data.expMonth ?? '',
         expYear: data.expYear ?? '',
         cvv: data.cvv ?? '',
@@ -613,6 +835,7 @@ function getDefaultValues(itemType: ItemType, item?: DecryptedVaultItem): Record
         billingState: billing.state ?? '',
         billingZip: billing.zip ?? '',
         billingCountry: billing.country ?? '',
+        customFields: data.customFields ?? [],
       };
     }
     case 'identity': {
@@ -764,8 +987,9 @@ function buildDataPayload(
  *
  * `preserved` is the item's existing decrypted data (`{}` for a create, and `{}`
  * for an undecodable item — {@link buildDataPayload} substitutes it, so nothing
- * here can read a placeholder). Only the secret branch consults it, to decide
- * whether an expiry the user did not touch can be written back verbatim.
+ * here can read a placeholder). The secret and card branches consult it, to decide
+ * whether a value the user did not touch (an expiry, a card number, an expiry year)
+ * can be written back verbatim.
  *
  * No branch emits `name`. The item name is encrypted SEPARATELY as
  * `encryptedName`; no decrypted data schema declares a `name` key, so every one of
@@ -811,6 +1035,7 @@ function buildModelledFields(
       return {
         content: values.content,
         format: values.format,
+        customFields: storedCustomFieldsOrNothing(values.customFields),
       };
     case 'card': {
       const billingStreet = (values.billingStreet as string) || '';
@@ -830,11 +1055,22 @@ function buildModelledFields(
         billingZip,
         billingCountry,
       ]);
+      // The number and the year are written back VERBATIM while the control still
+      // holds what the form opened with, so an edit elsewhere never rewrites them
+      // (an imported 20-digit number, a 2-digit year). A changed number is stored as
+      // its digits; a changed 2-digit year as `20YY`.
+      const storedNumber = storedCardNumber(preserved);
+      const number = values.number as string;
+      const storedYear = typeof preserved.expYear === 'string' ? preserved.expYear : undefined;
+      const year = values.expYear as string;
       return {
         cardholderName: values.cardholderName,
-        number: (values.number as string).replace(/\s/g, ''),
+        number:
+          number === cardNumberForDisplay(storedNumber) && storedNumber !== ''
+            ? storedNumber
+            : cardNumberDigits(number),
         expMonth: values.expMonth,
-        expYear: values.expYear,
+        expYear: year === storedYear ? year : expandCardYear(year),
         cvv: values.cvv,
         brand: emptyToUndefined(values.brand),
         notes: emptyToUndefined(values.notes),
@@ -851,6 +1087,7 @@ function buildModelledFields(
               country: billingCountry,
             }
           : undefined,
+        customFields: storedCustomFieldsOrNothing(values.customFields),
       };
     }
     case 'identity': {
@@ -1061,6 +1298,103 @@ function FormField({
   );
 }
 
+/** Whether an event target is a control a registered field can live in. */
+function isFormControl(
+  target: EventTarget,
+): target is HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement {
+  return (
+    target instanceof HTMLInputElement ||
+    target instanceof HTMLTextAreaElement ||
+    target instanceof HTMLSelectElement
+  );
+}
+
+/**
+ * Whether a mouse or touch press on `target` leaves focus where it is: a button, or
+ * a label around a checkbox or a button (a yes/no field, "Mark as favorite").
+ *
+ * Leaving a field shows what it got wrong (a message, the card number's checksum
+ * warning, a two-digit year written out, the expiry hint), and that can push what
+ * is below it down the page. Were the press itself to take focus, that would
+ * happen between the press and its release, under the pointer: the button would
+ * move away and the click would never happen. So such a press keeps focus in the
+ * field, the click goes through, and the field is checked when focus really
+ * leaves it, or by the save the click starts. A field, a list or a slider takes
+ * focus as usual (preventing it would stop a list from opening).
+ */
+function pressKeepsFocus(target: EventTarget): boolean {
+  if (!(target instanceof Element)) return false;
+  const control = target.closest('button, label');
+  if (control === null) return false;
+  return (
+    control.tagName !== 'LABEL' || control.querySelector('input[type="checkbox"], button') !== null
+  );
+}
+
+interface ExpiryControlProps {
+  control: Control<Record<string, unknown>>;
+  name: 'expiryDate' | 'expiryTime';
+  label: string;
+  type: 'date' | 'time';
+  /** The DOM node, which the form reads `validity.badInput` from. */
+  inputRef: React.RefObject<HTMLInputElement | null>;
+  /** Called when the control is left, after react-hook-form has seen the blur. */
+  onLeave: () => void;
+  onValueChange?: (() => void) | undefined;
+}
+
+/**
+ * A secret's expiry date or time, CONTROLLED rather than `register`ed, and that is
+ * the point of it.
+ *
+ * A half-typed date reads as empty to script, so the form records it as
+ * `INCOMPLETE_INPUT` and the schema refuses it. A `register`ed control would have
+ * that value WRITTEN INTO the element, where the browser sanitises it to `''` and
+ * wipes what the person had typed, after which nothing remembers the date was ever
+ * incomplete and the next save stores no expiry. Here the element shows `''` for
+ * the recorded value, which React does not write over a half-typed date (the node
+ * already reads `''`), so the person's partial entry stays on screen.
+ */
+function ExpiryControl({
+  control,
+  name,
+  label,
+  type,
+  inputRef,
+  onLeave,
+  onValueChange,
+}: ExpiryControlProps) {
+  const { field, fieldState } = useController({ name, control });
+  const value =
+    typeof field.value === 'string' && field.value !== INCOMPLETE_INPUT ? field.value : '';
+  const error = fieldState.error?.message;
+  return (
+    <FormField label={label} name={name} error={error}>
+      <input
+        id={`field-${name}`}
+        ref={(node) => {
+          field.ref(node);
+          inputRef.current = node;
+        }}
+        name={field.name}
+        type={type}
+        value={value}
+        onChange={(e) => {
+          field.onChange(e.target.value);
+          onValueChange?.();
+        }}
+        onBlur={() => {
+          field.onBlur();
+          onLeave();
+        }}
+        className={inputClass}
+        aria-describedby={error ? `field-${name}-error` : undefined}
+        aria-invalid={error ? true : undefined}
+      />
+    </FormField>
+  );
+}
+
 /** The message react-hook-form holds for `name`, when it is a string. */
 function fieldErrorMessage(errors: FieldErrors, name: string): string | undefined {
   const message = errors[name]?.message;
@@ -1224,16 +1558,28 @@ interface CustomFieldsSectionProps {
    * control.
    */
   allowBoolean: boolean;
+  /** The operator's custom-field limit (`CUSTOM_FIELDS_LIMIT`). */
+  limit: number;
+  /** How many custom fields the entry had when the form opened (0 while creating). */
+  initialCount: number;
+  /**
+   * Called when a row's value or type changes, so the parent can re-check that
+   * row's NAME: the "give this field a name" rule depends on the value.
+   */
+  onRowContentChange: (index: number) => void;
+  /** Called when a row's name changes: a note's content rule reads the names. */
+  onRowNameChange: () => void;
 }
 
 /**
- * The "+ Add Field" block, shared by the login, secret and identity forms.
+ * The "+ Add Field" block, rendered ONCE for every item type (it used to be three
+ * copies inside the login, secret and identity blocks, which had already drifted).
  *
- * One component rather than three inline copies: the identity form needs it (its
- * `customFields` are stored, written by the Bitwarden importer, and were previously
- * invisible and uneditable), and the login and secret copies had already drifted —
- * the login's handled the Boolean type, the secret's did not, and neither rendered
- * the per-row error a bounded `name`/`value` now needs.
+ * The limit: "+ Add Field" stops at the operator's `limit`, with a counter and a
+ * line saying why. It is `aria-disabled` rather than `disabled`, so it stays in the
+ * tab order and the reason stays discoverable. An entry that ALREADY had more fields
+ * (an import before the limit, or a lowered limit) keeps every one of them: it is
+ * told so, and simply cannot gain fields until it is under the limit.
  */
 function CustomFieldsSection({
   fields,
@@ -1244,38 +1590,68 @@ function CustomFieldsSection({
   watchField,
   setField,
   allowBoolean,
+  limit,
+  initialCount,
+  onRowContentChange,
+  onRowNameChange,
 }: CustomFieldsSectionProps) {
   const rowErrors = errors.customFields as
     | Record<number, { name?: { message?: string }; value?: { message?: string } } | undefined>
     | undefined;
+  const count = fields.length;
+  const atLimit = count >= limit;
+  const helpId = 'custom-fields-limit-help';
   return (
     <div>
       <div className="mb-1.5 flex items-center justify-between">
-        <span className="text-sm font-medium text-[hsl(var(--foreground))]">Custom Fields</span>
+        <span className="text-sm font-medium text-[hsl(var(--foreground))]">
+          Custom Fields{' '}
+          <span className="font-normal text-[hsl(var(--muted-foreground))]">
+            ({count} of {limit})
+          </span>
+        </span>
         <button
           type="button"
-          onClick={onAppend}
-          className="text-xs text-[hsl(var(--primary))] hover:underline"
+          onClick={atLimit ? undefined : onAppend}
+          aria-disabled={atLimit ? true : undefined}
+          aria-describedby={atLimit ? helpId : undefined}
+          className={cn(
+            'text-xs text-[hsl(var(--primary))]',
+            atLimit ? 'cursor-not-allowed opacity-50' : 'hover:underline',
+          )}
         >
           + Add Field
         </button>
       </div>
+      {atLimit && (
+        <p id={helpId} className="mb-2 text-xs text-[hsl(var(--muted-foreground))]">
+          {initialCount > limit && count > limit
+            ? `This entry has ${String(count)} custom fields, more than the limit of ${String(limit)}. It keeps all of them, but no more can be added until it has fewer than ${String(limit)}.`
+            : `An entry can have up to ${String(limit)} custom fields.`}
+        </p>
+      )}
       <div className="space-y-2">
         {fields.map((field, idx) => {
-          const fieldType = watchField(`customFields.${String(idx)}.type`) || 'text';
-          const fieldValue = watchField(`customFields.${String(idx)}.value`);
+          const row = String(idx);
+          const fieldType = watchField(`customFields.${row}.type`) || 'text';
+          const fieldValue = watchField(`customFields.${row}.value`);
           const showBooleanControl = allowBoolean && fieldType === 'boolean';
           const isBooleanTrue = showBooleanControl && fieldValue === 'true';
-          const rowError = rowErrors?.[idx]?.name?.message ?? rowErrors?.[idx]?.value?.message;
+          const nameError = rowErrors?.[idx]?.name?.message;
+          const valueError = rowErrors?.[idx]?.value?.message;
+          const nameErrorId = `field-customFields-${row}-name-error`;
+          const valueErrorId = `field-customFields-${row}-value-error`;
           return (
             <div key={field.id}>
               <div className="flex gap-2">
                 <input
-                  {...register(`customFields.${String(idx)}.name`)}
+                  {...register(`customFields.${row}.name`, { onChange: onRowNameChange })}
                   placeholder="Field name"
+                  aria-label={`Custom field ${String(idx + 1)} name`}
                   maxLength={MAX_CUSTOM_FIELD_NAME_LENGTH}
                   className={cn(inputClass, 'w-1/3')}
-                  aria-invalid={rowError ? true : undefined}
+                  aria-invalid={nameError ? true : undefined}
+                  aria-describedby={nameError ? nameErrorId : undefined}
                 />
                 {showBooleanControl ? (
                   <label className="flex flex-1 items-center gap-2 rounded-md border border-[hsl(var(--input))] bg-[hsl(var(--background))] px-3 py-2">
@@ -1283,7 +1659,8 @@ function CustomFieldsSection({
                       type="checkbox"
                       checked={isBooleanTrue}
                       onChange={(e) => {
-                        setField(`customFields.${String(idx)}.value`, String(e.target.checked));
+                        setField(`customFields.${row}.value`, String(e.target.checked));
+                        onRowContentChange(idx);
                       }}
                       className="h-4 w-4 rounded border-[hsl(var(--input))] text-[hsl(var(--primary))] focus:ring-[hsl(var(--ring))]"
                     />
@@ -1293,11 +1670,15 @@ function CustomFieldsSection({
                   </label>
                 ) : (
                   <input
-                    {...register(`customFields.${String(idx)}.value`)}
+                    {...register(`customFields.${row}.value`, {
+                      onChange: () => onRowContentChange(idx),
+                    })}
                     placeholder="Value"
+                    aria-label={`Custom field ${String(idx + 1)} value`}
                     maxLength={MAX_NOTE_CONTENT_LENGTH}
                     className={cn(inputClass, 'flex-1')}
-                    aria-invalid={rowError ? true : undefined}
+                    aria-invalid={valueError ? true : undefined}
+                    aria-describedby={valueError ? valueErrorId : undefined}
                   />
                 )}
                 {/* Named per row, because several rows carry an identical
@@ -1305,7 +1686,9 @@ function CustomFieldsSection({
                     grades a nameless one CRITICAL — a screen-reader user hears
                     "combo box, Text" with nothing saying which field it types. */}
                 <select
-                  {...register(`customFields.${String(idx)}.type`)}
+                  {...register(`customFields.${row}.type`, {
+                    onChange: () => onRowContentChange(idx),
+                  })}
                   aria-label={`Custom field ${String(idx + 1)} type`}
                   className={cn(inputClass, 'w-24')}
                 >
@@ -1322,9 +1705,22 @@ function CustomFieldsSection({
                   <Trash2 className="h-4 w-4" />
                 </button>
               </div>
-              {rowError !== undefined && (
-                <p role="alert" className="mt-1 text-xs text-[hsl(var(--destructive))]">
-                  {rowError}
+              {nameError !== undefined && (
+                <p
+                  id={nameErrorId}
+                  role="alert"
+                  className="mt-1 text-xs text-[hsl(var(--destructive))]"
+                >
+                  {nameError}
+                </p>
+              )}
+              {valueError !== undefined && (
+                <p
+                  id={valueErrorId}
+                  role="alert"
+                  className="mt-1 text-xs text-[hsl(var(--destructive))]"
+                >
+                  {valueError}
                 </p>
               )}
             </div>
@@ -1332,6 +1728,63 @@ function CustomFieldsSection({
         })}
       </div>
     </div>
+  );
+}
+
+interface CardNumberFieldProps {
+  control: Control<Record<string, unknown>>;
+  /** Show the checksum warning: once the field was left, or a save was attempted. */
+  showWarning: boolean;
+}
+
+/**
+ * The card number: grouped in fours as it is typed, validated by length only (12 to
+ * 19 digits), and WARNED about, never refused, when the Luhn checksum fails.
+ *
+ * Its own component with its own `useController`, for two reasons. The control is
+ * reformatted on every keystroke, so it cannot be a plain `register`ed input; and
+ * mounting the controller only for a card keeps the field out of the other types'
+ * forms entirely. `field.onBlur` is wired so the field is marked touched when it is
+ * left, which the "show the warning once the field was left" rule reads.
+ */
+function CardNumberField({ control, showWarning }: CardNumberFieldProps) {
+  const { field, fieldState } = useController({ name: 'number', control });
+  const value = typeof field.value === 'string' ? field.value : '';
+  const digits = cardNumberDigits(value);
+  const luhnWarning =
+    (showWarning || fieldState.isTouched) && isCardNumberLength(digits) && !isValidLuhn(digits);
+  const error = fieldState.error?.message;
+  const describedBy =
+    [error ? 'field-number-error' : '', luhnWarning ? 'field-number-warning' : '']
+      .filter(Boolean)
+      .join(' ') || undefined;
+  return (
+    <FormField label="Card Number" name="number" error={error}>
+      <input
+        id="field-number"
+        ref={field.ref}
+        name={field.name}
+        value={value}
+        onChange={(e) => field.onChange(formatCardNumber(e.target.value))}
+        onBlur={field.onBlur}
+        placeholder="1234 5678 9012 3456"
+        inputMode="numeric"
+        maxLength={CARD_NUMBER_INPUT_MAX_LENGTH}
+        className={cn(inputClass, 'font-mono tracking-wider')}
+        autoComplete="off"
+        aria-describedby={describedBy}
+        aria-invalid={error ? true : undefined}
+      />
+      {luhnWarning && (
+        <p
+          id="field-number-warning"
+          className="mt-1 flex items-center gap-1 text-xs text-amber-700 dark:text-amber-300"
+        >
+          <AlertTriangle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+          This number fails the standard card check. Check it for a typo; you can still save it.
+        </p>
+      )}
+    </FormField>
   );
 }
 
@@ -1357,6 +1810,12 @@ interface VaultItemFormProps {
    * other heading to name it.
    */
   titleLevel?: 'h1' | 'h2';
+  /**
+   * The operator's custom-field limit (`CUSTOM_FIELDS_LIMIT`), read by the host page
+   * through `useCustomFieldsLimit` so that this component issues no request of its
+   * own. Defaults to the documented default.
+   */
+  customFieldsLimit?: number;
 }
 
 /**
@@ -1378,6 +1837,7 @@ export function VaultItemForm({
   onSaved,
   onCancel,
   titleLevel: Title = 'h2',
+  customFieldsLimit = DEFAULT_CUSTOM_FIELDS_LIMIT,
 }: VaultItemFormProps) {
   const { toast } = useToast();
   const createItem = useVaultStore((s) => s.createItem);
@@ -1394,6 +1854,8 @@ export function VaultItemForm({
   const [folderId, setFolderId] = useState(item?.folderId ?? defaultFolderId ?? '');
   const [tags, setTags] = useState(item?.tags ?? []);
   const [tagInput, setTagInput] = useState('');
+  /** Why the last "Add" did not add a tag, shown under the input until it changes. */
+  const [tagNotice, setTagNotice] = useState<'duplicate' | 'limit' | null>(null);
   const [favorite, setFavorite] = useState(item?.favorite ?? false);
   const [saving, setSaving] = useState(false);
   const [showPasswordGen, setShowPasswordGen] = useState(false);
@@ -1444,7 +1906,15 @@ export function VaultItemForm({
     [],
   );
 
-  const schema = useMemo(() => getSchemaForType(itemType), [itemType]);
+  // The values the form opened with, while EDITING: the schema lets a control that
+  // still holds its opening value through every blocking rule (see `isUntouched`).
+  // `null` while creating, where every rule applies.
+  const rules = useMemo<FormRuleContext>(
+    () => ({ initial: isEditing ? defaultValues : null }),
+    // The opening values never change after mount, exactly like `defaultValues`.
+    [isEditing, defaultValues],
+  );
+  const schema = useMemo(() => getSchemaForType(itemType, rules), [itemType, rules]);
 
   const {
     register,
@@ -1455,12 +1925,117 @@ export function VaultItemForm({
     clearErrors,
     watch,
     reset,
-    formState: { errors },
+    trigger,
+    getFieldState,
+    getValues,
+    formState: { errors, submitCount, isSubmitted },
   } = useForm({
     defaultValues,
+    // The form validates itself: `noValidate` on the element keeps the browser's
+    // own constraint check from blocking the submit before this runs (an identity
+    // email the browser disliked used to stop the save with no message and with
+    // every other field unvalidated). When each control is checked is decided by
+    // `checkLeftField` / `recheckInvalidField` below, not by a validation `mode`.
+    //
+    // react-hook-form focuses the first error in REGISTRATION order, which is not
+    // the order on screen; the `submitCount` effect below focuses in DOM order.
+    shouldFocusError: false,
     // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-explicit-any -- dynamic form schema requires broad resolver type
     resolver: zodResolver(schema) as any,
   });
+
+  /**
+   * Whether the CURRENT values give `name` an issue, checked synchronously against
+   * the schema the resolver uses. A re-check is asked of react-hook-form only when it
+   * would change what is on screen (an issue to show, or a shown one to clear):
+   * re-validating a valid control that shows nothing schedules a render that shows
+   * nothing either.
+   */
+  const fieldHasIssue = useCallback(
+    (name: string): boolean => {
+      const result = schema.safeParse(getValues());
+      return !result.success && result.error.issues.some((issue) => issue.path.join('.') === name);
+    },
+    [schema, getValues],
+  );
+
+  /**
+   * Re-check a field whose rule depends on the one just edited, but only when that
+   * re-check can show the person something they should see now (see
+   * `shouldRecheckPartner`): never an error on a field they have not reached yet,
+   * and never one left standing after they fixed its cause.
+   */
+  const recheckPartner = useCallback(
+    (partner: string) => {
+      const state = getFieldState(partner);
+      if (
+        shouldRecheckPartner({
+          hasError: state.invalid,
+          isTouched: state.isTouched,
+          isSubmitted,
+        }) &&
+        (state.invalid || fieldHasIssue(partner))
+      ) {
+        void trigger(partner);
+      }
+    },
+    [getFieldState, trigger, isSubmitted, fieldHasIssue],
+  );
+
+  /**
+   * When a control is checked, before the first save attempt: on LEAVING it, but
+   * only once the person has changed it, and then live on every change while it
+   * shows an error. ("Reward early, punish late": a mistake is reported as soon as
+   * the person moves on from it, and its message disappears as soon as it is fixed,
+   * but tabbing past a field nobody has filled in yet is not an error until a save
+   * is attempted.) After a save attempt, react-hook-form re-checks every change by
+   * itself (`reValidateMode`), and every rule runs again on the next save.
+   *
+   * Delegated from the `<form>` (React's `onBlur`/`onChange` bubble), so every
+   * registered control is covered by its `name`, including rows added later.
+   */
+  const checkLeftField = useCallback(
+    (target: EventTarget) => {
+      if (isSubmitted || !isFormControl(target) || target.name === '') return;
+      const state = getFieldState(target.name);
+      if (state.isDirty && (state.invalid || fieldHasIssue(target.name))) {
+        void trigger(target.name);
+      }
+    },
+    [isSubmitted, getFieldState, trigger, fieldHasIssue],
+  );
+  const recheckInvalidField = useCallback(
+    (target: EventTarget) => {
+      if (isSubmitted || !isFormControl(target) || target.name === '') return;
+      if (getFieldState(target.name).invalid) void trigger(target.name);
+    },
+    [isSubmitted, getFieldState, trigger],
+  );
+
+  // How many custom fields the entry had when the form opened: an entry already over
+  // the limit keeps them all, and the section says so.
+  const initialCustomFieldCount =
+    isEditing && Array.isArray(item.data.customFields) ? item.data.customFields.length : 0;
+  const errorCount = countFieldErrors(errors);
+
+  // After a refused save, focus the first invalid control ON SCREEN.
+  //
+  // Keyed on `submitCount`, which react-hook-form publishes in the SAME update as
+  // the refused save's errors, and only after `onInvalid` has run. A state bump made
+  // inside `onInvalid` itself rendered one microtask too early: the effect then saw
+  // only the controls that were ALREADY invalid (a changed field checked as it was
+  // left, such as the email the person had just typed before pressing Create) and
+  // focused that one instead of the first problem on the form.
+  const formRef = useRef<HTMLFormElement>(null);
+  const focusAfterRefusal = useRef(false);
+  useEffect(() => {
+    if (!focusAfterRefusal.current) return;
+    focusAfterRefusal.current = false;
+    formRef.current?.querySelector<HTMLElement>('[aria-invalid="true"]')?.focus();
+  }, [submitCount]);
+  const onInvalid = useCallback(() => {
+    focusAfterRefusal.current = true;
+  }, []);
 
   // Field arrays for login URIs and custom fields
   // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-explicit-any -- dynamic form shape requires broad control type
@@ -1482,6 +2057,26 @@ export function VaultItemForm({
   const handleAppendCustomField = useCallback(() => {
     appendCustomField({ name: '', value: '', type: 'text' });
   }, [appendCustomField]);
+  // A note's "write the note, or add a custom field" rule reads every row's NAME, so
+  // a shown error is re-checked as names change: naming a field clears it at once.
+  const recheckNoteContent = useCallback(() => {
+    if (itemType === 'note' && getFieldState('content').invalid) void trigger('content');
+  }, [itemType, getFieldState, trigger]);
+  // A row's name is re-checked as its value or type changes only once it SHOWS an
+  // error, or a save was attempted. Not on "visited", unlike the other pairs: adding
+  // a row puts focus in its name, so the name counts as visited the moment the
+  // person moves on to the value, and "give this field a name" would appear while
+  // the value is still being typed.
+  const recheckCustomFieldName = useCallback(
+    (index: number) => {
+      const name = `customFields.${String(index)}.name`;
+      if (getFieldState(name).invalid || (isSubmitted && fieldHasIssue(name))) {
+        void trigger(name);
+      }
+      recheckNoteContent();
+    },
+    [getFieldState, isSubmitted, fieldHasIssue, trigger, recheckNoteContent],
+  );
 
   // react-hook-form types a DYNAMIC path's `watch`/`setValue` as `void`/never for a
   // `Record<string, unknown>` form, so the cast has to live somewhere. It lives
@@ -1505,17 +2100,85 @@ export function VaultItemForm({
   // The Preview shows the note the way it will be saved, so it follows the
   // chosen format instead of always interpreting the text as Markdown.
   const noteFormat = watch('format') as INoteData['format'];
-  const watchedCardNumber = watch('number') as string | undefined;
   // A static path, so no cast gymnastics are needed on setValue. react-hook-form
   // returns the STORED array, so the reference is stable while the contents are —
   // which is what lets the list re-mask only on a real change.
   const backupCodes = (watch('backupCodes') ?? []) as string[];
-  const cardLuhnWarning = useMemo(() => {
-    if (itemType !== 'card' || !watchedCardNumber) return null;
-    const digits = watchedCardNumber.replace(/\s/g, '');
-    if (digits.length < 13 || !/^\d+$/.test(digits)) return null;
-    return isValidLuhn(digits) ? null : 'Card number does not pass Luhn check';
-  }, [itemType, watchedCardNumber]);
+
+  // The card's expiry as it is being typed: warned about here (expired, or within
+  // the expiring window) exactly as the list and the item view will warn about it.
+  const watchedExpMonth = watchField('expMonth');
+  const watchedExpYear = watchField('expYear');
+  // Only for a WHOLE year: while "2029" is being typed it passes through "20", which
+  // would announce a card that expired in 2020. A stored two-digit year the person
+  // has not touched is whole as it stands.
+  const editorCardExpiry =
+    itemType === 'card' &&
+    (/^\d{4}$/.test(watchedExpYear) || isUntouched(rules.initial, 'expYear', watchedExpYear))
+      ? readCardExpiry(watchedExpMonth, watchedExpYear)
+      : null;
+
+  // A stored TOTP value the parser cannot use, left untouched: not a reason to
+  // block the save (the rule exempts it), but the person should know codes cannot
+  // be generated from it.
+  const watchedTotp = watchField('totp');
+  const untouchedTotpFailure = useMemo(() => {
+    if (itemType !== 'login' || watchedTotp.trim() === '') return null;
+    if (!isUntouched(rules.initial, 'totp', watchedTotp)) return null;
+    const parsed = parseTotpValue(watchedTotp);
+    return parsed.ok ? null : describeTotpFailure(parsed.reason);
+  }, [itemType, watchedTotp, rules]);
+
+  // A secret expiry already in the past: allowed (the person may be recording an
+  // expired token), but said, because the item will show as expired at once.
+  const watchedExpiryDate = watchField('expiryDate');
+  const watchedExpiryTime = watchField('expiryTime');
+  const secretExpiryPassed = useMemo(() => {
+    if (itemType !== 'secret') return false;
+    const combined = combineExpiry(
+      watchedExpiryDate,
+      watchedExpiryTime,
+      item ? storedExpiry(item.data) : '',
+    );
+    const instant = combined === undefined ? null : parseExpiryInstant(combined);
+    return instant !== null && instant.getTime() <= Date.now();
+  }, [itemType, watchedExpiryDate, watchedExpiryTime, item]);
+
+  const expiryDateRef = useRef<HTMLInputElement | null>(null);
+  const expiryTimeRef = useRef<HTMLInputElement | null>(null);
+  /** The controls currently recorded as incomplete, so their refusal can be withdrawn. */
+  const recordedIncomplete = useRef(new Set<string>());
+  /**
+   * Record an incomplete date or time control as `INCOMPLETE_INPUT`, so the schema
+   * refuses it with a message instead of a half-typed date silently reading as "no
+   * expiry". Called when such a control is left and before every save (pressing
+   * Enter inside the control submits without leaving it).
+   */
+  const syncIncompleteInputs = useCallback(
+    (validate: boolean) => {
+      const write = setValue as unknown as (
+        path: string,
+        value: string,
+        options: { shouldValidate: boolean },
+      ) => void;
+      for (const [name, node] of [
+        ['expiryDate', expiryDateRef.current],
+        ['expiryTime', expiryTimeRef.current],
+      ] as const) {
+        if (node === null) continue;
+        if (node.validity.badInput) {
+          recordedIncomplete.current.add(name);
+          write(name, INCOMPLETE_INPUT, { shouldValidate: validate });
+        } else if (recordedIncomplete.current.delete(name)) {
+          // Recorded as incomplete before, and complete (or cleared) now. Clearing
+          // a half-typed control fires no change event, and on leaving it the form
+          // has already taken the control's value; re-check it so the refusal goes.
+          write(name, node.value, { shouldValidate: validate });
+        }
+      }
+    },
+    [setValue],
+  );
 
   // -------------------------------------------------------------------------
   // Filling a card's billing address from an address saved on an identity
@@ -1727,14 +2390,22 @@ export function VaultItemForm({
     [isEditing, reset],
   );
 
-  // Tag management
+  // Tag management. A tag that is not added says why, instead of the input simply
+  // emptying: at the limit, or already on the item.
   const handleAddTag = useCallback(() => {
-    if (tags.length >= MAX_TAGS_PER_ITEM) return;
     const tag = tagInput.trim();
-    if (tag && !tags.includes(tag)) {
-      setTags((prev) => [...prev, tag]);
+    if (!tag) return;
+    if (tags.includes(tag)) {
+      setTagNotice('duplicate');
+      return;
     }
+    if (tags.length >= MAX_TAGS_PER_ITEM) {
+      setTagNotice('limit');
+      return;
+    }
+    setTags((prev) => [...prev, tag]);
     setTagInput('');
+    setTagNotice(null);
   }, [tagInput, tags]);
 
   const handleRemoveTag = useCallback((tag: string) => {
@@ -1800,7 +2471,20 @@ export function VaultItemForm({
   );
 
   return (
-    <form onSubmit={(e) => void handleSubmit(onSubmit)(e)} className="space-y-6">
+    <form
+      ref={formRef}
+      noValidate
+      onMouseDownCapture={(e) => {
+        if (pressKeepsFocus(e.target)) e.preventDefault();
+      }}
+      onBlur={(e) => checkLeftField(e.target)}
+      onChange={(e) => recheckInvalidField(e.target)}
+      onSubmit={(e) => {
+        syncIncompleteInputs(false);
+        void handleSubmit(onSubmit, onInvalid)(e);
+      }}
+      className="space-y-6"
+    >
       <Title className="text-lg font-semibold text-[hsl(var(--foreground))]">
         {isEditing ? 'Edit Item' : 'New Item'}
       </Title>
@@ -1839,6 +2523,7 @@ export function VaultItemForm({
           id="field-name"
           {...register('name')}
           placeholder="Item name"
+          maxLength={MAX_ITEM_NAME_BYTES}
           className={inputClass}
           autoFocus
           autoComplete="off"
@@ -1923,14 +2608,17 @@ export function VaultItemForm({
                   errors.uris as Record<string, { uri?: { message?: string } }> | undefined
                 )?.[idx];
                 const uriError = uriFieldError?.uri?.message;
+                const uriErrorId = `field-uris-${String(idx)}-uri-error`;
                 return (
                   <div key={field.id}>
                     <div className="flex gap-2">
                       <input
                         {...register(`uris.${idx}.uri` as const)}
                         placeholder="example.com"
+                        aria-label={`URI ${String(idx + 1)}`}
                         className={cn(inputClass, 'flex-1')}
                         aria-invalid={uriError ? true : undefined}
+                        aria-describedby={uriError ? uriErrorId : undefined}
                       />
                       {/* Named per row, for the reason the custom-field type
                           select records: one of several identical controls, and
@@ -1955,7 +2643,11 @@ export function VaultItemForm({
                       </button>
                     </div>
                     {uriError && (
-                      <p role="alert" className="mt-1 text-xs text-[hsl(var(--destructive))]">
+                      <p
+                        id={uriErrorId}
+                        role="alert"
+                        className="mt-1 text-xs text-[hsl(var(--destructive))]"
+                      >
                         {uriError}
                       </p>
                     )}
@@ -1974,6 +2666,12 @@ export function VaultItemForm({
               register={register}
               errors={errors}
             />
+            {untouchedTotpFailure !== null && (
+              <p className="flex items-center gap-1 text-xs text-amber-700 dark:text-amber-300">
+                <AlertTriangle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                {`${untouchedTotpFailure}, so no codes can be generated from it.`}
+              </p>
+            )}
             <button
               type="button"
               onClick={() => setScanningTotp(true)}
@@ -2040,17 +2738,6 @@ export function VaultItemForm({
             multiline
             rows={3}
           />
-
-          <CustomFieldsSection
-            fields={customFields}
-            onAppend={handleAppendCustomField}
-            onRemove={removeCustomField}
-            register={register}
-            errors={errors}
-            watchField={watchField}
-            setField={setField}
-            allowBoolean
-          />
         </div>
       )}
 
@@ -2081,37 +2768,31 @@ export function VaultItemForm({
           <div className="grid grid-cols-2 gap-3">
             {/* Both controls render their error: a store-side `expiresAt` rejection is
                 mapped onto `expiryDate`, and without a message there it would vanish. */}
-            <FormField label="Expiry Date" name="expiryDate" error={errors.expiryDate?.message}>
-              <input
-                id="field-expiryDate"
-                {...register('expiryDate')}
-                type="date"
-                className={inputClass}
-                aria-describedby={errors.expiryDate ? 'field-expiryDate-error' : undefined}
-                aria-invalid={errors.expiryDate ? true : undefined}
-              />
-            </FormField>
-            <FormField label="Time (optional)" name="expiryTime" error={errors.expiryTime?.message}>
-              <input
-                id="field-expiryTime"
-                {...register('expiryTime')}
-                type="time"
-                className={inputClass}
-                aria-describedby={errors.expiryTime ? 'field-expiryTime-error' : undefined}
-                aria-invalid={errors.expiryTime ? true : undefined}
-              />
-            </FormField>
+            <ExpiryControl
+              control={control}
+              name="expiryDate"
+              label="Expiry Date"
+              type="date"
+              inputRef={expiryDateRef}
+              onLeave={() => syncIncompleteInputs(true)}
+            />
+            <ExpiryControl
+              control={control}
+              name="expiryTime"
+              label="Time (optional)"
+              type="time"
+              inputRef={expiryTimeRef}
+              onLeave={() => syncIncompleteInputs(true)}
+              // The "time without a date" message lives on the DATE.
+              onValueChange={() => recheckPartner('expiryDate')}
+            />
           </div>
-          <CustomFieldsSection
-            fields={customFields}
-            onAppend={handleAppendCustomField}
-            onRemove={removeCustomField}
-            register={register}
-            errors={errors}
-            watchField={watchField}
-            setField={setField}
-            allowBoolean={false}
-          />
+          {secretExpiryPassed && (
+            <p className="flex items-center gap-1 text-xs text-amber-700 dark:text-amber-300">
+              <AlertTriangle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+              This date has passed, so the secret will show as expired.
+            </p>
+          )}
         </div>
       )}
 
@@ -2175,64 +2856,70 @@ export function VaultItemForm({
               aria-invalid={errors.cardholderName ? true : undefined}
             />
           </FormField>
-          <FormField label="Card Number" name="number" error={errors.number?.message}>
-            <input
-              id="field-number"
-              value={(watch('number') as string | undefined) ?? ''}
-              onChange={(e) => {
-                const formatted = formatCardNumber(e.target.value);
-                setValue('number', formatted, { shouldValidate: true });
-              }}
-              placeholder="1234 5678 9012 3456"
-              inputMode="numeric"
-              maxLength={23}
-              className={cn(inputClass, 'font-mono tracking-wider')}
-              autoComplete="off"
-              aria-describedby={errors.number ? 'field-number-error' : undefined}
-              aria-invalid={errors.number ? true : undefined}
-            />
-            {cardLuhnWarning && (
-              <p className="mt-1 text-xs text-yellow-600 dark:text-yellow-400">{cardLuhnWarning}</p>
-            )}
-          </FormField>
-          <div className="grid grid-cols-3 gap-3">
-            <FormField label="Exp Month" name="expMonth" error={errors.expMonth?.message}>
-              <input
-                id="field-expMonth"
-                {...register('expMonth')}
-                placeholder="MM"
-                maxLength={2}
-                className={inputClass}
-                autoComplete="off"
-                aria-describedby={errors.expMonth ? 'field-expMonth-error' : undefined}
-                aria-invalid={errors.expMonth ? true : undefined}
-              />
-            </FormField>
-            <FormField label="Exp Year" name="expYear" error={errors.expYear?.message}>
-              <input
-                id="field-expYear"
-                {...register('expYear')}
-                placeholder="YYYY"
-                maxLength={4}
-                className={inputClass}
-                autoComplete="off"
-                aria-describedby={errors.expYear ? 'field-expYear-error' : undefined}
-                aria-invalid={errors.expYear ? true : undefined}
-              />
-            </FormField>
-            <FormField label="CVV" name="cvv" error={errors.cvv?.message}>
-              <input
-                id="field-cvv"
-                {...register('cvv')}
-                type="password"
-                placeholder="CVV"
-                maxLength={4}
-                className={cn(inputClass, 'font-mono')}
-                autoComplete="off"
-                aria-describedby={errors.cvv ? 'field-cvv-error' : undefined}
-                aria-invalid={errors.cvv ? true : undefined}
-              />
-            </FormField>
+          <CardNumberField control={control} showWarning={isSubmitted} />
+          <div>
+            <div className="grid grid-cols-3 gap-3">
+              <FormField label="Exp Month" name="expMonth" error={errors.expMonth?.message}>
+                <input
+                  id="field-expMonth"
+                  {...register('expMonth', { onChange: () => recheckPartner('expYear') })}
+                  placeholder="MM"
+                  inputMode="numeric"
+                  maxLength={2}
+                  className={inputClass}
+                  autoComplete="off"
+                  aria-describedby={errors.expMonth ? 'field-expMonth-error' : undefined}
+                  aria-invalid={errors.expMonth ? true : undefined}
+                />
+              </FormField>
+              <FormField label="Exp Year" name="expYear" error={errors.expYear?.message}>
+                <input
+                  id="field-expYear"
+                  {...register('expYear', {
+                    onChange: () => recheckPartner('expMonth'),
+                    onBlur: (e: React.FocusEvent<HTMLInputElement>) => {
+                      // "27" means 2027, said back to the person as soon as they leave
+                      // the field. Only a year they changed: an untouched stored "27"
+                      // is written back exactly as it was.
+                      const year = e.target.value;
+                      if (/^\d{2}$/.test(year) && !isUntouched(rules.initial, 'expYear', year)) {
+                        setValue('expYear', expandCardYear(year), {
+                          shouldValidate: true,
+                          shouldDirty: true,
+                        });
+                        recheckPartner('expMonth');
+                      }
+                    },
+                  })}
+                  placeholder="YYYY"
+                  inputMode="numeric"
+                  maxLength={4}
+                  className={inputClass}
+                  autoComplete="off"
+                  aria-describedby={errors.expYear ? 'field-expYear-error' : undefined}
+                  aria-invalid={errors.expYear ? true : undefined}
+                />
+              </FormField>
+              <FormField label="CVV" name="cvv" error={errors.cvv?.message}>
+                <input
+                  id="field-cvv"
+                  {...register('cvv')}
+                  type="password"
+                  placeholder="CVV"
+                  inputMode="numeric"
+                  maxLength={4}
+                  className={cn(inputClass, 'font-mono')}
+                  autoComplete="off"
+                  aria-describedby={errors.cvv ? 'field-cvv-error' : undefined}
+                  aria-invalid={errors.cvv ? true : undefined}
+                />
+              </FormField>
+            </div>
+            {/* Always mounted, so a screen reader hears the hint when it appears; it
+              holds nothing until the month and the year both read as a date. */}
+            <div role="status" className="mt-1.5">
+              <CardExpiryNotice expiry={editorCardExpiry} variant="editor" />
+            </div>
           </div>
           <BoundedTextField
             name="brand"
@@ -2563,18 +3250,24 @@ export function VaultItemForm({
             multiline
             rows={3}
           />
-          <CustomFieldsSection
-            fields={customFields}
-            onAppend={handleAppendCustomField}
-            onRemove={removeCustomField}
-            register={register}
-            errors={errors}
-            watchField={watchField}
-            setField={setField}
-            allowBoolean
-          />
         </div>
       )}
+
+      {/* One custom-field block for every type, after the type's own fields. */}
+      <CustomFieldsSection
+        fields={customFields}
+        onAppend={handleAppendCustomField}
+        onRemove={removeCustomField}
+        register={register}
+        errors={errors}
+        watchField={watchField}
+        setField={setField}
+        allowBoolean={itemType !== 'secret'}
+        limit={customFieldsLimit}
+        initialCount={initialCustomFieldCount}
+        onRowContentChange={recheckCustomFieldName}
+        onRowNameChange={recheckNoteContent}
+      />
 
       {/* Common: Folder, Tags, Favorite */}
       <div className="space-y-4 border-t border-[hsl(var(--border))] pt-4">
@@ -2597,7 +3290,10 @@ export function VaultItemForm({
 
         {/* Tags */}
         <div>
-          <label className="mb-1.5 block text-sm font-medium text-[hsl(var(--foreground))]">
+          <label
+            htmlFor="field-tags"
+            className="mb-1.5 block text-sm font-medium text-[hsl(var(--foreground))]"
+          >
             Tags
           </label>
           <div className="mb-2 flex flex-wrap gap-1.5">
@@ -2620,9 +3316,14 @@ export function VaultItemForm({
           </div>
           <div className="flex gap-2">
             <input
+              id="field-tags"
               type="text"
               value={tagInput}
-              onChange={(e) => setTagInput(e.target.value)}
+              onChange={(e) => {
+                setTagInput(e.target.value);
+                if (tagNotice !== null) setTagNotice(null);
+              }}
+              aria-describedby={tagNotice !== null ? 'field-tags-notice' : undefined}
               onKeyDown={(e) => {
                 if (e.key === 'Enter') {
                   e.preventDefault();
@@ -2642,6 +3343,17 @@ export function VaultItemForm({
               Add
             </button>
           </div>
+          {tagNotice !== null && (
+            <p
+              id="field-tags-notice"
+              role="status"
+              className="mt-1 text-xs text-[hsl(var(--muted-foreground))]"
+            >
+              {tagNotice === 'duplicate'
+                ? 'That tag is already on this item.'
+                : `An item can have up to ${String(MAX_TAGS_PER_ITEM)} tags.`}
+            </p>
+          )}
         </div>
 
         {/* Favorite toggle */}
@@ -2664,6 +3376,18 @@ export function VaultItemForm({
           <span className="text-sm text-[hsl(var(--foreground))]">Mark as favorite</span>
         </label>
       </div>
+
+      {/* After a refused save: how many controls need attention, beside the button
+          that was pressed. The messages themselves sit on the controls. */}
+      {submitCount > 0 && errorCount > 0 && (
+        <FormAlert
+          message={
+            errorCount === 1
+              ? '1 field needs your attention before this item can be saved.'
+              : `${String(errorCount)} fields need your attention before this item can be saved.`
+          }
+        />
+      )}
 
       {/* Actions */}
       <div className="flex justify-end gap-2 border-t border-[hsl(var(--border))] pt-4">

@@ -115,6 +115,11 @@ function asItem(partial: Record<string, unknown>): DecryptedVaultItem {
 }
 
 /** The decrypted `data` payload handed to createItem. */
+/** The identity messages, worded to say what to do (operator-requested, 0.18.0). */
+const EMAIL_MESSAGE = 'Enter a valid email address, like name@example.com';
+const PHONE_MESSAGE =
+  'Enter a valid phone number: digits, spaces, ( ) . - and an optional leading +';
+
 function createdData(): Record<string, unknown> {
   const call = mockCreateItem.mock.calls[0];
   expect(call).toBeDefined();
@@ -533,7 +538,20 @@ describe('VaultItemForm — secret payload', () => {
     expect(mockCreateItem).not.toHaveBeenCalled();
   });
 
-  it('still omits expiresAt when the date control is simply empty', async () => {
+  it('still omits expiresAt when both expiry controls are simply empty', async () => {
+    renderForm({ defaultType: 'secret' });
+
+    fillSecret();
+
+    submit();
+
+    await waitFor(() => expect(mockCreateItem).toHaveBeenCalledTimes(1));
+    expect('expiresAt' in createdData()).toBe(false);
+  });
+
+  it('refuses a time without a date instead of silently storing no expiry', async () => {
+    // Operator-requested validation change: a time on its own used to be dropped by
+    // a save that reported success. The message goes on the DATE, the missing half.
     renderForm({ defaultType: 'secret' });
 
     fillSecret();
@@ -541,8 +559,10 @@ describe('VaultItemForm — secret payload', () => {
 
     submit();
 
-    await waitFor(() => expect(mockCreateItem).toHaveBeenCalledTimes(1));
-    expect('expiresAt' in createdData()).toBe(false);
+    const message = await screen.findByText('Add a date for this time, or clear the time');
+    expect(message.getAttribute('id')).toBe('field-expiryDate-error');
+    expect(document.getElementById('field-expiryDate')).toHaveAttribute('aria-invalid', 'true');
+    expect(mockCreateItem).not.toHaveBeenCalled();
   });
 
   // -------------------------------------------------------------------------
@@ -673,14 +693,20 @@ describe('VaultItemForm — secret payload', () => {
     expect('expiresAt' in data).toBe(false);
   });
 
-  it('omits expiresAt entirely when no date is given, even if a time is set', async () => {
+  it('omits expiresAt once a lone time is cleared again, and stores no empty description', async () => {
     renderForm({ defaultType: 'secret' });
 
     fillSecret();
-    fireEvent.change(document.getElementById('field-expiryTime')!, {
-      target: { value: '09:30' },
-    });
+    const time = document.getElementById('field-expiryTime')!;
+    fireEvent.change(time, { target: { value: '09:30' } });
+    submit();
+    await screen.findByText('Add a date for this time, or clear the time');
 
+    // Clearing the time withdraws the refusal (it re-checks the date it sits on).
+    fireEvent.change(time, { target: { value: '' } });
+    await waitFor(() =>
+      expect(screen.queryByText('Add a date for this time, or clear the time')).toBeNull(),
+    );
     submit();
 
     await waitFor(() => expect(mockCreateItem).toHaveBeenCalledTimes(1));
@@ -1034,32 +1060,35 @@ describe('VaultItemForm — card payload and validation', () => {
     );
   });
 
-  it('warns inline and blocks submit when the card number fails the Luhn check', async () => {
+  it('warns about a Luhn failure but still saves the card, as it is printed', async () => {
+    // Operator decision (0.18.0): the checksum WARNS and never refuses. Some card
+    // brands carry no Luhn check digit, and the vault must store the card a person
+    // actually holds.
     renderForm({ defaultType: 'card' });
 
     fillCard('4111111111111112');
+    fireEvent.blur(screen.getByPlaceholderText('1234 5678 9012 3456'));
 
-    expect(screen.getByText('Card number does not pass Luhn check')).toBeInTheDocument();
+    expect(await screen.findByText(/fails the standard card check/)).toBeInTheDocument();
 
     submit();
 
-    await waitFor(() => {
-      expect(
-        screen.getByText('Card number fails Luhn check — verify the number'),
-      ).toBeInTheDocument();
-    });
-    expect(mockCreateItem).not.toHaveBeenCalled();
+    await waitFor(() => expect(mockCreateItem).toHaveBeenCalledTimes(1));
+    expect(createdData().number).toBe('4111111111111112');
+    expect(screen.queryByText('Card numbers have 12 to 19 digits')).not.toBeInTheDocument();
   });
 
   it('shows no Luhn warning for a partial number or a valid one', async () => {
     renderForm({ defaultType: 'card' });
+    const input = screen.getByPlaceholderText('1234 5678 9012 3456');
 
-    // Fewer than 13 digits: too early to judge.
+    // Fewer than 12 digits: too early to judge, even once the field is left.
     typeIn('1234 5678 9012 3456', '411111');
-    expect(screen.queryByText('Card number does not pass Luhn check')).not.toBeInTheDocument();
+    fireEvent.blur(input);
+    expect(screen.queryByText(/fails the standard card check/)).not.toBeInTheDocument();
 
     typeIn('1234 5678 9012 3456', '4111111111111111');
-    expect(screen.queryByText('Card number does not pass Luhn check')).not.toBeInTheDocument();
+    expect(screen.queryByText(/fails the standard card check/)).not.toBeInTheDocument();
 
     // The lazily-loaded strength meter applies itself in a `.then` scheduled by the
     // typing above, which in a synchronous case lands once the body has finished and
@@ -1069,31 +1098,109 @@ describe('VaultItemForm — card payload and validation', () => {
     });
   });
 
-  it('rejects a card number shorter than 13 digits', async () => {
+  it('rejects a card number shorter than 12 digits', async () => {
     renderForm({ defaultType: 'card' });
 
-    fillCard('411111111111');
+    fillCard('41111111111');
     submit();
 
-    await waitFor(() => expect(screen.getByText('Must be at least 13 digits')).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByText('Card numbers have 12 to 19 digits')).toBeInTheDocument(),
+    );
     expect(mockCreateItem).not.toHaveBeenCalled();
   });
 
-  it('rejects an out-of-range expiry month, a short year and a 2-digit CVV', async () => {
+  it('accepts a 12-digit card number, which some Maestro cards have', async () => {
+    renderForm({ defaultType: 'card' });
+
+    fillCard('500000000009');
+    submit();
+
+    await waitFor(() => expect(mockCreateItem).toHaveBeenCalledTimes(1));
+    expect(createdData().number).toBe('500000000009');
+  });
+
+  it('keeps every digit of a number longer than 19 and reports the length instead of cutting it', async () => {
+    renderForm({ defaultType: 'card' });
+
+    const input = screen.getByPlaceholderText('1234 5678 9012 3456');
+    // Room for the vault's 30 storable digits plus the group spaces, so the browser
+    // never silently refuses the 20th digit either.
+    expect(input).toHaveAttribute('maxlength', '37');
+    fillCard('4111111111111111111111111');
+    expect((input as HTMLInputElement).value.replace(/\s/g, '')).toBe('4111111111111111111111111');
+
+    submit();
+
+    expect(await screen.findByText('Card numbers have 12 to 19 digits')).toBeInTheDocument();
+    expect(mockCreateItem).not.toHaveBeenCalled();
+  });
+
+  it('rejects an out-of-range expiry month, a 3-digit year and a 2-digit CVV', async () => {
     renderForm({ defaultType: 'card' });
 
     fillCard();
     typeIn('MM', '13');
-    typeIn('YYYY', '20');
+    typeIn('YYYY', '202');
     typeIn('CVV', '12');
 
     submit();
 
     await waitFor(() => {
-      expect(screen.getByText('Invalid month (01-12)')).toBeInTheDocument();
-      expect(screen.getByText('Invalid year')).toBeInTheDocument();
-      expect(screen.getByText('Must be 3-4 digits')).toBeInTheDocument();
+      expect(screen.getByText('Enter a month from 1 to 12')).toBeInTheDocument();
+      expect(screen.getByText('Enter a year like 2029 or 29')).toBeInTheDocument();
+      expect(screen.getByText('CVV must be 3 or 4 digits')).toBeInTheDocument();
     });
+    expect(mockCreateItem).not.toHaveBeenCalled();
+  });
+
+  it('accepts a month without its leading zero and a 2-digit year, storing the year as 20YY', async () => {
+    renderForm({ defaultType: 'card' });
+
+    fillCard();
+    typeIn('MM', '1');
+    typeIn('YYYY', '27');
+    submit();
+
+    await waitFor(() => expect(mockCreateItem).toHaveBeenCalledTimes(1));
+    expect(createdData().expMonth).toBe('1');
+    expect(createdData().expYear).toBe('2027');
+  });
+
+  it('expands a typed 2-digit year as soon as the field is left', async () => {
+    renderForm({ defaultType: 'card' });
+
+    const year = screen.getByPlaceholderText('YYYY');
+    fireEvent.change(year, { target: { value: '29' } });
+    fireEvent.blur(year);
+
+    await waitFor(() => expect(year).toHaveValue('2029'));
+  });
+
+  it('asks for the missing half of an expiry, on the missing control', async () => {
+    renderForm({ defaultType: 'card' });
+
+    fillCard();
+    typeIn('MM', '05');
+    submit();
+
+    const message = await screen.findByText('Add the expiry year too');
+    expect(message.getAttribute('id')).toBe('field-expYear-error');
+    expect(mockCreateItem).not.toHaveBeenCalled();
+
+    // Typing the year clears it, without another save.
+    typeIn('YYYY', '2030');
+    await waitFor(() => expect(screen.queryByText('Add the expiry year too')).toBeNull());
+  });
+
+  it('asks for the month when only a year is given', async () => {
+    renderForm({ defaultType: 'card' });
+
+    fillCard();
+    typeIn('YYYY', '2030');
+    submit();
+
+    expect(await screen.findByText('Add the expiry month too')).toBeInTheDocument();
     expect(mockCreateItem).not.toHaveBeenCalled();
   });
 });
@@ -1282,7 +1389,7 @@ describe('VaultItemForm — identity payload and validation', () => {
 
     submit();
 
-    await waitFor(() => expect(screen.getByText('Invalid email address')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(EMAIL_MESSAGE)).toBeInTheDocument());
     expect(mockCreateItem).not.toHaveBeenCalled();
   });
 
@@ -1295,7 +1402,7 @@ describe('VaultItemForm — identity payload and validation', () => {
     submit();
 
     await waitFor(() => {
-      expect(screen.getByText('Invalid phone number')).toBeInTheDocument();
+      expect(screen.getByText(PHONE_MESSAGE)).toBeInTheDocument();
     });
     expect(mockCreateItem).not.toHaveBeenCalled();
   });
@@ -2247,7 +2354,7 @@ describe('VaultItemForm — stored bounds enforced inline', () => {
 
     submit();
 
-    await waitFor(() => expect(screen.getByText('Invalid phone number')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(PHONE_MESSAGE)).toBeInTheDocument());
     expect(mockCreateItem).not.toHaveBeenCalled();
   });
 
@@ -2279,17 +2386,32 @@ describe('VaultItemForm — stored bounds enforced inline', () => {
     // `type="email"` check accepts it too — while `identityDataSchema` rejects it.
     // That asymmetry is the whole defect: the value was encrypted and only failed on
     // the next decrypt, degrading the entire identity.
-    //
-    // (A quoted local part, `"ada"@example.com`, is another such value but cannot be
-    // driven through this control: the browser marks it natively invalid and blocks
-    // the submit before any of our validation runs.)
     fireEvent.change(screen.getByPlaceholderText('Email address'), {
       target: { value: 'a..b@example.com' },
     });
 
     submit();
 
-    await waitFor(() => expect(screen.getByText('Invalid email address')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(EMAIL_MESSAGE)).toBeInTheDocument());
+    expect(mockCreateItem).not.toHaveBeenCalled();
+  });
+
+  it('now reports a quoted local part, which the browser used to block with no message', async () => {
+    // Before the form validated itself (`noValidate`), the browser marked
+    // `"ada"@example.com` natively invalid and blocked the submit before any of the
+    // app's validation ran, so the person saw no message at all.
+    renderForm({ defaultType: 'identity' });
+
+    typeIn('Item name', 'Ada');
+    typeIn('First name', 'Ada');
+    typeIn('Last name', 'Lovelace');
+    fireEvent.change(screen.getByPlaceholderText('Email address'), {
+      target: { value: '"ada"@example.com' },
+    });
+
+    submit();
+
+    await waitFor(() => expect(screen.getByText(EMAIL_MESSAGE)).toBeInTheDocument());
     expect(mockCreateItem).not.toHaveBeenCalled();
   });
 

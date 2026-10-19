@@ -81,6 +81,9 @@ vi.mock('../../src/services/api/configApi', () => ({
   getFileEncryptionMaxBytes: vi.fn(),
   // The register page asks which registration mode the server runs (F-24).
   readRegistrationMode: () => Promise.resolve('open'),
+  getCustomFieldsLimit: () => Promise.resolve(30),
+  cachedCustomFieldsLimitValue: () => null,
+  readCustomFieldsLimitFresh: () => Promise.resolve(30),
 }));
 
 vi.mock('../../src/services/api/backupApi', () => ({
@@ -112,7 +115,10 @@ vi.mock('../../src/components/folders/FolderRail', () => ({
 vi.mock('../../src/components/vault/VaultList', () => ({
   VaultList: () => <p>vault rows</p>,
 }));
-vi.mock('../../src/components/vault/VaultItemForm', () => ({ VaultItemForm: () => null }));
+vi.mock('../../src/components/vault/VaultItemForm', () => ({
+  VaultItemForm: () => null,
+  useCustomFieldsLimit: () => 30,
+}));
 vi.mock('../../src/hooks/useVaultFolderScope', () => ({ useVaultFolderScope: () => ({}) }));
 
 /* -------------------------------------------------------------------------- */
@@ -172,6 +178,8 @@ function stubVaultStore(): void {
     fetchFolders: vi.fn(() => Promise.resolve()),
     fetchTrashItems: vi.fn(() => Promise.resolve()),
     showTrash: false,
+    // The page reads the items for its card-expiry reminder.
+    items: [],
     selectedType: null,
     selectedFolder: null,
     searchQuery: '',

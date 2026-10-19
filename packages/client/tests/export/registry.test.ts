@@ -99,6 +99,15 @@ describe('PORTABLE_EXPORT_FORMATS — registry shape', () => {
     expect(byValue.get('chrome-csv')).toMatch(/logins only/i);
   });
 
+  it('says the Bitwarden CSV brings custom fields back as plain text, hidden ones included', () => {
+    // The CSV has one untyped column for every custom field, and a re-import reads it
+    // into the notes: a hidden field's value comes back readable. Notes carry custom
+    // fields since 0.18.0, so this now applies to them as well as to logins.
+    const note = PORTABLE_EXPORT_FORMATS.find((m) => m.value === 'bitwarden-csv')?.lossNote;
+    expect(note).toMatch(/custom fields/i);
+    expect(note).toMatch(/hidden field comes back readable/i);
+  });
+
   it('maps each format to the expected extension and MIME type', () => {
     const byValue = new Map(PORTABLE_EXPORT_FORMATS.map((f) => [f.value, f]));
     expect(byValue.get('bitwarden-json')).toMatchObject({

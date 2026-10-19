@@ -4,6 +4,7 @@ import {
   forwardRef,
   useEffect,
   useCallback,
+  useLayoutEffect,
   useRef,
   useId,
   createContext,
@@ -131,25 +132,32 @@ function Dialog({ open, onOpenChange, children }: DialogProps) {
   }
   wasOpenRef.current = open;
 
-  const handleEscape = useCallback(
-    (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        onOpenChange(false);
-      }
-    },
-    [onOpenChange],
-  );
+  // Escape calls the LATEST `onOpenChange`. The listener is added by an effect,
+  // and effects run after the commit that shows new content: a listener that kept
+  // the handler of the render that added it called the previous render's handler
+  // when Escape came in between ("What's new" then acknowledged nothing, because
+  // that handler predated the notes it was showing). The ref is updated in a
+  // layout effect, which runs within the commit itself.
+  const onOpenChangeRef = useRef(onOpenChange);
+  useLayoutEffect(() => {
+    onOpenChangeRef.current = onOpenChange;
+  });
 
   useEffect(() => {
     if (!open) return;
 
+    const handleEscape = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        onOpenChangeRef.current(false);
+      }
+    };
     document.addEventListener('keydown', handleEscape);
     lockBodyScroll();
     return () => {
       document.removeEventListener('keydown', handleEscape);
       unlockBodyScroll();
     };
-  }, [open, handleEscape]);
+  }, [open]);
 
   // Restore focus when dialog closes
   useEffect(() => {

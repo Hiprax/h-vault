@@ -1516,6 +1516,42 @@ describe('Server Config Validation', () => {
   });
 
   // ---------------------------------------------------------------------------
+  // CUSTOM_FIELDS_LIMIT (editor + import limit; int 1..100, default 30, '' = default)
+  // ---------------------------------------------------------------------------
+
+  describe('CUSTOM_FIELDS_LIMIT', () => {
+    it('defaults to 30 when unset', async () => {
+      const { config } = await loadConfigWithEnv({ CUSTOM_FIELDS_LIMIT: undefined });
+      expect(config.CUSTOM_FIELDS_LIMIT).toBe(30);
+    });
+
+    it('treats an empty assignment as unset rather than as 0', async () => {
+      const { config } = await loadConfigWithEnv({ CUSTOM_FIELDS_LIMIT: '' });
+      expect(config.CUSTOM_FIELDS_LIMIT).toBe(30);
+    });
+
+    it.each([
+      ['1', 1],
+      ['10', 10],
+      ['100', 100],
+    ])('accepts %s', async (raw, expected) => {
+      const { config } = await loadConfigWithEnv({ CUSTOM_FIELDS_LIMIT: raw });
+      expect(config.CUSTOM_FIELDS_LIMIT).toBe(expected);
+    });
+
+    it.each([
+      ['0 (below the minimum)', '0'],
+      ['101 (above the stored cap every decrypt enforces)', '101'],
+      ['a fraction', '10.5'],
+      ['a word', 'thirty'],
+    ])('rejects %s', async (_label, raw) => {
+      await expect(loadConfigWithEnv({ CUSTOM_FIELDS_LIMIT: raw })).rejects.toThrow(
+        /Invalid environment configuration/,
+      );
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // TWO_FACTOR_ENCRYPTION_KEY
   // ---------------------------------------------------------------------------
 

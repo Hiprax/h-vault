@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useVaultStore } from '../stores/vaultStore';
+import { useAuthStore } from '../stores/authStore';
+import { ExpiringCardsReminder } from '../components/vault/ExpiringCardsReminder';
 import { SearchBar, VAULT_SEARCH_RESULTS_ID } from '../components/vault/SearchBar';
 import { FolderRail } from '../components/folders/FolderRail';
 import { RailLayout } from '../components/layout/RailLayout';
 import { useVaultFolderScope } from '../hooks/useVaultFolderScope';
 import { VaultList } from '../components/vault/VaultList';
-import { VaultItemForm } from '../components/vault/VaultItemForm';
+import { VaultItemForm, useCustomFieldsLimit } from '../components/vault/VaultItemForm';
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
 import { useToast } from '../components/ui/Toast';
 import { useInlineDialog } from '../components/ui/Dialog';
@@ -18,6 +20,12 @@ export default function VaultPage() {
   const fetchTrashItems = useVaultStore((s) => s.fetchTrashItems);
   const fetchFolders = useVaultStore((s) => s.fetchFolders);
   const showTrash = useVaultStore((s) => s.showTrash);
+  const items = useVaultStore((s) => s.items);
+  const userId = useAuthStore((s) => s.user?.userId ?? '');
+  // Hiding the card-expiry reminder unmounts the button that was pressed, so focus
+  // is handed to the page's heading rather than falling to <body>.
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  const focusHeading = useCallback(() => headingRef.current?.focus(), []);
   const selectedType = useVaultStore((s) => s.selectedType);
   const selectedFolder = useVaultStore((s) => s.selectedFolder);
   // One reader of the filter state, shared with the rail. Two independent readers
@@ -29,6 +37,8 @@ export default function VaultPage() {
   // list is showing without either of them re-deriving the other's work.
   const filteredItemCount = useVaultStore((s) => s.filteredItemCount);
   const [showCreateDialog, setShowCreateDialog] = useState(false);
+  // Read here and handed to the editor, so the form itself issues no request.
+  const customFieldsLimit = useCustomFieldsLimit();
   const { toast } = useToast();
   const createDialogRef = useRef<HTMLDivElement>(null);
   const closeCreateDialog = useCallback(() => setShowCreateDialog(false), []);
@@ -121,7 +131,23 @@ export default function VaultPage() {
         {/* The page's one h1, as `/documents` has. Outside the list's error
             boundary so a list that fails to render still leaves a named page,
             and outside the rail so it names the page rather than one pane. */}
-        <h1 className="mb-4 text-2xl font-bold text-[hsl(var(--foreground))]">Vault</h1>
+        <h1
+          ref={headingRef}
+          tabIndex={-1}
+          className="mb-4 text-2xl font-bold text-[hsl(var(--foreground))] focus:outline-none"
+        >
+          Vault
+        </h1>
+        {/* Expired and soon-expiring cards, worked out in the browser; nothing at
+            all when there are none, when hidden, or in the trash view. */}
+        {!showTrash && (
+          <ExpiringCardsReminder
+            items={items}
+            userId={userId}
+            onHidden={focusHeading}
+            className="mb-4"
+          />
+        )}
         <ErrorBoundary>
           <VaultList onCreateNew={handleCreateNew} />
         </ErrorBoundary>
@@ -148,6 +174,7 @@ export default function VaultPage() {
                 defaultFolderId={selectedFolder ?? undefined}
                 onSaved={handleFormSaved}
                 onCancel={handleFormCancel}
+                customFieldsLimit={customFieldsLimit}
               />
             </ErrorBoundary>
           </div>

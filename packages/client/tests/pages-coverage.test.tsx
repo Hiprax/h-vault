@@ -304,6 +304,8 @@ vi.mock('../src/components/vault/VaultItemForm', () => ({
       { 'data-testid': 'vault-item-form' },
       React.createElement('button', { onClick: onCancel }, 'Cancel Form'),
     ),
+  // The pages read the custom-field limit through the editor's module.
+  useCustomFieldsLimit: () => 30,
 }));
 
 // ---------------------------------------------------------------------------

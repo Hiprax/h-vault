@@ -16,7 +16,7 @@
  */
 import React from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, waitFor, act, cleanup } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act, cleanup, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { createHash } from 'node:crypto';
 import {
@@ -171,6 +171,38 @@ vi.mock('../src/services/api/authApi', () => ({
   login2faApi: vi.fn(),
   logoutApi: vi.fn(),
   lockApi: vi.fn().mockResolvedValue({ data: { success: true } }),
+}));
+
+/**
+ * The custom-field limit every import reads before anything else, fresh. A test
+ * turns this knob (a number, or `null` for "the server did not say"); the rest of
+ * the config module is the real one.
+ */
+const { mockReadCustomFieldsLimitFresh } = vi.hoisted(() => ({
+  mockReadCustomFieldsLimitFresh: vi.fn<() => Promise<number | null>>(),
+}));
+
+vi.mock('../src/services/api/configApi', async () => {
+  const actual = await vi.importActual<typeof import('../src/services/api/configApi')>(
+    '../src/services/api/configApi',
+  );
+  return {
+    ...actual,
+    readCustomFieldsLimitFresh: () => mockReadCustomFieldsLimitFresh(),
+  };
+});
+
+/**
+ * The fetch of the code that applies the limit (a lazy chunk in the app): real by
+ * default, held open by the test that locks the vault while it is under way.
+ */
+const { mockLoadCustomFieldsLimit } = vi.hoisted(() => ({
+  mockLoadCustomFieldsLimit:
+    vi.fn<() => Promise<typeof import('../src/services/import/customFieldsLimit')>>(),
+}));
+
+vi.mock('../src/services/import/loadCustomFieldsLimit', () => ({
+  loadCustomFieldsLimit: () => mockLoadCustomFieldsLimit(),
 }));
 
 vi.mock('../src/services/api/client', () => ({
@@ -348,6 +380,10 @@ function lastImportBody() {
 describe('SettingsPage import flow', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockReadCustomFieldsLimitFresh.mockResolvedValue(30);
+    mockLoadCustomFieldsLimit.mockImplementation(
+      () => import('../src/services/import/customFieldsLimit'),
+    );
     mockGetProfileApi.mockResolvedValue({
       data: {
         success: true,
@@ -1347,5 +1383,348 @@ describe('SettingsPage import flow', () => {
     } finally {
       onLine.mockRestore();
     }
+  });
+
+  // -------------------------------------------------------------------------
+  // The custom-field limit (CUSTOM_FIELDS_LIMIT): read fresh, applied before
+  // matching, disclosed BEFORE anything is sent and reported after.
+  // -------------------------------------------------------------------------
+
+  /** A Bitwarden JSON login carrying `textCount` text fields, then two hidden ones. */
+  function bitwardenLoginWithFields(textCount: number, name = 'Many fields') {
+    const fields = [
+      ...Array.from({ length: textCount }, (_, i) => ({
+        name: `Text ${String(i + 1)}`,
+        value: `text value ${String(i + 1)}`,
+        type: 0,
+      })),
+      { name: 'Hidden A', value: 'HIDDEN-SENTINEL-ALPHA', type: 1 },
+      { name: 'Hidden B', value: 'HIDDEN-SENTINEL-BRAVO', type: 1 },
+    ];
+    return JSON.stringify({
+      items: [
+        {
+          type: 1,
+          name,
+          login: { username: 'many', password: 'many-pass', uris: [] },
+          fields,
+        },
+      ],
+    });
+  }
+
+  function startBitwardenImport(json: string, strategy = 'skip') {
+    fireEvent.click(screen.getByText('Import Vault'));
+    // Found by its options rather than its current label: a second import in the
+    // same test opens the panel with the format the first one chose.
+    const format = screen
+      .getAllByRole('combobox')
+      .find((select) => select.querySelector('option[value="bitwarden"]') !== null)!;
+    fireEvent.change(format, { target: { value: 'bitwarden' } });
+    fireEvent.change(screen.getByPlaceholderText('Paste exported data here...'), {
+      target: { value: json },
+    });
+    const conflict = screen
+      .getAllByRole('combobox')
+      .find((select) => select.querySelector('option[value="overwrite"]') !== null)!;
+    fireEvent.change(conflict, { target: { value: strategy } });
+  }
+
+  async function clickImport() {
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Import' }));
+    });
+  }
+
+  it('stops before anything is read or sent when the limit cannot be read', async () => {
+    mockReadCustomFieldsLimitFresh.mockResolvedValue(null);
+    mockListItemsApi.mockResolvedValue(itemsPage([]));
+    await renderSettings();
+    startBitwardenImport(bitwardenLoginWithFields(1));
+
+    await clickImport();
+
+    await waitFor(() =>
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: "Could not read this server's custom-field limit. Nothing was imported.",
+          type: 'error',
+        }),
+      ),
+    );
+    expect(mockListItemsApi).not.toHaveBeenCalled();
+    expect(mockImportVaultApi).not.toHaveBeenCalled();
+  });
+
+  it('imports nothing when the vault locks while the limit is being read', async () => {
+    mockReadCustomFieldsLimitFresh.mockImplementation(async () => {
+      useAuthStore.setState({ vaultKey: null } as never);
+      return 30;
+    });
+    mockListItemsApi.mockResolvedValue(itemsPage([]));
+    await renderSettings();
+    startBitwardenImport(bitwardenLoginWithFields(1));
+
+    await clickImport();
+
+    await waitFor(() =>
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          // A locked vault cannot be read, so the duplicate check stops the import.
+          title: 'Could not load your vault to check for duplicates. Nothing was imported.',
+          type: 'error',
+        }),
+      ),
+    );
+    expect(mockImportVaultApi).not.toHaveBeenCalled();
+  });
+
+  it('reads nothing from the vault until the limit code has loaded, so a lock then imports nothing', async () => {
+    // The vault already holds the entry the file holds. Had the vault been read
+    // BEFORE this wait, a lock during it would have emptied the list the import
+    // resolves against, and the file's entry would have been added a second time.
+    let releaseLoad!: () => void;
+    const loadHeld = new Promise<void>((resolve) => {
+      releaseLoad = resolve;
+    });
+    mockLoadCustomFieldsLimit.mockImplementation(async () => {
+      await loadHeld;
+      return import('../src/services/import/customFieldsLimit');
+    });
+    mockListItemsApi.mockResolvedValue(itemsPage([existingGithubItem()]));
+    await renderSettings();
+    startFirefoxImport();
+
+    await clickImport();
+    await waitFor(() => expect(mockLoadCustomFieldsLimit).toHaveBeenCalledTimes(1));
+    expect(mockListItemsApi).not.toHaveBeenCalled();
+
+    // The vault locks while the code is still loading.
+    act(() => {
+      useVaultStore.getState().clearStore();
+      useAuthStore.setState({ vaultKey: null } as never);
+    });
+    await act(async () => {
+      releaseLoad();
+      await loadHeld;
+    });
+
+    await waitFor(() =>
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({
+          // A locked vault cannot be read, so the duplicate check stops the import.
+          title: 'Could not load your vault to check for duplicates. Nothing was imported.',
+          type: 'error',
+        }),
+      ),
+    );
+    expect(mockImportVaultApi).not.toHaveBeenCalled();
+  });
+
+  it('shows what the limit will cut BEFORE sending, then imports it cut and reports it', async () => {
+    mockReadCustomFieldsLimitFresh.mockResolvedValue(3);
+    mockListItemsApi.mockResolvedValue(itemsPage([]));
+    mockImportVaultApi.mockImplementation(acceptImport({ insertedCount: 1, updatedCount: 0 }));
+    await renderSettings();
+    startBitwardenImport(bitwardenLoginWithFields(4));
+
+    await clickImport();
+
+    // The cut-only layout: nothing about overwrites, everything about the cut.
+    await waitFor(() => expect(screen.getByText('Confirm import changes')).toBeInTheDocument());
+    expect(mockImportVaultApi).not.toHaveBeenCalled();
+    expect(
+      screen.getByText(
+        'This import will move some custom fields into notes, or leave them out, before anything is saved.',
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/name is replaced/)).not.toBeInTheDocument();
+    // The list arrives with its own small chunk, fetched when an import runs.
+    const region = await screen.findByRole('region', {
+      name: 'Custom fields this import will move or leave out',
+    });
+    expect(region).toHaveTextContent(
+      'In 1 entry, some custom fields are moved or left out. The limit is 3 custom fields per entry.',
+    );
+    expect(region).toHaveTextContent('moved to its notes: Text 4');
+    expect(region).toHaveTextContent('hidden, not imported: Hidden A, Hidden B');
+    // Names only: no hidden value is ever put in the confirmation.
+    expect(screen.getByRole('dialog').textContent).not.toContain('HIDDEN-SENTINEL');
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('Apply Changes'));
+    });
+    await waitFor(() => expect(mockImportVaultApi).toHaveBeenCalledTimes(1));
+
+    // On the wire: three fields kept, the fourth moved into the notes as text,
+    // and neither hidden value anywhere.
+    const insert = lastImportBody().operations.inserts[0]!;
+    const insertId = await insertRowId(insert);
+    const data = JSON.parse(openSentField(insert, 'data', dataAad('login', insertId))) as {
+      customFields: { name: string }[];
+      notes: string;
+    };
+    expect(data.customFields.map((field) => field.name)).toEqual(['Text 1', 'Text 2', 'Text 3']);
+    expect(data.notes).toContain('Text 4: text value 4');
+    expect(JSON.stringify(data)).not.toContain('HIDDEN-SENTINEL');
+
+    // After: a warning that stays, and the report on the page.
+    const summary = await importSummary();
+    expect(summary).toMatchObject({ type: 'warning', duration: 15_000 });
+    const report = await screen.findByRole('region', { name: 'Import report' });
+    expect(report).toHaveTextContent('hidden, not imported: Hidden A, Hidden B');
+    expect(report.textContent).not.toContain('HIDDEN-SENTINEL');
+
+    // Closing it removes it.
+    fireEvent.click(within(report).getByRole('button', { name: 'Close import report' }));
+    expect(screen.queryByRole('region', { name: 'Import report' })).not.toBeInTheDocument();
+  });
+
+  it('sends nothing when a cut-only import is cancelled', async () => {
+    mockReadCustomFieldsLimitFresh.mockResolvedValue(3);
+    mockListItemsApi.mockResolvedValue(itemsPage([]));
+    await renderSettings();
+    startBitwardenImport(bitwardenLoginWithFields(4));
+
+    await clickImport();
+    await waitFor(() => expect(screen.getByText('Confirm import changes')).toBeInTheDocument());
+    await act(async () => {
+      fireEvent.click(screen.getByText('Cancel Import'));
+    });
+
+    await waitFor(() =>
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({ title: 'Import cancelled. Nothing was changed.' }),
+      ),
+    );
+    expect(mockImportVaultApi).not.toHaveBeenCalled();
+    expect(screen.queryByRole('region', { name: 'Import report' })).not.toBeInTheDocument();
+  });
+
+  it('asks for no confirmation and leaves no report when the limit cuts nothing', async () => {
+    mockReadCustomFieldsLimitFresh.mockResolvedValue(30);
+    mockListItemsApi.mockResolvedValue(itemsPage([]));
+    mockImportVaultApi.mockImplementation(acceptImport({ insertedCount: 1, updatedCount: 0 }));
+    await renderSettings();
+    startBitwardenImport(bitwardenLoginWithFields(2));
+
+    await clickImport();
+
+    const summary = await importSummary();
+    expect(summary).toMatchObject({ type: 'success' });
+    expect(screen.queryByText('Confirm import changes')).not.toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Import report' })).not.toBeInTheDocument();
+  });
+
+  it('clears a previous report the moment the next import starts', async () => {
+    mockReadCustomFieldsLimitFresh.mockResolvedValue(3);
+    mockListItemsApi.mockResolvedValue(itemsPage([]));
+    mockImportVaultApi.mockImplementation(acceptImport({ insertedCount: 1, updatedCount: 0 }));
+    await renderSettings();
+    startBitwardenImport(bitwardenLoginWithFields(4));
+    await clickImport();
+    await waitFor(() => expect(screen.getByText('Confirm import changes')).toBeInTheDocument());
+    await act(async () => {
+      fireEvent.click(screen.getByText('Apply Changes'));
+    });
+    await screen.findByRole('region', { name: 'Import report' });
+
+    // A second import that cannot even start (the limit cannot be read) still
+    // takes the old report down first.
+    mockReadCustomFieldsLimitFresh.mockResolvedValue(null);
+    startBitwardenImport(bitwardenLoginWithFields(1, 'Another'));
+    await clickImport();
+
+    await waitFor(() =>
+      expect(screen.queryByRole('region', { name: 'Import report' })).not.toBeInTheDocument(),
+    );
+  });
+
+  /** Two GitHub logins that differ only in a hidden field the limit of 1 cuts. */
+  function twinsDifferingInACutHiddenField() {
+    const twin = (secret: string) => ({
+      type: 1,
+      name: 'Work GitHub',
+      login: { username: 'octocat', password: OLD_PASSWORD, uris: [{ uri: 'https://github.com' }] },
+      fields: [
+        { name: 'One', value: '1', type: 0 },
+        { name: 'Recovery', value: secret, type: 1 },
+      ],
+    });
+    return JSON.stringify({
+      items: [twin('HIDDEN-SENTINEL-ALPHA'), twin('HIDDEN-SENTINEL-BRAVO')],
+    });
+  }
+
+  it('names a row the cut folded into another when that other row is imported', async () => {
+    mockReadCustomFieldsLimitFresh.mockResolvedValue(1);
+    mockListItemsApi.mockResolvedValue(itemsPage([]));
+    await renderSettings();
+    startBitwardenImport(twinsDifferingInACutHiddenField());
+
+    await clickImport();
+
+    const region = await screen.findByRole('region', {
+      name: 'Custom fields this import will move or leave out',
+    });
+    expect(region).toHaveTextContent(
+      'Work GitHub became identical to Work GitHub once its extra fields were cut, so it is imported once',
+    );
+    expect(screen.getByRole('dialog').textContent).not.toContain('HIDDEN-SENTINEL');
+    expect(mockImportVaultApi).not.toHaveBeenCalled();
+  });
+
+  it('asks nothing about a fold when the row it folded into is skipped, since nothing is written', async () => {
+    // The vault already holds this login: under `skip` the kept twin is skipped,
+    // so neither twin is imported and there is nothing to confirm.
+    mockReadCustomFieldsLimitFresh.mockResolvedValue(1);
+    mockListItemsApi.mockResolvedValue(itemsPage([existingGithubItem()]));
+    await renderSettings();
+    startBitwardenImport(twinsDifferingInACutHiddenField(), 'skip');
+
+    await clickImport();
+
+    await waitFor(() => expect(mockToast).toHaveBeenCalled());
+    expect(screen.queryByText('Confirm import changes')).not.toBeInTheDocument();
+    expect(mockImportVaultApi).not.toHaveBeenCalled();
+    expect(screen.queryByRole('region', { name: 'Import report' })).not.toBeInTheDocument();
+  });
+
+  it('lists the cut beside the overwrite when an import does both', async () => {
+    mockReadCustomFieldsLimitFresh.mockResolvedValue(1);
+    mockListItemsApi.mockResolvedValue(itemsPage([existingGithubItem()]));
+    mockImportVaultApi.mockImplementation(acceptImport({ insertedCount: 0, updatedCount: 1 }));
+    await renderSettings();
+    startBitwardenImport(
+      JSON.stringify({
+        items: [
+          {
+            type: 1,
+            name: 'Work GitHub',
+            login: {
+              username: 'octocat',
+              password: 'brand-new-secret',
+              uris: [{ uri: 'https://github.com' }],
+            },
+            fields: [
+              { name: 'One', value: '1', type: 0 },
+              { name: 'Two', value: '2', type: 0 },
+            ],
+          },
+        ],
+      }),
+      'overwrite',
+    );
+
+    await clickImport();
+
+    await waitFor(() => expect(screen.getByText('Confirm import changes')).toBeInTheDocument());
+    expect(screen.getByText(/will modify 1 existing item\b/)).toBeInTheDocument();
+    expect(screen.getByText(/name is replaced/)).toBeInTheDocument();
+    expect(
+      await screen.findByRole('region', {
+        name: 'Custom fields this import will move or leave out',
+      }),
+    ).toHaveTextContent('moved to its notes: Two');
   });
 });

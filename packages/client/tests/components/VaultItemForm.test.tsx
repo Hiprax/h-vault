@@ -234,7 +234,8 @@ describe('VaultItemForm', () => {
 
       await waitFor(() => {
         expect(screen.getByText('Name is required')).toBeInTheDocument();
-        expect(screen.getByText('Content is required')).toBeInTheDocument();
+        // A note needs its text OR a named custom field, and the message says both.
+        expect(screen.getByText('Write the note, or add a custom field')).toBeInTheDocument();
       });
     });
   });
@@ -252,10 +253,11 @@ describe('VaultItemForm', () => {
         expect(screen.getByText('Name is required')).toBeInTheDocument();
         expect(screen.getByText('Cardholder name is required')).toBeInTheDocument();
         expect(screen.getByText('Card number is required')).toBeInTheDocument();
-        // expMonth, expYear, cvv are now optional — no errors when empty
-        expect(screen.queryByText('Invalid month (01-12)')).not.toBeInTheDocument();
-        expect(screen.queryByText('Invalid year')).not.toBeInTheDocument();
-        expect(screen.queryByText('Must be 3-4 digits')).not.toBeInTheDocument();
+        // expMonth, expYear, cvv are optional — no errors when empty
+        expect(screen.queryByText('Enter a month from 1 to 12')).not.toBeInTheDocument();
+        expect(screen.queryByText('Enter a year like 2029 or 29')).not.toBeInTheDocument();
+        expect(screen.queryByText('CVV must be 3 or 4 digits')).not.toBeInTheDocument();
+        expect(screen.queryByText('Add the expiry year too')).not.toBeInTheDocument();
       });
     });
 
@@ -338,10 +340,61 @@ describe('VaultItemForm', () => {
 
       await waitFor(() => {
         expect(screen.getByText('Name is required')).toBeInTheDocument();
-        // firstName and lastName both show "Required"
-        const requiredErrors = screen.getAllByText('Required');
-        expect(requiredErrors.length).toBeGreaterThanOrEqual(2);
+        // Each required name says WHICH one is missing.
+        expect(screen.getByText('First name is required')).toBeInTheDocument();
+        expect(screen.getByText('Last name is required')).toBeInTheDocument();
       });
+    });
+
+    it('reports an invalid email AND every other invalid field together, instead of only focusing the email', async () => {
+      // The reported defect: with `type="email"` and no `noValidate`, the browser's
+      // own check blocked the submit for an address it disliked, focused the field
+      // with no message, and never let the app validate anything else.
+      renderForm({ defaultType: 'identity' });
+
+      const emailInput = screen.getByPlaceholderText('Email address');
+      // 'foo' is invalid to the browser's native email check too (no '@').
+      fireEvent.change(emailInput, { target: { value: 'foo' } });
+
+      fireEvent.click(screen.getByRole('button', { name: 'Create' }));
+
+      expect(
+        await screen.findByText('Enter a valid email address, like name@example.com'),
+      ).toBeInTheDocument();
+      expect(screen.getByText('Name is required')).toBeInTheDocument();
+      expect(screen.getByText('First name is required')).toBeInTheDocument();
+      expect(screen.getByText('Last name is required')).toBeInTheDocument();
+      // The summary beside the button counts every one of them.
+      expect(
+        screen.getByText('4 fields need your attention before this item can be saved.'),
+      ).toBeInTheDocument();
+      // Focus lands on the FIRST invalid control on screen, the name.
+      await waitFor(() =>
+        expect(document.activeElement).toBe(screen.getByPlaceholderText('Item name')),
+      );
+      expect(mockCreateItem).not.toHaveBeenCalled();
+    });
+
+    it('shows an invalid email as soon as the changed field is left, before any save', async () => {
+      renderForm({ defaultType: 'identity' });
+
+      const emailInput = screen.getByPlaceholderText('Email address');
+      fireEvent.change(emailInput, { target: { value: 'ada@' } });
+      fireEvent.blur(emailInput);
+
+      expect(
+        await screen.findByText('Enter a valid email address, like name@example.com'),
+      ).toBeInTheDocument();
+      // Fixing it clears the message live, without another blur or a save.
+      fireEvent.change(emailInput, { target: { value: 'ada@example.com' } });
+      await waitFor(() =>
+        expect(
+          screen.queryByText('Enter a valid email address, like name@example.com'),
+        ).not.toBeInTheDocument(),
+      );
+      // Leaving an untouched empty required field is not yet an error.
+      expect(screen.queryByText('First name is required')).not.toBeInTheDocument();
+      expect(mockCreateItem).not.toHaveBeenCalled();
     });
 
     it('renders the identity email validation error and wires aria-describedby to it', async () => {
@@ -353,10 +406,11 @@ describe('VaultItemForm', () => {
       fireEvent.change(screen.getByPlaceholderText('Last name'), { target: { value: 'Lovelace' } });
 
       const emailInput = screen.getByPlaceholderText('Email address');
+      // Still `type="email"` (the right keyboard on a phone, and autofill), but the
+      // form is `noValidate`, so the browser's own check never blocks the save.
       expect(emailInput.getAttribute('type')).toBe('email');
-      // 'foo@bar' passes the input's native HTML5 email constraint (so the form
-      // actually submits) but fails the app's stricter zod regex, which requires a
-      // dotted TLD — this is what exercises the FormField error plumbing.
+      // 'foo@bar' fails the app's zod check, which requires a dotted TLD; this is
+      // what exercises the FormField error plumbing.
       fireEvent.change(emailInput, { target: { value: 'foo@bar' } });
 
       fireEvent.click(screen.getByRole('button', { name: 'Create' }));
@@ -364,7 +418,7 @@ describe('VaultItemForm', () => {
       // The error text must render AND the input must point at it via
       // aria-describedby (the FormField error plumbing) — a screen-reader contract
       // that a plain "input exists / type is email" assertion never checked.
-      const errorEl = await screen.findByText('Invalid email address');
+      const errorEl = await screen.findByText('Enter a valid email address, like name@example.com');
       expect(errorEl).toBeInTheDocument();
       expect(errorEl.getAttribute('id')).toBe('field-email-error');
       expect(emailInput.getAttribute('aria-describedby')).toBe('field-email-error');
@@ -385,7 +439,9 @@ describe('VaultItemForm', () => {
 
       fireEvent.click(screen.getByRole('button', { name: 'Create' }));
 
-      const errorEl = await screen.findByText('Invalid phone number');
+      const errorEl = await screen.findByText(
+        'Enter a valid phone number: digits, spaces, ( ) . - and an optional leading +',
+      );
       expect(errorEl).toBeInTheDocument();
       expect(errorEl.getAttribute('id')).toBe('field-phone-error');
       expect(phoneInput.getAttribute('aria-describedby')).toBe('field-phone-error');
@@ -766,10 +822,10 @@ describe('VaultItemForm', () => {
   });
 
   // -------------------------------------------------------------------------
-  // 13. Custom field name sanitization (blank names stripped before encryption)
+  // 13. Custom field names: a blank row is stripped, a nameless VALUE is refused
   // -------------------------------------------------------------------------
-  describe('custom field name sanitization', () => {
-    it('drops a custom field with a blank name but keeps a named field (login)', async () => {
+  describe('custom field names', () => {
+    it('refuses a value with a blank name instead of silently dropping it (login)', async () => {
       renderForm();
 
       fireEvent.change(screen.getByPlaceholderText('Item name'), {
@@ -785,9 +841,48 @@ describe('VaultItemForm', () => {
       expect(nameInputs).toHaveLength(2);
       expect(valueInputs).toHaveLength(2);
 
-      // Row 0: blank name + a real value  -> must be stripped.
+      // Row 0: blank name + a real value. It used to be dropped without a word;
+      // what the person typed must not vanish.
       fireEvent.change(valueInputs[0]!, { target: { value: 'orphan-value' } });
-      // Row 1: real name + an empty value -> must be kept.
+      // Row 1: real name + an empty value -> kept.
+      fireEvent.change(nameInputs[1]!, { target: { value: 'API Key' } });
+
+      fireEvent.click(screen.getByRole('button', { name: 'Create' }));
+
+      const message = await screen.findByText('Give this field a name, or remove it');
+      expect(message.getAttribute('id')).toBe('field-customFields-0-name-error');
+      expect(nameInputs[0]!.getAttribute('aria-describedby')).toBe(
+        'field-customFields-0-name-error',
+      );
+      expect(nameInputs[0]!.getAttribute('aria-invalid')).toBe('true');
+      expect(mockCreateItem).not.toHaveBeenCalled();
+
+      // Naming it saves both rows, the value intact.
+      fireEvent.change(nameInputs[0]!, { target: { value: 'Recovery hint' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Create' }));
+
+      await waitFor(() => {
+        expect(mockCreateItem).toHaveBeenCalledTimes(1);
+      });
+      const data = mockCreateItem.mock.calls[0]![2] as {
+        customFields: { name: string; value: string }[];
+      };
+      expect(data.customFields).toEqual([
+        { name: 'Recovery hint', value: 'orphan-value', type: 'text' },
+        { name: 'API Key', value: '', type: 'text' },
+      ]);
+    });
+
+    it('still strips a completely blank row before encryption (login)', async () => {
+      renderForm();
+
+      fireEvent.change(screen.getByPlaceholderText('Item name'), {
+        target: { value: 'My Login' },
+      });
+      fireEvent.click(screen.getByText('+ Add Field'));
+      fireEvent.click(screen.getByText('+ Add Field'));
+      const nameInputs = screen.getAllByPlaceholderText('Field name');
+      // Row 0 left blank entirely; row 1 named.
       fireEvent.change(nameInputs[1]!, { target: { value: 'API Key' } });
 
       fireEvent.click(screen.getByRole('button', { name: 'Create' }));
@@ -795,15 +890,15 @@ describe('VaultItemForm', () => {
       await waitFor(() => {
         expect(mockCreateItem).toHaveBeenCalledTimes(1);
       });
-
       const data = mockCreateItem.mock.calls[0]![2] as { customFields: { name: string }[] };
       expect(data.customFields).toHaveLength(1);
       expect(data.customFields[0]!.name).toBe('API Key');
-      // The blank-named entry never reaches encryption.
+      // The blank row never reaches encryption.
       expect(data.customFields.some((f) => f.name.trim() === '')).toBe(false);
+      expect(screen.queryByText('Give this field a name, or remove it')).not.toBeInTheDocument();
     });
 
-    it('drops a whitespace-only custom field name (secret)', async () => {
+    it('refuses a whitespace-only name that carries a value (secret)', async () => {
       renderForm({ defaultType: 'secret' });
 
       fireEvent.change(screen.getByPlaceholderText('Item name'), {
@@ -816,18 +911,14 @@ describe('VaultItemForm', () => {
       fireEvent.click(screen.getByText('+ Add Field'));
       const nameInputs = screen.getAllByPlaceholderText('Field name');
       const valueInputs = screen.getAllByPlaceholderText('Value');
-      // Whitespace-only name + a value -> stripped (trim().length === 0).
+      // Whitespace-only name + a value: a name that is not there.
       fireEvent.change(nameInputs[0]!, { target: { value: '   ' } });
-      fireEvent.change(valueInputs[0]!, { target: { value: 'ignored' } });
+      fireEvent.change(valueInputs[0]!, { target: { value: 'kept-not-dropped' } });
 
       fireEvent.click(screen.getByRole('button', { name: 'Create' }));
 
-      await waitFor(() => {
-        expect(mockCreateItem).toHaveBeenCalledTimes(1);
-      });
-
-      const data = mockCreateItem.mock.calls[0]![2] as { customFields: unknown[] };
-      expect(data.customFields).toHaveLength(0);
+      expect(await screen.findByText('Give this field a name, or remove it')).toBeInTheDocument();
+      expect(mockCreateItem).not.toHaveBeenCalled();
     });
   });
 });

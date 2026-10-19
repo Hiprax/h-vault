@@ -378,6 +378,16 @@ security posture, not a disclaimer.
   restore rewrite no ciphertext at all; rename rewrites only the separately-encrypted
   name and does not put the contents in the request; and the editor — which would
   rewrite all of it from a placeholder — is unavailable.
+  An import also removes data on purpose in a few stated places (a value longer than its field
+  can hold, as before), and the custom-field limit is the largest of them, so it does so in the
+  open: when an entry has more custom fields than `CUSTOM_FIELDS_LIMIT` allows, the extra text and
+  yes/no fields become lines in the entry's notes, extra HIDDEN fields (and a hidden value too
+  long to store) are dropped rather than written out in clear (their names, never their values,
+  are reported), and the import lists exactly what it will move or drop before anything is saved
+  (it can be cancelled) and again afterwards. The limit never cuts an entry an import overwrites
+  below the custom fields it already has; the overwrite itself still replaces the entry with the
+  file's version. It applies to H-Vault's own export files too; backup restore is not an import
+  and is never cut.
   Two limits, stated rather than implied. This is not a vault-wide integrity check:
   backup restore and vault-key rotation re-encrypt your data as an opaque blob and
   deliberately do not inspect its format, because they must carry through content this
@@ -540,7 +550,12 @@ security posture, not a disclaimer.
   document ceiling and the extension allowlist. Those are operator limits rather than user data,
   and they are published to anonymous callers exactly as the File Encryption cap already was. If
   the extension list would tell a stranger something about your organisation, leave it empty; it
-  buys no enforcement in exchange.
+  buys no enforcement in exchange. The custom-field limit (`CUSTOM_FIELDS_LIMIT`) is published
+  the same way and is advisory in the same sense: custom fields are inside the encrypted item
+  data, so only the browser can count them, and a client that ignores the limit is refused
+  nothing by the server. Card expiry warnings are likewise worked out only in the browser, after
+  unlock, from the card's own month and year; no expiry date reaches the server in readable
+  form, only inside the encrypted card data it already held.
 - **Your deployment.** An exposed MongoDB port, a `TRUST_PROXY` set higher than the number
   of proxies actually in front of the app, secrets committed to a repository, or a missing
   TLS certificate will undo the guarantees above. The deployment checklist in the README

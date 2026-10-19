@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import request from 'supertest';
 import {
+  DEFAULT_CUSTOM_FIELDS_LIMIT,
   DOCUMENT_PLAINTEXT_CHUNK_BYTES,
   MAX_DOCUMENTS_PER_USER,
   publicConfigResponseSchema,
@@ -79,13 +80,41 @@ describe('GET /api/v1/config', () => {
     expect(res.body.success).toBe(true);
   });
 
-  it('exposes nothing beyond the file-encryption cap, the document advertisement and the registration mode', async () => {
+  it('exposes nothing beyond the file-encryption cap, the document advertisement, the registration mode and the custom-field limit', async () => {
     const res = await request(app).get('/api/v1/config');
 
-    expect(Object.keys(res.body.data)).toEqual(['fileEncryption', 'documents', 'registration']);
+    expect(Object.keys(res.body.data)).toEqual([
+      'fileEncryption',
+      'documents',
+      'registration',
+      'vault',
+    ]);
     expect(Object.keys(res.body.data.fileEncryption)).toEqual(['maxSizeMB']);
     // The mode only: the domain allowlist and the inviter list stay private.
     expect(res.body.data.registration).toEqual({ mode: 'open' });
+    // The limit only, nothing else about the vault.
+    expect(Object.keys(res.body.data.vault)).toEqual(['customFieldsLimit']);
+  });
+
+  it('advertises the configured custom-field limit, which the suite pins at its default', async () => {
+    const res = await request(app).get('/api/v1/config');
+
+    // `vitest.config.ts` pins CUSTOM_FIELDS_LIMIT to '', which the env schema maps
+    // to the default.
+    expect(config.CUSTOM_FIELDS_LIMIT).toBe(DEFAULT_CUSTOM_FIELDS_LIMIT);
+    expect(res.body.data.vault).toEqual({ customFieldsLimit: DEFAULT_CUSTOM_FIELDS_LIMIT });
+  });
+
+  it('echoes the limit the operator configured, not the default', async () => {
+    const configured = config.CUSTOM_FIELDS_LIMIT;
+    config.CUSTOM_FIELDS_LIMIT = 7;
+    try {
+      const res = await request(app).get('/api/v1/config');
+      expect(res.status).toBe(200);
+      expect(res.body.data.vault).toEqual({ customFieldsLimit: 7 });
+    } finally {
+      config.CUSTOM_FIELDS_LIMIT = configured;
+    }
   });
 
   it('is wired behind the healthLimiter middleware', () => {

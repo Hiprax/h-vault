@@ -123,97 +123,97 @@ beforeEach(() => {
 // ===========================================================================
 
 describe('VaultItemForm - Card Luhn warning', () => {
-  it('shows Luhn warning for invalid card number', async () => {
+  // The checksum is a WARNING, never a refusal (some brands carry no check digit),
+  // and it is shown once the field has been LEFT, never mid-typing: a 16-digit
+  // number fails the checksum at every length from 12 to 15 while it is typed.
+  const LUHN_WARNING = /fails the standard card check/;
+
+  function typeAndLeave(value: string): HTMLElement {
+    const input = screen.getByPlaceholderText('1234 5678 9012 3456');
+    fireEvent.change(input, { target: { value } });
+    fireEvent.blur(input);
+    return input;
+  }
+
+  it('shows the Luhn warning for an invalid card number once the field is left', async () => {
     renderForm({ defaultType: 'card' });
 
-    const cardNumberInput = screen.getByPlaceholderText('1234 5678 9012 3456');
-    expect(cardNumberInput).toBeInTheDocument();
+    const input = screen.getByPlaceholderText('1234 5678 9012 3456');
+    fireEvent.change(input, { target: { value: '1234567890123456' } });
+    // Not while typing.
+    expect(screen.queryByText(LUHN_WARNING)).not.toBeInTheDocument();
 
-    // Type an invalid card number (fails Luhn check, but >= 13 digits)
-    fireEvent.change(cardNumberInput, { target: { value: '1234567890123456' } });
+    fireEvent.blur(input);
 
-    await waitFor(() => {
-      expect(screen.getByText('Card number does not pass Luhn check')).toBeInTheDocument();
-    });
+    const warning = await screen.findByText(LUHN_WARNING);
+    expect(warning).toHaveAttribute('id', 'field-number-warning');
+    expect(input.getAttribute('aria-describedby')).toContain('field-number-warning');
+    // A warning, not an error: the control is not marked invalid.
+    expect(input).not.toHaveAttribute('aria-invalid');
   });
 
   it('does not show Luhn warning for valid card number', async () => {
     renderForm({ defaultType: 'card' });
 
-    const cardNumberInput = screen.getByPlaceholderText('1234 5678 9012 3456');
-
-    // Type a valid Visa test number
-    fireEvent.change(cardNumberInput, { target: { value: '4111111111111111' } });
+    typeAndLeave('4111111111111111');
 
     await waitFor(() => {
-      expect(screen.queryByText('Card number does not pass Luhn check')).not.toBeInTheDocument();
+      expect(screen.queryByText(LUHN_WARNING)).not.toBeInTheDocument();
     });
   });
 
   it('does not show Luhn warning when card number is too short', async () => {
     renderForm({ defaultType: 'card' });
 
-    const cardNumberInput = screen.getByPlaceholderText('1234 5678 9012 3456');
-
-    // Type a short number (fewer than 13 digits)
-    fireEvent.change(cardNumberInput, { target: { value: '1234' } });
+    typeAndLeave('1234');
 
     await waitFor(() => {
-      expect(screen.queryByText('Card number does not pass Luhn check')).not.toBeInTheDocument();
+      expect(screen.queryByText(LUHN_WARNING)).not.toBeInTheDocument();
     });
   });
 
-  it('does not show Luhn warning when card number is empty', async () => {
+  it('does not show Luhn warning when card number is empty', () => {
     renderForm({ defaultType: 'card' });
 
     // Don't type anything - card number should be empty by default
-    expect(screen.queryByText('Card number does not pass Luhn check')).not.toBeInTheDocument();
+    expect(screen.queryByText(LUHN_WARNING)).not.toBeInTheDocument();
   });
 
-  it('does not show Luhn warning for non-card item types', async () => {
+  it('does not show Luhn warning for non-card item types', () => {
     renderForm({ defaultType: 'login' });
 
     // Login type should not show card number input at all
     expect(screen.queryByPlaceholderText('1234 5678 9012 3456')).not.toBeInTheDocument();
-    expect(screen.queryByText('Card number does not pass Luhn check')).not.toBeInTheDocument();
+    expect(screen.queryByText(LUHN_WARNING)).not.toBeInTheDocument();
   });
 
   it('shows Luhn warning for formatted invalid numbers with spaces', async () => {
     renderForm({ defaultType: 'card' });
 
-    const cardNumberInput = screen.getByPlaceholderText('1234 5678 9012 3456');
+    typeAndLeave('1234 5678 9012 3456');
 
-    // Type formatted but invalid number
-    fireEvent.change(cardNumberInput, { target: { value: '1234 5678 9012 3456' } });
-
-    await waitFor(() => {
-      expect(screen.getByText('Card number does not pass Luhn check')).toBeInTheDocument();
-    });
+    expect(await screen.findByText(LUHN_WARNING)).toBeInTheDocument();
   });
 
   it('does not show Luhn warning for formatted valid numbers', async () => {
     renderForm({ defaultType: 'card' });
 
-    const cardNumberInput = screen.getByPlaceholderText('1234 5678 9012 3456');
-
-    // Type formatted valid Visa number
-    fireEvent.change(cardNumberInput, { target: { value: '4111-1111-1111-1111' } });
+    typeAndLeave('4111-1111-1111-1111');
 
     await waitFor(() => {
-      expect(screen.queryByText('Card number does not pass Luhn check')).not.toBeInTheDocument();
+      expect(screen.queryByText(LUHN_WARNING)).not.toBeInTheDocument();
     });
   });
 
   it('does not show Luhn warning for non-numeric input', async () => {
     renderForm({ defaultType: 'card' });
 
-    const cardNumberInput = screen.getByPlaceholderText('1234 5678 9012 3456');
+    // Letters are stripped by the formatter, so nothing remains to check.
+    const input = typeAndLeave('abcdefghijklmnop');
 
-    // Type letters - should not trigger Luhn check (non-digit guard)
-    fireEvent.change(cardNumberInput, { target: { value: 'abcdefghijklmnop' } });
-
+    expect(input).toHaveValue('');
     await waitFor(() => {
-      expect(screen.queryByText('Card number does not pass Luhn check')).not.toBeInTheDocument();
+      expect(screen.queryByText(LUHN_WARNING)).not.toBeInTheDocument();
     });
   });
 });

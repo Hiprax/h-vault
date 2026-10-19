@@ -1676,6 +1676,15 @@ export const swaggerSpec: JsonObject = {
               mode: { type: 'string', enum: ['open', 'invite', 'closed'] },
             },
           },
+          vault: {
+            type: 'object',
+            description:
+              'The custom-field limit (CUSTOM_FIELDS_LIMIT) the item editor and every import apply. Advisory: custom fields are inside the encrypted item data, so the server cannot count them. Absent from an older server, which a client reads as the default of 30.',
+            required: ['customFieldsLimit'],
+            properties: {
+              customFieldsLimit: { type: 'integer', minimum: 1, maximum: 100 },
+            },
+          },
         },
       },
       SessionInfo: {
@@ -2836,7 +2845,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Health'],
         summary: 'Public client configuration',
         description:
-          'Returns the operator-tunable limits the browser needs before or without signing in: the File Encryption size cap, and whether the document store is enabled with its limits. Unauthenticated, and nothing in it names the storage engine. Rate limited: 60 req/IP per minute, counted in memory per process.',
+          'Returns the operator-tunable limits the browser needs before or without signing in: the File Encryption size cap, whether the document store is enabled with its limits, who may register, and the custom-field limit. Unauthenticated, and nothing in it names the storage engine. Rate limited: 60 req/IP per minute, counted in memory per process.',
         responses: {
           200: jsonEnvelope('Public configuration', { $ref: '#/components/schemas/PublicConfig' }),
           429: { $ref: '#/components/responses/RateLimited' },

@@ -24,6 +24,8 @@ import {
 import { cn } from '../../lib/utils';
 import { itemMatchesSearch } from '../../lib/vaultSearch';
 import { ITEM_TYPE_LABELS, getItemSubtitle } from '../../lib/vaultDisplay';
+import { readItemCardExpiry } from '../../lib/cardExpiry';
+import { CardExpiryBadge } from './CardExpiry';
 import { VAULT_SEARCH_RESULTS_ID } from './SearchBar';
 import {
   sendPaced,
@@ -243,6 +245,9 @@ const VaultListItem = memo(function VaultListItem({
   // The distinguishing second label — a username, host, masked card tail or
   // person's name. Never a secret; see `getItemSubtitle`.
   const subtitle = getItemSubtitle(item);
+  // An expired or soon-expiring card says so in its row (nothing for any other
+  // item, a trashed card or an undecodable one).
+  const cardExpiry = readItemCardExpiry(item);
   const lastModified = new Date(item.updatedAt).toLocaleDateString(undefined, {
     month: 'short',
     day: 'numeric',
@@ -342,6 +347,7 @@ const VaultListItem = memo(function VaultListItem({
             >
               {ITEM_TYPE_LABELS[item.itemType]}
             </span>
+            <CardExpiryBadge expiry={cardExpiry} />
             {subtitle && (
               <span
                 data-testid="vault-item-subtitle"

@@ -119,6 +119,9 @@ vi.mock('../src/services/api/configApi', () => ({
   // The register page asks which registration mode the server runs (F-24); it
   // never rejects in production either (null = "the server did not say").
   readRegistrationMode: () => Promise.resolve('open'),
+  getCustomFieldsLimit: () => Promise.resolve(30),
+  cachedCustomFieldsLimitValue: () => null,
+  readCustomFieldsLimitFresh: () => Promise.resolve(30),
 }));
 
 vi.mock('../src/services/crypto/fileCryptoService', async (importOriginal) => {

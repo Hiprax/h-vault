@@ -83,11 +83,14 @@ describe('Bitwarden JSON', () => {
     expect(login.data.customFields).toEqual([{ name: 'PIN', value: '1234', type: 'hidden' }]);
   });
 
-  it('maps a secure note', () => {
+  it('maps a secure note, carrying its fields as custom fields rather than folding them', () => {
+    // Specification change (0.18.0): notes hold custom fields now, so a Bitwarden
+    // secure note's `fields` import as fields, as a login's and an identity's
+    // always have. Folding them into the content wrote hidden values in clear.
     const note = byType(parseImportData('bitwarden', BW_JSON).items, 'note');
     expect(note.name).toBe('My Note');
-    expect(String(note.data.content)).toContain('secret text');
-    expect(String(note.data.content)).toContain('k: v'); // custom field folded into content
+    expect(note.data.content).toBe('secret text');
+    expect(note.data.customFields).toEqual([{ name: 'k', value: 'v', type: 'text' }]);
   });
 
   it('maps a card', () => {
@@ -147,6 +150,94 @@ describe('Bitwarden JSON', () => {
 
   it('throws a friendly ImportParseError on malformed JSON', () => {
     expect(() => parseImportData('bitwarden', '{not json')).toThrowError(/Bitwarden/);
+  });
+});
+
+describe('Bitwarden JSON note and card fields (0.18.0)', () => {
+  /** A value no other input here contains, so finding it anywhere proves a leak. */
+  const PIN = '\uE000card-pin\uE001';
+  const ALARM = '\uE000alarm-code\uE001';
+
+  const parseOne = (item: Record<string, unknown>): ParsedImportItem => {
+    const { items } = parseImportData('bitwarden', JSON.stringify({ items: [item] }));
+    expect(items).toHaveLength(1);
+    return items[0]!;
+  };
+
+  it('maps a card’s fields to custom fields, types intact, and leaves its notes alone', () => {
+    const card = parseOne({
+      type: 3,
+      name: 'Card',
+      notes: 'card note',
+      card: { cardholderName: 'A', number: '4111111111111111' },
+      fields: [
+        { name: 'PIN', value: PIN, type: 1 },
+        { name: 'Bank', value: 'Acme', type: 0 },
+        { name: 'Contactless', value: 'true', type: 2 },
+        { name: '   ', value: 'nameless', type: 0 },
+      ],
+    });
+
+    expect(card.itemType).toBe('card');
+    expect(card.data.customFields).toEqual([
+      { name: 'PIN', value: PIN, type: 'hidden' },
+      { name: 'Bank', value: 'Acme', type: 'text' },
+      { name: 'Contactless', value: 'true', type: 'boolean' },
+    ]);
+    // Nothing is folded any more: the notes are exactly the source's.
+    expect(card.data.notes).toBe('card note');
+    expect(String(card.data.notes)).not.toContain('\uE000');
+  });
+
+  it('emits neither customFields nor notes for a card that has neither', () => {
+    const card = parseOne({
+      type: 3,
+      name: 'Bare card',
+      card: { number: '4111111111111111' },
+      fields: [{ name: '', value: 'x', type: 0 }],
+    });
+
+    expect('customFields' in card.data).toBe(false);
+    expect('notes' in card.data).toBe(false);
+  });
+
+  it('keeps a hidden note field hidden, its value out of the content', () => {
+    const note = parseOne({
+      type: 2,
+      name: 'House',
+      notes: 'keys under the mat',
+      fields: [
+        { name: 'Alarm', value: ALARM, type: 1 },
+        { name: 'Wi-Fi', value: 'house-net', type: 0 },
+      ],
+    });
+
+    expect(note.data.content).toBe('keys under the mat');
+    expect(note.data.customFields).toEqual([
+      { name: 'Alarm', value: ALARM, type: 'hidden' },
+      { name: 'Wi-Fi', value: 'house-net', type: 'text' },
+    ]);
+  });
+
+  it('imports an unknown item type as a note carrying its fields the same way', () => {
+    const note = parseOne({
+      type: 99,
+      name: 'Future type',
+      fields: [{ name: 'k', value: 'v', type: 0 }],
+    });
+
+    expect(note.itemType).toBe('note');
+    expect(note.data.content).toBe('');
+    expect(note.data.customFields).toEqual([{ name: 'k', value: 'v', type: 'text' }]);
+  });
+
+  it('keeps folding a CSV note’s fields column, which carries no field types', () => {
+    const csv =
+      'folder,favorite,type,name,notes,fields,reprompt,login_uri,login_username,login_password,login_totp\n' +
+      ',0,note,My Note,note body,k: v,0,,,,';
+    const [note] = parseImportData('bitwarden', csv).items;
+    expect(note?.data.content).toBe('note body\n\nk: v');
+    expect(note && 'customFields' in note.data).toBe(false);
   });
 });
 

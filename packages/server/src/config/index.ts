@@ -2,8 +2,11 @@ import { X509Certificate } from 'node:crypto';
 import net from 'node:net';
 import { z } from 'zod';
 import {
+  DEFAULT_CUSTOM_FIELDS_LIMIT,
   DOCUMENT_CIPHERTEXT_CHUNK_BYTES,
+  MAX_CUSTOM_FIELDS_PER_ITEM,
   MAX_DOCUMENT_EXT_LENGTH,
+  MIN_CUSTOM_FIELDS_LIMIT,
   MAX_REGISTRATION_INVITERS,
   MIN_SUSTAINED_UPLOAD_BYTES_PER_SECOND,
   REGISTRATION_MODES,
@@ -391,6 +394,25 @@ const envSchema = z
     // operator-tunable ceiling. Bounded 1..1024; browser one-shot crypto is
     // memory-bound, so 100 MB is a desktop-safe default.
     FILE_ENCRYPTION_MAX_SIZE_MB: z.coerce.number().int().min(1).max(1024).default(100),
+
+    // Vault item limits
+    // How many custom fields an entry may have in the item editor, and how many an
+    // import keeps (the rest is moved into the entry's notes, or dropped when hidden,
+    // with a warning before and after). Custom fields live inside the encrypted item
+    // data, so the server cannot count them: this is ADVERTISED via GET /config and
+    // enforced by the client. Bounded above by the decrypt-side cap
+    // (`MAX_CUSTOM_FIELDS_PER_ITEM`), which existing entries may already reach and
+    // which therefore never moves. An empty assignment keeps the default, as for
+    // UNVERIFIED_ACCOUNT_TTL_DAYS: coercing '' would read 0.
+    CUSTOM_FIELDS_LIMIT: z.preprocess(
+      (v) => (v === '' ? undefined : v),
+      z.coerce
+        .number()
+        .int()
+        .min(MIN_CUSTOM_FIELDS_LIMIT)
+        .max(MAX_CUSTOM_FIELDS_PER_ITEM)
+        .default(DEFAULT_CUSTOM_FIELDS_LIMIT),
+    ),
 
     // Document store (optional object storage)
     //

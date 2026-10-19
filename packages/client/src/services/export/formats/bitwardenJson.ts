@@ -220,10 +220,10 @@ function backupCodesField(p: PortableItem): BitwardenField | undefined {
  * Unlike {@link backupCodesField}, the round trip IS symmetric: the importer hoists
  * this entry back into `address.deliveryNotes` by name. The no-hoist rule for
  * recovery codes exists because a wrong hoist would run free text through a strict
- * code parser and litter a security-critical list; neither half applies here, and
- * leaving the value in `customFields` would be actively worse, because
- * `IdentityDetail` renders no custom fields and the identity form does not carry
- * them, so it would be invisible in the app and lost on the next edit.
+ * code parser and litter a security-critical list; neither half applies here. An
+ * identity does show and edit custom fields, so a value left there would not be
+ * lost, but hoisting puts it back in the field the user typed it into instead of
+ * the generic custom-field list.
  */
 function deliveryNotesField(p: PortableItem): BitwardenField | undefined {
   if (p.type !== 'identity') return undefined;
@@ -360,9 +360,11 @@ export function toBitwardenJson(portable: readonly PortableItem[]): {
       }
     }
 
-    // Recovery codes go FIRST. `clampCustomFields` on the way back in summarises
-    // anything past the 100-field cap into notes, and of everything competing for
-    // those slots the recovery codes are what must not be demoted to prose.
+    // Recovery codes go FIRST. An import keeps an entry's FIRST custom fields, up to
+    // the operator's limit (`CUSTOM_FIELDS_LIMIT`) and the parsers' cap of 100: a
+    // text field past it is summarised into notes and a hidden one is not imported
+    // at all, so of everything competing for those slots the recovery codes are
+    // what must not be cut.
     // An identity's delivery notes follow for the same reason at lower stakes: they
     // are not a secret, so being summarised into notes past the cap is acceptable,
     // just not preferred. The two promoted fields never coexist (one is login-only,

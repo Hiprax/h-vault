@@ -15,10 +15,10 @@ import { config, storageConfigured } from '../config/index.js';
  * bucket — only whether the feature is available and the numbers the browser has
  * to know before it starts encrypting.
  *
- * Three blocks today. The first two exist for the same reason: the work happens
- * in the browser, so the server can only ADVERTISE the operator's limit and the
- * client is what enforces it. The third, `registration`, is the opposite: the
- * server enforces it, and publishes it only so the register page can explain it.
+ * Four blocks today. Three exist for the same reason: the work happens in the
+ * browser, so the server can only ADVERTISE the operator's limit and the client is
+ * what enforces it. `registration` is the opposite: the server enforces it, and
+ * publishes it only so the register page can explain it.
  *
  *   * `fileEncryption` — the File Encryption tool's size guardrail. Files are
  *     encrypted entirely in the browser and never uploaded, so the server could
@@ -33,6 +33,11 @@ import { config, storageConfigured } from '../config/index.js';
  *     OPTIONAL in `publicConfigDataSchema` for the other direction of the same
  *     compatibility: a current client must still parse an older server's
  *     envelope, or the File Encryption cap silently falls back too.
+ *
+ *   * `vault` — the custom-field limit (`CUSTOM_FIELDS_LIMIT`) the item editor and
+ *     every import apply. Custom fields are inside the encrypted item data, so the
+ *     server cannot count them; it is advisory in exactly the way the File
+ *     Encryption cap is, and SECURITY.md says so.
  *
  * `allowedExtensions` is advisory and the documentation says so plainly: the
  * server receives ciphertext and never sees a filename, so it cannot enforce an
@@ -62,6 +67,7 @@ export const getPublicConfig = catchAsync((_req: Request, res: Response): void =
     // filled. The domain allowlist is NOT published; an address outside it is
     // answered exactly as a registered one is.
     registration: { mode: config.REGISTRATION_MODE },
+    vault: { customFieldsLimit: config.CUSTOM_FIELDS_LIMIT },
   };
 
   res.json({ success: true, data });

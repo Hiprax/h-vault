@@ -1,4 +1,9 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { Suspense, lazy, useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { InfoTip } from '../components/ui/InfoTip';
+import {
+  SETTINGS_HELP_TOPICS,
+  type SettingsHelpTopic,
+} from '../components/settings/settingsHelpTopics';
 import { isAxiosError } from 'axios';
 import { Link, useNavigate } from 'react-router';
 import {
@@ -88,7 +93,7 @@ import type {
 // answered. A second copy here would be a second place for "a 409 whose body
 // has no non-negative integer is an ordinary conflict" to drift.
 import { staleVaultKeyVersion } from '../services/api/staleVaultKey';
-import { readDocumentsConfigFresh } from '../services/api/configApi';
+import { readCustomFieldsLimitFresh, readDocumentsConfigFresh } from '../services/api/configApi';
 import { deriveWrapKey, wrapDek, zeroDek } from '../services/crypto/documentCryptoService';
 import {
   completeBwkWrapper,
@@ -117,6 +122,8 @@ import { getItemsFetchGeneration, useVaultStore } from '../stores/vaultStore';
 import { passwordDidChange } from '../services/crypto/passwordHistory';
 import { decryptVaultField, encryptVaultField } from '../services/crypto/vaultField';
 import { parseCsv } from '../services/import/csv';
+import type { LimitSummary } from '../services/import/customFieldsLimit';
+import { loadCustomFieldsLimit } from '../services/import/loadCustomFieldsLimit';
 import {
   IMPORT_FORMATS,
   ImportParseError,
@@ -140,6 +147,37 @@ import { refreshInBackground } from '../lib/backgroundRefresh';
 // ---------------------------------------------------------------------------
 // CSV helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * The long explanations behind the (?) buttons, in their own chunk: they are most
+ * of a page of text, and the Settings chunk has a size budget that can only ever
+ * come down. Fetched the first time a button is hovered or focused.
+ */
+const SettingsHelp = lazy(() => import('../components/settings/SettingsHelp'));
+
+/**
+ * What the custom-field limit cut from an import, and the code that cuts it: both
+ * needed only while an import runs, so both are fetched then rather than carried in
+ * the Settings chunk, whose size budget can only ever come down.
+ */
+const loadImportLimitViews = () => import('../components/settings/ImportLimitSummary');
+const ImportLimitCuts = lazy(() =>
+  loadImportLimitViews().then((module) => ({ default: module.ImportLimitCuts })),
+);
+const ImportLimitReport = lazy(() =>
+  loadImportLimitViews().then((module) => ({ default: module.ImportLimitReport })),
+);
+const preloadSettingsHelp = () => import('../components/settings/SettingsHelp');
+
+/** The (?) button and its explanation for one Settings topic. */
+function SettingsHelpTip({ topic }: { topic: SettingsHelpTopic }) {
+  const { label, title } = SETTINGS_HELP_TOPICS[topic];
+  return (
+    <InfoTip label={label} title={title} onPreload={preloadSettingsHelp}>
+      <SettingsHelp topic={topic} />
+    </InfoTip>
+  );
+}
 
 const HVAULT_FIELDS = [
   { value: '', label: '-- Skip --' },
@@ -399,12 +437,21 @@ async function extractNativeItems(raw: string, vaultKey: CryptoKey): Promise<Nat
   return { items, filtered, reasons, total: rows.length };
 }
 
-/** What an `overwrite` import is about to change, shown before anything is sent. */
+/** What an import is about to change, shown before anything is sent. */
 interface ImportConfirmSummary {
   updateCount: number;
   insertCount: number;
   passwordChanges: number;
+  /** What the custom-field limit will cut, or `null` when it cuts nothing. */
+  limitCuts: { summary: LimitSummary; limit: number } | null;
 }
+
+/** How many cut entries, and field names per entry, the confirmation and report list. */
+const LIMIT_SUMMARY_MAX_ENTRIES = 20;
+const LIMIT_SUMMARY_MAX_NAMES = 10;
+
+/** How long the result toast stays when the limit cut something (the report stays). */
+const LIMIT_CUT_TOAST_MS = 15_000;
 
 // ---------------------------------------------------------------------------
 // Vault key rotation helpers
@@ -665,6 +712,13 @@ export default function SettingsPage() {
 
   // Import state
   const [showImport, setShowImport] = useState(false);
+  // What the custom-field limit cut from the last import, kept on screen after the
+  // import panel closes. Page state ONLY: it names decrypted entries and fields,
+  // so it goes when a lock unmounts this page, and is never stored anywhere.
+  const [importLimitReport, setImportLimitReport] = useState<{
+    summary: LimitSummary;
+    limit: number;
+  } | null>(null);
   const [importData, setImportData] = useState('');
   const [importFormat, setImportFormat] = useState<ImportSourceFormat>('json');
   const [importing, setImporting] = useState(false);
@@ -1342,6 +1396,9 @@ export default function SettingsPage() {
       return;
     }
 
+    // A report describes ONE import; it never stays up to be read as the next one's.
+    // (Setting `null` over `null` renders nothing, so this needs no current value.)
+    setImportLimitReport(null);
     setImporting(true);
     setImportProgress(null);
     try {
@@ -1413,6 +1470,27 @@ export default function SettingsPage() {
         }
       }
 
+      // 1b ── The custom-field limit, read FRESH, before the vault is loaded: the
+      // import ACTS on it (it moves fields into notes and leaves hidden ones out),
+      // so "the server did not say" stops the import instead of guessing. Read
+      // here, ahead of `fetchItems`, and the code that applies it is loaded here
+      // too (a separate chunk, fetched on the first import): the vault-stability
+      // checks below must sit between EVERY wait and the snapshot the import
+      // resolves against, or a lock during a wait after them empties the snapshot
+      // and every row in the file is added again as new.
+      const [customFieldsLimit, importLimit] = await Promise.all([
+        readCustomFieldsLimitFresh(),
+        loadCustomFieldsLimit(),
+      ]);
+      if (customFieldsLimit === null) {
+        toast({
+          title: "Could not read this server's custom-field limit. Nothing was imported.",
+          description: 'Check your connection and run the import again.',
+          type: 'error',
+        });
+        return;
+      }
+
       // 2 ── Resolution must run against a COMPLETE item set. `fetchItems`
       // streams pages and appends progressively, so reading `state.items` before
       // it settles would resolve against a partial vault and insert duplicates
@@ -1460,23 +1538,59 @@ export default function SettingsPage() {
         return;
       }
 
-      // 3 ── Resolve ONCE over the whole set, against the whole vault.
+      // 3 ── Cut every row to the custom-field limit BEFORE matching, so each is
+      // matched in the form it will be stored in, then resolve ONCE over the whole
+      // set, against the whole vault. A cut row ALSO matches an entry stored in
+      // full (imported before the limit), so a re-import never duplicates either.
+      const { limitImportItems, prepareLimitedUpdates, summariseLimitReports } = importLimit;
+      const limited = limitImportItems(incoming, customFieldsLimit);
       const resolution = await resolveImport({
         existing: useVaultStore.getState().items,
-        incoming,
+        incoming: limited.items,
         strategy: conflictStrategy,
+        alternateOf: limited.untrimmedOf,
       });
+      // An overwrite is re-cut from the file's full row at the larger of the limit
+      // and what the stored entry already has: the limit never shrinks an entry.
+      const prepared = prepareLimitedUpdates(
+        resolution.updates,
+        customFieldsLimit,
+        limited.untrimmedOf,
+      );
+      const updates = prepared.updates;
+      // A row folded into another by the cut is worth saying only when that other
+      // row is written: when it is skipped or already up to date, neither is
+      // imported, and the confirmation would describe an import that changes nothing.
+      const written = new Set<unknown>([
+        ...resolution.inserts,
+        ...resolution.updates.map((update) => update.incoming),
+      ]);
+      const limitSummary = summariseLimitReports(
+        [...resolution.inserts.map(limited.reportOf), ...prepared.reports],
+        {
+          merges: (resolution.mergedByLimit ?? []).filter((merge) => written.has(merge.kept)),
+          reportOf: limited.reportOf,
+          maxEntries: LIMIT_SUMMARY_MAX_ENTRIES,
+          maxNames: LIMIT_SUMMARY_MAX_NAMES,
+        },
+      );
+      const limitCuts =
+        limitSummary.rowCount + limitSummary.mergedCount > 0
+          ? { summary: limitSummary, limit: customFieldsLimit }
+          : null;
 
-      // 4 ── No update is sent without explicit confirmation.
-      if (resolution.updates.length > 0) {
-        const passwordChanges = resolution.updates.filter(
+      // 4 ── Nothing is sent without explicit confirmation when it would change an
+      // existing item, or when the limit would cut anything from the file.
+      if (updates.length > 0 || limitCuts !== null) {
+        const passwordChanges = updates.filter(
           ({ incoming: row, existing: match }) =>
             match.itemType === 'login' && passwordDidChange(match.data.password, row.data.password),
         ).length;
         const confirmed = await requestImportConfirmation({
-          updateCount: resolution.updates.length,
+          updateCount: updates.length,
           insertCount: resolution.inserts.length,
           passwordChanges,
+          limitCuts,
         });
         if (!confirmed) {
           toast({ title: 'Import cancelled. Nothing was changed.', type: 'info' });
@@ -1499,7 +1613,7 @@ export default function SettingsPage() {
       // 5 ── Encrypt only what will actually be sent.
       const operations = await buildImportOperations({
         inserts: resolution.inserts,
-        updates: resolution.updates,
+        updates,
         userId: importUserId,
         vaultKey,
       });
@@ -1588,13 +1702,21 @@ export default function SettingsPage() {
       const title =
         parts.length === 1 ? insertedPart : `${parts.join(', ')} (${String(totalRows)} rows)`;
 
+      const limitNote =
+        limitCuts === null
+          ? []
+          : ['Some custom fields were moved into notes or left out: see the import report.'];
+      const description = [...limitNote, ...skipReasons].join('\n');
       toast({
         title,
         // Name the entries that were dropped and why, rather than only counting them.
-        ...(skipReasons.length > 0 ? { description: skipReasons.join('\n') } : {}),
-        type: skippedInvalid > 0 ? 'warning' : 'success',
+        ...(description !== '' ? { description } : {}),
+        type: skippedInvalid > 0 || limitCuts !== null ? 'warning' : 'success',
+        ...(limitCuts !== null ? { duration: LIMIT_CUT_TOAST_MS } : {}),
       });
       if (inserted > 0 || updated > 0) refreshInBackground(useVaultStore.getState().fetchItems());
+      // In the same batch as closing the panel, and only when something was cut.
+      if (limitCuts !== null) setImportLimitReport(limitCuts);
       setShowImport(false);
       setImportData('');
       // In the same batch as the line above, so the render that drops the
@@ -3190,6 +3312,7 @@ export default function SettingsPage() {
               <label htmlFor="lock-on-hidden" className="text-sm text-[hsl(var(--foreground))]">
                 Lock when the tab is hidden
               </label>
+              <SettingsHelpTip topic="lock-on-hidden" />
             </div>
             <input
               id="lock-on-hidden"
@@ -3248,9 +3371,12 @@ export default function SettingsPage() {
           <div className="border-t border-[hsl(var(--border))] pt-4">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium text-[hsl(var(--foreground))]">
-                  Rotate Vault Key
-                </p>
+                <div className="flex items-center gap-1">
+                  <p className="text-sm font-medium text-[hsl(var(--foreground))]">
+                    Rotate Vault Key
+                  </p>
+                  <SettingsHelpTip topic="vault-key-rotation" />
+                </div>
                 <p className="text-xs text-[hsl(var(--muted-foreground))]">
                   {interruptedRotation
                     ? 'Re-encrypt every entry under the key the interrupted rotation was moving to'
@@ -3296,9 +3422,12 @@ export default function SettingsPage() {
             {!interruptedRotation && (
               <div className="mt-3 flex items-center justify-between">
                 <div>
-                  <p className="text-sm font-medium text-[hsl(var(--foreground))]">
-                    Re-seal Entries
-                  </p>
+                  <div className="flex items-center gap-1">
+                    <p className="text-sm font-medium text-[hsl(var(--foreground))]">
+                      Re-seal Entries
+                    </p>
+                    <SettingsHelpTip topic="entry-reseal" />
+                  </div>
                   <p className="text-xs text-[hsl(var(--muted-foreground))]">
                     Bind every entry to its own place, under the key you already use
                   </p>
@@ -3811,6 +3940,17 @@ export default function SettingsPage() {
               </div>
             </div>
           )}
+          {/* What the custom-field limit cut from the last import, after the panel
+              has closed. Labelled, not live: the toast already announced it. */}
+          {importLimitReport && (
+            <Suspense fallback={null}>
+              <ImportLimitReport
+                summary={importLimitReport.summary}
+                limit={importLimitReport.limit}
+                onClose={() => setImportLimitReport(null)}
+              />
+            </Suspense>
+          )}
         </CardContent>
       </Card>
 
@@ -3866,27 +4006,40 @@ export default function SettingsPage() {
           <DialogHeader>
             <DialogTitle>Confirm import changes</DialogTitle>
             <DialogDescription>
-              This import will modify {importConfirm?.updateCount ?? 0} existing item
-              {importConfirm?.updateCount === 1 ? '' : 's'} in place.
+              {(importConfirm?.updateCount ?? 0) > 0
+                ? `This import will modify ${String(importConfirm?.updateCount ?? 0)} existing item${importConfirm?.updateCount === 1 ? '' : 's'} in place.`
+                : 'This import will move some custom fields into notes, or leave them out, before anything is saved.'}
             </DialogDescription>
           </DialogHeader>
           <ul className="list-disc space-y-1 pl-5 text-sm text-[hsl(var(--foreground))]">
-            <li>
-              {importConfirm?.passwordChanges ?? 0} password
-              {importConfirm?.passwordChanges === 1 ? '' : 's'} will change. The previous password
-              is kept in each item&apos;s password history.
-            </li>
-            <li>
-              Each matched item&apos;s <strong>name is replaced</strong> by the name in the imported
-              file, so an item you renamed reverts to the source name.
-            </li>
-            <li>
-              A matched item&apos;s content is replaced wholesale. Anything the imported file does
-              not carry — a TOTP secret, backup codes, delivery notes, notes, custom fields — is{' '}
-              <strong>lost</strong>, and only the password is recoverable from history.
-            </li>
+            {(importConfirm?.updateCount ?? 0) > 0 && (
+              <>
+                <li>
+                  {importConfirm?.passwordChanges ?? 0} password
+                  {importConfirm?.passwordChanges === 1 ? '' : 's'} will change. The previous
+                  password is kept in each item&apos;s password history.
+                </li>
+                <li>
+                  Each matched item&apos;s <strong>name is replaced</strong> by the name in the
+                  imported file, so an item you renamed reverts to the source name.
+                </li>
+                <li>
+                  A matched item&apos;s content is replaced wholesale. Anything the imported file
+                  does not carry — a TOTP secret, backup codes, delivery notes, notes, custom fields
+                  — is <strong>lost</strong>, and only the password is recoverable from history.
+                </li>
+              </>
+            )}
             <li>{importConfirm?.insertCount ?? 0} new items will be added.</li>
           </ul>
+          {importConfirm?.limitCuts && (
+            <Suspense fallback={null}>
+              <ImportLimitCuts
+                summary={importConfirm.limitCuts.summary}
+                limit={importConfirm.limitCuts.limit}
+              />
+            </Suspense>
+          )}
           <DialogFooter>
             <button
               type="button"

@@ -20,7 +20,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, waitFor, act, within } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act, within, cleanup } from '@testing-library/react';
 import { MemoryRouter, Routes, Route, useLocation } from 'react-router';
 import React, { StrictMode } from 'react';
 
@@ -165,11 +165,13 @@ vi.mock('../src/components/vault/VaultItemForm', () => ({
     defaultFolderId,
     onSaved,
     onCancel,
+    customFieldsLimit,
   }: {
     defaultType?: string;
     defaultFolderId?: string;
     onSaved?: () => void;
     onCancel?: () => void;
+    customFieldsLimit?: number;
   }) =>
     React.createElement(
       'div',
@@ -182,7 +184,15 @@ vi.mock('../src/components/vault/VaultItemForm', () => ({
       ),
       React.createElement('button', { type: 'button', onClick: onSaved }, 'Save Form'),
       React.createElement('button', { type: 'button', onClick: onCancel }, 'Cancel Form'),
+      React.createElement(
+        'span',
+        { 'data-testid': 'form-custom-fields-limit' },
+        String(customFieldsLimit ?? 'none'),
+      ),
     ),
+  // The page reads the operator's limit through the editor's module and hands it
+  // to the form; 17 so the test can tell it from the form's own default.
+  useCustomFieldsLimit: () => 17,
 }));
 
 // ---------------------------------------------------------------------------
@@ -191,6 +201,7 @@ vi.mock('../src/components/vault/VaultItemForm', () => ({
 
 import { ToastProvider } from '../src/components/ui/Toast';
 import { useVaultStore } from '../src/stores/vaultStore';
+import { useAuthStore } from '../src/stores/authStore';
 import SessionsPage from '../src/pages/SessionsPage';
 import AuditLogPage from '../src/pages/AuditLogPage';
 import VaultPage from '../src/pages/VaultPage';
@@ -902,6 +913,82 @@ describe('VaultPage - mount fetching', () => {
   });
 });
 
+describe('VaultPage - card expiry reminder', () => {
+  const expiredCard = {
+    id: 'card-old',
+    itemType: 'card',
+    name: 'Old Visa',
+    favorite: false,
+    tags: [],
+    data: {
+      cardholderName: 'A',
+      number: '4111111111111111',
+      expMonth: '01',
+      expYear: '2020',
+      cvv: '',
+    },
+    createdAt: '2025-01-01T00:00:00.000Z',
+    updatedAt: '2025-01-01T00:00:00.000Z',
+    _raw: {},
+  };
+
+  beforeEach(() => {
+    localStorage.clear();
+    useAuthStore.setState({ user: { userId: 'user-1', email: 'a@example.com' } } as never);
+  });
+
+  afterEach(() => {
+    // Unmount first: resetting the store under a mounted page is an update
+    // outside act.
+    cleanup();
+    localStorage.clear();
+    useVaultStore.setState({ items: [], showTrash: false } as never);
+  });
+
+  it('lists an expired card between the heading and the list, linking to it', async () => {
+    primeVaultStore({ items: [expiredCard] });
+
+    await act(async () => {
+      renderPage(<VaultPage />);
+    });
+
+    const reminder = screen.getByTestId('expiring-cards-reminder');
+    expect(reminder).toHaveTextContent('1 card has expired.');
+    expect(within(reminder).getByRole('link', { name: /Old Visa/ })).toHaveAttribute(
+      'href',
+      '/vault/card-old',
+    );
+    // It sits after the page heading.
+    const heading = screen.getByRole('heading', { level: 1, name: 'Vault' });
+    expect(
+      heading.compareDocumentPosition(reminder) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it('is not shown in the trash view', async () => {
+    primeVaultStore({ items: [expiredCard], showTrash: true });
+
+    await act(async () => {
+      renderPage(<VaultPage />);
+    });
+
+    expect(screen.queryByTestId('expiring-cards-reminder')).not.toBeInTheDocument();
+  });
+
+  it('hands focus to the page heading when it is hidden', async () => {
+    primeVaultStore({ items: [expiredCard] });
+
+    await act(async () => {
+      renderPage(<VaultPage />);
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Hide card expiry reminder' }));
+
+    expect(screen.queryByTestId('expiring-cards-reminder')).not.toBeInTheDocument();
+    expect(document.activeElement).toBe(screen.getByRole('heading', { level: 1, name: 'Vault' }));
+  });
+});
+
 describe('VaultPage - decryption failure notifications', () => {
   it('surfaces a warning toast carrying the failure count from the store event', async () => {
     primeVaultStore();
@@ -973,6 +1060,8 @@ describe('VaultPage - create-item dialog', () => {
     const dialog = await screen.findByRole('dialog', { name: 'Create new vault item' });
     expect(within(dialog).getByTestId('form-default-type')).toHaveTextContent('note');
     expect(within(dialog).getByTestId('form-default-folder')).toHaveTextContent('folder-9');
+    // The operator's custom-field limit reaches the editor from the page.
+    expect(within(dialog).getByTestId('form-custom-fields-limit')).toHaveTextContent('17');
   });
 
   it('closes and re-fetches items when the form reports a save', async () => {

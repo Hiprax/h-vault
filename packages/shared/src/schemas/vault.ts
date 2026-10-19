@@ -643,6 +643,13 @@ export const secretDataSchema = z.object({
 export const noteDataSchema = z.object({
   content: z.string().max(MAX_NOTE_CONTENT_LENGTH).optional().default(''),
   format: z.enum(NOTE_FORMATS).optional().default('markdown'),
+  // `.optional()` with NO `.default([])`, unlike the three older owners of this key.
+  // Every stored note predates it, and a default would inject `customFields: []` into
+  // each one's parsed data: its import content hash would move (so re-importing the
+  // file it came from would duplicate it) and the N-1 fixture would gain a key it
+  // never stored. Absent and empty therefore stay distinct here, and the editor
+  // writes `undefined`, never `[]`, for a note with no fields.
+  customFields: z.array(customFieldSchema).max(MAX_CUSTOM_FIELDS_PER_ITEM).optional(),
 });
 
 /**
@@ -688,6 +695,8 @@ export const cardDataSchema = z.object({
   brand: z.string().max(MAX_CARD_BRAND_LENGTH).optional(),
   notes: z.string().max(MAX_NOTE_CONTENT_LENGTH).optional(),
   billingAddress: addressSchema.optional(),
+  // Optional with no default, for the reason `noteDataSchema.customFields` gives.
+  customFields: z.array(customFieldSchema).max(MAX_CUSTOM_FIELDS_PER_ITEM).optional(),
 });
 
 /**

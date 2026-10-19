@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+### Added
+
+- **Card expiry warnings.** A card that has expired, or expires within 60 days, is marked "Expired" or "Expires soon" in the vault list, says so at the top of the card itself (with the month it was valid through, and how many days are left), and is listed in a reminder at the top of the vault that can be hidden until something changes. The editor says so too while the expiry is being entered. Expiry is worked out only in the browser after unlock, from the card's month and year: the server never sees an expiry date in readable form, and nothing is emailed.
+- **Custom fields on secure notes and cards**, like logins, identities and secrets: text, hidden and yes/no fields, shown on the item, searchable, and exported. A note can now be nothing but its fields.
+- **`CUSTOM_FIELDS_LIMIT` (1-100, default 30): how many custom fields an entry may have.** The item editor counts them ("12 of 30") and stops offering "+ Add Field" at the limit; an entry that already has more keeps every one of them but cannot gain more until it is under the limit. Every import applies it too, H-Vault's own export files included (see Changed). `GET /config` advertises it as `vault.customFieldsLimit`. Advisory, not a security control: custom fields are inside the encrypted item data, so the server cannot count them.
+- **A secret whose expiry date is already in the past says so in the editor** ("This date has passed, so the secret will show as expired"); it still saves.
+- **Plain-language help in Settings.** A question-mark button beside Rotate Vault Key, Re-seal Entries and "Lock when the tab is hidden" opens an explanation on hover, click, tap or keyboard: what the action does, what happens afterwards, when to use it, and its limits.
+
+### Changed
+
+- **Behaviour change: imports apply the custom-field limit.** An imported entry keeps its first fields up to `CUSTOM_FIELDS_LIMIT`; the text of each extra text or yes/no field is added to the entry's notes (a note's text, a secret's description) while they have room (anything that does not fit is named in the warning), and extra HIDDEN fields are not imported at all rather than written out in clear (by name, never by value, in the warning). Before anything is saved the import lists exactly which entries are affected, what moves into notes and what is dropped, and can be cancelled; afterwards an "Import report" on the Settings page lists the same. It applies to H-Vault's own export files as well. Re-importing the same file still finds the entries it imported, including entries imported in full before this release. The limit never cuts an overwritten entry below the number of custom fields it already has; an overwrite still replaces the entry with the file's version, as before. Changing the limit later can make a re-import add a second copy of a non-login entry that was cut under the old limit. Restoring a backup is not an import and is never cut.
+- **Behaviour change: a Bitwarden note's or card's custom fields now import as custom fields**, as a login's and an identity's always have, instead of being added to the note text (where hidden values appeared in clear). A note or card with fields that was imported from Bitwarden before this release no longer matches the same file on re-import, because notes and cards are matched by their content, so importing that file again adds a second copy of it.
+- **Behaviour change: a card number that fails the Luhn checksum is now a warning, not a refusal.** Some card brands carry no check digit, and the vault has to store the card a person actually holds; the warning still catches a typo.
+- **Behaviour change: the item editor stops adding custom fields at the limit (`CUSTOM_FIELDS_LIMIT`, default 30)**, where it had no limit before. An entry that already has more keeps all of them and says so.
+- **Behaviour change: the item editor validates as you go and explains every problem.** The browser's own form check no longer runs (it could block a save with no message); each field is checked when you leave it after changing it, its message disappears as soon as it is fixed, and a save that is refused lists how many fields need attention and moves focus to the first one on screen. Messages say what to do ("Enter a valid email address, like name@example.com", "First name is required"). A half-typed date or time is still refused, now with a message on the field.
+- **Card details accept every real card.** Card numbers of 12 to 19 digits (some Maestro cards have 12), a month with or without its leading zero, and a two-digit year (saved as 20YY). An expiry needs both its month and its year.
+- **A value the editor would now refuse, but which was stored before and has not been touched, never blocks a save.** Imported entries (an empty cardholder, a month without a year, an unusable TOTP value) can still be renamed or edited elsewhere; the editor only applies its rules to what you change, and tells you when a stored TOTP value cannot generate codes.
+
+### Fixed
+
+- **The identity email no longer blocks Create silently.** An address the browser disliked stopped the save, focused the field without a message, and kept every other field from being checked.
+- **Editing a card no longer shortens a stored card number.** A number longer than 19 digits (as an import can store) was cut to 19 when the card was opened, so saving any change stored a different number.
+- **A custom field with a value but no name is no longer thrown away on save**; it is refused with "Give this field a name, or remove it". A completely blank row is still dropped.
+- **A secret's expiry time without a date is no longer silently ignored**; it is refused with "Add a date for this time, or clear the time".
+- **The TOTP value is checked when it is entered**, with the same parser the code display uses, instead of saving a value that can never generate a code.
+- **An item name made only of spaces, or too long to encrypt, is refused on the Name field** instead of after encrypting, in a toast.
+- **A tag that is not added says why** (already on the item, or the item has the maximum of 20) instead of disappearing.
+- **A card with no expiry no longer shows "/" as its expiry.**
+- **Pressing Escape just as "What's new" finishes loading now marks it as read**, instead of closing it unread so that it came back next time. Every dialog now closes on Escape through its current handler.
+
+### Security
+
+- **An import never writes a hidden custom-field value into an entry's notes in clear.** Hidden fields beyond the parsers' own cap of 100 (and a hidden value too long to store) were added to the notes as text; they are now dropped, named in the import warning and in a names-only line in the notes. A Bitwarden note's or card's hidden fields, which were added to its text, now import as hidden fields.
+
 ## [0.17.0] - 2026-10-18
 
 ### Added

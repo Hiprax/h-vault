@@ -1,6 +1,11 @@
 // @vitest-environment node
 import { describe, it, expect, beforeAll } from 'vitest';
-import { vaultItemDataSchemas, cardDataSchema, identityDataSchema } from '@hvault/shared';
+import {
+  vaultItemDataSchemas,
+  cardDataSchema,
+  identityDataSchema,
+  MAX_NOTE_CONTENT_LENGTH,
+} from '@hvault/shared';
 import { buildImportOperations } from '../../src/services/import';
 import {
   buildLogin,
@@ -489,5 +494,215 @@ describe('backup codes on import', () => {
     });
     expect(skipped).toBe(0);
     expect(inserts).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Hidden custom fields at the parser's own clamp (trap 4)
+//
+// A hidden field is the custom-field equivalent of a password: the UI masks it,
+// and `notes` is rendered in the clear on the same item. The clamp therefore
+// records each field's TYPE before deciding where a value may go, and a hidden
+// value is never written into notes, neither in the past-the-cap summary nor as
+// the tail of a truncated value. What it does write is the field's NAME, so the
+// loss is visible, and the names ride on the item as a non-serialised notice the
+// import report reads.
+// ---------------------------------------------------------------------------
+
+/** A value no other input in these tests can contain, so finding it proves a leak. */
+const hiddenValue = (label: string): string => `\uE000hidden-${label}\uE001`;
+
+/** `count` plain text fields named `f0`… with values `v0`…, as a source file carries them. */
+const textFields = (count: number): { name: string; value: string; type: number }[] =>
+  Array.from({ length: count }, (_, i) => ({
+    name: `f${String(i)}`,
+    value: `v${String(i)}`,
+    type: 0,
+  }));
+
+describe('import fidelity clamp — hidden custom fields', () => {
+  it('names a hidden field past the 100-field cap and never writes its value', () => {
+    const item = buildLogin({
+      username: 'u',
+      password: 'p',
+      customFields: [
+        ...textFields(100),
+        { name: 'Recovery PIN', value: hiddenValue('pin'), type: 1 },
+        { name: 'Plain extra', value: 'plain-extra-value', type: 0 },
+        { name: 'API key', value: hiddenValue('api'), type: 'hidden' },
+      ],
+    });
+
+    expect(item.data.customFields).toHaveLength(100);
+    const notes = String(item.data.notes);
+    // The text field keeps today's summary, counted on its own…
+    expect(notes).toContain(
+      '1 additional custom field(s) not imported:\nPlain extra: plain-extra-value',
+    );
+    // …and the hidden ones leave their names only.
+    expect(notes).toContain('2 hidden custom field(s) were not imported: Recovery PIN, API key');
+    expect(JSON.stringify(item)).not.toContain('\uE000');
+    expect(item.importNotices).toEqual({
+      hiddenDropped: ['Recovery PIN', 'API key'],
+      movedToNotes: ['Plain extra'],
+    });
+    assertRoundTrips('login', item.data);
+  });
+
+  it('drops an over-long hidden value WHOLE rather than storing a shortened copy that looks intact', () => {
+    const longSecret = `${'S'.repeat(MAX_NOTE_CONTENT_LENGTH)}${hiddenValue('tail')}`;
+    const item = buildLogin({
+      username: 'u',
+      password: 'p',
+      customFields: [
+        { name: 'Private key', value: longSecret, type: 1 },
+        { name: 'kept', value: 'v', type: 0 },
+      ],
+    });
+
+    // The dropped field frees its slot: only the text field is stored.
+    expect(item.data.customFields).toEqual([{ name: 'kept', value: 'v', type: 'text' }]);
+    expect(item.data.notes).toBe('1 hidden custom field(s) were not imported: Private key');
+    const json = JSON.stringify(item);
+    expect(json).not.toContain('\uE000');
+    expect(json).not.toContain('S'.repeat(64));
+    expect(item.importNotices).toEqual({ hiddenDropped: ['Private key'], movedToNotes: [] });
+    assertRoundTrips('login', item.data);
+  });
+
+  it('keeps a hidden value of exactly the maximum length intact, with no notice', () => {
+    const atCap = 'S'.repeat(MAX_NOTE_CONTENT_LENGTH);
+    const item = buildLogin({
+      username: 'u',
+      password: 'p',
+      customFields: [{ name: 'Private key', value: atCap, type: 1 }],
+    });
+
+    expect(item.data.customFields).toEqual([{ name: 'Private key', value: atCap, type: 'hidden' }]);
+    expect('notes' in item.data).toBe(false);
+    expect('importNotices' in item).toBe(false);
+  });
+
+  it('names a truncated TEXT field as moved to notes, keeping today’s tail fold', () => {
+    const item = buildLogin({
+      username: 'u',
+      password: 'p',
+      customFields: [{ name: 'blob', value: 'x'.repeat(MAX_NOTE_CONTENT_LENGTH + 5) }],
+    });
+
+    expect(String(item.data.notes)).toContain(
+      'Custom field "blob" was truncated; remaining value: xxxxx',
+    );
+    expect(item.importNotices).toEqual({ hiddenDropped: [], movedToNotes: ['blob'] });
+  });
+
+  it('attaches no notice to an item whose custom fields all fit', () => {
+    const item = buildLogin({
+      username: 'u',
+      password: 'p',
+      customFields: [
+        { name: 'a', value: '1', type: 0 },
+        { name: 'b', value: hiddenValue('b'), type: 1 },
+      ],
+    });
+
+    expect('importNotices' in item).toBe(false);
+    expect('notes' in item.data).toBe(false);
+  });
+
+  it('applies the same rule to a pre-shaped card and carries the notice through makeItem', () => {
+    const item = makeItem('card', 'Card', {
+      number: '4111111111111111',
+      notes: 'card note',
+      customFields: [
+        ...textFields(100),
+        { name: 'Card PIN', value: hiddenValue('card-pin'), type: 'hidden' },
+      ],
+    });
+
+    expect(item.data.customFields).toHaveLength(100);
+    expect(item.data.notes).toBe(
+      'card note\n\n1 hidden custom field(s) were not imported: Card PIN',
+    );
+    expect(JSON.stringify(item)).not.toContain('\uE000');
+    expect(item.importNotices).toEqual({ hiddenDropped: ['Card PIN'], movedToNotes: [] });
+    assertRoundTrips('card', item.data);
+  });
+
+  it('attaches no notice to a pre-shaped item without a custom-field list', () => {
+    const item = makeItem('identity', 'Jane', { firstName: 'Jane' });
+    expect('importNotices' in item).toBe(false);
+  });
+});
+
+describe('buildNote — custom fields', () => {
+  it('stores the fields and keeps the content byte-for-byte when nothing overflows', () => {
+    // A note's import identity is the hash of its content, so a note without
+    // overflow must keep the exact text it always had, untrimmed.
+    const content = '  body with edges \n';
+    const item = buildNote({
+      name: 'N',
+      content,
+      customFields: [
+        { name: 'Door', value: '4321', type: 0 },
+        { name: 'Alarm', value: hiddenValue('alarm'), type: 1 },
+        { name: 'Pets', value: 'true', type: 2 },
+      ],
+    });
+
+    expect(item.data).toEqual({
+      content,
+      format: 'plaintext',
+      customFields: [
+        { name: 'Door', value: '4321', type: 'text' },
+        { name: 'Alarm', value: hiddenValue('alarm'), type: 'hidden' },
+        { name: 'Pets', value: 'true', type: 'boolean' },
+      ],
+    });
+    expect('importNotices' in item).toBe(false);
+    assertRoundTrips('note', item.data);
+  });
+
+  it('builds a note from its fields alone, with empty content', () => {
+    const item = buildNote({ customFields: [{ name: 'Door', value: '4321' }] });
+    expect(item.name).toBe('Untitled note');
+    expect(item.data).toEqual({
+      content: '',
+      format: 'plaintext',
+      customFields: [{ name: 'Door', value: '4321', type: 'text' }],
+    });
+    assertRoundTrips('note', item.data);
+  });
+
+  it('emits no customFields key when the list is empty or every entry is nameless', () => {
+    for (const customFields of [undefined, [], [{ name: '  ', value: 'x' }]]) {
+      const item = buildNote({
+        name: 'N',
+        content: 'c',
+        ...(customFields ? { customFields } : {}),
+      });
+      expect(item.data).toEqual({ content: 'c', format: 'plaintext' });
+    }
+  });
+
+  it('folds overflow into the content with the notes join, naming hidden fields only', () => {
+    const item = buildNote({
+      name: 'N',
+      content: '  body  ',
+      customFields: [
+        ...textFields(100),
+        { name: 'extra', value: 'e', type: 0 },
+        { name: 'Secret', value: hiddenValue('secret'), type: 1 },
+      ],
+    });
+
+    expect(item.data.customFields).toHaveLength(100);
+    expect(item.data.content).toBe(
+      'body\n\n1 additional custom field(s) not imported:\nextra: e\n\n' +
+        '1 hidden custom field(s) were not imported: Secret',
+    );
+    expect(JSON.stringify(item)).not.toContain('\uE000');
+    expect(item.importNotices).toEqual({ hiddenDropped: ['Secret'], movedToNotes: ['extra'] });
+    assertRoundTrips('note', item.data);
   });
 });

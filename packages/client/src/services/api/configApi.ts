@@ -33,11 +33,13 @@
 import type { AxiosResponse } from 'axios';
 import type { ApiResponse, PublicConfig, RegistrationMode } from '@hvault/shared';
 import {
+  DEFAULT_CUSTOM_FIELDS_LIMIT,
   MAX_FILE_ENCRYPTION_SIZE_MB,
   documentsConfigResponseSchema,
   fileEncryptionConfigResponseSchema,
   publicConfigDataSchema,
   registrationConfigResponseSchema,
+  vaultConfigResponseSchema,
 } from '@hvault/shared';
 import { api } from './client.js';
 
@@ -250,4 +252,68 @@ export async function readRegistrationMode(): Promise<RegistrationMode | null> {
   } catch {
     return null;
   }
+}
+
+// ---------------------------------------------------------------------------
+// The custom-field limit
+// ---------------------------------------------------------------------------
+
+/**
+ * One read of the custom-field limit: the server's number, the default for a
+ * server that sends no `vault` block (one older than the setting), or `null` when
+ * the server did not say (a failed request, or a block this client refuses).
+ *
+ * An ABSENT block is a determinate answer, exactly as `readDocumentsConfigFresh`
+ * treats an absent `documents` block: an older server has no limit setting, and the
+ * documented default is what it means. Only a malformed block or a failed request is
+ * "could not tell".
+ */
+async function readCustomFieldsLimit(): Promise<number | null> {
+  try {
+    const res = await getPublicConfigApi();
+    const parsed = vaultConfigResponseSchema.safeParse(res.data);
+    if (!parsed.success) return null;
+    return parsed.data.data.vault?.customFieldsLimit ?? DEFAULT_CUSTOM_FIELDS_LIMIT;
+  } catch {
+    return null;
+  }
+}
+
+// SUCCESS only. Unlike the two memos above, a failed read is NOT cached: the limit
+// decides how many fields the editor offers, and pinning the default for the tab's
+// lifetime after one dropped request (or one 429 behind a shared address) would
+// quietly lower an operator's higher limit until a reload. The next caller simply
+// asks again.
+let cachedCustomFieldsLimit: number | null = null;
+
+/** The limit a previous successful read returned, or `null` before there was one. */
+export function cachedCustomFieldsLimitValue(): number | null {
+  return cachedCustomFieldsLimit;
+}
+
+/**
+ * The custom-field limit for DISPLAY (the item editor's counter and its Add
+ * button): memoised once read, never rejects, and falls back to
+ * `DEFAULT_CUSTOM_FIELDS_LIMIT` when the server did not say. Advisory in the same
+ * sense as every other block here: custom fields are inside the ciphertext, so the
+ * server cannot count them.
+ */
+export async function getCustomFieldsLimit(): Promise<number> {
+  if (cachedCustomFieldsLimit !== null) return cachedCustomFieldsLimit;
+  const limit = await readCustomFieldsLimit();
+  if (limit === null) return DEFAULT_CUSTOM_FIELDS_LIMIT;
+  cachedCustomFieldsLimit = limit;
+  return limit;
+}
+
+/**
+ * The custom-field limit for an IMPORT, read fresh, or `null` when the server did
+ * not say. An import ACTS on the number (it moves fields into notes and drops hidden
+ * ones), so "could not tell" must stop it rather than guess, which is the
+ * `readDocumentsConfigFresh` doctrine. A successful read also refreshes the memo.
+ */
+export async function readCustomFieldsLimitFresh(): Promise<number | null> {
+  const limit = await readCustomFieldsLimit();
+  if (limit !== null) cachedCustomFieldsLimit = limit;
+  return limit;
 }

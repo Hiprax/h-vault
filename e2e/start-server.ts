@@ -82,6 +82,9 @@ const E2E_ENV: Record<string, string> = {
   // notice through a stubbed status response, and a test run must not depend on,
   // or send anything to, a host on the internet.
   UPDATE_CHECK_ENABLED: 'false',
+  // The custom-field limit the editor and imports apply, pinned to its default so a
+  // developer's .env cannot change what the specs see. '' maps to the default (30).
+  CUSTOM_FIELDS_LIMIT: '',
 };
 
 /**

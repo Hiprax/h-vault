@@ -292,8 +292,8 @@ describe('15 — VaultList accessibility', () => {
 // and not exported). The identity email/phone rejection and the card Luhn
 // warning are covered against the REAL, rendered form in
 // coverage-vault-item-form.test.tsx ('rejects a malformed email address',
-// 'rejects a phone number with illegal characters', 'warns inline and blocks
-// submit when the card number fails the Luhn check') and in
+// 'rejects a phone number with illegal characters', 'warns about a Luhn failure
+// but still saves the card, as it is printed') and in
 // phase3-fixes.test.tsx ('VaultItemForm - Card Luhn warning'), so the clone
 // tests were removed rather than left masquerading as coverage.
 // ==========================================================================

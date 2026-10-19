@@ -230,6 +230,9 @@ const secretArbitrary = fc.record({
 const noteArbitrary = fc.record({
   content: optional(boundedString(MAX_NOTE_CONTENT_LENGTH)),
   format: optional(fc.constantFrom(...NOTE_FORMATS)),
+  customFields: optional(
+    fc.array(customFieldArbitrary, { maxLength: Math.min(MAX_CUSTOM_FIELDS_PER_ITEM, 3) }),
+  ),
 });
 
 const cardArbitrary = fc.record({
@@ -241,6 +244,9 @@ const cardArbitrary = fc.record({
   brand: optional(boundedString(MAX_CARD_BRAND_LENGTH)),
   notes: optional(boundedString(MAX_NOTE_CONTENT_LENGTH)),
   billingAddress: optional(fc.record(addressFields)),
+  customFields: optional(
+    fc.array(customFieldArbitrary, { maxLength: Math.min(MAX_CUSTOM_FIELDS_PER_ITEM, 3) }),
+  ),
 });
 
 /**

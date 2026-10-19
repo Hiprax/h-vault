@@ -217,6 +217,10 @@ export default defineConfig({
       S3_BUCKET: '',
       S3_ACCESS_KEY_ID: '',
       S3_SECRET_ACCESS_KEY: '',
+      // A value in a developer's .env would change what `/config` advertises and
+      // what the config tests read back. '' maps to the default (30) inside a
+      // `z.preprocess`, so the pin keeps the suite on the documented default.
+      CUSTOM_FIELDS_LIMIT: '',
     },
   },
 });

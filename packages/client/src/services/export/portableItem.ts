@@ -315,6 +315,11 @@ function fillNote(record: PortableItem, data: INoteData): void {
   // A note's body IS its notes; the `format` (markdown/plaintext) has no portable
   // equivalent, so it is intentionally not carried.
   record.notes = data.content;
+  // Optional with no schema default on a note and a card (one stored before 0.18.0
+  // has no list at all), hence the `undefined` check the three older owners skip.
+  if (data.customFields !== undefined && data.customFields.length > 0) {
+    record.customFields = mapCustomFields(data.customFields);
+  }
 }
 
 function fillCard(record: PortableItem, data: ICardData): void {
@@ -329,6 +334,9 @@ function fillCard(record: PortableItem, data: ICardData): void {
   };
   if (data.notes !== undefined) {
     record.notes = data.notes;
+  }
+  if (data.customFields !== undefined && data.customFields.length > 0) {
+    record.customFields = mapCustomFields(data.customFields);
   }
 }
 

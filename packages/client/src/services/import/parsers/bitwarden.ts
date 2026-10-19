@@ -96,8 +96,11 @@ function parseBitwardenJson(text: string): ParsedImportItem[] {
         };
         const brand = str(card.brand);
         if (brand) data.brand = brand;
-        const foldedNotes = appendFields(notes, fields);
-        if (foldedNotes) data.notes = foldedNotes;
+        // Fields import as fields, typed, as a login's and an identity's do. They
+        // used to be folded into the notes, which wrote a hidden value in clear.
+        const cf = mapCustomFields(fields);
+        if (cf.length > 0) data.customFields = cf;
+        if (notes) data.notes = notes;
         items.push(makeItem('card', name, data, { tags, favorite }));
         break;
       }
@@ -200,13 +203,15 @@ function parseBitwardenJson(text: string): ParsedImportItem[] {
       case 5: {
         // SSH key (Bitwarden `sshKey`: { privateKey, publicKey, keyFingerprint }).
         // H-Vault has no SSH item type. Without an explicit case this fell through
-        // to the note branch, which keeps only `notes` (and folded custom fields)
-        // and drops the key entirely. `noteDataSchema` has no `customFields`, so a
-        // note cannot hold the key parts as labelled fields. Import it as a `login`
-        // instead — a credential type that carries every key part in clearly-
-        // labelled custom fields (private key masked as `hidden`), keeping them
-        // retrievable and searchable. Any Bitwarden custom fields and notes on the
-        // item are preserved alongside.
+        // to the note branch, which read only `notes` and `fields` and dropped the
+        // key entirely. It is imported as a `login`, carrying every key part in a
+        // clearly-labelled custom field (the private key masked as `hidden`), with
+        // the item's own Bitwarden fields and notes alongside.
+        //
+        // A note can hold custom fields too since 0.18.0, but SSH keys stay logins
+        // on purpose: an item's import identity includes its type, so moving them
+        // would make every SSH key imported before then a different item, and
+        // re-importing the same export would duplicate each one.
         const sshKey = (it.sshKey ?? {}) as Record<string, unknown>;
         const sshFields: BwField[] = [];
         const privateKey = str(sshKey.privateKey);
@@ -228,8 +233,10 @@ function parseBitwardenJson(text: string): ParsedImportItem[] {
         break;
       }
       default: {
-        // type 2 (secure note) and any unknown type → note
-        items.push(buildNote({ name, content: appendFields(notes, fields), tags, favorite }));
+        // type 2 (secure note) and any unknown type → note, its fields as fields.
+        // `buildNote` clamps them as `buildLogin` does, so a hidden one is never
+        // written into the content.
+        items.push(buildNote({ name, content: notes, customFields: fields, tags, favorite }));
         break;
       }
     }
@@ -305,11 +312,4 @@ function mapCustomFields(
       value: str(f.value),
       type: normalizeCustomFieldType(f.type),
     }));
-}
-
-function appendFields(notes: string, fields: BwField[]): string {
-  const lines = fields
-    .filter((f) => typeof f.name === 'string' && f.name.trim())
-    .map((f) => `${(f.name ?? '').trim()}: ${str(f.value)}`);
-  return [notes, ...lines].filter(Boolean).join('\n');
 }

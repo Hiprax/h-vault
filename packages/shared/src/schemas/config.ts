@@ -1,5 +1,10 @@
 import { z } from '../zod.js';
-import { MAX_DOCUMENT_EXT_LENGTH, REGISTRATION_MODES } from '../constants/index.js';
+import {
+  MAX_CUSTOM_FIELDS_PER_ITEM,
+  MAX_DOCUMENT_EXT_LENGTH,
+  MIN_CUSTOM_FIELDS_LIMIT,
+  REGISTRATION_MODES,
+} from '../constants/index.js';
 
 // Runtime validation for the public (unauthenticated) GET /config response.
 // Mirrors the `PublicConfig` interface in `types/index.ts` and the success
@@ -50,6 +55,19 @@ export const publicConfigDataSchema = z.object({
   // is: an older server sends no such block, and the register page then shows the
   // form it always showed.
   registration: z.object({ mode: z.enum(REGISTRATION_MODES) }).optional(),
+  // The operator's custom-field limit (`CUSTOM_FIELDS_LIMIT`). OPTIONAL for the
+  // reason the two blocks above are: an older server sends none, and the client then
+  // applies `DEFAULT_CUSTOM_FIELDS_LIMIT`. Bounded exactly as the server's env schema
+  // bounds it, so a value the server could never send is refused rather than obeyed.
+  vault: z
+    .object({
+      customFieldsLimit: z
+        .number()
+        .int()
+        .min(MIN_CUSTOM_FIELDS_LIMIT)
+        .max(MAX_CUSTOM_FIELDS_PER_ITEM),
+    })
+    .optional(),
 });
 
 export const publicConfigResponseSchema = z.object({
@@ -109,4 +127,15 @@ export const documentsConfigResponseSchema = publicConfigResponseSchema.extend({
  */
 export const registrationConfigResponseSchema = publicConfigResponseSchema.extend({
   data: publicConfigDataSchema.pick({ registration: true }),
+});
+
+/**
+ * The same envelope a fourth time, narrowed to the block the custom-field limit
+ * readers act on: the item editor's counter and every import. Narrow for the reason
+ * the three above are: a malformed `documents` block must not change how many
+ * custom fields an entry may have, and an out-of-range limit must not hide the
+ * document store.
+ */
+export const vaultConfigResponseSchema = publicConfigResponseSchema.extend({
+  data: publicConfigDataSchema.pick({ vault: true }),
 });

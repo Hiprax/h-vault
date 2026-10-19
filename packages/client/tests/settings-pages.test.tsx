@@ -21,7 +21,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest';
-import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import React from 'react';
 import { deriveRowId } from '@hvault/shared';
@@ -1008,6 +1008,42 @@ describe('SettingsPage', () => {
     await waitFor(() => {
       expect(screen.getByText('Clipboard clear (seconds)')).toBeInTheDocument();
     });
+  });
+
+  it.each([
+    [
+      'Help: what rotating the vault key does',
+      'Vault key rotation, explained',
+      'What happens when you rotate',
+    ],
+    [
+      'Help: sealing entries to their place',
+      'Entry sealing, explained',
+      'What it protects against',
+    ],
+    [
+      'Help: locking when the tab is hidden',
+      'Locking a hidden tab, explained',
+      'What counts as hidden',
+    ],
+  ])('opens the explanation behind "%s" next to its row', async (label, title, firstSection) => {
+    await renderSettings();
+    const trigger = await screen.findByRole('button', { name: label });
+    expect(trigger).toHaveAttribute('aria-expanded', 'false');
+
+    fireEvent.click(trigger);
+
+    const panel = await screen.findByRole('dialog', { name: title });
+    expect(trigger).toHaveAttribute('aria-expanded', 'true');
+    // The lazy body arrives inside the panel.
+    expect(
+      await within(panel).findByRole('heading', { level: 3, name: firstSection }),
+    ).toBeInTheDocument();
+    // The row's own exact texts are untouched by the button beside them.
+    expect(screen.getByLabelText('Lock when the tab is hidden')).toHaveAttribute(
+      'id',
+      'lock-on-hidden',
+    );
   });
 
   it('renders Rotate Vault Key button', async () => {

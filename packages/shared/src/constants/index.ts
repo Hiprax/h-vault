@@ -264,6 +264,16 @@ export const MAX_ITEMS_PER_USER = 10_000;
 export const MAX_FOLDERS_PER_USER = 500;
 export const MAX_SORT_ORDER = 10_000;
 export const MAX_ENCRYPTED_NAME_LENGTH = 1_000;
+// The longest item NAME, in UTF-8 bytes, whose ciphertext fits
+// `MAX_ENCRYPTED_NAME_LENGTH`. Derived, never restated: a name is sealed with
+// AES-GCM, whose ciphertext is exactly as long as the plaintext's UTF-8 bytes (the
+// tag is stored apart), and stored as padded base64, which is `4 * ceil(n / 3)`
+// characters for `n` bytes. The editor refuses a longer name with a message on the
+// Name control instead of letting the store's size pre-flight refuse it in a toast
+// after the work of encrypting it. Bytes, not characters: an accented letter is two
+// bytes and most emoji four, so a character count either refuses names that fit or
+// admits names that do not.
+export const MAX_ITEM_NAME_BYTES = Math.floor(MAX_ENCRYPTED_NAME_LENGTH / 4) * 3;
 export const MAX_ENCRYPTED_DATA_LENGTH = 500_000;
 export const MAX_NOTE_CONTENT_LENGTH = 50_000;
 export const MAX_RESTORE_DATA_LENGTH = 26_214_400;
@@ -318,6 +328,16 @@ export const MAX_URI_LENGTH = 2_048;
 export const MAX_URIS_PER_ITEM = 100;
 export const MAX_CUSTOM_FIELD_NAME_LENGTH = 500;
 export const MAX_CUSTOM_FIELDS_PER_ITEM = 100;
+// The operator's custom-field limit (`CUSTOM_FIELDS_LIMIT`, advertised by
+// `GET /config` as `vault.customFieldsLimit`): how many custom fields the item editor
+// lets an entry have, and how many an import keeps. It is NOT the stored bound:
+// `MAX_CUSTOM_FIELDS_PER_ITEM` above runs on every decrypt, so lowering THAT would
+// turn every existing entry with more fields into the "could not be fully decoded"
+// notice. The limit therefore lives between these two and never above the stored
+// cap. Advisory: custom fields are inside the ciphertext, so the server cannot count
+// them and only the client enforces this.
+export const DEFAULT_CUSTOM_FIELDS_LIMIT = 30;
+export const MIN_CUSTOM_FIELDS_LIMIT = 1;
 export const MAX_SECRET_DESCRIPTION_LENGTH = 10_000;
 export const MAX_CARD_CARDHOLDER_NAME_LENGTH = 300;
 export const MAX_CARD_BRAND_LENGTH = 50;
@@ -326,8 +346,8 @@ export const MAX_CARD_BRAND_LENGTH = 50;
 // bounds each of them, and a clamp that disagrees with the schema by one character
 // is exactly the drift that discards a whole card at validation. The values are the
 // literals the schema already carried, so nothing about validation changes. They are
-// deliberately far wider than the item form's own rules (13-19 digits, `01`-`12`, a
-// four-digit year, 3-4 CVV digits), because an IMPORTED card is not required to be
+// deliberately far wider than the item form's own rules (12-19 digits, `1`-`12`, a
+// two- or four-digit year, 3-4 CVV digits), because an IMPORTED card is not required to be
 // well formed — the vault's job there is to store what the source file held.
 export const MAX_CARD_NUMBER_LENGTH = 30;
 export const MAX_CARD_EXP_MONTH_LENGTH = 2;

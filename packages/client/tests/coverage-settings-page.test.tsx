@@ -229,6 +229,9 @@ vi.mock('../src/services/api/configApi', async () => {
   return {
     ...actual,
     readDocumentsConfigFresh: (...args: unknown[]) => mockReadDocumentsConfigFresh(...args),
+    // Every import reads the custom-field limit first and stops without one; this
+    // suite has no server, so it answers the documented default.
+    readCustomFieldsLimitFresh: () => Promise.resolve(30),
   };
 });
 

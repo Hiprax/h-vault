@@ -725,6 +725,15 @@ export interface PublicConfig {
   registration?: {
     mode: RegistrationMode;
   };
+  /**
+   * The operator's custom-field limit (`CUSTOM_FIELDS_LIMIT`): how many custom
+   * fields the item editor allows an entry and an import keeps. Optional for the
+   * same N-1 reason; absent means `DEFAULT_CUSTOM_FIELDS_LIMIT`. Advisory only: the
+   * fields are inside the ciphertext, so the server cannot count them.
+   */
+  vault?: {
+    customFieldsLimit: number;
+  };
 }
 
 /** What `POST /auth/invitations` answers: the link to hand over, once. */

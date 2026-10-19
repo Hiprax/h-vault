@@ -69,7 +69,7 @@ const FORMAT_META: Record<PortableExportFormat, Omit<PortableExportFormatMeta, '
     extension: 'csv',
     mimeType: 'text/csv',
     lossNote:
-      'Logins and secure notes only — cards, identities and secrets are omitted. Folder paths re-import as tags, and backup codes arrive as text in the notes.',
+      'Logins and secure notes only — cards, identities and secrets are omitted. Folder paths re-import as tags. Custom fields and backup codes travel as plain text: imported back into H-Vault they arrive in the notes, so a hidden field comes back readable there.',
   },
   'chrome-csv': {
     label: 'Chrome / Edge (.csv)',

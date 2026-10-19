@@ -444,10 +444,9 @@ describe('toBitwardenJson — optional-field edges', () => {
     // A LOSSLESS round trip, and the name match here is deliberate, unlike a login's
     // recovery codes. The no-hoist rule for codes exists because a wrong hoist would
     // run free text through a strict code parser; there is no parser here and the
-    // destination is itself a free-text field. What makes hoisting necessary rather
-    // than merely nice: `IdentityDetail` renders no custom fields and the identity
-    // form does not carry them, so a value left in `customFields` would be invisible
-    // in the app and destroyed by the next edit of that identity.
+    // destination is itself a free-text field. What makes hoisting right rather than
+    // merely nice: the value goes back to the field the user typed it into, instead
+    // of sitting in the generic custom-field list.
     const items = roundTrip([identity()]);
     const id = byType(items, 'identity');
     expect((id.data.address as Record<string, unknown>).deliveryNotes).toBe('Ring twice');
@@ -545,5 +544,48 @@ describe('toBitwardenJson — login backup codes', () => {
     };
     const { content } = toBitwardenJson([note]);
     expect(itemsOf(content)[0]?.fields).toBeUndefined();
+  });
+});
+
+describe('toBitwardenJson — note and card custom fields (0.18.0)', () => {
+  interface EmittedItem {
+    type: number;
+    notes: string | null;
+    fields?: { name: string; value: string; type: number }[];
+  }
+  const emitted = (portable: PortableItem[]): EmittedItem[] =>
+    (JSON.parse(toBitwardenJson(portable).content) as { items: EmittedItem[] }).items;
+
+  const FIELDS = [
+    { name: 'Door', value: '4321', type: 'text' as const },
+    { name: 'Alarm', value: '9876', type: 'hidden' as const },
+    { name: 'Pets', value: 'true', type: 'boolean' as const },
+  ];
+
+  it('emits a note’s fields with their type codes and reads them back as fields', () => {
+    const [doc] = emitted([note({ customFields: FIELDS })]);
+    expect(doc?.type).toBe(2);
+    expect(doc?.notes).toBe('note body');
+    expect(doc?.fields).toEqual([
+      { name: 'Door', value: '4321', type: 0 },
+      { name: 'Alarm', value: '9876', type: 1 },
+      { name: 'Pets', value: 'true', type: 2 },
+    ]);
+
+    const n = byType(roundTrip([note({ customFields: FIELDS })]), 'note');
+    expect(n.data.content).toBe('note body');
+    expect(n.data.customFields).toEqual(FIELDS);
+  });
+
+  it('round-trips a card’s fields without folding the hidden value into its notes', () => {
+    const c = byType(roundTrip([card({ notes: 'card note', customFields: FIELDS })]), 'card');
+    expect(c.data.customFields).toEqual(FIELDS);
+    expect(c.data.notes).toBe('card note');
+  });
+
+  it('brings a secret’s fields back as the secure note’s own fields', () => {
+    const n = byType(roundTrip([secret({ customFields: FIELDS })]), 'note');
+    expect(n.data.customFields).toEqual(FIELDS);
+    expect(String(n.data.content)).not.toContain('9876');
   });
 });

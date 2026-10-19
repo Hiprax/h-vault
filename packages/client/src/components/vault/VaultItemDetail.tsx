@@ -32,6 +32,8 @@ import { useInlineDialog } from '../ui/Dialog';
 import { BackupCodesSection } from './BackupCodesSection';
 import { TotpDisplay } from './TotpDisplay';
 import { NoteContent } from './NoteContent';
+import { CardExpiryNotice } from './CardExpiry';
+import { formatCardExpiry, readCardExpiry } from '../../lib/cardExpiry';
 import { useUserSettings } from '../../hooks/useUserSettings';
 import { copySecretToClipboard } from '../../services/clipboard/clipboardService';
 import type { ItemType } from '@hvault/shared';
@@ -279,8 +281,10 @@ function PasswordHistorySection({ itemId, entries }: PasswordHistoryProps) {
 // ---------------------------------------------------------------------------
 
 /**
- * The custom-field rows of an item whose form offers the Boolean type — a login and
- * (since it gained custom-field controls) an identity.
+ * The custom-field rows of an item whose form offers the Boolean type: a login, an
+ * identity, and (since 0.18.0) a note and a card. A note's and a card's list is
+ * OPTIONAL in their stored schemas (no default, so their import identity did not
+ * move), so those two call sites pass `?? []`.
  *
  * `SecretDetail` deliberately keeps its own simpler renderer: the secret form has
  * only ever offered text/hidden, so the same split holds on both sides.
@@ -470,18 +474,23 @@ function NoteDetail({ data }: { data: INoteData }) {
   return (
     <div className="space-y-3">
       <NoteContent content={data.content} format={data.format} />
+      <CustomFieldRows fields={data.customFields ?? []} />
     </div>
   );
 }
 
 function CardDetail({ data }: { data: ICardData }) {
   const billing = data.billingAddress;
+  // Shown as `MM/YYYY` when it can be read, else as stored; a card with no expiry
+  // shows the empty-value dash rather than a bare "/".
+  const expiry = formatCardExpiry(data.expMonth, data.expYear);
   return (
     <div className="space-y-3">
+      <CardExpiryNotice expiry={readCardExpiry(data.expMonth, data.expYear)} variant="detail" />
       <CopyField label="Cardholder Name" value={data.cardholderName} />
       <CopyField label="Card Number" value={data.number} masked mono />
       <div className="grid grid-cols-2 gap-3">
-        <CopyField label="Expiry" value={`${data.expMonth}/${data.expYear}`} />
+        <CopyField label="Expiry" value={expiry} />
         <CopyField label="CVV" value={data.cvv} masked mono />
       </div>
       {data.brand && <CopyField label="Brand" value={data.brand} />}
@@ -511,6 +520,7 @@ function CardDetail({ data }: { data: ICardData }) {
             {billing.country && <CopyField label="Country" value={billing.country} />}
           </div>
         )}
+      <CustomFieldRows fields={data.customFields ?? []} />
     </div>
   );
 }

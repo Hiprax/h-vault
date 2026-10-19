@@ -11,11 +11,32 @@ export type ImportSourceFormat =
   'bitwarden' | 'lastpass' | 'keepass' | 'chrome' | 'firefox' | 'onepassword' | 'csv' | 'json';
 
 /**
+ * What a parser's own clamp did to an item's custom fields, by NAME only.
+ *
+ * The clamp keeps at most `MAX_CUSTOM_FIELDS_PER_ITEM` fields and bounds each
+ * value. A text or boolean field it cannot keep whole has its value, or the tail
+ * of it, written into the item's notes; a hidden one is dropped instead, because
+ * notes are shown in the clear. Both are named here so the import can tell the
+ * user before and after it writes. Never a value: the report built from this is
+ * shown on screen.
+ */
+interface ImportFieldNotice {
+  /** Hidden fields dropped whole: past the cap, or too long to store intact. */
+  hiddenDropped: string[];
+  /** Text or boolean fields whose value, or the part that did not fit, went into the notes. */
+  movedToNotes: string[];
+}
+
+/**
  * A single vault item parsed from a source file, BEFORE encryption.
  *
  * `data` is a loose object; it is validated (and stripped/defaulted) against the
  * shared `vaultItemDataSchemas[itemType]` during the encryption step, so parsers
  * may emit minimal objects and rely on schema defaults.
+ *
+ * `importNotices` is present only when the parser's clamp cut a custom field. It
+ * is read by the import report and is never serialised: sealing encrypts `name`
+ * and `data` alone, and the wire row names its other fields one by one.
  */
 export interface ParsedImportItem {
   itemType: ItemType;
@@ -23,6 +44,7 @@ export interface ParsedImportItem {
   data: Record<string, unknown>;
   tags: string[];
   favorite: boolean;
+  importNotices?: ImportFieldNotice;
 }
 
 /** Result of parsing a source file: the items plus any non-fatal warnings. */
@@ -51,6 +73,11 @@ export interface NativeCiphertext {
  * `dataJson` is the decrypted data STRING, byte for byte, never re-serialised
  * from the parsed `data`: its content was validated when it was first stored, and
  * sealing the same string again is what guarantees a re-import cannot perturb it.
+ *
+ * That guarantee holds for every native row the custom-field limit leaves alone.
+ * A row the limit CUTS is a different row by definition: `limitImportItem` drops
+ * this field from the cut copy, which is then validated and serialised from its
+ * `data` like any other source.
  */
 interface NativeContent {
   dataJson: string;

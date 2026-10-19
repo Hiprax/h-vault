@@ -18,8 +18,11 @@
  * overwrite is sealed to the matched row's id and STORED type. That includes a
  * native H-Vault row, whose file ciphertext is bound to the row it was exported
  * from (or to nothing, in format v1) and so is never re-sent: extraction opens it
- * and this module seals its stored data string again, byte for byte. Its retained
- * previous passwords are sealed to the new row the same way.
+ * and this module seals its stored data string again, byte for byte, for every
+ * native row the custom-field limit did not cut. A row the limit cut arrives
+ * without its `native` content (`limitImportItem`), so it is validated and
+ * serialised from its data like any other source. Its retained previous passwords
+ * are sealed to the new row the same way either way.
  *
  * Nothing here matches, re-orders or drops silently: a row that cannot be sealed
  * is returned as a counted failure with a human-readable reason, so the caller's

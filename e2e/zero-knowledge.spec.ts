@@ -100,10 +100,11 @@ function sentinel(label: string): string {
 /**
  * A Luhn-valid 16-digit card number built from the seeded stream.
  *
- * The card form refuses anything that fails the Luhn check, so the one field on
- * a card worth planting a sentinel in cannot simply be a random string. Fifteen
- * seeded digits plus the computed check digit give a number that is both
- * acceptable to the form and unique to this run.
+ * The card form warns about anything that fails the Luhn check (it no longer
+ * refuses it), and a sentinel should not trip a warning that has nothing to do with
+ * what this spec proves, so the one field on a card worth planting a sentinel in is
+ * not simply a random string. Fifteen seeded digits plus the computed check digit
+ * give a number that is both clean for the form and unique to this run.
  */
 function sentinelCardNumber(): string {
   let digits = '';

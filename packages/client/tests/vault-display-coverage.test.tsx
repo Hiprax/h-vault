@@ -273,19 +273,29 @@ vi.mock('../src/components/vault/VaultItemForm', () => ({
     onCancel,
     onSaved,
     titleLevel,
+    customFieldsLimit,
   }: {
     onCancel?: () => void;
     onSaved?: () => void;
     titleLevel?: string;
+    customFieldsLimit?: number;
   }) =>
     React.createElement(
       'div',
-      // The level the page asks for, exposed so the page's half of that contract
-      // is observable; the form's own half is pinned in VaultItemForm.test.tsx.
-      { 'data-testid': 'vault-item-form', 'data-title-level': titleLevel ?? 'default' },
+      // The level and the custom-field limit the page passes, exposed so the
+      // page's half of each contract is observable; the form's own half is pinned
+      // in VaultItemForm.test.tsx and VaultItemForm.rules.test.tsx.
+      {
+        'data-testid': 'vault-item-form',
+        'data-title-level': titleLevel ?? 'default',
+        'data-custom-fields-limit': String(customFieldsLimit ?? 'none'),
+      },
       React.createElement('button', { onClick: onCancel }, 'Cancel Form'),
       React.createElement('button', { onClick: onSaved }, 'Save Form'),
     ),
+  // The pages read the custom-field limit through the editor's module. Not the
+  // default (30), so a page that forgot to pass it on is told apart.
+  useCustomFieldsLimit: () => 17,
 }));
 
 // Mock PasswordGenerator for GeneratorPage
@@ -2888,6 +2898,8 @@ describe('VaultItemPage', () => {
     fireEvent.click(screen.getByText('Edit'));
 
     expect(screen.getByTestId('vault-item-form')).toBeInTheDocument();
+    // The operator's custom-field limit reaches the editor from the page.
+    expect(screen.getByTestId('vault-item-form')).toHaveAttribute('data-custom-fields-limit', '17');
   });
 
   it('exits edit mode when Cancel is clicked in form', async () => {
@@ -3581,5 +3593,173 @@ describe('VaultItemDetail — schema-invalid item resilience', () => {
 
     expect(screen.queryByText(/could not be fully decoded/i)).not.toBeInTheDocument();
     expect(screen.getByText('octocat')).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 0.18.0: card expiry and custom fields where they are SHOWN
+//
+// The expiry rules themselves are pinned in tests/lib/cardExpiry.test.ts; these
+// pin the WIRING: that the list row and the item view actually say it, and that
+// they do not for a card that is trashed. Years far in the past or the future
+// keep every assertion independent of the day the suite runs.
+// ---------------------------------------------------------------------------
+
+describe('card expiry and custom fields in the list and the item view', () => {
+  const expiredCard = (overrides: Partial<Parameters<typeof makeDecryptedItem>[0]> = {}) =>
+    makeDecryptedItem({
+      id: 'card-old',
+      name: 'Old Visa',
+      itemType: 'card',
+      data: {
+        cardholderName: 'A',
+        number: '4111111111111111',
+        expMonth: '01',
+        expYear: '2020',
+        cvv: '',
+      },
+      ...overrides,
+    });
+
+  it('marks an expired card in its vault-list row, and a valid one not at all', () => {
+    useVaultStore.setState({
+      items: [
+        expiredCard(),
+        makeDecryptedItem({
+          id: 'card-new',
+          name: 'New Visa',
+          itemType: 'card',
+          data: {
+            cardholderName: 'A',
+            number: '4111111111111111',
+            expMonth: '01',
+            expYear: '2099',
+            cvv: '',
+          },
+        }),
+      ] as never[],
+    });
+
+    renderWithRouter(<VaultList onCreateNew={vi.fn()} />);
+
+    const badges = screen.getAllByTestId('card-expiry-badge');
+    expect(badges).toHaveLength(1);
+    expect(badges[0]).toHaveTextContent('Expired');
+    expect(badges[0]).toHaveAttribute('title', 'Valid through 01/2020');
+  });
+
+  it('does not mark a card in the trash view', () => {
+    useVaultStore.setState({
+      trashItems: [{ ...expiredCard(), deletedAt: '2025-06-15T12:00:00.000Z' }] as never[],
+      showTrash: true,
+    });
+
+    renderWithRouter(<VaultList onCreateNew={vi.fn()} />);
+
+    expect(screen.getByText('Old Visa')).toBeInTheDocument();
+    expect(screen.queryByTestId('card-expiry-badge')).not.toBeInTheDocument();
+  });
+
+  it('says on the card itself that it has expired, and when', () => {
+    renderWithRouter(<VaultItemDetail item={expiredCard() as never} onEdit={vi.fn()} />);
+
+    const notice = screen.getByTestId('card-expiry-notice');
+    expect(notice).toHaveTextContent('This card has expired');
+    expect(notice).toHaveTextContent('It was valid through January 2020.');
+    expect(screen.getByText('01/2020')).toBeInTheDocument();
+  });
+
+  it('shows no notice and no bare "/" for a card without an expiry', () => {
+    renderWithRouter(
+      <VaultItemDetail
+        item={
+          makeDecryptedItem({
+            itemType: 'card',
+            data: {
+              cardholderName: 'A',
+              number: '4111111111111111',
+              expMonth: '',
+              expYear: '',
+              cvv: '',
+            },
+          }) as never
+        }
+        onEdit={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByTestId('card-expiry-notice')).not.toBeInTheDocument();
+    expect(screen.getByText('Expiry')).toBeInTheDocument();
+    expect(screen.queryByText('/')).not.toBeInTheDocument();
+  });
+
+  it('shows a stored expiry it cannot read exactly as stored', () => {
+    renderWithRouter(
+      <VaultItemDetail
+        item={
+          makeDecryptedItem({
+            itemType: 'card',
+            data: {
+              cardholderName: 'A',
+              number: '4111111111111111',
+              expMonth: '7',
+              expYear: '',
+              cvv: '',
+            },
+          }) as never
+        }
+        onEdit={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText('7')).toBeInTheDocument();
+    expect(screen.queryByTestId('card-expiry-notice')).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ['note', { content: 'body', format: 'plaintext' }],
+    [
+      'card',
+      { cardholderName: 'A', number: '4111111111111111', expMonth: '', expYear: '', cvv: '' },
+    ],
+  ] as const)('renders a %s custom fields, a boolean as Yes/No', (itemType, data) => {
+    renderWithRouter(
+      <VaultItemDetail
+        item={
+          makeDecryptedItem({
+            itemType,
+            data: {
+              ...data,
+              customFields: [
+                { name: 'Branch', value: 'Main St', type: 'text' },
+                { name: 'Contactless', value: 'true', type: 'boolean' },
+              ],
+            },
+          }) as never
+        }
+        onEdit={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText('Branch')).toBeInTheDocument();
+    expect(screen.getByText('Main St')).toBeInTheDocument();
+    expect(screen.getByText('Contactless')).toBeInTheDocument();
+    expect(screen.getByText('Yes')).toBeInTheDocument();
+  });
+
+  it('renders a note or card without custom fields exactly as before', () => {
+    renderWithRouter(
+      <VaultItemDetail
+        item={
+          makeDecryptedItem({
+            itemType: 'note',
+            data: { content: 'only text', format: 'plaintext' },
+          }) as never
+        }
+        onEdit={vi.fn()}
+      />,
+    );
+    expect(screen.getByText('only text')).toBeInTheDocument();
+    expect(screen.queryByText('Yes')).not.toBeInTheDocument();
   });
 });

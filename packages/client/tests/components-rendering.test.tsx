@@ -105,6 +105,9 @@ vi.mock('../src/services/api/userApi', () => ({
 vi.mock('../src/services/api/configApi', () => ({
   getFileEncryptionMaxBytes: vi.fn().mockResolvedValue(100 * 1024 * 1024),
   getDocumentsConfig: vi.fn(() => new Promise(() => undefined)),
+  getCustomFieldsLimit: () => Promise.resolve(30),
+  cachedCustomFieldsLimitValue: () => null,
+  readCustomFieldsLimitFresh: () => Promise.resolve(30),
 }));
 
 vi.mock('../src/services/offlineCache', async (importOriginal) => ({

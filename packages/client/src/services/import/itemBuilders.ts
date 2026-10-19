@@ -154,6 +154,19 @@ interface VaultCustomField {
   type: CustomFieldType;
 }
 
+/** The notice an item carries, spread into it: empty when the clamp cut nothing. */
+type ItemNotice = Pick<ParsedImportItem, 'importNotices'>;
+
+/**
+ * The names-only line a dropped hidden custom field leaves in an item's notes.
+ *
+ * Shared with the custom-field limit (`customFieldsLimit.ts`) so the two places
+ * that drop hidden fields word it the same way.
+ */
+export function hiddenFieldsNotImportedLine(names: readonly string[]): string {
+  return `${String(names.length)} hidden custom field(s) were not imported: ${names.join(', ')}`;
+}
+
 /**
  * Coerce, clamp and cap a source custom-field list to the vault bounds.
  *
@@ -162,26 +175,44 @@ interface VaultCustomField {
  * {@link MAX_NOTE_CONTENT_LENGTH}; keeps at most {@link MAX_CUSTOM_FIELDS_PER_ITEM}.
  * Truncated values and any fields beyond the cap are returned as `overflow`
  * lines so the caller can preserve them in notes rather than dropping them.
+ *
+ * Except a HIDDEN field's (trap 4). Its type is read before anything is decided,
+ * because the type decides where a value may go: notes are shown in the clear, so
+ * a hidden field past the cap is dropped with a names-only line, and a hidden
+ * value too long to store is dropped WHOLE rather than kept shortened, which would
+ * look intact while its tail sat in the notes. Every field cut either way is named
+ * in the returned notice.
  */
 function clampCustomFields(raw: readonly unknown[]): {
   fields: VaultCustomField[];
   overflow: string[];
+  notice: ItemNotice;
 } {
   const fields: VaultCustomField[] = [];
   const overflow: string[] = [];
   const dropped: { name: string; value: string }[] = [];
+  const hiddenDropped: string[] = [];
+  const movedToNotes: string[] = [];
 
   for (const entry of raw) {
     if (typeof entry !== 'object' || entry === null) continue;
     const rec = entry as { name?: unknown; value?: unknown; type?: unknown };
     const name = (typeof rec.name === 'string' ? rec.name : '').trim();
     if (!name) continue;
+    const clampedName = name.slice(0, MAX_CUSTOM_FIELD_NAME_LENGTH);
+    const type = normalizeCustomFieldType(rec.type as string | number | undefined);
     const value = toFieldValue(rec.value);
-    if (fields.length >= MAX_CUSTOM_FIELDS_PER_ITEM) {
-      dropped.push({ name: name.slice(0, MAX_CUSTOM_FIELD_NAME_LENGTH), value });
+    const hidden = type === 'hidden';
+    if (
+      fields.length >= MAX_CUSTOM_FIELDS_PER_ITEM ||
+      (hidden && value.length > MAX_NOTE_CONTENT_LENGTH)
+    ) {
+      if (hidden) hiddenDropped.push(clampedName);
+      else dropped.push({ name: clampedName, value });
       continue;
     }
-    const clampedName = name.slice(0, MAX_CUSTOM_FIELD_NAME_LENGTH);
+    // Only a text or boolean value can still overflow here: a hidden one that
+    // would has just been dropped whole.
     const { value: clampedValue, overflow: valueOverflow } = clampWithOverflow(
       value,
       MAX_NOTE_CONTENT_LENGTH,
@@ -190,20 +221,23 @@ function clampCustomFields(raw: readonly unknown[]): {
       overflow.push(
         `Custom field "${clampedName}" was truncated; remaining value: ${valueOverflow}`,
       );
+      movedToNotes.push(clampedName);
     }
-    fields.push({
-      name: clampedName,
-      value: clampedValue,
-      type: normalizeCustomFieldType(rec.type as string | number | undefined),
-    });
+    fields.push({ name: clampedName, value: clampedValue, type });
   }
 
   if (dropped.length > 0) {
     const summary = dropped.map((d) => `${d.name}: ${d.value}`).join('\n');
     overflow.push(`${String(dropped.length)} additional custom field(s) not imported:\n${summary}`);
+    movedToNotes.push(...dropped.map((d) => d.name));
   }
+  if (hiddenDropped.length > 0) overflow.push(hiddenFieldsNotImportedLine(hiddenDropped));
 
-  return { fields, overflow };
+  const notice: ItemNotice =
+    hiddenDropped.length > 0 || movedToNotes.length > 0
+      ? { importNotices: { hiddenDropped, movedToNotes } }
+      : {};
+  return { fields, overflow, notice };
 }
 
 /**
@@ -212,8 +246,9 @@ function clampCustomFields(raw: readonly unknown[]): {
  * clamp each to {@link MAX_LOGIN_BACKUP_CODE_LENGTH} and keep at most
  * {@link MAX_LOGIN_BACKUP_CODES}.
  *
- * Anything dropped is reported as a COUNT and never as a value, which is the one
- * place this differs from {@link clampCustomFields}. Recovery codes sit on the
+ * Anything dropped is reported as a COUNT and never as a value, as
+ * {@link clampCustomFields} does for a hidden field and unlike its text fields,
+ * whose values it folds. Recovery codes sit on the
  * `password` side of the line drawn at the top of this file: notes are written
  * verbatim into the Chrome CSV `note` column, so folding the values in would leak
  * them into the very export whose loss note promises they are absent.
@@ -407,9 +442,11 @@ export function buildLogin(input: LoginInput): ParsedImportItem {
   // A password is clamped to the schema bound but is NEVER folded into notes.
   const password = (input.password ?? '').slice(0, MAX_LOGIN_PASSWORD_LENGTH);
 
-  const { fields: customFields, overflow: fieldOverflow } = clampCustomFields(
-    input.customFields ?? [],
-  );
+  const {
+    fields: customFields,
+    overflow: fieldOverflow,
+    notice,
+  } = clampCustomFields(input.customFields ?? []);
   overflow.push(...fieldOverflow);
 
   const { codes: backupCodes, overflow: codeOverflow } = clampBackupCodes(input.backupCodes ?? []);
@@ -430,6 +467,7 @@ export function buildLogin(input: LoginInput): ParsedImportItem {
     data,
     tags: toTags(input.tags),
     favorite: Boolean(input.favorite),
+    ...notice,
   };
 }
 
@@ -492,22 +530,39 @@ function hostDerivedName(host: string, rawUsername: string): string {
 export interface NoteInput {
   name?: string;
   content?: string;
+  /** Source custom fields, coerced and clamped exactly as a login's are. */
+  customFields?: readonly unknown[];
   tags?: (string | undefined | null)[];
   favorite?: boolean;
 }
 
 export function buildNote(input: NoteInput): ParsedImportItem {
-  return {
-    itemType: 'note',
+  const { fields, overflow, notice } = clampCustomFields(input.customFields ?? []);
+  const content = input.content ?? '';
+  const data: Record<string, unknown> = {
     // A note's content IS its free text, so an over-long value has nowhere else
     // to go: clamp to the schema bound rather than let it sink the whole item.
+    //
+    // The custom-field overflow joins it through `assembleNotes` only when there
+    // is some. That join trims, and a note's import identity is the hash of its
+    // content: a note with nothing to fold must keep the exact text it always had,
+    // or re-importing the file it came from would duplicate it.
+    content:
+      overflow.length > 0
+        ? assembleNotes(content, overflow)
+        : content.slice(0, MAX_NOTE_CONTENT_LENGTH),
+    format: 'plaintext',
+  };
+  // Absent rather than `[]`: `noteDataSchema.customFields` has no default, so an
+  // empty list would change the hash of every note that never had a field.
+  if (fields.length > 0) data.customFields = fields;
+  return {
+    itemType: 'note',
     name: clampName(input.name ?? '') || DEFAULT_NAMES.note,
-    data: {
-      content: (input.content ?? '').slice(0, MAX_NOTE_CONTENT_LENGTH),
-      format: 'plaintext',
-    },
+    data,
     tags: toTags(input.tags),
     favorite: Boolean(input.favorite),
+    ...notice,
   };
 }
 
@@ -525,12 +580,14 @@ export function makeItem(
   data: Record<string, unknown>,
   opts?: { tags?: (string | undefined | null)[]; favorite?: boolean },
 ): ParsedImportItem {
+  const clamped = clampNotesAndFields(itemType, data);
   return {
     itemType,
     name: clampName(name) || DEFAULT_NAMES[itemType],
-    data: clampNotesAndFields(itemType, data),
+    data: clamped.data,
     tags: toTags(opts?.tags),
     favorite: Boolean(opts?.favorite),
+    ...clamped.notice,
   };
 }
 
@@ -634,13 +691,17 @@ const SCALAR_FIELD_BOUNDS: Partial<Record<ItemType, readonly ScalarBound[]>> = {
  * because the scalar table is per type and a key name alone does not identify a
  * field: nothing should clamp a `number` on an item type where that key means
  * something else.
+ *
+ * Returns the custom-field clamp's notice beside the data, for `makeItem` to put
+ * on the item.
  */
 function clampNotesAndFields(
   itemType: ItemType,
   data: Record<string, unknown>,
-): Record<string, unknown> {
+): { data: Record<string, unknown>; notice: ItemNotice } {
   const out: Record<string, unknown> = { ...data };
   const overflow: string[] = [];
+  let notice: ItemNotice = {};
 
   for (const { field, max, label, foldTail } of SCALAR_FIELD_BOUNDS[itemType] ?? []) {
     const source = out[field];
@@ -657,9 +718,10 @@ function clampNotesAndFields(
   }
 
   if (Array.isArray(out.customFields)) {
-    const { fields, overflow: fieldOverflow } = clampCustomFields(out.customFields);
-    overflow.push(...fieldOverflow);
-    if (fields.length > 0) out.customFields = fields;
+    const clamped = clampCustomFields(out.customFields);
+    overflow.push(...clamped.overflow);
+    notice = clamped.notice;
+    if (clamped.fields.length > 0) out.customFields = clamped.fields;
     else delete out.customFields;
   }
 
@@ -678,5 +740,5 @@ function clampNotesAndFields(
     else delete out.notes;
   }
 
-  return out;
+  return { data: out, notice };
 }

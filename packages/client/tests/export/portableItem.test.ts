@@ -219,6 +219,54 @@ describe('toPortableItems — per type', () => {
     expect(portable[0]?.notes).toBe('# Heading\nbody');
   });
 
+  it('carries a note’s custom fields, hidden ones still typed hidden', async () => {
+    const item = mkItem('note', {
+      content: 'body',
+      format: 'plaintext',
+      customFields: [
+        { name: 'Door', value: '4321', type: 'text' },
+        { name: 'Alarm', value: '9876', type: 'hidden' },
+        { name: 'Pets', value: 'true', type: 'boolean' },
+      ],
+    });
+    const { portable, skipped } = await run([item]);
+    expect(skipped).toEqual([]);
+    expect(portable[0]?.notes).toBe('body');
+    expect(portable[0]?.customFields).toEqual([
+      { name: 'Door', value: '4321', type: 'text' },
+      { name: 'Alarm', value: '9876', type: 'hidden' },
+      { name: 'Pets', value: 'true', type: 'boolean' },
+    ]);
+  });
+
+  it('omits customFields for a note whose list is absent or empty', async () => {
+    const { portable } = await run([
+      mkItem('note', { content: 'a' }, { id: 'n1' }),
+      mkItem('note', { content: 'b', customFields: [] }, { id: 'n2' }),
+    ]);
+    expect(portable.map((rec) => 'customFields' in rec)).toEqual([false, false]);
+  });
+
+  it('carries a card’s custom fields beside its notes', async () => {
+    const item = mkItem('card', {
+      cardholderName: 'A',
+      number: '4111111111111111',
+      notes: 'card note',
+      customFields: [{ name: 'PIN', value: '0000', type: 'hidden' }],
+    });
+    const { portable } = await run([item]);
+    expect(portable[0]?.notes).toBe('card note');
+    expect(portable[0]?.customFields).toEqual([{ name: 'PIN', value: '0000', type: 'hidden' }]);
+  });
+
+  it('omits customFields for a card whose list is absent or empty', async () => {
+    const { portable } = await run([
+      mkItem('card', { number: '4111111111111111' }, { id: 'c1' }),
+      mkItem('card', { number: '4111111111111111', customFields: [] }, { id: 'c2' }),
+    ]);
+    expect(portable.map((rec) => 'customFields' in rec)).toEqual([false, false]);
+  });
+
   it('flattens a card, carrying cvv, brand and billing address', async () => {
     const item = mkItem('card', {
       cardholderName: 'Alice Q',
