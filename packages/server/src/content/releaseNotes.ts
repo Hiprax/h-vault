@@ -2,6 +2,82 @@ import type { ReleaseNote } from '@hvault/shared';
 
 export const RELEASE_NOTES: readonly ReleaseNote[] = [
   {
+    version: '0.18.0',
+    date: '2026-10-19',
+    title: 'Card expiry warnings, a clearer item editor and custom fields everywhere',
+    summary:
+      'H-Vault now tells you when a card has expired or is about to, the item editor explains every problem as you go, secure notes and cards can carry custom fields, and Settings explains its vault key and lock options in plain words.',
+    highlights: [
+      {
+        icon: 'clock',
+        title: 'Know when a card expires',
+        body: 'A card that has expired, or expires within 60 days, is marked in your vault list and at the top of the card, and a reminder at the top of your vault lists them until you hide it. The editor says so too while you enter the expiry. Expiry is worked out in your browser, never on the server.',
+      },
+      {
+        icon: 'note',
+        title: 'Custom fields on notes and cards',
+        body: 'Secure notes and cards can now carry custom fields, like logins and identities: text, hidden and yes or no fields. A note can even be nothing but its fields.',
+      },
+      {
+        icon: 'wrench',
+        title: 'An item editor that explains itself',
+        body: 'Each field is checked when you leave it, its message goes away as soon as it is fixed, and a save that cannot go through says how many fields need attention and takes you to the first one. Cards of 12 to 19 digits are accepted, and a card number that fails the usual check digit test is a warning, not a refusal.',
+      },
+      {
+        icon: 'sparkles',
+        title: 'Help beside the vault key and lock settings',
+        body: 'A question mark beside Rotate Vault Key, Re-seal Entries and Lock when the tab is hidden explains what each one does, what happens afterwards, when to use it and what it cannot do.',
+      },
+    ],
+    changes: [
+      {
+        kind: 'changed',
+        text: 'An entry can have up to 30 custom fields, or the limit your administrator set. An entry that already has more keeps all of them, but cannot gain more until it has fewer.',
+      },
+      {
+        kind: 'changed',
+        text: 'Imports apply the same limit. Extra text and yes or no fields are added to the entry notes where they fit, extra hidden fields are left out, and the import lists exactly what it will move or leave out before anything is saved, and again afterwards.',
+      },
+      {
+        kind: 'changed',
+        text: 'Custom fields on Bitwarden notes and cards now import as custom fields. Importing the same Bitwarden file again can add a second copy of a note or card with fields that was imported before this update.',
+      },
+      {
+        kind: 'fixed',
+        text: 'An email address the editor cannot accept on an identity now shows a message, instead of stopping the save with no explanation.',
+      },
+      {
+        kind: 'fixed',
+        text: 'Editing a card no longer shortens a long card number that an import stored.',
+      },
+      {
+        kind: 'fixed',
+        text: 'A custom field with a value but no name is no longer thrown away when you save. You are asked to name it or remove it.',
+      },
+      {
+        kind: 'fixed',
+        text: 'An expiry time on a secret without a date is no longer silently ignored. You are asked to add the date or clear the time.',
+      },
+      {
+        kind: 'added',
+        text: 'A secret whose expiry date has already passed says so in the editor.',
+      },
+      {
+        kind: 'fixed',
+        text: "Closing What's New with Escape just as it opens now marks it as read, so it does not come back.",
+      },
+      {
+        kind: 'security',
+        text: 'A hidden custom field that an import cannot keep is left out, instead of being added to the entry notes as readable text.',
+      },
+      {
+        kind: 'added',
+        text: 'CUSTOM_FIELDS_LIMIT sets how many custom fields an entry may have, from 1 to 100 (30 by default). It applies to the item editor and to every import, including H-Vault exports.',
+        audience: 'administrators',
+      },
+    ],
+  },
+  {
     version: '0.17.0',
     date: '2026-10-18',
     title: 'Get your entries back after a password reset',

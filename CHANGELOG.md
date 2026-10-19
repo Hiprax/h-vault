@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-10-19
+
 ### Added
 
 - **Card expiry warnings.** A card that has expired, or expires within 60 days, is marked "Expired" or "Expires soon" in the vault list, says so at the top of the card itself (with the month it was valid through, and how many days are left), and is listed in a reminder at the top of the vault that can be hidden until something changes. The editor says so too while the expiry is being entered. Expiry is worked out only in the browser after unlock, from the card's month and year: the server never sees an expiry date in readable form, and nothing is emailed.
@@ -1037,7 +1039,8 @@ First public release.
 - Progressive Web App with offline read access via IndexedDB, dark/light/system themes, keyboard shortcuts, virtualized lists and WAI-ARIA-conformant components.
 - Local CI pipeline (`npm run ci`) running eleven gates — including container builds with Trivy scanning and CodeQL — from the `pre-push` hook.
 
-[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.17.0...HEAD
+[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.18.0...HEAD
+[0.18.0]: https://github.com/Hiprax/h-vault/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/Hiprax/h-vault/compare/v0.16.1...v0.17.0
 [0.16.1]: https://github.com/Hiprax/h-vault/compare/v0.16.0...v0.16.1
 [0.16.0]: https://github.com/Hiprax/h-vault/compare/v0.15.0...v0.16.0
