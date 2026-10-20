@@ -3241,8 +3241,9 @@ are the only durable record that a given commit was measured on a given day.
 4. **`publish-images`**, only once both platforms passed, joins each image's two digests into one
    multi-platform index tagged with the release version on `ghcr.io/hiprax`, and attaches a
    signed build-provenance attestation to each.
-5. **`release`** checks that an anonymous client can pull every tag (a package GitHub creates is
-   private until someone makes it public), then tags the commit and publishes the Release.
+5. **`release`** checks that an anonymous client can pull every tag (a package the workflow creates
+   takes the repository's visibility, but one made any other way starts private), then tags the
+   commit and publishes the Release.
 
 The logic of steps 2 to 5 lives in `scripts/ci/release-images.mjs` and `scripts/ci/lib/`, where it is
 unit-tested, not in the workflow file.
@@ -3269,9 +3270,9 @@ file once an `actionlint` release knows them.
 
 **Rehearsing a release.** Dispatching the workflow by hand with `stage_images` ticked runs the
 gauntlet and both image jobs, and pushes the images by digest only: no tag, no attestation, no
-Release, from any branch. It is how a change to the image build is tried before it ships, and how
-a NEW image's package is created so it can be made public before the release that first needs it.
-A dispatch never publishes from any branch but `main`.
+Release, from any branch. It is how a change to the image build is tried before it ships. Its
+digests carry no tag, but anyone who can see the packages can pull them the moment they are
+pushed. A dispatch tags and releases nothing from any branch but `main`.
 
 **Least privilege, and pinned tools.** Only the `release` job can write to the repository, and
 only the image jobs can write packages: the gauntlet job, which installs every dependency and runs

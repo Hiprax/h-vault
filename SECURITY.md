@@ -1856,13 +1856,14 @@ What stands behind each image:
   `.github/workflows/release.yml` on GitHub-hosted runners (native x86 and native ARM), from
   this repository's `docker/Dockerfile`, with every base image, the Dockerfile frontend and the
   BuildKit that runs the build pinned by digest.
-- **The bytes that were published were scanned and run first.** Each platform's images are
-  pushed untagged, pulled back, scanned with the digest-pinned Trivy (a fixable CRITICAL or HIGH
-  finding outside the reviewed baseline fails the release), and stood up with the real
-  `docker-compose.yml` for one real user journey through its single port. Only after both
-  platforms passed are they tagged. The registry token never reaches the build containers, the
-  scanner (which is handed a saved tarball, with no Docker socket and no credential, after the
-  job has signed out) or the smoke-test stack.
+- **The bytes behind each tag were scanned and run first.** Each platform's images are
+  pushed untagged (an untagged digest can already be pulled, like anything in a public
+  package, but no install or update step names one), pulled back, scanned with the
+  digest-pinned Trivy (a fixable CRITICAL or HIGH finding outside the reviewed baseline fails
+  the release), and stood up with the real `docker-compose.yml` for one real user journey
+  through its single port. Only after both platforms passed are they tagged. The registry
+  token never reaches the build containers, the scanner (which is handed a saved tarball, with
+  no Docker socket and no credential, after the job has signed out) or the smoke-test stack.
 - **A signed build provenance.** Each tag's index carries a SLSA provenance attestation, signed
   through Sigstore by GitHub's own attestation action, naming the repository, workflow, commit
   and run that built it. Check it before you run an image (GitHub CLI 2.68 or later, the first
@@ -1874,8 +1875,8 @@ What stands behind each image:
     --source-ref refs/heads/main --deny-self-hosted-runners
   ```
 
-- **A released tag is not moved.** The workflow publishes a version's images only while that
-  version has no git tag, refuses to replace them once it has, and publishes from `main` only.
+- **A released tag is not moved.** The workflow tags a version's images only while that
+  version has no git tag, refuses to replace them once it has, and tags from `main` only.
   The registry itself would let the repository's owner move a tag, though, so a deployment that
   must never change underneath you pins the digests, in a `docker-compose.override.yml` beside
   the compose file (the keys are the SERVICE names; the web image runs as `hvault-nginx`):

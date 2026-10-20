@@ -528,7 +528,10 @@ export function confirmedIndexDigest(raw, manifest) {
 // 3. Verify: what an anonymous user would get
 // ---------------------------------------------------------------------------
 
-/** Where a maintainer makes a package public (a package starts private). */
+/**
+ * Where a maintainer makes a package public. One the release workflow creates
+ * takes the repository's visibility; one pushed any other way starts private.
+ */
 export function packageSettingsUrl(name) {
   const owner = SOURCE_REPOSITORY.split('/')[0];
   return `https://github.com/users/${owner}/packages/container/${name}/settings`;
@@ -539,9 +542,10 @@ export function packageSettingsUrl(name) {
  * judged the way `docker pull` would meet it: an anonymous pull token, then the
  * tag's manifest.
  *
- * A package GitHub created on the first push is PRIVATE (GitHub docs), and a
- * private package refuses the anonymous token (measured: 403, against 200 for a
- * public one). So this is the check that stops a Release from being published
+ * A package pushed by hand, or in a private repository, starts private (one this
+ * workflow creates takes the repository's visibility), and a private or missing
+ * package refuses the anonymous token (measured: 403, against 200 for a public
+ * one). So this is the check that stops a Release from being published
  * while its install instructions cannot work. With `expectedIndex`, the tag must
  * also resolve to exactly the index this run published, so a stale tag left by
  * an earlier run cannot pass for this release.

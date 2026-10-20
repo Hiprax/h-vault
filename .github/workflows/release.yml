@@ -25,8 +25,8 @@ on:
         description: >-
           Rehearse the image jobs: run the gauntlet, then build, scan and smoke-test the
           images on both platforms and push them by digest only. No tag, no attestation,
-          no release. Also how a NEW image's package gets created, so it can be made
-          public before its first release.
+          no release. Anyone who can see the packages can pull those untagged
+          digests.
         type: boolean
         default: false
 
@@ -510,9 +510,10 @@ jobs:
       # A Release is never published while its install instructions cannot
       # work: every image tag must be pullable by an ANONYMOUS client, hold both
       # platforms and be annotated with this version and THIS commit, and when
-      # this run published them, be exactly the index it published. A package is
-      # private when GitHub first creates it, so a new image fails here, naming
-      # its settings page, until it is made public.
+      # this run published them, be exactly the index it published. A package
+      # this workflow creates takes the repository's visibility; one that is
+      # private (pushed by hand, or in a private fork) fails here, naming its
+      # settings page, until it is made public.
       - name: Check that anyone can pull the release images
         if: steps.version.outputs.should_release == 'true'
         env:

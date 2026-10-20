@@ -607,12 +607,13 @@ workflow only calls it.
 - **Rehearse a change to the image build** before it ships: push a branch and run
   `gh workflow run release.yml --ref <branch> -f stage_images=true`. It runs the gauntlet,
   builds, scans and smoke-tests both platforms and pushes the images by digest only. It tags
-  nothing and releases nothing, from any branch; a dispatch publishes only from `main`.
-- **A NEW image** (one `lib/images.mjs` gains) gets its package created by its first push, and
-  GitHub makes a new package **private**. The release then stops before tagging, naming the
-  package's settings page. Run a rehearsal first, so the package exists, and make it public
-  under the package's settings ("Change visibility"; there is no way back to private). The
-  release that ships the image then goes through in one run.
+  nothing and releases nothing, from any branch; a dispatch tags and releases only from `main`.
+- **A NEW image** (one `lib/images.mjs` gains) gets its package created by its first push from
+  the workflow, and a package the workflow's `GITHUB_TOKEN` creates takes the repository's
+  visibility, so here it is public from that push, rehearsal digests included. A package
+  pushed any other way (by hand, with a personal token), or created in a private fork, starts
+  **private**: the release then stops before tagging, naming the package's settings page, until
+  it is made public there ("Change visibility"; there is no way back to private).
 - **An interrupted release** (the tag pushed, the Release missing) heals with "Re-run failed
   jobs" on that run, or by dispatching the workflow on the tag itself
   (`gh workflow run release.yml --ref vX.Y.Z`), which re-runs the gauntlet at that commit and
