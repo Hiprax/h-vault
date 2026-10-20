@@ -396,8 +396,8 @@ hash-locked `scripts/ci/requirements-diff-cover.txt`. None of these moves on its
 new upstream release changes nothing here until someone edits the pin, which is the point:
 a moved tag or a replaced release asset can no longer reach the job. The cost is that
 refreshing a pin is a deliberate edit, done like this. (What the gauntlet itself pulls in
-without a hash committed here, such as the browsers, the base images and the scanner image,
-is listed in SECURITY.md; those are not pins this procedure moves.)
+without a hash committed here, such as the browsers and the Alpine packages, is listed in
+SECURITY.md; those are not pins this procedure moves.)
 
 - **An action.** Resolve the tag to the commit it points at, with read-only calls:
 
@@ -413,15 +413,32 @@ is listed in SECURITY.md; those are not pins this procedure moves.)
   every occurrence of the action (one action is pinned one way everywhere) and update the
   comment. Moving to a new MAJOR is a dependency upgrade: read its release notes first.
 
-- **The runner image.** Both jobs name it outright (`runs-on: ubuntu-26.04`), never a
-  `*-latest` label, so the image changes only with an edit here; `local-pipeline.test.ts`
-  refuses a `*-latest` label, two different labels, and an `actions/checkout` or
-  `actions/setup-node` release still on the Node 20 runtime. The pinned `actionlint`
-  predates the `ubuntu-26.04` label, so `.github/actionlint.yaml` declares it, and only it
-  (the same test holds the file to that one label). Moving to another image: try it first
-  on a throwaway branch with
-  `gh workflow run release.yml --ref <branch>`, then change both jobs and that file
-  together, and delete the file once an `actionlint` release knows the label.
+- **The runner image.** Every job names it outright (`runs-on: ubuntu-26.04`), never a
+  `*-latest` label, so the image changes only with an edit here; the one job that builds
+  the ARM images runs on the same release's native ARM image, `ubuntu-26.04-arm`.
+  `local-pipeline.test.ts` refuses a `*-latest` label, two Ubuntu releases, the ARM label on
+  any other job, and an `actions/checkout` or `actions/setup-node` release still on the
+  Node 20 runtime. The pinned `actionlint` predates both labels, so `.github/actionlint.yaml`
+  declares them, and only them (the same test holds the file to the labels the jobs use).
+  Moving to another release: try it first on a throwaway branch with
+  `gh workflow run release.yml --ref <branch> -f stage_images=true`, then change every job
+  and that file together, and delete the file once an `actionlint` release knows the labels.
+
+- **An image the release pulls by digest.** The BuildKit the image jobs build with (in
+  `release.yml`), the Trivy scanner (`TRIVY_IMAGE` in `scripts/ci/lib/trivy.mjs`, which the
+  docker gate uses too) and the Dockerfile frontend (the `# syntax=` line of
+  `docker/Dockerfile` and `docker/mongo.Dockerfile`, which a test holds equal) are each a
+  `tag@sha256:<index digest>`. Take a release at least two weeks old, then read the
+  multi-platform index digest from the registry, and from a second registry where the
+  publisher mirrors it, before you move the pin; the two must agree:
+
+  ```bash
+  docker buildx imagetools inspect aquasec/trivy:<version>              # Digest: sha256:...
+  docker buildx imagetools inspect ghcr.io/aquasecurity/trivy:<version>
+  ```
+
+  Check the new index still lists `linux/amd64` and `linux/arm64`. A new scanner can report
+  different findings, so re-run `npm run ci:docker` before committing.
 
 - **A downloaded binary.** Change its `*_VERSION` and its checksum line together; a
   version bumped alone fails the checksum on purpose. Take the hash from the checksum file
@@ -578,6 +595,31 @@ hatches above mean an unchecked commit can reach `main`.
 A push to `main` releases only when the root `package.json` version has been bumped and
 `CHANGELOG.md` has a matching `## [X.Y.Z]` section; that section becomes the Release body.
 An ordinary push publishes nothing and says so.
+
+A release also publishes the **images**: after the gauntlet, the workflow builds
+`hvault-app`, `hvault-web` and `hvault-bootstrap` for `linux/amd64` and `linux/arm64`, each on
+its own native runner, scans and runs them, tags one multi-platform index per image on
+`ghcr.io/hiprax` with the version, and attests their provenance. The git tag and the Release
+come only after an anonymous client can pull every one of them. `scripts/ci/lib/images.mjs` is
+the one list of published images, and `scripts/ci/release-images.mjs` does the work; the
+workflow only calls it.
+
+- **Rehearse a change to the image build** before it ships: push a branch and run
+  `gh workflow run release.yml --ref <branch> -f stage_images=true`. It runs the gauntlet,
+  builds, scans and smoke-tests both platforms and pushes the images by digest only. It tags
+  nothing and releases nothing, from any branch; a dispatch publishes only from `main`.
+- **A NEW image** (one `lib/images.mjs` gains) gets its package created by its first push, and
+  GitHub makes a new package **private**. The release then stops before tagging, naming the
+  package's settings page. Run a rehearsal first, so the package exists, and make it public
+  under the package's settings ("Change visibility"; there is no way back to private). The
+  release that ships the image then goes through in one run.
+- **An interrupted release** (the tag pushed, the Release missing) heals with "Re-run failed
+  jobs" on that run, or by dispatching the workflow on the tag itself
+  (`gh workflow run release.yml --ref vX.Y.Z`), which re-runs the gauntlet at that commit and
+  checks that the published images name it. If a newer advisory now stops that gauntlet, publish
+  the Release by hand from the curated section:
+  `node scripts/ci/changelog-extract.mjs X.Y.Z > notes.md` then
+  `gh release create vX.Y.Z --verify-tag --notes-file notes.md`.
 
 A release also needs its **in-app release notes**: one entry at the top of
 `packages/server/src/content/releaseNotes.ts`, with the same version and date as the new

@@ -318,3 +318,55 @@ describe('tsc build info', () => {
     expect(dockerignore).not.toMatch(/^\.cache$/m);
   });
 });
+
+/**
+ * Every production compile runs ONE type-checker.
+ *
+ * TypeScript 7's native compiler checks a project with four checkers in parallel
+ * by default, and memory scales with them: the server emit measured 1.29 GB peak
+ * with the default and 0.51 GB with `--checkers 1`, in the same 2.9 s. On a small
+ * server that difference is the build being killed by the OOM killer (it was, on a
+ * 1.6 GiB host). The flag lives in the workspace build scripts rather than in the
+ * Dockerfile, so the image build, a PM2 host's `npm run build` and a developer's
+ * build all get it. `type-check` is deliberately untouched: it is a tier-0 gate
+ * with its own measured budget.
+ */
+describe('production compiles', () => {
+  /** The tsc segment of a `build` script, split into tokens. */
+  function tscTokens(workspace: string): string[] {
+    const build = readManifest(workspace).scripts?.['build'] ?? '';
+    const segments = build
+      .split('&&')
+      .map((segment) => segment.trim())
+      .filter((segment) => /^tsc(?:\s|$)/.test(segment));
+    expect(segments, `${workspace} build runs exactly one tsc`).toHaveLength(1);
+    return segments[0]!.split(/\s+/);
+  }
+
+  it.each(['packages/server', 'packages/shared'])(
+    '%s builds with one type-checker',
+    (workspace) => {
+      const tokens = tscTokens(workspace);
+      const at = tokens.indexOf('--checkers');
+      expect(at, 'the build passes --checkers').toBeGreaterThan(0);
+      expect(tokens[at + 1]).toBe('1');
+      expect(tokens.filter((token) => token === '--checkers')).toHaveLength(1);
+    },
+  );
+
+  it('runs the client build mode with one type-checker', () => {
+    // The client compiles through scripts/build.mjs, whose single `tsc -b` call is
+    // the only place a flag can reach it.
+    const script = readFileSync(path.join(repoRoot, 'packages/client/scripts/build.mjs'), 'utf-8');
+    const calls = [
+      ...script.matchAll(/run\(\[binOf\('@typescript\/native', 'bin\/tsc'\),([^\]]*)\]/g),
+    ];
+    expect(calls).toHaveLength(1);
+    const args = [...calls[0]![1]!.matchAll(/'([^']*)'/g)].map((m) => m[1]);
+    expect(args[0]).toBe('-b');
+    expect(args.slice(args.indexOf('--checkers'), args.indexOf('--checkers') + 2)).toEqual([
+      '--checkers',
+      '1',
+    ]);
+  });
+});

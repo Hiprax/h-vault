@@ -70,7 +70,13 @@ function run(args, label) {
 // `tsc6` binary, so `binOf('typescript', 'bin/tsc')` would name a file that is
 // not there. TypeScript 7's `bin/tsc` is a small Node launcher for the native
 // compiler, which is why it can still be run with `process.execPath`.
-const tscStatus = run([binOf('@typescript/native', 'bin/tsc'), '-b'], 'tsc -b');
+//
+// `--checkers 1`: the native compiler checks with four checkers in parallel by
+// default and its memory grows with them, which on a small server is the
+// difference between a build and the OOM killer. Measured on the server emit:
+// 2.9 s either way, peak 1.29 GB with the default and 0.51 GB with one checker.
+// packages/server/tests/tsconfig-incremental.test.ts holds every build to it.
+const tscStatus = run([binOf('@typescript/native', 'bin/tsc'), '-b', '--checkers', '1'], 'tsc -b');
 if (tscStatus !== 0) process.exit(tscStatus);
 
 /**

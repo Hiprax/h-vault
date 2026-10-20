@@ -39,10 +39,18 @@ import { existsSync, copyFileSync, unlinkSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { captureExe, runExe, hasExe, repoRoot } from './lib/proc.mjs';
 import { color, symbol, note, warn } from './lib/ui.mjs';
+import { IMAGE_DOCKERFILE, PUBLISHED_IMAGES } from './lib/images.mjs';
+import {
+  TRIVY_IMAGE,
+  TRIVY_SCAN_ARGS,
+  extractFindings,
+  judgeFindings,
+  parseBaseline,
+  scanCoverageProblem,
+} from './lib/trivy.mjs';
 
 const TAG = 'local-ci';
 const TRIVY_CACHE_VOLUME = 'hvault-trivy-cache';
-const TRIVY_IMAGE = 'aquasec/trivy:latest';
 // Reviewed, accepted container findings. Consulted here rather than through a
 // repo-root `.trivyignore`, which only a NATIVE trivy binary would read: this
 // gate usually runs Trivy in a container and deliberately bind-mounts no host
@@ -67,13 +75,19 @@ const BASELINE = path.join(repoRoot, 'scripts', 'ci', 'trivy-baseline.json');
 //     oversight. The controls that DO apply to it are the digest pin, the
 //     internal-only network with no published port, and the hardening block —
 //     all of them asserted in packages/server/tests/docker-hardening.test.ts.
+//
+// The first three are the images every release publishes, taken from the one
+// catalogue (`lib/images.mjs`) so this gate scans exactly what ships. The
+// bootstrap image carries the full devDependency tree into the production stack,
+// so it is the largest attack surface of the three; it must not be the one image
+// nobody scans.
 const IMAGES = [
-  { name: 'hvault-app', file: 'docker/Dockerfile', target: 'app', scan: true },
-  { name: 'hvault-web', file: 'docker/Dockerfile', target: 'web', scan: true },
-  // The bootstrap image carries the full devDependency tree into the production
-  // stack, so it is the largest attack surface of the three — it must not be the
-  // one image nobody scans.
-  { name: 'hvault-bootstrap', file: 'docker/Dockerfile', target: 'bootstrap', scan: true },
+  ...PUBLISHED_IMAGES.map(({ name, target }) => ({
+    name,
+    file: IMAGE_DOCKERFILE,
+    target,
+    scan: true,
+  })),
   { name: 'hvault-db', file: 'docker/mongo.Dockerfile', target: null, scan: false },
 ];
 
@@ -266,33 +280,12 @@ function daemonSocketMount() {
   return `${hostPath}:/var/run/docker.sock`;
 }
 
-// `--exit-code 0` is deliberate: Trivy reports, this gate DECIDES. The verdict
-// has to be taken after the baseline in `trivy-baseline.json` is applied, and a
-// non-zero exit here would fail the push before that could happen. A scan that
-// genuinely could not run is still caught — that surfaces as a non-zero exit
-// from a scanner that produced no parseable report, handled below.
-//
-// `--format json` rather than `table` for the same reason: an accepted finding
-// can only be matched on (id, image, package, path) if those fields survive as
-// data. The human-readable table is re-rendered from the JSON.
 // Resolved once, not per image: three scans would otherwise print the note three
 // times and shell out to `docker context inspect` for an answer that cannot change.
 const socketMount = nativeTrivy ? '' : daemonSocketMount();
 
-const scanArgs = [
-  'image',
-  '--severity',
-  'CRITICAL,HIGH',
-  '--ignore-unfixed',
-  '--exit-code',
-  '0',
-  '--scanners',
-  'vuln',
-  '--format',
-  'json',
-  '--timeout',
-  '15m',
-];
+// The scan itself (`TRIVY_SCAN_ARGS`, and why it never fails on its own) is in
+// lib/trivy.mjs, shared with the release workflow's scan of the published images.
 
 /**
  * The accepted-findings list. Read once, up front, so a malformed or missing
@@ -305,9 +298,7 @@ function loadBaseline() {
     fail(`missing ${path.relative(repoRoot, BASELINE)} — the Trivy baseline must exist`);
   }
   try {
-    const parsed = JSON.parse(readFileSync(BASELINE, 'utf8'));
-    if (!Array.isArray(parsed.findings)) throw new Error('`findings` must be an array');
-    return parsed.findings;
+    return parseBaseline(readFileSync(BASELINE, 'utf8'));
   } catch (error) {
     return fail(
       `${path.relative(repoRoot, BASELINE)} is not valid: ${error instanceof Error ? error.message : String(error)}`,
@@ -318,43 +309,8 @@ function loadBaseline() {
 const baseline = loadBaseline();
 const baselineHits = new Set();
 
-/**
- * A finding is accepted only when EVERY field of a baseline entry matches: the
- * CVE, the image it was reviewed in, the package, and the path prefix. Matching
- * on the CVE alone would let an entry reviewed for npm's bundled copy silently
- * excuse the same CVE appearing in our own application dependencies — which is
- * exactly the finding that must never be waved through.
- */
-function acceptedBy(finding, imageName) {
-  return baseline.find(
-    (entry) =>
-      entry.id === finding.id &&
-      entry.image === imageName &&
-      entry.package === finding.pkg &&
-      finding.path.startsWith(entry.pathPrefix),
-  );
-}
-
-function extractFindings(report) {
-  const findings = [];
-  for (const result of report.Results ?? []) {
-    for (const vulnerability of result.Vulnerabilities ?? []) {
-      findings.push({
-        id: vulnerability.VulnerabilityID,
-        pkg: vulnerability.PkgName,
-        installed: vulnerability.InstalledVersion,
-        fixed: vulnerability.FixedVersion ?? '',
-        severity: vulnerability.Severity,
-        // PkgPath is where the package actually lives; Target is the scan unit
-        // it was found through. The path is what distinguishes npm's bundled
-        // tree from our own, so it must never fall back to nothing.
-        path: vulnerability.PkgPath ?? result.Target ?? '',
-        title: vulnerability.Title ?? '',
-      });
-    }
-  }
-  return findings;
-}
+// Matching a finding against the baseline (every field, never the CVE alone)
+// is `acceptedBy` in lib/trivy.mjs.
 
 const vulnerable = [];
 let acceptedCount = 0;
@@ -367,7 +323,7 @@ for (const image of IMAGES.filter((candidate) => candidate.scan)) {
   let report;
 
   if (nativeTrivy) {
-    const scan = captureExe('trivy', [...scanArgs, reference]);
+    const scan = captureExe('trivy', [...TRIVY_SCAN_ARGS, reference]);
     status = scan.status;
     report = scan.stdout;
     if (scan.stderr.trim()) console.log(scan.stderr.trim());
@@ -378,7 +334,7 @@ for (const image of IMAGES.filter((candidate) => candidate.scan)) {
       '-v',
       `${TRIVY_CACHE_VOLUME}:/root/.cache`,
       TRIVY_IMAGE,
-      ...scanArgs,
+      ...TRIVY_SCAN_ARGS,
       reference,
     ]);
     status = scan.status;
@@ -396,20 +352,16 @@ for (const image of IMAGES.filter((candidate) => candidate.scan)) {
     fail(`trivy produced no parseable JSON report for ${reference}`);
   }
 
-  const findings = extractFindings(parsed);
-  const unresolved = [];
-
-  for (const finding of findings) {
-    const entry = acceptedBy(finding, image.name);
-    if (entry) {
-      baselineHits.add(entry.id);
-      acceptedCount += 1;
-      note(
-        `accepted ${finding.id} (${finding.pkg} ${finding.installed}) in ${reference} — see scripts/ci/trivy-baseline.json`,
-      );
-    } else {
-      unresolved.push(finding);
-    }
+  // A report that scanned nothing must not read as "no findings".
+  const coverage = scanCoverageProblem(parsed);
+  if (coverage) fail(`${reference}: ${coverage}`);
+  const { accepted, unresolved } = judgeFindings(extractFindings(parsed), baseline, image.name);
+  for (const { finding, entry } of accepted) {
+    baselineHits.add(entry.id);
+    acceptedCount += 1;
+    note(
+      `accepted ${finding.id} (${finding.pkg} ${finding.installed}) in ${reference} — see scripts/ci/trivy-baseline.json`,
+    );
   }
 
   if (unresolved.length === 0) {

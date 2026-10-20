@@ -20,3 +20,4 @@ export * from './utils/index.js';
 export * from './utils/backupCodes.js';
 export * from './utils/rowId.js';
 export * from './utils/releaseVersion.js';
+export * from './utils/updateSteps.js';

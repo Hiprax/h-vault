@@ -33,6 +33,11 @@ import { parse } from 'yaml';
 import { DOCUMENT_CIPHERTEXT_CHUNK_BYTES } from '@hvault/shared';
 import { SANDBOX_DOCUMENT_PATH } from '../src/config/clientArtifacts.js';
 import { resolveComposeImage, STORAGE_COMPOSE_SERVICE } from '../../../tests/harness/s3Server.js';
+import {
+  IMAGE_DOCKERFILE,
+  PUBLISHED_IMAGES,
+  imageRepository,
+} from '../../../scripts/ci/lib/images.mjs';
 
 interface HealthCheck {
   test?: string[] | string;
@@ -48,7 +53,8 @@ type NetworkAttachment =
 interface ServiceConfig {
   image?: string;
   /** Long form only in this repo; the short `build: .` form is typed for completeness. */
-  build?: string | { context?: string; dockerfile?: string };
+  build?: string | { context?: string; dockerfile?: string; target?: string };
+  pull_policy?: string;
   container_name?: string;
   stop_signal?: string;
   security_opt?: string[];
@@ -388,11 +394,12 @@ describe('Docker deployment', () => {
     });
 
     it('tags its own images with the release, and the default tracks package.json', () => {
-      // A rollback is `git checkout v<previous> && docker compose up -d --build`:
-      // the old release's images are still on the host under their own tag. That
-      // only works if the tag actually names the release — a default that drifted
-      // from package.json would silently overwrite one version's image with
-      // another's, and `docker compose ps` would lie about what is serving.
+      // A rollback is `git checkout v<previous>` and that release's HVAULT_VERSION:
+      // the old release's images are still in the registry, and on the host, under
+      // their own tag. That only works if the tag actually names the release: a
+      // default that drifted from package.json would pull or build one version's
+      // image under another's name, and `docker compose ps` would lie about what
+      // is serving.
       for (const service of [app, nginx, bootstrap]) {
         // Everything after the FIRST colon: the tag is itself an interpolation that
         // contains colons (`${HVAULT_VERSION:-1.1.0}`), so a naive split loses it.
@@ -411,6 +418,59 @@ describe('Docker deployment', () => {
       // serves the old stack and reports success.
       const envVersion = /^HVAULT_VERSION=(.*)$/m.exec(envExample)?.[1]?.trim();
       expect(envVersion).toBe(rootPackageJson.version);
+      // The database image is built locally and its tag LEADS with the MongoDB
+      // major an operator needs to see, but carries the release after it, so a
+      // release that changes docker/mongo.Dockerfile is a new tag and is built on
+      // update without `--build`.
+      for (const service of [db, dbInit]) {
+        const image = service?.image ?? '';
+        expect(image).toMatch(/^hvault-db:8\.\d+-\$\{HVAULT_VERSION:-\d+\.\d+\.\d+\}$/);
+        expect(interpolationDefault(image.replace(/^hvault-db:8\.\d+-/, ''))).toBe(
+          rootPackageJson.version,
+        );
+      }
+    });
+
+    it('pulls the published images under their catalogue names, and can still build each one', () => {
+      // `docker compose pull` fetches what a release published, so a small server
+      // compiles nothing; the `build:` block is what `up --build` uses to build
+      // the same image from source. scripts/ci/lib/images.mjs is the one list, and
+      // the release workflow publishes exactly it.
+      for (const image of PUBLISHED_IMAGES) {
+        const service = compose.services[image.service];
+        expect(service?.image?.split(':')[0], image.service).toBe(imageRepository(image.name));
+        expect(service?.build, image.service).toMatchObject({
+          context: '.',
+          dockerfile: IMAGE_DOCKERFILE,
+          target: image.target,
+        });
+        // The default policy, so a missing tag is pulled; `never` would make a
+        // fresh install build from source after all.
+        expect(service?.pull_policy, image.service).toBeUndefined();
+      }
+      // And nothing else claims a published name.
+      const published = Object.entries(compose.services)
+        .filter(([, service]) => service?.image?.startsWith('ghcr.io/'))
+        .map(([name]) => name)
+        .sort();
+      expect(published).toEqual(PUBLISHED_IMAGES.map((image) => image.service).sort());
+    });
+
+    it('never asks a registry for an image only this host builds', () => {
+      // A service with `build:` and the default pull policy is LOOKED FOR in a
+      // registry first, and `docker compose pull` fails outright when the name is
+      // not there, which stops the documented `pull && up` before anything starts.
+      // So every image the stack builds but nobody publishes says `never`: Compose
+      // builds it when this release's tag is missing and reuses it otherwise.
+      const localOnly = Object.entries(compose.services).filter(
+        ([, service]) => service?.build !== undefined && !service.image?.startsWith('ghcr.io/'),
+      );
+      expect(localOnly.map(([name]) => name).sort()).toEqual(['hvault-db', 'hvault-db-init']);
+      for (const [name, service] of localOnly) {
+        expect(service?.pull_policy, name).toBe('never');
+      }
+      expect(dbInit?.image).toBe(db?.image);
+      expect(dbInit?.build).toEqual(db?.build);
     });
 
     it('namespaces the project AND the container names, so a second stack can coexist', () => {
@@ -929,7 +989,8 @@ describe('Docker deployment', () => {
       // manager's datastore should not be the thing that drops out of security
       // support first.
       expect(mongoDockerfile).toMatch(/^FROM mongo:8\.0@sha256:[0-9a-f]{64}$/m);
-      expect(db?.image).toMatch(/^hvault-db:8\.\d+$/);
+      // The image tag names the same major the Dockerfile builds on.
+      expect(db?.image).toMatch(/^hvault-db:8\.0-/);
     });
 
     it('carries the rseq tunable MongoDB 8.x needs on Linux 6.19+ (Ubuntu 26.04)', () => {
@@ -1000,7 +1061,7 @@ describe('Docker deployment', () => {
        * ordinary shape
        *
        *     hvault-db:
-       *       image: hvault-db:8.0
+       *       image: hvault-db:8.0-${HVAULT_VERSION}
        *       command: ["--replSet", "rs0", "--bind_ip_all"]
        *
        * launches a mongod while containing no `mongod` token anywhere. An earlier
@@ -1572,6 +1633,10 @@ describe('Docker deployment', () => {
         // Its own tag, so it never shadows the pulled engine image, defaulting to
         // the release like the stack's other images (a bump must not leave it stale).
         expect(s3Override?.image).toMatch(/^hvault-s3:\$\{HVAULT_VERSION:-\d+\.\d+\.\d+\}$/);
+        // Built here and published nowhere, so `docker compose pull` must not look
+        // for it: without `never` the documented `pull && up` fails with the
+        // override in place.
+        expect(s3Override?.pull_policy).toBe('never');
         expect(interpolationDefault(s3Override?.image?.replace(/^hvault-s3:/, ''))).toBe(
           rootPackageJson.version,
         );
@@ -1756,6 +1821,22 @@ describe('Docker deployment', () => {
       expect(unpinned).toEqual([]);
     });
 
+    it('pins the Dockerfile frontend a build fetches, by digest and identically everywhere', () => {
+      // A `# syntax=` directive makes BuildKit pull that frontend image from Docker
+      // Hub and hand it the whole build definition: a floating `dockerfile:1` is a
+      // mutable pointer at the code that decides what every image contains, the
+      // published release images included. A Dockerfile WITHOUT the directive uses
+      // the builder's built-in frontend and fetches nothing (garage.Dockerfile).
+      const directives = dockerfiles
+        .map(({ name, text }) => ({ name, line: text.split('\n')[0]! }))
+        .filter(({ line }) => line.startsWith('# syntax='));
+      expect(directives.map(({ name }) => name).sort()).toEqual(['Dockerfile', 'mongo.Dockerfile']);
+      for (const { line } of directives) {
+        expect(line).toMatch(/^# syntax=docker\/dockerfile:\d+\.\d+\.\d+@sha256:[0-9a-f]{64}$/);
+      }
+      expect(new Set(directives.map(({ line }) => line)).size).toBe(1);
+    });
+
     it('runs the very MongoDB image production builds on in the development stack', () => {
       // The same rule the two compose files hold for the storage engine: a
       // behaviour difference between dev and prod must never be a database
@@ -1794,6 +1875,26 @@ describe('Docker deployment', () => {
       for (const source of sources) {
         expect(['build-client', 'web-root']).toContain(source);
       }
+    });
+
+    it('starts the client compile only after the server compile has finished', () => {
+      // Both compile stages derive from build-shared, so BuildKit would run them at
+      // the same time, and their peaks ADD: the server type-check and the client
+      // bundle together are what got a 1.6 GiB server's build killed by the OOM
+      // killer. A read-only bind of one file from build-server makes the client's
+      // RUN wait until that stage is complete. BuildKit keys such a mount by the
+      // CONTENT of the bound file, so it binds the server's package.json, which only
+      // a dependency, script or version change touches: an ordinary server code
+      // change still leaves the client step cached. Binding anything the server compile WRITES would
+      // rebuild the client on every server edit.
+      const start = dockerfile.indexOf('FROM build-shared AS build-client');
+      const stage = dockerfile.slice(start, dockerfile.indexOf('\nFROM ', start + 1));
+      const compile = stage.split('\n').filter((line) => line.startsWith('RUN '));
+      expect(compile).toHaveLength(1);
+      expect(compile[0]).toMatch(
+        /^RUN --mount=type=bind,from=build-server,source=\/app\/packages\/server\/package\.json,target=\S+ /,
+      );
+      expect(compile[0]).toContain('npm run build -w packages/client');
     });
 
     it('ships a lockfile carrying integrity metadata for every registry package', () => {

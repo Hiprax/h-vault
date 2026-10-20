@@ -9,7 +9,9 @@
  * exists beside the runner rather than inside it.
  *
  * `scripts/ci/deploy-drill.mjs` owns the docker commands; this file owns the
- * verdicts.
+ * verdicts. The release workflow's smoke test of the images it publishes
+ * (`scripts/ci/release-images.mjs`) asks a subset of the same questions, with
+ * the same answers.
  */
 
 /**
@@ -350,6 +352,152 @@ export function renderOverride(envFileAbsolutePath) {
     )
     .join('');
   return `services:\n${services}`;
+}
+
+/**
+ * The throwaway configuration a scratch deployment boots with.
+ *
+ * Two stacks use it: the deployment drill (`test:deploy`), which stands the
+ * working tree's stack up from nothing, and the release workflow's smoke test of
+ * the exact images it is about to publish (`scripts/ci/release-images.mjs`). One
+ * definition, because a key the drill learned to supply (every `${...:?}` guard
+ * in docker-compose.yml, the three JWT and session secrets, an https origin) is
+ * a key the release smoke test needs too.
+ *
+ * Every secret comes from `secret()`, called once per key, so a run never reuses
+ * a value. `dev-` prefixes are refused outside development and `CORS_ORIGIN`
+ * must be https in production, so these are not placeholders: they are the
+ * minimum a real production boot accepts, which is part of what both prove.
+ *
+ * - `TRUST_PROXY_HOPS` is 1: these stacks are reached on their published port
+ *   directly, with only their own Nginx in front of Express. The documented
+ *   production value is 2, and a count that does not match reality makes
+ *   `req.ip` wrong, which is what the rate limiters key on.
+ * - `HVAULT_VERSION` is the caller's own tag, never a release's: a scratch
+ *   stack built from a working tree must not take the name of an image a real
+ *   deployment on the same host pulled.
+ * - `UPDATE_CHECK_ENABLED` is off: a scratch stack must not depend on, or
+ *   announce itself to, a host on the internet.
+ * - The object storage access key id is a literal derived from the stack name
+ *   rather than a secret: the engine refuses an id shorter than 8 characters,
+ *   and an id is not a secret. S3_ENDPOINT is deliberately absent, because the
+ *   stack pins the in-stack address itself.
+ *
+ * @param {{ stackName: string, httpPort: number, edgeSubnet: string, dataSubnet: string,
+ *   imageTag: string, secret: () => string }} options
+ * @returns {Record<string, string>}
+ */
+export function scratchStackEnvironment({
+  stackName,
+  httpPort,
+  edgeSubnet,
+  dataSubnet,
+  imageTag,
+  secret,
+}) {
+  // The stack name is also the bucket name, so it must be one S3 accepts.
+  if (!/^hvault-[a-z0-9]+(?:-[a-z0-9]+)*$/.test(String(stackName)) || stackName.length > 63) {
+    throw new Error(`a scratch stack name must look like hvault-<name>, got: ${String(stackName)}`);
+  }
+  if (!Number.isInteger(httpPort) || httpPort < 1024 || httpPort > 65535) {
+    throw new Error(`a scratch stack needs an unprivileged port, got: ${String(httpPort)}`);
+  }
+  for (const subnet of [edgeSubnet, dataSubnet]) {
+    if (!/^172\.31\.\d{1,3}\.0\/24$/.test(String(subnet))) {
+      throw new Error(`a scratch stack subnet must be a 172.31.x.0/24, got: ${String(subnet)}`);
+    }
+  }
+  if (edgeSubnet === dataSubnet) throw new Error('the edge and data subnets must differ');
+  if (!/^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/.test(String(imageTag))) {
+    throw new Error(`not a valid image tag: ${String(imageTag)}`);
+  }
+  const origin = `https://${stackName.replace(/^hvault-/, '')}.hvault.test`;
+  return {
+    HVAULT_STACK_NAME: stackName,
+    HVAULT_HTTP_PORT: String(httpPort),
+    HVAULT_EDGE_SUBNET: edgeSubnet,
+    HVAULT_DATA_SUBNET: dataSubnet,
+    HVAULT_VERSION: imageTag,
+    TRUST_PROXY_HOPS: '1',
+    MONGO_ROOT_USERNAME: 'hvault',
+    MONGO_ROOT_PASSWORD: secret(),
+    MONGO_APP_USERNAME: 'hvault_app',
+    MONGO_APP_PASSWORD: secret(),
+    JWT_ACCESS_SECRET: secret(),
+    JWT_REFRESH_SECRET: secret(),
+    SESSION_SECRET: secret(),
+    APP_URL: origin,
+    CORS_ORIGIN: origin,
+    APP_NAME: 'H-Vault',
+    BCRYPT_ROUNDS: '12',
+    SMTP_FROM: 'noreply@hvault.test',
+    UPDATE_CHECK_ENABLED: 'false',
+    S3_BUCKET: stackName,
+    S3_ACCESS_KEY_ID: `${stackName.replace(/-/g, '')}key`,
+    S3_SECRET_ACCESS_KEY: secret(),
+    S3_RPC_SECRET: secret(),
+  };
+}
+
+/**
+ * `docker compose` arguments that run a mongosh script inside the database
+ * container, with every secret passed by NAME only.
+ *
+ * Each variable is a bare `-e NAME`, which the docker CLI fills from its OWN
+ * environment, so no value reaches a command line anywhere: not mongosh's, and
+ * not the host docker client's either (F-18). The caller supplies the values in
+ * the environment of the `docker compose` process it runs these with.
+ *
+ * @param {string} script
+ * @param {string[]} envNames
+ */
+export function mongoshExecArgs(script, envNames) {
+  for (const name of envNames) {
+    if (!/^[A-Z][A-Z0-9_]*$/.test(name))
+      throw new Error(`not an environment variable name: ${name}`);
+  }
+  return [
+    'exec',
+    '-T',
+    ...envNames.flatMap((name) => ['-e', name]),
+    'hvault-db',
+    'mongosh',
+    '--quiet',
+    '--host',
+    '127.0.0.1',
+    '--eval',
+    script,
+  ];
+}
+
+/**
+ * Marks one account's address verified, as clicking the emailed link would.
+ *
+ * A scratch stack sends no mail, so a journey that registers an account has to
+ * finish verification directly in the database. It reads the root credential
+ * and the address from `R_U`, `R_P` and `MAIL` (see `mongoshExecArgs`), and
+ * prints the counts `emailVerifiedProblem` judges.
+ */
+export const MARK_EMAIL_VERIFIED_SCRIPT =
+  "db.getSiblingDB('admin').auth(process.env.R_U, process.env.R_P);" +
+  "const r = db.getSiblingDB('hvault').users.updateOne({ email: process.env.MAIL }, { $set: { emailVerified: true } });" +
+  "print('matched=' + r.matchedCount + ' modified=' + r.modifiedCount);";
+
+/**
+ * Why marking the address verified did not work, or null when it did.
+ *
+ * Exactly one account must have matched AND changed: a zero means the journey
+ * registered under another address, and a match without a change means the
+ * account was already verified, which a fresh registration never is.
+ *
+ * @param {{ ok: boolean, stdout: string, stderr: string }} result
+ */
+export function emailVerifiedProblem(result) {
+  if (result.ok && /matched=1 modified=1/.test(result.stdout)) return null;
+  return `could not verify the account in the database: ${result.stdout}${result.stderr}`.slice(
+    0,
+    400,
+  );
 }
 
 /**

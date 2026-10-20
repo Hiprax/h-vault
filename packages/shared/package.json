@@ -20,7 +20,7 @@
     }
   },
   "scripts": {
-    "build": "node scripts/inject-version.js && tsc",
+    "build": "node scripts/inject-version.js && tsc --checkers 1",
     "dev": "tsc --watch",
     "test": "vitest run --coverage",
     "test:flake": "vitest run --config vitest.flake.config.ts",

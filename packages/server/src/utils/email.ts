@@ -2,7 +2,7 @@ import nodemailer from 'nodemailer';
 import type { Transporter } from 'nodemailer';
 import { createModuleLogger } from './logger.js';
 import { isLoopbackIpLiteral } from './networkAddress.js';
-import { maskEmail } from '@hvault/shared';
+import { dockerUpdateSteps, isReleaseVersion, maskEmail } from '@hvault/shared';
 import { config } from '../config/index.js';
 
 const logger = createModuleLogger('email');
@@ -601,6 +601,13 @@ export async function sendUpdateAvailableEmail(
     update.publishedAt === null
       ? ''
       : ` It was published on ${escapeHtml(update.publishedAt.toISOString().slice(0, 10))}.`;
+  // The update commands (the same ones the About page shows) only for a real
+  // release version: every line is meant to be pasted into a shell, so the
+  // helper refuses anything else, and an email must never throw.
+  const updateSteps = isReleaseVersion(update.latest)
+    ? `<p style="margin: 0 0 8px; line-height: 1.6;">To update a Docker installation, run these in its directory:</p>
+        <pre style="margin: 0 0 16px; padding: 12px 14px; border-radius: 6px; background: #111827; color: #f9fafb; font-size: 13px; line-height: 1.6; white-space: pre-wrap;">${escapeHtml(dockerUpdateSteps(update.latest))}</pre>`
+    : '';
 
   const html = `
     <!DOCTYPE html>
@@ -615,10 +622,7 @@ export async function sendUpdateAvailableEmail(
         <p style="margin: 0 0 24px;">
           <a href="${releaseUrl}" style="display: inline-block; padding: 10px 22px; border-radius: 6px; background: #1d4ed8; color: #ffffff; font-weight: 600; text-decoration: none;">Read the release notes</a>
         </p>
-        <p style="margin: 0 0 8px; line-height: 1.6;">To update a Docker installation, run these in its directory:</p>
-        <pre style="margin: 0 0 16px; padding: 12px 14px; border-radius: 6px; background: #111827; color: #f9fafb; font-size: 13px; line-height: 1.6; white-space: pre-wrap;">git pull
-# set HVAULT_VERSION=${latest} in .env, then:
-docker compose up -d --build --wait</pre>
+        ${updateSteps}
         <p style="margin: 0 0 16px; line-height: 1.6;">
           H-Vault also shows this under <a href="${aboutUrl}" style="color: #1d4ed8;">Settings, About H-Vault</a>.
         </p>

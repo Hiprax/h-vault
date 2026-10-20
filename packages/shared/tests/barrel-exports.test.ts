@@ -150,6 +150,7 @@ import {
   parseReleaseVersion,
   compareReleaseVersions,
   isReleaseVersion,
+  dockerUpdateSteps,
 } from '../src/index.js';
 import {
   MAX_SANDBOX_CODE_LENGTH,
@@ -180,6 +181,7 @@ describe('barrel exports (src/index.ts)', () => {
     expect(parseReleaseVersion('1.2.3')).toEqual([1, 2, 3]);
     expect(compareReleaseVersions('1.2.3', '1.2.4')).toBe(-1);
     expect(isReleaseVersion('1.2')).toBe(false);
+    expect(dockerUpdateSteps('1.2.3')).toContain('git checkout v1.2.3');
   });
 
   it('exports all common schemas', () => {

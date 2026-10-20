@@ -465,7 +465,9 @@ security posture, not a disclaimer.
   the master password or the vault key at the moment they are in memory. This is inherent
   to every browser-based zero-knowledge application, H-Vault included. Self-host it, pin
   the version you deploy, and treat the served bundle as security-critical. A modified
-  build can do anything the genuine one can, so nothing below holds against one. What the
+  build can do anything the genuine one can, so nothing below holds against one. The
+  release images are such a build: check their provenance before you run them, or build
+  them from source yourself (see [Release integrity](#release-integrity-the-published-images)). What the
   genuine build does narrow is script injected into its page: the master encryption key
   derived from your master password is held by the browser as non-extractable, so such
   script can use it while the vault is unlocked but cannot read it out. That matters because
@@ -1805,11 +1807,14 @@ devices via clipboard sync. H-Vault reduces the exposure window but cannot elimi
   reporting the ones it does not cover; a later npm release enforces it. That is why the
   telemetry opt-out is set separately. The production images install with scripts disabled
   either way.
-- The release workflow gives write access only to the job that publishes. The job that
+- The release workflow gives write access only to the jobs that publish. The job that
   installs dependencies and runs the gauntlet holds a read-only token and does not keep it in
   its checkout, so a compromised dependency or tool running there cannot push to the
-  repository or move a release tag; the publishing job checks the commit out afresh and runs
-  only this repository's own scripts. Every GitHub Action is pinned to a full commit SHA, the
+  repository, publish an image or move a release tag. The two image jobs may push packages,
+  the job that tags the images may also sign their provenance, and only the release job may
+  push a git tag or publish a Release; each checks the commit out afresh and runs only this
+  repository's own scripts on the host (plus, in the job that tags the images, GitHub's own
+  attestation action). Every GitHub Action is pinned to a full commit SHA, the
   five downloaded tools (actionlint, hadolint, oasdiff, gitleaks and osv-scanner) are checked
   against SHA-256 values committed in the workflow, and
   `diff-cover` is installed from a hash-locked requirements file. Be precise about the limit:
@@ -1818,12 +1823,14 @@ devices via clipboard sync. H-Vault reduces the exposure window but cannot elimi
   image itself (`ubuntu-26.04`, named outright so it changes only with the workflow, but not
   pinned to a digest); the Node toolchain `actions/setup-node` downloads; the
   Playwright browsers and the system packages `playwright install --with-deps` installs
-  through apt; the Alpine packages `apk upgrade` pulls into the images the image gate builds
-  (their base images, `node:24-alpine3.23`, `mongo:8.0`, Nginx and Garage, are all pinned by
-  digest, and the development stack's database names the same digest); the Trivy scanner image
-  (`aquasec/trivy:latest`) and the vulnerability database it fetches; and the MongoDB server
-  binary the test harness downloads, which is checked only against a checksum served from
-  the same host. The npm dependency tree is pinned by the lockfile's integrity hashes.
+  through apt; the Alpine packages `apk upgrade` pulls into the images the image gate and the
+  release build (their base images, `node:24-alpine3.23`, `mongo:8.0`, Nginx and Garage, are
+  all pinned by digest, as are the Dockerfile frontend and the BuildKit the release builds
+  with, and the development stack's database names the same digest); the vulnerability
+  database Trivy fetches (the scanner itself, `aquasec/trivy:0.75.0`, is pinned by digest:
+  Trivy's own releases were compromised in March 2026, GHSA-69fq-xp46-6x23); and the MongoDB
+  server binary the test harness downloads, which is checked only against a checksum served
+  from the same host. The npm dependency tree is pinned by the lockfile's integrity hashes.
 
 ## Hardening your own deployment
 
@@ -1833,6 +1840,70 @@ put an instance in front of real data — in particular: set a dedicated
 `TRUST_PROXY_HOPS` to the true number of proxies, and keep the single published port bound
 to `127.0.0.1`. If the server must make no request to a third party it was not asked to,
 set `UPDATE_CHECK_ENABLED=false`; the release check is then off, and the app says so.
+
+### Release integrity: the published images
+
+Every release from 0.20.0 on publishes three images to GitHub's container registry,
+`ghcr.io/hiprax/hvault-app`, `hvault-web` and `hvault-bootstrap`, under one tag per release
+(`X.Y.Z`, never `latest`), each holding a `linux/amd64` and a `linux/arm64` image. `docker
+compose pull` fetches them. Nothing else in the stack is published: the database image is built
+on your server from the pinned MongoDB image, and the storage engine is pulled from its upstream
+by digest.
+
+What stands behind each image:
+
+- **It was built from the release commit, after the gauntlet passed on it**, by
+  `.github/workflows/release.yml` on GitHub-hosted runners (native x86 and native ARM), from
+  this repository's `docker/Dockerfile`, with every base image, the Dockerfile frontend and the
+  BuildKit that runs the build pinned by digest.
+- **The bytes that were published were scanned and run first.** Each platform's images are
+  pushed untagged, pulled back, scanned with the digest-pinned Trivy (a fixable CRITICAL or HIGH
+  finding outside the reviewed baseline fails the release), and stood up with the real
+  `docker-compose.yml` for one real user journey through its single port. Only after both
+  platforms passed are they tagged. The registry token never reaches the build containers, the
+  scanner (which is handed a saved tarball, with no Docker socket and no credential, after the
+  job has signed out) or the smoke-test stack.
+- **A signed build provenance.** Each tag's index carries a SLSA provenance attestation, signed
+  through Sigstore by GitHub's own attestation action, naming the repository, workflow, commit
+  and run that built it. Check it before you run an image (GitHub CLI 2.68 or later, the first
+  with `--source-ref`):
+
+  ```bash
+  gh attestation verify oci://ghcr.io/hiprax/hvault-app:0.20.0 --repo Hiprax/h-vault \
+    --signer-workflow Hiprax/h-vault/.github/workflows/release.yml \
+    --source-ref refs/heads/main --deny-self-hosted-runners
+  ```
+
+- **A released tag is not moved.** The workflow publishes a version's images only while that
+  version has no git tag, refuses to replace them once it has, and publishes from `main` only.
+  The registry itself would let the repository's owner move a tag, though, so a deployment that
+  must never change underneath you pins the digests, in a `docker-compose.override.yml` beside
+  the compose file (the keys are the SERVICE names; the web image runs as `hvault-nginx`):
+
+  ```yaml
+  services:
+    hvault-app:
+      image: ghcr.io/hiprax/hvault-app:<version>@sha256:<digest>
+    hvault-nginx:
+      image: ghcr.io/hiprax/hvault-web:<version>@sha256:<digest>
+    hvault-bootstrap:
+      image: ghcr.io/hiprax/hvault-bootstrap:<version>@sha256:<digest>
+  ```
+
+  For each `<digest>`, take the `Digest:` line of
+  `docker buildx imagetools inspect ghcr.io/hiprax/<image>:<version>`. The override then
+  outranks every update: the documented and in-app update steps move the compose file and the
+  database image to the new release, but these three stay on their pinned digests until you
+  edit them, so change them in the same step as `HVAULT_VERSION`.
+
+What it does not cover. Running the published images means trusting this repository's release
+workflow, GitHub Actions and the registry, on top of the source. A compromised build dependency
+could alter the image it builds: the gauntlet ran first on the same commit and lockfile, and the
+published bytes were scanned and run, but neither proves the absence of a well-hidden change.
+The way out of that trust is to build from source on your own machine:
+`docker compose up -d --build --wait` builds the very same Dockerfile from your checkout. The
+release build also pulls things no hash here pins: the runner images, the Alpine packages
+`apk upgrade` installs at build time, and Trivy's vulnerability database.
 
 ### The database's root credential
 

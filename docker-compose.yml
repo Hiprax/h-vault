@@ -26,8 +26,12 @@
 # takes precedence over `env_file` in Compose.
 #
 #   Quick start:  cp .env.example .env   # then fill in the secrets it names
-#                 docker compose up -d --build --wait   # exits non-zero unless
-#                                                       # every service is healthy
+#                 docker compose pull && docker compose up -d --wait
+#                     # runs the release's published images; `--wait` exits
+#                     # non-zero unless every service is healthy. To build the
+#                     # same images from source instead (needs about 1 GB of
+#                     # memory, RAM plus swap):
+#                 docker compose up -d --build --wait
 #
 # Requires Docker Compose >= 2.24 (the `env_file` long syntax below landed there).
 
@@ -170,12 +174,19 @@ services:
     build:
       <<: *hvault-build
       target: web
-    # Tagged with the release it was built from (HVAULT_VERSION in .env, which must
-    # track package.json's `version` — a unit test asserts the default below does).
-    # A rollback is then `git checkout <tag> && docker compose up -d --build`: the
-    # previous release's images are still on the host under their own tags, and the
-    # tag names themselves say which release is running.
-    image: hvault-web:${HVAULT_VERSION:-0.19.0}
+    # The release's PUBLISHED image (HVAULT_VERSION in .env, which must track
+    # package.json's `version`; a unit test asserts the default below does). Every
+    # release pushes it, with hvault-app and hvault-bootstrap, to the GitHub
+    # Container Registry for linux/amd64 and linux/arm64, so `docker compose pull`
+    # fetches it and nothing compiles on the server. The `build:` block above
+    # still builds the very same image from source with `docker compose up -d
+    # --build`. scripts/ci/lib/images.mjs is the one list of published images.
+    #
+    # A rollback is `git checkout <tag>`, HVAULT_VERSION set to that release, then
+    # `docker compose pull && docker compose up -d --wait`: the previous release's
+    # images are still in the registry (and usually on the host) under their own
+    # tags, and the tag names themselves say which release is running.
+    image: ghcr.io/hiprax/hvault-web:${HVAULT_VERSION:-0.19.0}
     container_name: ${HVAULT_STACK_NAME:-hvault}-nginx
     restart: unless-stopped
     # No `init:` here, deliberately (it is set on the two Node services, which need
@@ -252,7 +263,7 @@ services:
     build:
       <<: *hvault-build
       target: app
-    image: hvault-app:${HVAULT_VERSION:-0.19.0}
+    image: ghcr.io/hiprax/hvault-app:${HVAULT_VERSION:-0.19.0}
     container_name: ${HVAULT_STACK_NAME:-hvault}-app
     restart: unless-stopped
     # tini as PID 1: reaps zombies and forwards SIGTERM to node, which drains
@@ -422,7 +433,7 @@ services:
     build:
       <<: *hvault-build
       target: bootstrap
-    image: hvault-bootstrap:${HVAULT_VERSION:-0.19.0}
+    image: ghcr.io/hiprax/hvault-bootstrap:${HVAULT_VERSION:-0.19.0}
     container_name: ${HVAULT_STACK_NAME:-hvault}-bootstrap
     # A one-shot job: run once to completion and stay exited. Never restart — a
     # restart policy here would make `service_completed_successfully` unreachable.
@@ -500,15 +511,16 @@ services:
   # would crash-loop on authentication. A gated one-shot runs on EVERY `up` and is
   # idempotent — it reconciles roles and never rewrites an existing password.
   #
-  # It reuses hvault-db's image and repeats the same `build:` block on purpose:
-  # Compose dedupes and builds once, but a service that names an `image:` WITHOUT
-  # its own `build:` is pull-only, so dropping this block would make a fresh
-  # `docker compose up` (no --build) try to pull hvault-db:8.0 from Docker Hub.
+  # It reuses hvault-db's image and repeats the same `build:` block and pull
+  # policy on purpose: Compose dedupes and builds once, but a service that names an
+  # `image:` WITHOUT its own `build:` is pull-only, so dropping either would make
+  # `docker compose up` look for this local-only image in a registry.
   hvault-db-init:
     build:
       context: .
       dockerfile: docker/mongo.Dockerfile
-    image: hvault-db:8.0
+    image: hvault-db:8.0-${HVAULT_VERSION:-0.19.0}
+    pull_policy: never
     container_name: ${HVAULT_STACK_NAME:-hvault}-db-init
     # One-shot: a restart policy would make `service_completed_successfully`
     # unreachable for the services gating on it.
@@ -558,10 +570,21 @@ services:
       context: .
       dockerfile: docker/mongo.Dockerfile
     # 8.0 is the current MongoDB LTS (supported to 2029-10-31; the 7.0 line this
-    # stack used to pin runs out on 2027-08-31). The tag tracks the upstream major
-    # rather than HVAULT_VERSION: the image is stock mongo plus a key-file
-    # entrypoint, and it is the DATABASE version an operator needs to see here.
-    image: hvault-db:8.0
+    # stack used to pin runs out on 2027-08-31). The tag LEADS with that upstream
+    # major, because it is the DATABASE version an operator needs to see here, and
+    # carries the release it was built for after it.
+    #
+    # This image is NOT published. It is stock mongo plus a key-file entrypoint and
+    # the app-user provisioner, built here from the pinned upstream image in
+    # seconds (nothing compiles), so this repository never redistributes MongoDB.
+    # `pull_policy: never` is what lets that work without `--build`: Compose builds
+    # the image when this release's tag is missing and never asks a registry for
+    # it (`docker compose pull` skips it), and an image already present is reused
+    # rather than rebuilt, so a plain `up` never restarts the database for
+    # nothing. Every release is a new tag, so a change to docker/mongo.Dockerfile
+    # reaches every update.
+    image: hvault-db:8.0-${HVAULT_VERSION:-0.19.0}
+    pull_policy: never
     container_name: ${HVAULT_STACK_NAME:-hvault}-db
     restart: unless-stopped
     # Deliberately NO `init: true`, and this is a measured decision rather than an
@@ -815,8 +838,10 @@ services:
   #
   # TO USE IT, save the block between the two markers, with the leading "  # "
   # removed from every line, as `docker-compose.override.yml` beside this file
-  # (Compose loads that file automatically), then
-  # `docker compose up -d --build --wait`.
+  # (Compose loads that file automatically), then `docker compose up -d --wait`,
+  # which builds that small image locally the first time (nothing compiles; it is
+  # not published, so `pull_policy: never` keeps `docker compose pull` from
+  # looking for it in a registry).
   #
   # TO GO BACK to the stock image, hand the volumes back to root FIRST, while the
   # override is still in place, or the stock engine fails the same way (it runs
@@ -835,6 +860,7 @@ services:
   #       context: .
   #       dockerfile: docker/garage.Dockerfile
   #     image: hvault-s3:${HVAULT_VERSION:-0.19.0}
+  #     pull_policy: never
   #     # The tmpfs now belongs to the engine's user, like the app's and Nginx's.
   #     # `!override` replaces the list above rather than appending to it.
   #     tmpfs: !override

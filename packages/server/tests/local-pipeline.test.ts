@@ -40,6 +40,7 @@ import {
   planRelease,
 } from '../../../scripts/ci/lib/version.mjs';
 import { evaluateDenominator } from '../../../scripts/ci/lib/scan-denominator.mjs';
+import { PUBLISHED_IMAGES, imageRepository } from '../../../scripts/ci/lib/images.mjs';
 import { extractRelease } from '../../../scripts/ci/changelog-extract.mjs';
 import {
   OSV_EXIT,
@@ -76,7 +77,9 @@ const read = (...segments: string[]): string =>
 interface ReleaseWorkflow {
   on: {
     push?: { branches?: string[]; tags?: string[] };
-    workflow_dispatch?: unknown;
+    workflow_dispatch?: {
+      inputs?: Record<string, { type?: string; default?: unknown; description?: string }>;
+    } | null;
     pull_request?: unknown;
     schedule?: unknown;
   };
@@ -86,8 +89,10 @@ interface ReleaseWorkflow {
     string,
     {
       needs?: string[];
+      if?: string;
       'runs-on'?: unknown;
       permissions?: Record<string, string>;
+      outputs?: Record<string, string>;
       'timeout-minutes'?: number;
       steps: {
         name?: string;
@@ -158,21 +163,39 @@ describe('release workflow', () => {
     expect(release.on.push?.tags).toBeUndefined();
   });
 
-  it('grants write access only to the job that publishes, and none at workflow level', () => {
+  it('grants each job exactly the scopes it needs, and none at workflow level', () => {
     // A workflow-level block is inherited by EVERY job, so the one that runs
     // `npm ci` (every dependency's install script) and the whole gauntlet held a
     // token able to push to `main` and move tags. Each job now names its own
-    // scopes: `verify` reads, `release` writes `contents` (enough to push a tag
-    // and publish a Release) and nothing else — notably not the `security-events:
-    // write` the deleted CodeQL job required. A job added without a block of its
-    // own would inherit the repository default, which can be read-write, so every
-    // job must declare one.
+    // scopes: `verify` and `plan` read; the two image jobs may push packages
+    // (untagged images); `publish-images` may also mint an OIDC token and store
+    // attestations, which signing the images' provenance needs; and only
+    // `release` writes `contents` (enough to push a tag and publish a Release),
+    // notably without the `security-events: write` the deleted CodeQL job
+    // required. A job added without a block of its own would inherit the
+    // repository default, which can be read-write, so every job must declare
+    // one, and a job this table does not name is a failure until it is
+    // classified here.
     expect(release.permissions).toBeUndefined();
     for (const [name, job] of Object.entries(release.jobs)) {
       expect(job.permissions, `job ${name} must declare its own permissions`).toBeDefined();
     }
-    expect(release.jobs['verify']?.permissions).toEqual({ contents: 'read' });
-    expect(release.jobs['release']?.permissions).toEqual({ contents: 'write' });
+    const scopes = Object.fromEntries(
+      Object.entries(release.jobs).map(([name, job]) => [name, job.permissions]),
+    );
+    expect(scopes).toEqual({
+      verify: { contents: 'read' },
+      plan: { contents: 'read' },
+      'images-amd64': { contents: 'read', packages: 'write' },
+      'images-arm64': { contents: 'read', packages: 'write' },
+      'publish-images': {
+        contents: 'read',
+        packages: 'write',
+        'id-token': 'write',
+        attestations: 'write',
+      },
+      release: { contents: 'write' },
+    });
   });
 
   it('serialises runs without cancelling one mid-release', () => {
@@ -288,7 +311,7 @@ describe('release workflow', () => {
     }
   });
 
-  it('checks out full history in both jobs', () => {
+  it('checks out full history in every job', () => {
     // The release job derives the tag from every tag that exists; the verify job
     // needs it too, because the secret scan reads every blob ever committed and
     // the coverage gate diffs against `main`. A shallow clone breaks all three.
@@ -442,17 +465,29 @@ describe('release workflow supply chain (F-01): nothing it runs can change under
     }
   });
 
-  it('runs every job on one explicitly versioned runner image, never a moving -latest label', () => {
+  it('runs every job on one explicitly versioned Ubuntu release, never a moving -latest label', () => {
     // `ubuntu-latest` moves to a new Ubuntu release on GitHub's schedule, which
     // changes the operating system, kernel and Docker under the gauntlet with no
     // commit here (it moved to 26.04 from 2026-10-19). A named image moves only by
     // an edit to this file, like every other pin.
-    const labels = Object.values(release.jobs).map((job) => job['runs-on']);
+    //
+    // ONE release for every job, and the 64-bit ARM image of that same release
+    // for exactly one job: the one that builds the ARM release images natively
+    // (rather than under emulation, which is several times slower and is not
+    // what users run them on). Every other job, the gauntlet included, stays on
+    // the x86 image, so the ARM label cannot spread to where nothing needs it.
+    const labels = Object.entries(release.jobs).map(([name, job]) => [name, job['runs-on']]);
     expect(labels.length).toBeGreaterThan(1);
-    for (const label of labels) {
-      expect(label).toMatch(/^ubuntu-\d{2}\.\d{2}$/);
+    const releases = new Set<string>();
+    for (const [name, label] of labels) {
+      const match = /^ubuntu-(\d{2}\.\d{2})(-arm)?$/.exec(String(label));
+      expect(match, `job ${String(name)} runs on ${String(label)}`).not.toBeNull();
+      releases.add(match![1]!);
     }
-    expect(new Set(labels).size).toBe(1);
+    expect(releases.size).toBe(1);
+    expect(labels.filter(([, label]) => String(label).endsWith('-arm'))).toEqual([
+      ['images-arm64', `ubuntu-${[...releases][0]!}-arm`],
+    ]);
   });
 
   it('pins actions that run on a supported Node runtime (checkout and setup-node v5 or later)', () => {
@@ -469,10 +504,11 @@ describe('release workflow supply chain (F-01): nothing it runs can change under
     }
   });
 
-  it('declares to actionlint exactly the runner label the workflow uses, and nothing else', () => {
-    // actionlint's built-in list of hosted labels predates `ubuntu-26.04`, and it
-    // reports an unknown label as an error. `.github/actionlint.yaml` declares that
-    // one label; holding it to exactly the workflow's label, with no other key,
+  it('declares to actionlint exactly the runner labels the workflow uses, and nothing else', () => {
+    // actionlint's built-in list of hosted labels predates `ubuntu-26.04` and its
+    // ARM image, and it reports an unknown label as an error.
+    // `.github/actionlint.yaml` declares those labels; holding it to exactly the
+    // workflow's labels, in the order its jobs first use them, with no other key,
     // keeps it from ever becoming a place to silence a finding.
     const config = parse(read('.github', 'actionlint.yaml')) as Record<string, unknown>;
     expect(Object.keys(config)).toEqual(['self-hosted-runner']);
@@ -646,6 +682,219 @@ describe('release workflow supply chain (F-01): nothing it runs can change under
       /not an exact pin/,
     );
     expect(() => parseLockedRequirements('a==1 --index-url=http://x')).toThrow(/unexpected option/);
+  });
+});
+
+describe('release workflow: the published images', () => {
+  const jobs = release.jobs;
+  const LEGS = [
+    ['images-amd64', 'linux/amd64'],
+    ['images-arm64', 'linux/arm64'],
+  ] as const;
+  const step = (job: string, run: RegExp) => jobs[job]?.steps.find((s) => run.test(s.run ?? ''));
+  const stepIndex = (job: string, run: RegExp) =>
+    jobs[job]?.steps.findIndex((s) => run.test(s.run ?? '')) ?? -1;
+
+  it('decides once, up front, what the image jobs do, from exact true/false words', () => {
+    // Compared with the STRING 'true', a boolean input is always false, which
+    // would turn a rehearsal into a run that builds nothing and still passes;
+    // the expression below yields a real boolean, which reaches the script as
+    // the word `true` or `false` and nothing else (lib `parseFlag`).
+    const decide = step('plan', /release-images\.mjs plan$/);
+    expect(decide?.env).toEqual({
+      SHOULD_RELEASE: '${{ steps.version.outputs.should_release }}',
+      CREATE_TAG: '${{ steps.version.outputs.create_tag }}',
+      STAGE: "${{ github.event_name == 'workflow_dispatch' && inputs.stage_images == true }}",
+    });
+    expect(jobs['plan']?.steps.find((s) => s.run?.includes('next-version.mjs'))?.id).toBe(
+      'version',
+    );
+    expect(jobs['plan']?.outputs).toMatchObject({
+      version: '${{ steps.version.outputs.version }}',
+      build: '${{ steps.images.outputs.build }}',
+      publish: '${{ steps.images.outputs.publish }}',
+      stage: '${{ steps.images.outputs.stage }}',
+    });
+    // The rehearsal is a boolean input that is OFF unless asked for.
+    expect(release.on.workflow_dispatch?.inputs?.['stage_images']).toMatchObject({
+      type: 'boolean',
+      default: false,
+    });
+  });
+
+  it('builds both platforms only after the gauntlet passed, each on its own native runner', () => {
+    for (const [job, platform] of LEGS) {
+      expect(jobs[job]?.needs, job).toEqual(['verify', 'plan']);
+      expect(jobs[job]?.if, job).toBe("needs.plan.outputs.build == 'true'");
+      const build = step(job, /release-images\.mjs build/);
+      expect(build?.run, job).toContain(`--platform ${platform}`);
+      expect(build?.run, job).toContain('--builder hvault-release');
+      expect(build?.id, job).toBe('build');
+      // The digests leave the job only as job outputs, one per published image.
+      expect(Object.keys(jobs[job]?.outputs ?? {}).sort(), job).toEqual(
+        PUBLISHED_IMAGES.map((image) => image.key).sort(),
+      );
+      for (const image of PUBLISHED_IMAGES) {
+        expect(jobs[job]?.outputs?.[image.key], job).toBe(
+          `\${{ steps.build.outputs.${image.key} }}`,
+        );
+      }
+    }
+    expect(jobs['images-amd64']?.['runs-on']).toBe('ubuntu-26.04');
+    expect(jobs['images-arm64']?.['runs-on']).toBe('ubuntu-26.04-arm');
+  });
+
+  it('builds with a BuildKit image pinned by digest, never one that can move', () => {
+    for (const [job] of LEGS) {
+      const create = step(job, /docker buildx create/);
+      expect(create?.run, job).toMatch(
+        /--driver docker-container\s*\\\s*\n\s*--driver-opt image=moby\/buildkit:v\d+\.\d+\.\d+@sha256:[0-9a-f]{64}\n/,
+      );
+      // Created WITHOUT `--use`: the bake names it, and the smoke test's local
+      // database build stays on the daemon's own builder.
+      expect(create?.run, job).not.toMatch(/--use\b/);
+      // Created before the build that names it.
+      expect(stepIndex(job, /docker buildx create/)).toBeLessThan(
+        stepIndex(job, /release-images\.mjs build/),
+      );
+    }
+  });
+
+  it('hands the registry token only to `docker login`, through stdin, and signs out on every exit', () => {
+    const scripts = Object.values(jobs)
+      .flatMap((job) => job.steps)
+      .map((s) => s.run ?? '');
+    const logins = scripts.filter((run) => /docker login/.test(run));
+    expect(logins.length).toBe(3);
+    for (const run of logins) {
+      expect(run).toBe(
+        'set -euo pipefail\nprintf \'%s\' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin\n',
+      );
+    }
+    expect(scripts.join('\n')).not.toMatch(/docker login[^\n]*(?:\s-p\s|--password\s)/);
+    for (const job of ['images-amd64', 'images-arm64', 'publish-images']) {
+      const logout = jobs[job]?.steps.at(-1);
+      expect(logout?.run, job).toBe('docker logout ghcr.io');
+      expect(logout?.if, job).toBe('always()');
+      // The token is named only by the step that signs in: not in a job-level
+      // `env:` (every step, the build included, would inherit it), not as
+      // `secrets.GITHUB_TOKEN`, and in no other step of the job.
+      const TOKEN = /github\.token|secrets\.GITHUB_TOKEN/;
+      const EVERY_TOKEN = new RegExp(TOKEN.source, 'g');
+      expect(Object.keys(jobs[job] ?? {}), job).not.toContain('env');
+      const withToken = jobs[job]?.steps.filter((s) => TOKEN.test(JSON.stringify(s)));
+      expect(
+        withToken?.map((s) => s.name),
+        job,
+      ).toEqual(['Sign in to the GitHub Container Registry']);
+      expect(JSON.stringify(jobs[job]).match(EVERY_TOKEN), job).toHaveLength(1);
+      const checkout = jobs[job]?.steps.find((s) => s.uses?.startsWith('actions/checkout@'));
+      expect(checkout?.with?.['persist-credentials'], job).toBe(false);
+    }
+  });
+
+  it('publishes only for a release, after both platforms passed, and attests every image', () => {
+    const publish = jobs['publish-images'];
+    expect(publish?.needs).toEqual(['plan', 'images-amd64', 'images-arm64']);
+    expect(publish?.if).toBe("needs.plan.outputs.publish == 'true'");
+    const join = step('publish-images', /release-images\.mjs publish/);
+    expect(join?.id).toBe('publish');
+    expect(join?.env).toMatchObject({
+      AMD64_DIGESTS: '${{ toJSON(needs.images-amd64.outputs) }}',
+      ARM64_DIGESTS: '${{ toJSON(needs.images-arm64.outputs) }}',
+    });
+    const attests = publish?.steps.filter((s) => s.uses?.startsWith('actions/attest@')) ?? [];
+    expect(attests.map((s) => s.with)).toEqual(
+      PUBLISHED_IMAGES.map((image) => ({
+        'subject-name': imageRepository(image.name),
+        'subject-digest': `\${{ steps.publish.outputs.${image.key} }}`,
+        'push-to-registry': true,
+        'create-storage-record': false,
+      })),
+    );
+    for (const image of PUBLISHED_IMAGES) {
+      expect(publish?.outputs?.[image.key]).toBe(`\${{ steps.publish.outputs.${image.key} }}`);
+    }
+  });
+
+  it('releases only from main, never in a rehearsal, and never past a failed publish', () => {
+    const job = jobs['release'];
+    expect(job?.needs).toEqual(['verify', 'plan', 'publish-images']);
+    const condition = (job?.if ?? '').replace(/\s+/g, ' ').trim();
+    expect(condition).toBe(
+      "!cancelled() && needs.verify.result == 'success' && needs.plan.result == 'success' " +
+        "&& needs.plan.outputs.stage == 'false' " +
+        "&& (github.ref == 'refs/heads/main' || github.ref == format('refs/tags/v{0}', needs.plan.outputs.version)) " +
+        "&& (needs.publish-images.result == 'success' || (needs.publish-images.result == 'skipped' && needs.plan.outputs.publish == 'false'))",
+    );
+  });
+
+  it('refuses to tag git until anyone can pull the images it published', () => {
+    // Order: decide, agree with the plan, check the images are public, then tag.
+    const decide =
+      jobs['release']?.steps.findIndex((s) => s.run?.includes('next-version.mjs')) ?? -1;
+    const agree =
+      jobs['release']?.steps.findIndex(
+        (s) => s.run === 'node scripts/ci/release-images.mjs agree',
+      ) ?? -1;
+    const verify = stepIndex('release', /release-images\.mjs verify-public/);
+    const tag = stepIndex('release', /git tag -a/);
+    expect(decide).toBeGreaterThanOrEqual(0);
+    expect([decide < agree, agree < verify, verify < tag]).toEqual([true, true, true]);
+    const check = jobs['release']?.steps[verify];
+    expect(check?.if).toBe("steps.version.outputs.should_release == 'true'");
+    expect(check?.run).toContain('--expect-from-env');
+    expect(check?.env).toMatchObject({
+      PUBLISHED: '${{ needs.plan.outputs.publish }}',
+      EXPECTED_INDEXES: '${{ toJSON(needs.publish-images.outputs) }}',
+    });
+    // The job re-decides and hands both decisions to `decisionChangeProblem`
+    // (unit-tested in release-images.test.ts): a retry after the tag was pushed
+    // passes, a changed version or release decision or a vanished tag does not.
+    expect(jobs['release']?.steps[agree]?.env).toEqual({
+      PLANNED_VERSION: '${{ needs.plan.outputs.version }}',
+      PLANNED_SHOULD_RELEASE: '${{ needs.plan.outputs.should_release }}',
+      PLANNED_CREATE_TAG: '${{ needs.plan.outputs.create_tag }}',
+      OWN_VERSION: '${{ steps.version.outputs.version }}',
+      OWN_SHOULD_RELEASE: '${{ steps.version.outputs.should_release }}',
+      OWN_CREATE_TAG: '${{ steps.version.outputs.create_tag }}',
+    });
+    // Every verification pins this version and THIS commit (the annotations),
+    // whether or not this run published the images.
+    expect(
+      check?.run?.match(/verify-public --version "\$VERSION" --revision "\$GITHUB_SHA"/g),
+    ).toHaveLength(2);
+    // Only a run that published the images itself may mint the release tag.
+    const tagStep = jobs['release']?.steps[tag];
+    expect(tagStep?.if).toBe(
+      "steps.version.outputs.should_release == 'true' && steps.version.outputs.create_tag == 'true' && needs.plan.outputs.publish == 'true'",
+    );
+    expect(jobs['plan']?.outputs?.['create_tag']).toBe('${{ steps.version.outputs.create_tag }}');
+  });
+
+  it('keeps a rehearsal out of the queue a release waits in', () => {
+    expect(release.concurrency.group).toBe(
+      "${{ github.event_name == 'workflow_dispatch' && inputs.stage_images && 'release-stage' || 'release' }}",
+    );
+  });
+
+  it('leaves the first job without an `if:`, where the config gate selftest inserts one', () => {
+    // scripts/ci/lib/selftest-defects.mjs plants an undefined context in an `if:`
+    // right after the FIRST `runs-on:` line; an `if:` already there would make that
+    // a duplicate key, which actionlint reports without the planted context.
+    expect(Object.keys(jobs)[0]).toBe('verify');
+    expect(jobs['verify']?.if).toBeUndefined();
+  });
+
+  it('has the docker gate build and scan exactly the published images, from the one catalogue', () => {
+    const dockerGate = read('scripts', 'ci', 'docker-gate.mjs');
+    expect(dockerGate).toMatch(/\.\.\.PUBLISHED_IMAGES\.map\(/);
+    expect(dockerGate).toMatch(
+      /import \{ IMAGE_DOCKERFILE, PUBLISHED_IMAGES \} from '\.\/lib\/images\.mjs';/,
+    );
+    expect(dockerGate).not.toMatch(/name: 'hvault-(?:app|web|bootstrap)'/);
+    expect(dockerGate).toMatch(/import \{\s*TRIVY_IMAGE,/);
+    expect(dockerGate).not.toMatch(/aquasec\/trivy:latest/);
   });
 });
 

@@ -28,18 +28,22 @@ import { fileURLToPath } from 'node:url';
 import {
   ARGV_SAMPLE_SECONDS,
   BOOTSTRAP_ENVIRONMENT_KEYS,
+  MARK_EMAIL_VERIFIED_SCRIPT,
   SERVICE_EXPECTATIONS,
   argvCredentialProblems,
   argvSamplerScript,
   bootstrapEnvironmentProblems,
+  emailVerifiedProblem,
   hostBindingOf,
   isLoopbackBinding,
+  mongoshExecArgs,
   parseComposePs,
   parseProvisionLog,
   portExposureVerdict,
   publishedPorts,
   renderEnvFile,
   renderOverride,
+  scratchStackEnvironment,
   serviceVerdicts,
   singlePortProblems,
   verdictFor,
@@ -367,6 +371,161 @@ describe('the throwaway deployment configuration', () => {
     // quietly resolve inside the repository.
     expect(() => renderOverride('drill.env')).toThrow(/must be absolute/);
     expect(() => renderOverride('./tmp/drill.env')).toThrow(/must be absolute/);
+  });
+});
+
+describe('the scratch stack environment (the drill and the release smoke test)', () => {
+  let counter = 0;
+  /** Distinct, low-entropy "secrets": the scan reads committed history. */
+  const secret = () => {
+    counter += 1;
+    return String(counter).padStart(64, '0');
+  };
+  const options = {
+    stackName: 'hvault-release-smoke',
+    httpPort: 18090,
+    edgeSubnet: '172.31.246.0/24',
+    dataSubnet: '172.31.247.0/24',
+    imageTag: '0.20.0-release-smoke-arm64',
+    secret,
+  };
+
+  it('supplies every key docker-compose.yml refuses to start without', () => {
+    // Each `${NAME:?...}` guard aborts `docker compose up` before a container
+    // exists; a scratch stack missing one would fail for a reason unrelated to
+    // what it was built to prove.
+    const compose = readFileSync(path.join(repoRoot, 'docker-compose.yml'), 'utf8');
+    const guarded = [...new Set([...compose.matchAll(/\$\{([A-Z0-9_]+):\?/g)].map((m) => m[1]!))];
+    expect(guarded.length).toBeGreaterThan(0);
+    const env = scratchStackEnvironment(options);
+    expect(guarded.filter((name) => !(name in env))).toEqual([]);
+  });
+
+  it('boots in production mode: real secrets, an https origin, no update check', () => {
+    const env = scratchStackEnvironment(options);
+    expect(env).toMatchObject({
+      HVAULT_STACK_NAME: 'hvault-release-smoke',
+      HVAULT_HTTP_PORT: '18090',
+      HVAULT_EDGE_SUBNET: '172.31.246.0/24',
+      HVAULT_DATA_SUBNET: '172.31.247.0/24',
+      TRUST_PROXY_HOPS: '1',
+      APP_URL: 'https://release-smoke.hvault.test',
+      CORS_ORIGIN: 'https://release-smoke.hvault.test',
+      UPDATE_CHECK_ENABLED: 'false',
+      S3_BUCKET: 'hvault-release-smoke',
+      S3_ACCESS_KEY_ID: 'hvaultreleasesmokekey',
+    });
+    // Every secret is its own value: one reused across keys would hide a key
+    // the stack mixed up with another.
+    const secrets = [
+      'MONGO_ROOT_PASSWORD',
+      'MONGO_APP_PASSWORD',
+      'JWT_ACCESS_SECRET',
+      'JWT_REFRESH_SECRET',
+      'SESSION_SECRET',
+      'S3_SECRET_ACCESS_KEY',
+      'S3_RPC_SECRET',
+    ].map((key) => env[key]);
+    expect(new Set(secrets).size).toBe(secrets.length);
+    for (const value of secrets) expect(value).toMatch(/^\d{64}$/);
+    // The env file the drill writes refuses anything that is not a bare literal.
+    expect(() => renderEnvFile(env)).not.toThrow();
+  });
+
+  it('runs the images under the caller tag, never a release name', () => {
+    expect(scratchStackEnvironment(options).HVAULT_VERSION).toBe('0.20.0-release-smoke-arm64');
+    expect(
+      scratchStackEnvironment({ ...options, stackName: 'hvault-drill', imageTag: '0.20.0-drill' }),
+    ).toMatchObject({
+      HVAULT_VERSION: '0.20.0-drill',
+      APP_URL: 'https://drill.hvault.test',
+      S3_BUCKET: 'hvault-drill',
+      S3_ACCESS_KEY_ID: 'hvaultdrillkey',
+    });
+  });
+
+  it('refuses a configuration that would collide with, or impersonate, a real stack', () => {
+    expect(() => scratchStackEnvironment({ ...options, stackName: 'hvault' })).toThrow(
+      /hvault-<name>/,
+    );
+    expect(() => scratchStackEnvironment({ ...options, stackName: 'Hvault-Drill' })).toThrow(
+      /hvault-<name>/,
+    );
+    expect(() =>
+      scratchStackEnvironment({ ...options, stackName: `hvault-${'a'.repeat(57)}` }),
+    ).toThrow(/hvault-<name>/);
+    expect(() => scratchStackEnvironment({ ...options, httpPort: 1023 })).toThrow(
+      /unprivileged port/,
+    );
+    expect(() => scratchStackEnvironment({ ...options, httpPort: 65536 })).toThrow(
+      /unprivileged port/,
+    );
+    expect(() => scratchStackEnvironment({ ...options, httpPort: 18090.5 })).toThrow(
+      /unprivileged port/,
+    );
+    expect(() => scratchStackEnvironment({ ...options, edgeSubnet: '10.0.0.0/24' })).toThrow(
+      /172\.31\.x\.0\/24/,
+    );
+    expect(() => scratchStackEnvironment({ ...options, dataSubnet: options.edgeSubnet })).toThrow(
+      /must differ/,
+    );
+    expect(() => scratchStackEnvironment({ ...options, imageTag: 'has space' })).toThrow(
+      /not a valid image tag/,
+    );
+    expect(() => scratchStackEnvironment({ ...options, imageTag: '' })).toThrow(
+      /not a valid image tag/,
+    );
+  });
+});
+
+describe('running a database script in a scratch stack', () => {
+  it('passes every secret by name only, never by value (F-18)', () => {
+    expect(mongoshExecArgs('print(1)', ['R_U', 'R_P'])).toEqual([
+      'exec',
+      '-T',
+      '-e',
+      'R_U',
+      '-e',
+      'R_P',
+      'hvault-db',
+      'mongosh',
+      '--quiet',
+      '--host',
+      '127.0.0.1',
+      '--eval',
+      'print(1)',
+    ]);
+    // A `NAME=value` entry would put the value on the docker client's command line.
+    expect(() => mongoshExecArgs('print(1)', ['R_P=hunter2'])).toThrow(
+      /not an environment variable name/,
+    );
+    expect(() => mongoshExecArgs('print(1)', [''])).toThrow(/not an environment variable name/);
+  });
+
+  it('reads the verification credentials and address from the environment', () => {
+    for (const name of ['process.env.R_U', 'process.env.R_P', 'process.env.MAIL']) {
+      expect(MARK_EMAIL_VERIFIED_SCRIPT).toContain(name);
+    }
+    expect(MARK_EMAIL_VERIFIED_SCRIPT).toContain('$set: { emailVerified: true }');
+  });
+
+  it('accepts exactly one account matched and changed, and explains anything else', () => {
+    expect(
+      emailVerifiedProblem({ ok: true, stdout: 'matched=1 modified=1\n', stderr: '' }),
+    ).toBeNull();
+    expect(emailVerifiedProblem({ ok: true, stdout: 'matched=0 modified=0\n', stderr: '' })).toBe(
+      'could not verify the account in the database: matched=0 modified=0\n',
+    );
+    // Already verified: a fresh registration never is.
+    expect(emailVerifiedProblem({ ok: true, stdout: 'matched=1 modified=0', stderr: '' })).toMatch(
+      /^could not verify/,
+    );
+    expect(
+      emailVerifiedProblem({ ok: false, stdout: 'matched=1 modified=1', stderr: 'exec failed' }),
+    ).toBe('could not verify the account in the database: matched=1 modified=1exec failed');
+    expect(emailVerifiedProblem({ ok: false, stdout: '', stderr: 'x'.repeat(1000) })).toHaveLength(
+      400,
+    );
   });
 });
 

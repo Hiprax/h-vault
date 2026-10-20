@@ -138,7 +138,14 @@ describe('AboutPage: this installation', () => {
       screen.getByText('H-Vault 0.17.0 is available. This server runs 0.16.0.'),
     ).toBeInTheDocument();
     expect(screen.getByText('Published November 5, 2026.')).toBeInTheDocument();
-    expect(screen.getByText(/# set HVAULT_VERSION=0\.17\.0 in \.env, then:/)).toBeInTheDocument();
+    // The whole block, exactly: the release's tag, its version in .env, and its
+    // published images pulled before anything starts. Never a build on the server.
+    const commands = screen.getByText(/# set HVAULT_VERSION=0\.17\.0 in \.env, then:/);
+    expect(commands.tagName).toBe('PRE');
+    expect(commands.textContent).toBe(
+      'git fetch --tags\ngit checkout v0.17.0\n# set HVAULT_VERSION=0.17.0 in .env, then:\n' +
+        'docker compose pull && docker compose up -d --wait',
+    );
     expect(screen.getByRole('link', { name: /What changed in 0\.17\.0/ })).toHaveAttribute(
       'href',
       'https://github.com/Hiprax/h-vault/releases/tag/v0.17.0',

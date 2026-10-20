@@ -874,8 +874,15 @@ describe('Email utility', () => {
       );
       expect(message.html).toContain('It was published on 2026-10-02.');
       expect(message.html).toContain(`href="${update.releaseUrl}"`);
-      expect(message.html).toContain('# set HVAULT_VERSION=0.16.0 in .env, then:');
-      expect(message.html).toContain('docker compose up -d --build --wait');
+      // The shared update commands, HTML-escaped (`&&` arrives as `&amp;&amp;`):
+      // the release tag checked out, then its published images pulled before
+      // anything starts, and never a build on the server.
+      expect(message.html).toContain(
+        'git fetch --tags\ngit checkout v0.16.0\n# set HVAULT_VERSION=0.16.0 in .env, then:\n' +
+          'docker compose pull &amp;&amp; docker compose up -d --wait</pre>',
+      );
+      expect(message.html).not.toContain('--build');
+      expect(message.html).not.toContain('git pull');
       expect(message.html).toContain('href="http://localhost:5000/settings/about"');
       expect(message.html).toContain('listed in UPDATE_NOTIFY_EMAILS');
     });
@@ -902,6 +909,9 @@ describe('Email utility', () => {
       expect(html).toContain('&lt;b&gt;2&lt;/b&gt;');
       expect(html).toContain('&lt;i&gt;1&lt;/i&gt;');
       expect(html).not.toContain('" onmouseover="');
+      // Not a release version, so no shell commands are offered for it at all.
+      expect(html).not.toContain('git checkout');
+      expect(html).not.toContain('docker compose');
     });
 
     it('reports a failure when email is not configured', async () => {

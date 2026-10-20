@@ -103,16 +103,20 @@ import { color, note, symbol, warn } from './lib/ui.mjs';
 import { ensureReportDir, reportPath, writeJsonReport } from './lib/reports.mjs';
 import { SANDBOX_NGINX_JUNIT, SANDBOX_SUITE, sandboxRunProblems } from './lib/sandbox-browser.mjs';
 import {
+  MARK_EMAIL_VERIFIED_SCRIPT,
   SERVICE_EXPECTATIONS,
   argvCredentialProblems,
   argvSamplerScript,
   bootstrapEnvironmentProblems,
+  emailVerifiedProblem,
+  mongoshExecArgs,
   parseComposePs,
   parseProvisionLog,
   portExposureVerdict,
   publishedPorts,
   renderEnvFile,
   renderOverride,
+  scratchStackEnvironment,
   serviceVerdicts,
   singlePortProblems,
 } from './lib/drill.mjs';
@@ -191,55 +195,23 @@ const overrideFile = path.join(workspace, 'drill-override.yml');
 const probeOverrideFile = path.join(workspace, 'drill-no-restart.yml');
 
 /**
- * (c) The throwaway deployment's configuration.
- *
- * Every secret is generated per run. `dev-` prefixes are refused outside
- * development and `CORS_ORIGIN` must be https in production, so these values are
- * not placeholders: they are the minimum a real production boot accepts, which
- * is part of what this gate proves.
+ * (c) The throwaway deployment's configuration: `scratchStackEnvironment` in
+ * lib/drill.mjs, shared with the release workflow's smoke test, documents every
+ * value. The working tree's images are tagged `<version>-drill` rather than the
+ * release's own tag, so a drill on a host that also runs H-Vault from the
+ * published images never overwrites one of them with a local build.
  */
-const APP_PASSWORD = secret();
-const drillEnv = {
-  HVAULT_STACK_NAME: STACK_NAME,
-  HVAULT_HTTP_PORT: String(HTTP_PORT),
-  HVAULT_EDGE_SUBNET: EDGE_SUBNET,
-  HVAULT_DATA_SUBNET: DATA_SUBNET,
-  // One proxy in front of Express here — this stack's own Nginx — because the
-  // drill hits the published port directly instead of through a host Nginx. The
-  // documented production value is 2, and a count that does not match reality
-  // makes `req.ip` wrong, which is what the rate limiters key on.
-  TRUST_PROXY_HOPS: '1',
-  MONGO_ROOT_USERNAME: 'hvault',
-  MONGO_ROOT_PASSWORD: secret(),
-  MONGO_APP_USERNAME: 'hvault_app',
-  MONGO_APP_PASSWORD: APP_PASSWORD,
-  JWT_ACCESS_SECRET: secret(),
-  JWT_REFRESH_SECRET: secret(),
-  SESSION_SECRET: secret(),
-  APP_URL: 'https://drill.hvault.test',
-  CORS_ORIGIN: 'https://drill.hvault.test',
-  APP_NAME: 'H-Vault',
-  BCRYPT_ROUNDS: '12',
-  SMTP_FROM: 'noreply@hvault.test',
-  // The drilled stack must not ask GitHub for the newest release: the drill
-  // proves the deployment, and a run must not depend on a host on the internet.
-  UPDATE_CHECK_ENABLED: 'false',
-  // Object storage. All four are `${...:?}`-guarded in docker-compose.yml, so
-  // Compose refuses to resolve the stack without them and the drill would fail
-  // before a container existed — the same reason the two Mongo passwords are
-  // here. S3_ENDPOINT is deliberately absent: the stack pins the in-stack address
-  // itself, and supplying one here would only test a value the deployment
-  // overrides.
-  //
-  // The access key id is a fixed literal rather than a generated secret because
-  // the storage engine refuses an id shorter than 8 characters at boot, and
-  // because an id is not a secret; the two that are get a fresh 32-byte value per
-  // run, like every other credential above.
-  S3_BUCKET: 'hvault-drill',
-  S3_ACCESS_KEY_ID: 'hvaultdrillkey',
-  S3_SECRET_ACCESS_KEY: secret(),
-  S3_RPC_SECRET: secret(),
-};
+const pkgVersion = JSON.parse(readFileSync(path.join(repoRoot, 'package.json'), 'utf8')).version;
+const drillEnv = scratchStackEnvironment({
+  stackName: STACK_NAME,
+  httpPort: HTTP_PORT,
+  edgeSubnet: EDGE_SUBNET,
+  dataSubnet: DATA_SUBNET,
+  imageTag: `${pkgVersion}-drill`,
+  secret,
+});
+/** The app's database password as provisioned, before any rotation step changes it. */
+const APP_PASSWORD = drillEnv.MONGO_APP_PASSWORD;
 
 writeFileSync(envFile, renderEnvFile(drillEnv), 'utf8');
 writeFileSync(overrideFile, renderOverride(envFile), 'utf8');
@@ -327,22 +299,7 @@ function probeTcp(port) {
  * environment, so no value reaches a command line anywhere (F-18).
  */
 function mongosh(script, env) {
-  const envArgs = Object.keys(env).flatMap((key) => ['-e', key]);
-  return compose(
-    [
-      'exec',
-      '-T',
-      ...envArgs,
-      'hvault-db',
-      'mongosh',
-      '--quiet',
-      '--host',
-      '127.0.0.1',
-      '--eval',
-      script,
-    ],
-    { env: { ...composeEnv, ...env } },
-  );
+  return compose(mongoshExecArgs(script, Object.keys(env)), { env: { ...composeEnv, ...env } });
 }
 
 /** Runs a one-shot service again, exactly as a redeploy would, and waits for its exit code. */
@@ -970,24 +927,14 @@ try {
           note(message);
         },
         verifyEmail: async (email) => {
-          const result = mongosh(
-            "db.getSiblingDB('admin').auth(process.env.R_U, process.env.R_P);" +
-              "const r = db.getSiblingDB('hvault').users.updateOne({ email: process.env.MAIL }, { $set: { emailVerified: true } });" +
-              "print('matched=' + r.matchedCount + ' modified=' + r.modifiedCount);",
-            {
+          const problem = emailVerifiedProblem(
+            mongosh(MARK_EMAIL_VERIFIED_SCRIPT, {
               R_U: drillEnv.MONGO_ROOT_USERNAME,
               R_P: drillEnv.MONGO_ROOT_PASSWORD,
               MAIL: email,
-            },
+            }),
           );
-          if (!result.ok || !/matched=1 modified=1/.test(result.stdout)) {
-            throw new Error(
-              `could not verify the drill account in the database: ${result.stdout}${result.stderr}`.slice(
-                0,
-                400,
-              ),
-            );
-          }
+          if (problem) throw new Error(problem);
           await Promise.resolve();
         },
       });

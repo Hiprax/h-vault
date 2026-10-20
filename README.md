@@ -693,13 +693,19 @@ Nothing on the host but Docker. MongoDB, the object storage, Node and the routin
 in front of it (step 3).
 
 - **Docker Engine** with the **Compose plugin ≥ 2.24** (`docker compose version`). The stack uses
-  the `env_file` long syntax, which older Compose rejects with a parse error.
+  the `env_file` long syntax, which older Compose rejects with a parse error. The **buildx** plugin
+  that Docker Engine installs with it (`docker buildx version`) builds the small local database
+  image.
 - `sudo systemctl enable --now docker`, or the stack does **not** come back after a reboot.
 - The host's system Nginx (step 3) plus `sudo ufw allow 80,443/tcp`. Do **not** open the stack's
   port: it is bound to `127.0.0.1` and must stay that way. A Docker port published without a host
   IP is reachable from the whole internet **even behind an active `ufw deny`** — Docker's iptables
   rules are evaluated before `INPUT`.
-- ~2 GB free RAM and ~3 GB disk **to build**, if you build on the production host.
+- A **64-bit CPU that MongoDB 8 supports** (x86 with AVX, or ARMv8.2-A: a Raspberry Pi 5 works, a
+  Pi 4 does not), **1 GB of RAM** and about **3 GB of disk** for the images. Nothing is compiled
+  on the server: every release publishes ready-built images for 64-bit x86 and 64-bit ARM.
+  Building them yourself instead (`--build`) needs about **1 GB of free memory**, RAM plus swap.
+  [Running on a small server](#running-on-a-small-server) has the details.
 
 > **Building images on WSL2.** The Node image base is pinned to `node:24-alpine3.23` on purpose: the
 > floating `node:24-alpine` tag moved onto Alpine 3.24, whose musl userspace crashes `npm` at launch
@@ -710,6 +716,14 @@ in front of it (step 3).
 bzImage>`), then `wsl --shutdown`. Do not chase a 6.19+ kernel — it regresses MongoDB instead.
 
 ### 1. Configure
+
+Check out the latest release, so the compose file and the images it runs belong to the same one:
+
+```bash
+git clone https://github.com/Hiprax/h-vault.git
+cd h-vault
+git checkout "$(git describe --tags --abbrev=0)"   # the newest release tag
+```
 
 One `.env` at the repo root configures every package. Compose hands it to the app container
 wholesale, so there is no per-package env file to maintain. The one-shot that builds the indexes
@@ -734,7 +748,7 @@ At minimum:
 | `TRUST_PROXY_HOPS`                                                       | `2` with the system Nginx in front (the default); `1` if you expose the loopback port directly.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `HVAULT_STACK_NAME`                                                      | Namespaces the Compose project, containers, networks and volumes. Change it **only** for a second stack on the same host.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `HVAULT_EDGE_SUBNET`, `HVAULT_DATA_SUBNET`                               | Only if `172.31.24x` is already taken here. An overlap is fatal: Docker refuses to create the network.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `HVAULT_VERSION`                                                         | The tag the stack's images are built under. Keep it equal to `package.json`'s `version` (a test asserts the Compose default does).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `HVAULT_VERSION`                                                         | The release whose published images the stack pulls, and the tag a source build is given. `.env.example` names the release you checked out; keep the two equal (a test holds the Compose default to `package.json`).                                                                                                                                                                                                                                                                                                                                                                                                |
 
 > **Running two H-Vaults on one host?** Give the second its own `HVAULT_STACK_NAME`,
 > `HVAULT_HTTP_PORT` and subnets. The stack name matters most: two stacks sharing it do not fail
@@ -744,8 +758,20 @@ At minimum:
 ### 2. Start
 
 ```bash
-docker compose up -d --build --wait
+docker compose pull            # this release's published images: nothing is compiled here
+docker compose up -d --wait
 ```
+
+`pull` downloads `ghcr.io/hiprax/hvault-app`, `hvault-web` and `hvault-bootstrap` for this
+release, for 64-bit x86 or ARM, whichever the server is, and the object storage engine. The
+database image is built locally from the pinned MongoDB image in a few seconds (it only adds two
+scripts; nothing compiles). `pull` stops with an error when a download fails, where `up` alone
+would quietly fall back to compiling the images on the server, so run it first. Each image
+carries a signed build provenance you can check before you run it; see SECURITY.md, "Release
+integrity".
+
+**Rather build from source?** `docker compose up -d --build --wait` builds the same three images
+from this checkout instead. It needs about 1 GB of free memory (RAM plus swap) and a few minutes.
 
 `--wait` blocks until every service reports **healthy** and **exits non-zero if any does not** —
 that is the gate. A green `docker compose config` proves nothing. Afterwards `docker compose ps`
@@ -838,19 +864,98 @@ bundle's one-year lifetime, from `hvault-pm2.locations.conf`) at
   storage problem must not be able to hold a password manager's login down. A storage outage
   degrades documents alone, through the boot preflight and per-request errors.
 
+### Running on a small server
+
+Running H-Vault is light; compiling it is the heavy part, and with the published images a server
+never compiles anything. Measured on a fresh stack after a sign-in and one saved item, and again
+after a quiet minute, the running stack uses about **230 MiB** of memory:
+
+| Service                      | Memory in use | Its limit |
+| ---------------------------- | ------------- | --------- |
+| `hvault-db` (MongoDB)        | about 120 MiB | 1 GiB     |
+| `hvault-app`                 | about 100 MiB | 1 GiB     |
+| `hvault-s3` (object storage) | about 5 MiB   | 512 MiB   |
+| `hvault-nginx`               | about 5 MiB   | 256 MiB   |
+
+The limits are ceilings, not reservations. The heaviest things the app does, restoring a large
+backup or rotating the vault key of a full vault, use more for as long as they run, so a server
+with **1 GB of RAM and a little swap** suits a personal or family vault. The images take about
+3 GB of disk, most of it MongoDB's own image (1.3 GB) and the index bootstrap (1 GB), which carries
+the build toolchain its index script runs with; then add your data.
+
+**The CPU has to suit MongoDB 8**, or the database exits as it starts. From MongoDB's
+[production notes for 8.0](https://www.mongodb.com/docs/v8.0/administration/production-notes/):
+
+- **64-bit x86**: an Intel Haswell or newer Core, a Tiger Lake or newer Celeron or Pentium, or an
+  AMD Bulldozer or newer. That list is the authority. MongoDB needs AVX among other things, so
+  `grep -m1 -o -w avx /proc/cpuinfo` printing nothing rules a machine out, but printing `avx` does
+  not rule it in: older Intel CPUs (Sandy Bridge, Ivy Bridge) have AVX and are still below the
+  floor. A **virtual machine** must pass AVX through: on Proxmox or KVM choose the
+  `host` CPU type (or `x86-64-v3`) rather than a generic default.
+- **64-bit ARM**: ARMv8.2-A or newer. A **Raspberry Pi 5 works; a Raspberry Pi 4 or older does
+  not.**
+- **32-bit systems are not supported**: there are no images for them, and no MongoDB.
+
+**Keep a little swap** (a 1 to 2 GB swap file) on a 1 GB server, as a cushion for the moments
+above. `swapon --show` lists it; a `/dev/zram…` entry is compressed RAM rather than disk, which
+helps, but shrinks exactly when memory runs out.
+
+**Building from source on a small server.** If you build anyway (`--build`, or a platform with no
+published image), a cold build of all three images needs about **1 GB of free memory** at its
+peak (measured at 0.9 GiB; the server and client compiles run one after the other, each with one
+type checker). With less RAM it leans on swap and gets slow, and on a slow disk the kernel can
+stop it even though swap is still free: the build then ends with `npm error signal SIGKILL` (or
+just `Killed`). Making the kernel start swapping earlier gets it through, slowly:
+
+```bash
+sysctl vm.swappiness vm.watermark_scale_factor          # note the current values
+sudo sysctl vm.swappiness=100 vm.watermark_scale_factor=500
+docker compose up -d --build --wait
+sudo sysctl vm.swappiness=60 vm.watermark_scale_factor=10   # or the values noted above
+```
+
+Put the values back afterwards: these settings exist for the build, and MongoDB itself recommends
+a host that swaps as little as possible. Or build on any machine with the same CPU architecture
+and copy the images across, in the same release checkout on both sides. The build machine needs a
+`.env` too, because Compose resolves the whole file before it builds and refuses one without the
+required passwords. Nothing in it reaches the images, so give it throwaway values rather than a
+copy of the server's secrets: `cp .env.example .env`, then fill `MONGO_ROOT_PASSWORD`,
+`MONGO_APP_PASSWORD` and the four `S3_*` values with anything (`openssl rand -hex 16` will do).
+
+```bash
+docker compose build hvault-app hvault-nginx hvault-bootstrap        # on the build machine
+docker save ghcr.io/hiprax/hvault-app:<version> ghcr.io/hiprax/hvault-web:<version> \
+  ghcr.io/hiprax/hvault-bootstrap:<version> | ssh <server> docker load
+```
+
+then `docker compose up -d --wait` on the server, which builds only the database image.
+
 <details>
 <summary><b>Updating, rolling back, and backing up your data</b></summary>
 
 #### Update
 
 ```bash
-git pull
-# bump HVAULT_VERSION in .env to match package.json, then:
-docker compose up -d --build --wait
+git fetch --tags
+git checkout v<new version>
+# set HVAULT_VERSION=<new version> in .env, then:
+docker compose pull && docker compose up -d --wait
 ```
 
 **Settings, About H-Vault** shows these steps with the version filled in whenever a newer release
-is published, and the release check can email you about it (see `UPDATE_NOTIFY_EMAILS`).
+is published, and the release check can email you about it (see `UPDATE_NOTIFY_EMAILS`). A source
+build replaces the last line with `docker compose up -d --build --wait`.
+
+**Running a fork?** These steps, and the update steps the app shows, pull this project's images
+from `ghcr.io/hiprax`. A fork that changes the code builds it (`--build`), or publishes its own
+images and points the `image:` lines in `docker-compose.yml`, `scripts/ci/lib/images.mjs` and the
+attestation steps' `subject-name` in `.github/workflows/release.yml` at its own registry namespace.
+
+**Coming from 0.19.x or earlier?** Those releases built their images locally, under the names
+`hvault-app`, `hvault-web`, `hvault-bootstrap` and `hvault-db:8.0`. The stack now runs the
+published `ghcr.io/hiprax/...` images and a per-release `hvault-db:8.0-<version>`, so once the
+update is up, `docker image rm hvault-app:<old> hvault-web:<old> hvault-bootstrap:<old>
+hvault-db:8.0` frees their disk.
 
 The bootstrap re-runs (creating any index a new release added), and Nginx re-resolves the app
 through Docker's DNS, so it follows the new container even if its IP changes. There is a **brief
@@ -859,13 +964,16 @@ downtime window** while the containers are recreated.
 #### Roll back
 
 ```bash
-git checkout v0.1.0            # the release you want back
-docker compose up -d --build --wait
+git checkout v0.20.0           # the release you want back
+# set HVAULT_VERSION=0.20.0 in .env, then:
+docker compose pull && docker compose up -d --wait
 ```
 
-Images are tagged with `HVAULT_VERSION`, so the previous release's images are still on the host
-under their own tag, and `docker compose ps` names the version actually serving. A rollback does
-**not** roll the database back.
+Images are tagged with `HVAULT_VERSION`, so the previous release's images are still in the
+registry, and usually still on the host, under their own tag, and `docker compose ps` names the
+version actually serving. Releases before 0.20.0 published no images: to go back to one of them,
+use `docker compose up -d --build --wait` instead. A rollback does **not** roll the database
+back.
 
 #### Back up the database AND the document storage
 
@@ -996,16 +1104,18 @@ password, but `TWO_FACTOR_ENCRYPTION_KEY` is what makes the stored 2FA secrets r
 | Symptom                                                                                                                      | Cause and fix                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | ---------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | MongoDB crash-loops on Ubuntu 26.04 / any Linux 6.19+ kernel                                                                 | SERVER-121912. MongoDB 8.0 moved TCMalloc to per-CPU caches that violate the rseq ABI as it changed in kernel 6.19, so mongod aborts at startup and `restart: unless-stopped` loops forever. The fix ships in the stack — `GLIBC_TUNABLES=glibc.pthread.rseq=1`, set at **every** mongod launch site (both compose files, the server test harness, the E2E harness, the smoke gate and the sandbox gate). If you hit this, something removed it. **Never set it to `0`**: that is mongod's own default, and precisely the value that breaks.                                                                                                                                                                                                                                                       |
+| The image build stops with `npm error signal SIGKILL` (or just `Killed`)                                                     | The kernel's out-of-memory killer stopped the compiler; `sudo dmesg -T \| grep -i 'out of memory'` names it. Use the published images, which compile nothing: `docker compose pull && docker compose up -d --wait`. To build on a small machine anyway, see [Running on a small server](#running-on-a-small-server): it needs about 1 GB of free memory, and when the build is killed although swap is free, making the kernel swap earlier gets it through.                                                                                                                                                                                                                                                                                                                                       |
+| `docker compose pull` fails with `denied`, `manifest unknown`, `not found` or a network error                                | Nothing has been changed or started yet. Check that `HVAULT_VERSION` in `.env` names a release that publishes images (0.20.0 or later, written without a `v`) and that the server can reach `ghcr.io`. Releases before 0.20.0 have to be built: `docker compose up -d --build --wait`. Run `pull` before `up` for exactly this reason: on its own, `up` treats a failed download as a reason to compile the images on the server instead.                                                                                                                                                                                                                                                                                                                                                          |
 | `docker compose up` fails: "Pool overlaps with other one on this address space"                                              | Another Docker network already owns `172.31.240.0/24` or `172.31.241.0/24`. Set `HVAULT_EDGE_SUBNET` / `HVAULT_DATA_SUBNET` to free blocks, and give each stack its own `HVAULT_HTTP_PORT`. If free blocks keep getting taken, narrow Docker's own auto-allocation range instead — it carves bridges out of `172.17.0.0/12` from the bottom up — by setting `default-address-pools` in `/etc/docker/daemon.json`.                                                                                                                                                                                                                                                                                                                                                                                  |
 | `up -d --wait` exits 1 saying `container hvault-nginx is unhealthy`, but the port answers `200`                              | Only after an app outage longer than ~75 s. Nginx's health probe runs **through** the proxy to `/api/v1/health`, so while the app is down nginx fails its five retries and is marked unhealthy; Compose treats an already-unhealthy container as terminal instead of waiting for its next probe. The stack is fine — confirm with `curl -fsS http://127.0.0.1:${HVAULT_HTTP_PORT:-8080}/api/v1/health`, then re-run the command (nginx clears itself on its first good probe, ≤15 s). The deep probe is deliberate: it is what proves the whole single-port path at deploy time.                                                                                                                                                                                                                   |
 | Upgrading an **existing** deployment from `mongo:7.0`                                                                        | mongod 8.0 starts on a 7.0 data directory as-is. Then raise the compatibility version once, or 8.0 keeps behaving like 7.0: `docker compose exec hvault-db mongosh --quiet --eval 'db.getSiblingDB("admin").auth(process.env.MONGO_INITDB_ROOT_USERNAME, process.env.MONGO_INITDB_ROOT_PASSWORD); db.adminCommand({setFeatureCompatibilityVersion:"8.0", confirm:true})'`. Take a `mongodump` first — it is not reversible without a restore.                                                                                                                                                                                                                                                                                                                                                      |
 | `up -d --wait` exits 1 saying `container hvault-app is unhealthy` on the first start after an upgrade                        | Startup migrations run before the server listens, and on a large database they can outlast the app's health check; `hvault-nginx`, which waits for a healthy app, is then not started. Nothing is wrong and nothing is lost: the migrations keep running (one interrupted part-way carries on at the next start). Wait until `docker compose logs hvault-app` shows `All migrations applied`, then run `docker compose up -d --wait` again, which starts the rest of the stack.                                                                                                                                                                                                                                                                                                                    |
 | App exits with code 0 and no log output                                                                                      | Almost always a config error thrown before the app installs its error handling. `docker compose logs hvault-app`, and check `.env` has every required secret.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `MongoParseError` / auth failures on boot                                                                                    | `MONGO_ROOT_PASSWORD` or `MONGO_APP_PASSWORD` contains a character that is URI syntax (`@ : / ? #`). Regenerate it with `openssl rand -hex 32`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| Upgrading an existing deployment: `docker compose up` aborts with `S3_BUCKET is required` (or one of the other three `S3_*`) | Expected, and it fails **before** any container is created. The stack now runs an object storage service (`hvault-s3`) for the document store, and it guards its four values the same way it guards the database passwords — a placeholder would be a working bucket credential published in this repository. Add `S3_BUCKET`, `S3_ACCESS_KEY_ID` (8+ characters), `S3_SECRET_ACCESS_KEY` and `S3_RPC_SECRET` to `.env`, leave `S3_ENDPOINT` empty, then `docker compose up -d --build`. The bucket and key are created on that first `up`; existing data is untouched.                                                                                                                                                                                                                            |
+| Upgrading an existing deployment: `docker compose up` aborts with `S3_BUCKET is required` (or one of the other three `S3_*`) | Expected, and it fails **before** any container is created. The stack now runs an object storage service (`hvault-s3`) for the document store, and it guards its four values the same way it guards the database passwords — a placeholder would be a working bucket credential published in this repository. Add `S3_BUCKET`, `S3_ACCESS_KEY_ID` (8+ characters), `S3_SECRET_ACCESS_KEY` and `S3_RPC_SECRET` to `.env`, leave `S3_ENDPOINT` empty, then `docker compose pull && docker compose up -d --wait` (or `docker compose up -d --build --wait` for a source build). The bucket and key are created on that first `up`; existing data is untouched.                                                                                                                                        |
 | `hvault-s3` crash-loops after you change `S3_SECRET_ACCESS_KEY`                                                              | You changed the secret without changing the id. Measured: the engine exits 1 with `Access key <id> is associated with a secret key different than the one given in GARAGE_DEFAULT_SECRET_KEY` rather than adopting the new secret, and `restart: unless-stopped` retries forever. Set a **new `S3_ACCESS_KEY_ID` as well**, `docker compose up -d`, then drop the old one with `docker compose exec hvault-s3 /garage key delete <old-id>`. Reverting to the previous secret also works. Documents are unharmed either way — the bytes are sealed with keys the storage engine never holds.                                                                                                                                                                                                        |
 | Uploads fail, or the Documents page reports storage unavailable, while the vault works fine                                  | By design the app depends on the storage container having **started**, never on it being **healthy**, so the stack comes up and serves the vault even when storage does not. Check `docker compose ps hvault-s3` and `docker compose logs hvault-s3`. If the deployment is not meant to have documents at all, that is not this stack: leave the feature to a PM2 deployment, which has no storage engine.                                                                                                                                                                                                                                                                                                                                                                                         |
-| Upgrading an existing deployment: `docker compose up` aborts with `MONGO_APP_PASSWORD is required`                           | Expected, and it fails **before** any container is created. The app no longer authenticates as database root — it uses a least-privilege `readWrite`-on-`hvault` user that the new one-shot `hvault-db-init` provisions. Add `MONGO_APP_USERNAME` / `MONGO_APP_PASSWORD` (URL-safe, `openssl rand -hex 32`) to `.env`, then `docker compose up -d --build`. The user is created on that first `up`; existing data is untouched.                                                                                                                                                                                                                                                                                                                                                                    |
+| Upgrading an existing deployment: `docker compose up` aborts with `MONGO_APP_PASSWORD is required`                           | Expected, and it fails **before** any container is created. The app no longer authenticates as database root — it uses a least-privilege `readWrite`-on-`hvault` user that the new one-shot `hvault-db-init` provisions. Add `MONGO_APP_USERNAME` / `MONGO_APP_PASSWORD` (URL-safe, `openssl rand -hex 32`) to `.env`, then `docker compose pull && docker compose up -d --wait` (or `docker compose up -d --build --wait` for a source build). The user is created on that first `up`; existing data is untouched.                                                                                                                                                                                                                                                                                |
 | `hvault-db` goes **unhealthy after you change `MONGO_ROOT_PASSWORD`**                                                        | `MONGO_INITDB_ROOT_*` only creates the user on the first boot against an empty data directory, so changing it later does not rotate the existing user. Rotate the existing user to the new value, signing in with the OLD one, typed at a prompt so it is on no command line: `read -rs OLD_ROOT_PASSWORD && export OLD_ROOT_PASSWORD`, then `docker compose exec -e OLD_ROOT_PASSWORD hvault-db mongosh --quiet --eval 'db.getSiblingDB("admin").auth(process.env.MONGO_INITDB_ROOT_USERNAME, process.env.OLD_ROOT_PASSWORD); db.getSiblingDB("admin").changeUserPassword(process.env.MONGO_INITDB_ROOT_USERNAME, process.env.MONGO_INITDB_ROOT_PASSWORD)'` (the container already holds the new value from `.env`; this assumes the user name is unchanged), then `docker compose up -d --wait`. |
 | App boots in dev but the container exits complaining about `CORS_ORIGIN`                                                     | Compose forces `NODE_ENV=production`, where a non-HTTPS `CORS_ORIGIN` is a hard boot failure by design. Set `CORS_ORIGIN` and `APP_URL` to your real `https://` URL — that value is valid for local `npm run dev` too, since the Vite dev server proxies `/api` same-origin.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 
@@ -1020,6 +1130,10 @@ cp -r packages/client/dist-sandbox/. packages/server/sandbox-document/ # the iso
 npm run create-indexes -w packages/server   # nothing does this for you here
 pm2 start ecosystem.config.cjs --env production
 ```
+
+The build compiles on the host, so it needs about 1 GB of free memory, RAM plus swap (every compile
+runs one type checker, which keeps the peak there); a small server is better served by the Docker
+deployment's published images, which compile nothing.
 
 Two workers in cluster mode, each restarted past 768 MB (the limit is per worker, sized for one
 worker's full 64 MB breach-range cache plus its ordinary heap), structured logs in `logs/`. Background jobs take
@@ -1223,7 +1337,7 @@ start** rather than run misconfigured.
 | ---------------------- | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `HVAULT_HTTP_PORT`     | `8080`            | The one host port published, always bound to `127.0.0.1`                                                                                           |
 | `HVAULT_STACK_NAME`    | `hvault`          | Namespaces the project, containers, networks and volumes                                                                                           |
-| `HVAULT_VERSION`       | `0.19.0`          | Image tag for the three first-party images. Keep it equal to `package.json`                                                                        |
+| `HVAULT_VERSION`       | `0.19.0`          | The release whose published images the stack pulls, and the tag a source build gets. Keep it equal to the checked-out release                      |
 | `HVAULT_EDGE_SUBNET`   | `172.31.240.0/24` | Nginx ↔ app, plus the app's egress                                                                                                                 |
 | `HVAULT_DATA_SUBNET`   | `172.31.241.0/24` | App ↔ MongoDB and the object storage. Internal: no published port, no route out                                                                    |
 | `TRUST_PROXY_HOPS`     | `2`               | Becomes the app's `TRUST_PROXY`. Must match reality exactly                                                                                        |
@@ -2258,7 +2372,7 @@ engine beside the built artifact for the same reason; `flake` (release tier) run
 Playwright suite three times over and so inherits the same need; and `deploy` (release
 tier) stands the whole Compose stack up from nothing. All seven declare the daemon as a prerequisite and
 report **could not run** without it, which is exit 2 and not a pass. Trivy is optional: absent from `PATH`, the container
-gate runs `aquasec/trivy:latest` against a named cache volume instead, which needs the
+gate runs the digest-pinned `aquasec/trivy:0.75.0` against a named cache volume instead, which needs the
 daemon socket: under rootless Docker that is `$XDG_RUNTIME_DIR/docker.sock`, not
 `/var/run/docker.sock`.
 
@@ -2269,7 +2383,7 @@ image builds and the harnesses, and a fifth only when `trivy` is not on `PATH`:
 | Image                                                           | Size    | Pulled for                                               |
 | --------------------------------------------------------------- | ------- | -------------------------------------------------------- |
 | `mongo:8.0` (digest-pinned)                                     | 1.29 GB | the `FROM` of `docker/mongo.Dockerfile`                  |
-| `aquasec/trivy:latest`                                          | 252 MB  | only when `trivy` is absent from `PATH`                  |
+| `aquasec/trivy:0.75.0` (digest-pinned)                          | 260 MB  | only when `trivy` is absent from `PATH`                  |
 | `node:24-alpine3.23` (digest-pinned)                            | 235 MB  | the `base` stage every image built here is built through |
 | `dxflrs/garage:v2.3.0` (digest-pinned)                          | 100 MB  | `storage`, `e2e`, `a11y`, `sandbox`, `flake`, `deploy`   |
 | `nginxinc/nginx-unprivileged:1.30.5-alpine3.24` (digest-pinned) | 81 MB   | the `web` stage                                          |
@@ -2403,11 +2517,11 @@ the Docker base images. After those are cached the gauntlet is offline apart fro
 gates. The dependency audit asks the registry every time, and the two that build images
 (`ci:docker` and `test:deploy`) need Docker Hub on every run even with every layer cached:
 BuildKit asks the registry for image metadata before each build, the Dockerfiles'
-`# syntax=docker/dockerfile:1` frontend first. `ci:docker` also needs Trivy's database
+`# syntax=` frontend (`docker/dockerfile:1.27.1`, pinned by digest) first. `ci:docker` also needs Trivy's database
 registry whenever its cached database has passed its `NextUpdate`, a day after it was
 built. A resolver that cannot answer therefore fails those gates at their first build
-(`resolve image config for docker-image://docker.io/docker/dockerfile:1`, then `failed
-to resolve source metadata for docker.io/docker/dockerfile:1`, with a `dial tcp: lookup
+(`resolve image config for docker-image://docker.io/docker/dockerfile:…`, then `failed
+to resolve source metadata for docker.io/docker/dockerfile:…`, with a `dial tcp: lookup
 registry-1.docker.io` error underneath); that is the network, not the images, and
 re-running once DNS answers again is the remedy.
 
@@ -3112,13 +3226,26 @@ are the only durable record that a given commit was measured on a given day.
 
 ## Releases
 
-`.github/workflows/release.yml` is the only workflow in the repository, and it has two jobs.
+`.github/workflows/release.yml` is the only workflow in the repository. In order:
 
-The first runs `npm run ci` — the same T0 + T1 gates the pre-push hook runs, not a narrower set —
-on a clean checkout. The second tags the commit and publishes the Release, and runs only if the
-first passed. The pipeline having already run locally is not a substitute: the hook has documented
-escape hatches (see [The pipeline runs locally](#the-pipeline-runs-locally)), so an unverified commit can reach `main`, and re-running the gauntlet
-on a hosted runner costs nothing on a public repository.
+1. **`verify`** runs `npm run ci` — the same T0 + T1 gates the pre-push hook runs, not a narrower
+   set — on a clean checkout. The pipeline having already run locally is not a substitute: the
+   hook has documented escape hatches (see [The pipeline runs locally](#the-pipeline-runs-locally)),
+   so an unverified commit can reach `main`, and re-running the gauntlet on a hosted runner costs
+   nothing on a public repository.
+2. **`plan`** decides whether this commit is a release, and so whether images are built.
+3. **`images-amd64`** and **`images-arm64`**, each on a native runner, build `hvault-app`,
+   `hvault-web` and `hvault-bootstrap` in one bake, push them by digest with no tag, pull them
+   back, scan them with a digest-pinned Trivy and run them: the real `docker-compose.yml` and a real
+   user journey through its one port.
+4. **`publish-images`**, only once both platforms passed, joins each image's two digests into one
+   multi-platform index tagged with the release version on `ghcr.io/hiprax`, and attaches a
+   signed build-provenance attestation to each.
+5. **`release`** checks that an anonymous client can pull every tag (a package GitHub creates is
+   private until someone makes it public), then tags the commit and publishes the Release.
+
+The logic of steps 2 to 5 lives in `scripts/ci/release-images.mjs` and `scripts/ci/lib/`, where it is
+unit-tested, not in the workflow file.
 
 **A release happens when the version says so.** `package.json` is the version of truth —
 `scripts/inject-version.js` compiles it into `APP_VERSION`, which the OpenAPI document and the
@@ -3134,22 +3261,33 @@ To cut a release: bump the version everywhere it appears, rename `## [Unreleased
 [CHANGELOG.md](CHANGELOG.md) to `## [X.Y.Z] - <date>`, and push. The Release body is that section,
 verbatim; a release whose section is missing or empty fails rather than publishing empty notes.
 
-**A named runner image.** Both jobs run on `ubuntu-26.04`, named outright and never as
-`ubuntu-latest`, so the image only changes when this file does. The pinned `actionlint` predates
-that label, so `.github/actionlint.yaml` declares it, and nothing else; delete the file once an
-`actionlint` release knows the label.
+**A named runner image.** Every job runs on `ubuntu-26.04`, named outright and never as
+`ubuntu-latest`, so the image only changes when this file does; the ARM images are built on the
+same release's native ARM image, `ubuntu-26.04-arm`, and only they are. The pinned `actionlint`
+predates both labels, so `.github/actionlint.yaml` declares them, and nothing else; delete the
+file once an `actionlint` release knows them.
 
-**Least privilege, and pinned tools.** Only the second job can write to the repository: the
-gauntlet job, which installs every dependency and runs third-party code, gets a read-only token and
-does not keep it in its checkout. Every action is pinned to a full commit SHA, every tool the
+**Rehearsing a release.** Dispatching the workflow by hand with `stage_images` ticked runs the
+gauntlet and both image jobs, and pushes the images by digest only: no tag, no attestation, no
+Release, from any branch. It is how a change to the image build is tried before it ships, and how
+a NEW image's package is created so it can be made public before the release that first needs it.
+A dispatch never publishes from any branch but `main`.
+
+**Least privilege, and pinned tools.** Only the `release` job can write to the repository, and
+only the image jobs can write packages: the gauntlet job, which installs every dependency and runs
+third-party code, gets a read-only token and does not keep it in its checkout, and the image jobs
+run nothing on the host but this repository's own scripts and, to sign the images' provenance,
+GitHub's own attestation action. The BuildKit image they build with is
+pinned by digest. Every action is pinned to a full commit SHA, every tool the
 workflow downloads itself (`actionlint`, `hadolint`, `oasdiff`, `gitleaks`, `osv-scanner`) is checked against a SHA-256
 committed in the workflow, `diff-cover` comes from a hash-locked requirements file, and the npm
 tree is pinned by the lockfile's integrity hashes. Moving any of those pins is a deliberate edit;
 CONTRIBUTING.md, "Refreshing the release workflow's pins", is the procedure. Some things the
 gauntlet fetches are NOT pinned by a hash committed here, and SECURITY.md lists them: the runner
 image, the Node toolchain, the Playwright browsers and the system packages they install, the
-Alpine packages `apk upgrade` pulls into the images the image gate builds (their base images are
-pinned by digest), the Trivy scanner image, and the MongoDB binary the tests download.
+Alpine packages `apk upgrade` pulls into the images the image gate and the release build (their
+base images are pinned by digest), the vulnerability database Trivy fetches (the scanner itself is
+pinned by digest), and the MongoDB binary the tests download.
 
 Tags are ordered numerically, not lexically (`v1.10.0` is above `v1.9.0`). If HEAD is already
 tagged, no second tag is minted but the Release is still reconciled, so a run interrupted between

@@ -1,8 +1,10 @@
 name: Release
 
-# The only workflow in this repository. It does two things, in this order: it
-# runs the whole gauntlet, and then — only if the gauntlet passed and this
-# commit is genuinely a release — it tags the commit and publishes the Release.
+# The only workflow in this repository. It does three things, in this order: it
+# runs the whole gauntlet; then, only if the gauntlet passed and this commit is
+# genuinely a release, it builds the release images for both platforms, scans
+# and runs them, and publishes them; and only once anyone can pull those images
+# does it tag the commit and publish the Release.
 #
 # It used to be gated on nothing, on the argument that a commit reaching `main`
 # had already passed everything through the pre-push hook. That argument does
@@ -18,34 +20,54 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      stage_images:
+        description: >-
+          Rehearse the image jobs: run the gauntlet, then build, scan and smoke-test the
+          images on both platforms and push them by digest only. No tag, no attestation,
+          no release. Also how a NEW image's package gets created, so it can be made
+          public before its first release.
+        type: boolean
+        default: false
 
 # No workflow-level `permissions` block, deliberately: one would be inherited by
-# BOTH jobs, and `verify` runs third-party code (`npm ci` executes every
+# EVERY job, and `verify` runs third-party code (`npm ci` executes every
 # dependency's install script, then the whole gauntlet runs). Each job declares
-# its own scopes below — `verify` reads, and only `release`, which runs nothing
-# but this repository's own scripts, may push a tag and publish a Release.
+# its own scopes below: `verify` and `plan` read; the two image jobs may push
+# untagged images; `publish-images` may also tag them and sign their provenance
+# (with GitHub's own attestation action); and only `release`, which runs nothing
+# but this repository's own scripts, may push a git tag and publish a Release.
 #
 # Supply chain: every `uses:` is pinned to a full commit SHA (a tag can be moved
 # by whoever controls the action's repository; a commit id cannot), with the
 # release it names in a trailing comment, and every binary this workflow
 # downloads is checked against a SHA-256 committed here before it is installed.
-# CONTRIBUTING.md, "Refreshing the release workflow's pins", is the procedure
-# for moving any of them.
+# The BuildKit image the image jobs build with is pinned by digest, and so are
+# the base images and the Dockerfile frontend those builds pull (see
+# docker/Dockerfile); what is not pinned (the Alpine packages `apk upgrade`
+# installs, Trivy's vulnerability database) is listed in SECURITY.md. CONTRIBUTING.md,
+# "Refreshing the release workflow's pins", is the procedure for moving any of
+# them.
 #
 # The runner image is named, never `ubuntu-latest`: that label moves to a new
 # Ubuntu release on GitHub's schedule, which would change the operating system,
-# kernel and Docker the gauntlet runs on without a commit here. Both jobs run on
-# `ubuntu-26.04`, the release the local gauntlet is run on, and moving off it is a
-# deliberate edit like any other pin. actionlint's built-in list of hosted labels
-# predates it, so `.github/actionlint.yaml` declares it; delete that file once an
-# actionlint release knows the label.
+# kernel and Docker the gauntlet runs on without a commit here. Every job runs on
+# `ubuntu-26.04`, the release the local gauntlet is run on, except the one that
+# builds the 64-bit ARM images, which runs on the same release's native ARM image
+# (`ubuntu-26.04-arm`) rather than under emulation. Moving off either is a
+# deliberate edit like any other pin. actionlint's built-in list of hosted
+# labels predates both, so `.github/actionlint.yaml` declares them; delete that
+# file once an actionlint release knows them.
 
 # Serialised, and deliberately NOT cancel-in-progress. Two pushes landing
 # seconds apart would otherwise both read the same tag state and race, and the
 # loser fails with a red X. Serialised, the second run starts after the first
-# has pushed its tag and sees it.
+# has pushed its tag and sees it. A staging rehearsal has a group of its own: it
+# publishes nothing, and GitHub replaces a PENDING run in a group when another
+# one queues behind it, so sharing the group would let a rehearsal displace a
+# release waiting its turn.
 concurrency:
-  group: release
+  group: ${{ github.event_name == 'workflow_dispatch' && inputs.stage_images && 'release-stage' || 'release' }}
   cancel-in-progress: false
 
 jobs:
@@ -173,11 +195,268 @@ jobs:
         run: npm run ci
 
   # ---------------------------------------------------------------------------
-  # The release. Runs only after the gauntlet is green.
+  # The plan: is this commit a release, and what do the image jobs do?
+  #
+  # Decided once, up front, so the image jobs can be skipped outright rather than
+  # started to discover they have nothing to do. The decision is
+  # `planImages` in scripts/ci/lib/release-images.mjs, unit-tested: images are
+  # built for a release that is due, not yet tagged, on `main`, or for a staging
+  # rehearsal; they are published only for the first. `stage_images` reaches the
+  # script as the exact words true/false: compared with the STRING 'true', a
+  # boolean input is always false, which would turn a rehearsal into a run that
+  # builds nothing and still passes.
+  # ---------------------------------------------------------------------------
+  plan:
+    name: Plan the release
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      should_release: ${{ steps.version.outputs.should_release }}
+      create_tag: ${{ steps.version.outputs.create_tag }}
+      stage: ${{ steps.images.outputs.stage }}
+      build: ${{ steps.images.outputs.build }}
+      publish: ${{ steps.images.outputs.publish }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The release decision reads every existing tag.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Decide the release
+        id: version
+        run: |
+          git fetch --tags --force --quiet
+          node scripts/ci/next-version.mjs
+
+      - name: Decide what the image jobs do
+        id: images
+        env:
+          SHOULD_RELEASE: ${{ steps.version.outputs.should_release }}
+          CREATE_TAG: ${{ steps.version.outputs.create_tag }}
+          STAGE: ${{ github.event_name == 'workflow_dispatch' && inputs.stage_images == true }}
+        run: node scripts/ci/release-images.mjs plan
+
+  # ---------------------------------------------------------------------------
+  # The release images, one job per platform, each on a native runner.
+  #
+  # Each builds hvault-app, hvault-web and hvault-bootstrap from this commit in
+  # ONE bake (so the app and the Nginx image provably share one client build),
+  # pushes them by digest with no tag, pulls them back, drops the registry
+  # credential, scans the pulled bytes (Trivy, pinned by digest, from a saved
+  # tarball: no Docker socket and no credential reach it) and runs them: the real
+  # docker-compose.yml, a real user journey through its one port. Only the
+  # digests leave the job, as job outputs; nothing can pull these images by name
+  # until `publish-images` tags them.
+  #
+  # Only this repository's own scripts run on the host here, with Node and the
+  # docker CLI the runner image ships; the third-party build tooling runs inside
+  # BuildKit's build containers, which never see the registry token, and the
+  # scanner gets a saved tarball and nothing else.
+  # ---------------------------------------------------------------------------
+  images-amd64:
+    name: Images (linux/amd64)
+    needs: [verify, plan]
+    if: needs.plan.outputs.build == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      app: ${{ steps.build.outputs.app }}
+      web: ${{ steps.build.outputs.web }}
+      bootstrap: ${{ steps.build.outputs.bootstrap }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The image metadata names this commit, and its time comes from git.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Sign in to the GitHub Container Registry
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Create the pinned BuildKit builder
+        run: |
+          set -euo pipefail
+          docker buildx create --name hvault-release --driver docker-container \
+            --driver-opt image=moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
+          docker buildx inspect --bootstrap hvault-release
+
+      - name: Build, push by digest, scan and smoke-test the images
+        id: build
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: >-
+          node scripts/ci/release-images.mjs build --platform linux/amd64
+          --version "$VERSION" --revision "$GITHUB_SHA" --builder hvault-release
+
+      - name: Sign out of the registry
+        if: always()
+        run: docker logout ghcr.io
+
+  images-arm64:
+    name: Images (linux/arm64)
+    needs: [verify, plan]
+    if: needs.plan.outputs.build == 'true'
+    runs-on: ubuntu-26.04-arm
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      app: ${{ steps.build.outputs.app }}
+      web: ${{ steps.build.outputs.web }}
+      bootstrap: ${{ steps.build.outputs.bootstrap }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The image metadata names this commit, and its time comes from git.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Sign in to the GitHub Container Registry
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Create the pinned BuildKit builder
+        run: |
+          set -euo pipefail
+          docker buildx create --name hvault-release --driver docker-container \
+            --driver-opt image=moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
+          docker buildx inspect --bootstrap hvault-release
+
+      - name: Build, push by digest, scan and smoke-test the images
+        id: build
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: >-
+          node scripts/ci/release-images.mjs build --platform linux/arm64
+          --version "$VERSION" --revision "$GITHUB_SHA" --builder hvault-release
+
+      - name: Sign out of the registry
+        if: always()
+        run: docker logout ghcr.io
+
+  # ---------------------------------------------------------------------------
+  # Publishing the images: only after BOTH platforms passed, only for a release.
+  #
+  # One index per image joins its two platform digests and is tagged with the
+  # release version, annotated with where it came from. The script refuses when
+  # git already has the release tag, so a released version's images are never
+  # replaced. Each index then gets a signed SLSA build-provenance attestation
+  # (Sigstore, through GitHub's own action) stored beside it in the registry,
+  # which `gh attestation verify` checks against this repository and workflow.
+  # ---------------------------------------------------------------------------
+  publish-images:
+    name: Publish the images
+    needs: [plan, images-amd64, images-arm64]
+    if: needs.plan.outputs.publish == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    outputs:
+      app: ${{ steps.publish.outputs.app }}
+      web: ${{ steps.publish.outputs.web }}
+      bootstrap: ${{ steps.publish.outputs.bootstrap }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The refusal to replace a released version reads every existing tag.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Sign in to the GitHub Container Registry
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Join both platforms into one tagged index per image
+        id: publish
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+          AMD64_DIGESTS: ${{ toJSON(needs.images-amd64.outputs) }}
+          ARM64_DIGESTS: ${{ toJSON(needs.images-arm64.outputs) }}
+        run: node scripts/ci/release-images.mjs publish --version "$VERSION" --revision "$GITHUB_SHA"
+
+      - name: Attest the provenance of hvault-app
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/hiprax/hvault-app
+          subject-digest: ${{ steps.publish.outputs.app }}
+          push-to-registry: true
+          # Storage records exist only for organisation-owned repositories.
+          create-storage-record: false
+
+      - name: Attest the provenance of hvault-web
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/hiprax/hvault-web
+          subject-digest: ${{ steps.publish.outputs.web }}
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Attest the provenance of hvault-bootstrap
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/hiprax/hvault-bootstrap
+          subject-digest: ${{ steps.publish.outputs.bootstrap }}
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Sign out of the registry
+        if: always()
+        run: docker logout ghcr.io
+
+  # ---------------------------------------------------------------------------
+  # The release. Runs only after the gauntlet is green, never in a rehearsal,
+  # and, when this run published images, only after that succeeded. Only on
+  # `main`, or on exactly this release's own tag (`refs/tags/v<version>`): a
+  # dispatch there is how an interrupted release is healed once `main` has moved
+  # on. A run that did not publish the images itself never creates a tag (see
+  # "Create the tag"), so on that tag all it can do is check that the published
+  # images name this version and this commit, and reconcile the Release.
+  # `!cancelled()` because `publish-images` is legitimately SKIPPED on every push
+  # that releases nothing, and on a re-run of an already-tagged commit (which
+  # rebuilds nothing), and a plain `needs` would skip this job along with it: the
+  # "nothing to release" report and the heal of an interrupted release live here.
   # ---------------------------------------------------------------------------
   release:
     name: Tag and release
-    needs: verify
+    needs: [verify, plan, publish-images]
+    if: >-
+      !cancelled()
+      && needs.verify.result == 'success'
+      && needs.plan.result == 'success'
+      && needs.plan.outputs.stage == 'false'
+      && (github.ref == 'refs/heads/main' || github.ref == format('refs/tags/v{0}', needs.plan.outputs.version))
+      && (needs.publish-images.result == 'success'
+      || (needs.publish-images.result == 'skipped' && needs.plan.outputs.publish == 'false'))
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     # The minimum that lets GITHUB_TOKEN push a tag and publish a Release, and
@@ -213,6 +492,41 @@ jobs:
           git fetch --tags --force --quiet
           node scripts/ci/next-version.mjs
 
+      # The `plan` job made the same decision before the images were built. They
+      # may differ on a retry of this job alone, after an attempt that pushed the
+      # tag (allowed: that is the heal), and otherwise only if the decision no
+      # longer holds; `decisionChangeProblem` in scripts/ci/lib/release-images.mjs
+      # says which, and nothing is tagged then.
+      - name: Refuse a decision that changed since the plan
+        env:
+          PLANNED_VERSION: ${{ needs.plan.outputs.version }}
+          PLANNED_SHOULD_RELEASE: ${{ needs.plan.outputs.should_release }}
+          PLANNED_CREATE_TAG: ${{ needs.plan.outputs.create_tag }}
+          OWN_VERSION: ${{ steps.version.outputs.version }}
+          OWN_SHOULD_RELEASE: ${{ steps.version.outputs.should_release }}
+          OWN_CREATE_TAG: ${{ steps.version.outputs.create_tag }}
+        run: node scripts/ci/release-images.mjs agree
+
+      # A Release is never published while its install instructions cannot
+      # work: every image tag must be pullable by an ANONYMOUS client, hold both
+      # platforms and be annotated with this version and THIS commit, and when
+      # this run published them, be exactly the index it published. A package is
+      # private when GitHub first creates it, so a new image fails here, naming
+      # its settings page, until it is made public.
+      - name: Check that anyone can pull the release images
+        if: steps.version.outputs.should_release == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          PUBLISHED: ${{ needs.plan.outputs.publish }}
+          EXPECTED_INDEXES: ${{ toJSON(needs.publish-images.outputs) }}
+        run: |
+          set -euo pipefail
+          if [ "$PUBLISHED" = "true" ]; then
+            node scripts/ci/release-images.mjs verify-public --version "$VERSION" --revision "$GITHUB_SHA" --expect-from-env
+          else
+            node scripts/ci/release-images.mjs verify-public --version "$VERSION" --revision "$GITHUB_SHA"
+          fi
+
       # The GitHub Release body is the curated CHANGELOG.md section, not
       # `--generate-notes`' list of commit subjects. This project treats a
       # changelog entry as a blocking requirement of every change; publishing
@@ -228,16 +542,24 @@ jobs:
           echo "--- release notes ---"
           cat release-notes.md
 
-      # Skipped when the tag already exists — a re-run, or a workflow_dispatch on
-      # an unchanged commit. The publish step still reconciles the Release, so a
+      # Created only by a run that published the images itself (from `main`, digest
+      # verified above), so no other path can mint a release tag, and the Release
+      # step's `--verify-tag` then fails every other path closed. Skipped when the
+      # tag already exists — a re-run, or a workflow_dispatch on an unchanged
+      # commit. The publish step still reconciles the Release, so a
       # run interrupted between tagging and publishing heals when THAT run is
       # retried (or dispatched again on the same commit). It does not heal on a
       # later commit: once `v<version>` exists, a subsequent push reports
       # "nothing to release" and that version's Release stays unpublished until
-      # someone re-dispatches this workflow on the tagged commit. The failed run
-      # is red, so the gap is visible rather than silent.
+      # someone re-dispatches this workflow on the tag itself
+      # (`gh workflow run release.yml --ref v<version>`). The failed run is red,
+      # so the gap is visible rather than silent. That dispatch re-runs the whole
+      # gauntlet at the tagged commit, so weeks later a newly published advisory
+      # can stop it; the manual fallback is
+      # `node scripts/ci/changelog-extract.mjs X.Y.Z > notes.md` then
+      # `gh release create vX.Y.Z --verify-tag --notes-file notes.md`.
       - name: Create the tag
-        if: steps.version.outputs.should_release == 'true' && steps.version.outputs.create_tag == 'true'
+        if: steps.version.outputs.should_release == 'true' && steps.version.outputs.create_tag == 'true' && needs.plan.outputs.publish == 'true'
         env:
           TAG: ${{ steps.version.outputs.tag }}
         run: |

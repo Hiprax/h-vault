@@ -7,7 +7,7 @@ import {
   RefreshCw,
   Sparkles,
 } from 'lucide-react';
-import type { UpdateStatus } from '@hvault/shared';
+import { dockerUpdateSteps, type UpdateStatus } from '@hvault/shared';
 import { Button } from '../ui/Button';
 import { useToast } from '../ui/Toast';
 import { checkForUpdateNowApi } from '../../services/api/releaseStatusApi';
@@ -119,7 +119,7 @@ export function UpdateStatusCard({ userId, current, update }: UpdateStatusCardPr
             tabIndex={0}
             className="mt-2 overflow-x-auto rounded-md bg-[hsl(var(--muted))] px-3 py-2 text-xs leading-relaxed text-[hsl(var(--foreground))]"
           >
-            {`git pull\n# set HVAULT_VERSION=${latest} in .env, then:\ndocker compose up -d --build --wait`}
+            {dockerUpdateSteps(latest)}
           </pre>
         </div>
         <div className="flex flex-wrap gap-x-4 gap-y-1">

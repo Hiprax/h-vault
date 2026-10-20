@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:1.27.1@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
 # =============================================================================
 # H-Vault — single multi-target image definition
 # =============================================================================
@@ -19,6 +19,12 @@
 # once and both images share the identical layer — divergence is impossible.
 #
 # Build context is the repo ROOT (see docker-compose.yml), not this directory.
+#
+# The `# syntax=` line above is pinned by digest for the same reason as every
+# FROM below: BuildKit pulls that frontend image and hands it this whole file,
+# so a floating `dockerfile:1` would be a mutable pointer at the code that
+# decides what the published images contain. docker/mongo.Dockerfile names the
+# same digest (docker-hardening.test.ts holds the two equal).
 
 # Base tag is pinned to the Alpine 3.23 variant, NOT the floating `node:24-alpine`.
 # The floating tag rolled onto Alpine 3.24, whose musl/userspace SIGSEGVs `npm` at
@@ -181,9 +187,18 @@ FROM build-shared AS build-server
 COPY packages/server ./packages/server
 RUN chmod -R a+rX,go-w packages/server && npm run build -w packages/server
 
+# The client compile waits for the server compile. Both stages derive from
+# build-shared, so BuildKit would otherwise run them at the same time and their
+# memory peaks would ADD: the server type-check plus the client bundle is what got
+# a 1.6 GiB host's build killed by the OOM killer. Binding one file from
+# build-server makes this RUN wait until that stage is complete. BuildKit keys the
+# mount by the bound file's CONTENT, and the server's package.json changes only
+# with its dependencies, its scripts or a release's version bump, so an ordinary
+# server code change still leaves this step cached. The cost on a large machine is the server compile's few seconds no
+# longer overlapping this one.
 FROM build-shared AS build-client
 COPY packages/client ./packages/client
-RUN chmod -R a+rX,go-w packages/client && npm run build -w packages/client
+RUN --mount=type=bind,from=build-server,source=/app/packages/server/package.json,target=/tmp/after-build-server chmod -R a+rX,go-w packages/client && npm run build -w packages/client
 
 # -----------------------------------------------------------------------------
 # bootstrap — one-shot MongoDB index creation, then exits

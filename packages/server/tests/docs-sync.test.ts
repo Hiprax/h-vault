@@ -94,6 +94,37 @@ describe('README documentation sync', () => {
     expect(documented).toBe(rootPackageJson.version);
   });
 
+  it('keeps exactly one heading for each anchor the app and the guide link to', () => {
+    // GitHub derives a heading's anchor from its text (lower case, punctuation
+    // dropped, spaces to hyphens). The About page's "Full update guide" links to
+    // `#update`, and the deployment guide sends small servers to
+    // `#running-on-a-small-server`; renaming either heading would break the link
+    // silently, and a second heading with the same text would take `-1`.
+    const slug = (heading: string) =>
+      heading
+        .trim()
+        .toLowerCase()
+        .replace(/[^\p{L}\p{N}\s_-]/gu, '')
+        .replace(/\s/g, '-');
+    // Headings only: a `#` line inside a fenced code block is a shell comment.
+    let fenced = false;
+    const slugs = readme
+      .split('\n')
+      .map((line) => {
+        if (/^\s*```/.test(line)) fenced = !fenced;
+        return fenced ? undefined : /^#{1,6}\s+(.+?)\s*#*\s*$/.exec(line)?.[1];
+      })
+      .filter((heading): heading is string => heading !== undefined)
+      .map(slug);
+    for (const anchor of ['update', 'running-on-a-small-server']) {
+      expect(
+        slugs.filter((candidate) => candidate === anchor),
+        anchor,
+      ).toHaveLength(1);
+    }
+    expect(readme).toContain('(#running-on-a-small-server)');
+  });
+
   it('the audit-operations count matches AUDIT_ACTIONS.length', () => {
     expect(readme).toContain(`${String(AUDIT_ACTIONS.length)} distinct operations`);
   });
