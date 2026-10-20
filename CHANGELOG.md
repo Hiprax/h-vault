@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-10-20
+
 ### Added
 
 - **Ready-built images for every release.** Each release now publishes `ghcr.io/hiprax/hvault-app`, `hvault-web` and `hvault-bootstrap` to the GitHub Container Registry, under one `X.Y.Z` tag per release holding a `linux/amd64` and a `linux/arm64` image, so a server installs or updates with `docker compose pull && docker compose up -d --wait` and compiles nothing. The release workflow builds them from the verified commit on a native runner per platform, pushes them untagged, scans the pushed bytes with Trivy and runs them with the real `docker-compose.yml` and a user journey before it tags them, attaches a signed SLSA build-provenance attestation to each (`gh attestation verify oci://ghcr.io/hiprax/hvault-app:<version> --repo Hiprax/h-vault`), and tags git and publishes the Release only once an anonymous client can pull every one. `scripts/ci/release-images.mjs` does the work and `scripts/ci/lib/images.mjs` is the one list of published images; SECURITY.md, "Release integrity", says what stands behind an image and how to pin one by digest.
@@ -1092,7 +1094,8 @@ First public release.
 - Progressive Web App with offline read access via IndexedDB, dark/light/system themes, keyboard shortcuts, virtualized lists and WAI-ARIA-conformant components.
 - Local CI pipeline (`npm run ci`) running eleven gates — including container builds with Trivy scanning and CodeQL — from the `pre-push` hook.
 
-[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.19.0...HEAD
+[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.20.0...HEAD
+[0.20.0]: https://github.com/Hiprax/h-vault/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/Hiprax/h-vault/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/Hiprax/h-vault/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/Hiprax/h-vault/compare/v0.16.1...v0.17.0

@@ -1337,7 +1337,7 @@ start** rather than run misconfigured.
 | ---------------------- | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `HVAULT_HTTP_PORT`     | `8080`            | The one host port published, always bound to `127.0.0.1`                                                                                           |
 | `HVAULT_STACK_NAME`    | `hvault`          | Namespaces the project, containers, networks and volumes                                                                                           |
-| `HVAULT_VERSION`       | `0.19.0`          | The release whose published images the stack pulls, and the tag a source build gets. Keep it equal to the checked-out release                      |
+| `HVAULT_VERSION`       | `0.20.0`          | The release whose published images the stack pulls, and the tag a source build gets. Keep it equal to the checked-out release                      |
 | `HVAULT_EDGE_SUBNET`   | `172.31.240.0/24` | Nginx ↔ app, plus the app's egress                                                                                                                 |
 | `HVAULT_DATA_SUBNET`   | `172.31.241.0/24` | App ↔ MongoDB and the object storage. Internal: no published port, no route out                                                                    |
 | `TRUST_PROXY_HOPS`     | `2`               | Becomes the app's `TRUST_PROXY`. Must match reality exactly                                                                                        |

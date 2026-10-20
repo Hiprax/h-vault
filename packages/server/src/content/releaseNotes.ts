@@ -2,6 +2,44 @@ import type { ReleaseNote } from '@hvault/shared';
 
 export const RELEASE_NOTES: readonly ReleaseNote[] = [
   {
+    version: '0.20.0',
+    date: '2026-10-20',
+    title: 'Ready-made server images and lighter source builds',
+    summary:
+      'Every release now comes as ready-built images for 64-bit Intel or AMD servers and for 64-bit ARM servers, so installing or updating no longer compiles anything on your server, and building it from source needs about half the memory it did.',
+    highlights: [
+      {
+        icon: 'server',
+        title: 'Install and update without compiling',
+        body: 'Each release publishes ready-built images, each with a signed record of how it was built. Installing or updating now downloads them instead of building H-Vault on your server, which makes small servers and ARM boards such as a Raspberry Pi 5 practical.',
+        audience: 'administrators',
+      },
+      {
+        icon: 'gauge',
+        title: 'Source builds that fit a small server',
+        body: 'Building H-Vault yourself now needs about 1 GB of free memory instead of about 1.6 GB, and the guide has a new section on running H-Vault on a small server.',
+        audience: 'administrators',
+      },
+    ],
+    changes: [
+      {
+        kind: 'changed',
+        text: 'The update steps under Settings, About H-Vault and in the update email now check out the new release, download its images and start it, without compiling anything.',
+        audience: 'administrators',
+      },
+      {
+        kind: 'changed',
+        text: 'The database image is now built on your server once per release, so each update restarts the database briefly.',
+        audience: 'administrators',
+      },
+      {
+        kind: 'improved',
+        text: 'Every published image is scanned for known vulnerabilities and started with a full sign-in and save before the release goes out.',
+        audience: 'administrators',
+      },
+    ],
+  },
+  {
     version: '0.19.0',
     date: '2026-10-20',
     title: 'Work on many documents at once, better document tags and sturdier uploads',

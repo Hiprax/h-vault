@@ -44,8 +44,8 @@ long-term support branches.
 
 | Version | Supported |
 | ------- | --------- |
-| 0.19.x  | Yes       |
-| < 0.19  | No        |
+| 0.20.x  | Yes       |
+| < 0.20  | No        |
 
 ## Threat model
 
