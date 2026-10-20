@@ -13,6 +13,7 @@ import {
   MAX_PASSWORD_CLASS_MINIMUM,
   MIN_PASSWORD_LENGTH,
   MAX_PASSWORD_LENGTH,
+  PASSWORD_VERIFY_RATE_LIMIT_MAX,
   MAX_RELEASE_CHANGES,
   MAX_RELEASE_HIGHLIGHTS,
   MAX_RELEASE_HIGHLIGHT_TITLE_LENGTH,
@@ -408,20 +409,23 @@ const ACKNOWLEDGED_REAUTH_RESPONSES = {
 const ID_PATH_PARAM = { name: 'id', in: 'path', required: true, schema: { type: 'string' } };
 
 /**
- * The vault-item and folder write budgets, as every mutation that spends one quotes it.
+ * The vault-item, folder and document write budgets, as every mutation that spends
+ * one quotes it.
  *
- * Both numbers are DERIVED in `middleware/rateLimiter.ts` (two passes over the most
- * rows an account may hold) and are written out here rather than imported:
+ * All three numbers are DERIVED in `middleware/rateLimiter.ts` (two passes over the
+ * most rows an account may hold) and are written out here rather than imported:
  * importing that module evaluates the server configuration and constructs every
  * limiter, while this one imports nothing but `@hvault/shared`, which is what lets
  * `scripts/ci/emit-openapi.mjs` build it with no side effects. `docs-sync.test.ts`
- * compares every description quoting either sentence with the constants, so a cap
- * that moves without this text fails there.
+ * compares every description quoting any of these sentences with the constants, so
+ * a cap that moves without this text fails there.
  */
 const ITEM_WRITE_BUDGET =
   'Rate limited: 20,000 req/user per 15 min, one budget across every item mutation (sized for a bulk action over the whole vault).';
 const FOLDER_WRITE_BUDGET =
   'Rate limited: 1,000 req/user per 15 min, one budget across every folder mutation.';
+const DOCUMENT_WRITE_BUDGET =
+  'Rate limited: 10,006 req/user per 15 min, one budget across every document mutation (sized for a bulk action over every document an account can hold).';
 
 /**
  * A count an earlier revision of this document declared under a name the handler
@@ -497,6 +501,16 @@ const HEAVY_RESPONSE_ADMISSION =
 const HEAVY_RESPONSE_BUSY = errorResponse(
   'This account already has a backup download, a mailed backup or an export in progress. No `data`. Wait for it to finish and retry.',
 );
+
+/**
+ * The re-authentication budget, as every route that re-checks the master password
+ * quotes it. Derived from the shared constant the limiter enforces, so the
+ * fourteen descriptions cannot keep a number the server no longer uses.
+ */
+const PASSWORD_VERIFY_LIMIT = `${String(PASSWORD_VERIFY_RATE_LIMIT_MAX)} req/user per 15 min`;
+const PASSWORD_VERIFY_BUDGET = `Rate limited: ${PASSWORD_VERIFY_LIMIT}, one budget per account shared by every request that re-checks the master password.`;
+/** The same budget as the two 30 MB routes quote it: they spend it before the body is read. */
+const PASSWORD_VERIFY_LARGE_BODY_BUDGET = `Rate limited: ${String(PASSWORD_VERIFY_RATE_LIMIT_MAX)} requests per account per 15 min, one budget shared by every request that re-checks the master password, counted before the body is read.`;
 
 /** The heavy-operation budget, as the vault's bulk routes quote it. */
 const HEAVY_OP_BUDGET =
@@ -2691,7 +2705,8 @@ export const swaggerSpec: JsonObject = {
         tags: ['Documents'],
         summary: 'Update a document’s metadata and attributes',
         description:
-          'Re-seals the metadata blob (a rename, a retag, an edited note) and sets the favorite flag and the folder. It cannot change a single byte of the stored content or of the framing that describes it, and it cannot touch the wrapped document key or the storage key: content is immutable after upload, so replacing bytes means uploading a new document. Sending folderId as null removes the document from its folder; the field is then ABSENT from the response rather than present and null. Unlike every other write that produces ciphertext, this endpoint is NOT refused while a vault-key rotation is running, because the metadata blob is sealed under a key derived from the document key and a rotation only rewraps that key.',
+          'Re-seals the metadata blob (a rename, a retag, an edited note) and sets the favorite flag and the folder. It cannot change a single byte of the stored content or of the framing that describes it, and it cannot touch the wrapped document key or the storage key: content is immutable after upload, so replacing bytes means uploading a new document. Sending folderId as null removes the document from its folder; the field is then ABSENT from the response rather than present and null. Unlike every other write that produces ciphertext, this endpoint is NOT refused while a vault-key rotation is running, because the metadata blob is sealed under a key derived from the document key and a rotation only rewraps that key. ' +
+          DOCUMENT_WRITE_BUDGET,
         security: [{ bearerAuth: [], csrfToken: [] }],
         parameters: [DOCUMENT_ID_PARAM],
         requestBody: jsonRequestBody('UpdateDocumentRequest'),
@@ -2705,7 +2720,8 @@ export const swaggerSpec: JsonObject = {
         tags: ['Documents'],
         summary: 'Move a document to the trash',
         description:
-          'A soft delete: the deletion time is stamped on the row and nothing else happens. The stored object stays in the bucket, the row keeps its wrapped key, and the document still counts against both the document limit and the storage quota reported by GET /documents/usage — so the space comes back at DELETE /documents/{id}/permanent, or when the trash auto-purge reaches it, and the UI says so rather than letting a user assume the deletion failed.',
+          'A soft delete: the deletion time is stamped on the row and nothing else happens. The stored object stays in the bucket, the row keeps its wrapped key, and the document still counts against both the document limit and the storage quota reported by GET /documents/usage — so the space comes back at DELETE /documents/{id}/permanent, or when the trash auto-purge reaches it, and the UI says so rather than letting a user assume the deletion failed. ' +
+          DOCUMENT_WRITE_BUDGET,
         security: [{ bearerAuth: [], csrfToken: [] }],
         parameters: [DOCUMENT_ID_PARAM],
         responses: {
@@ -2721,7 +2737,8 @@ export const swaggerSpec: JsonObject = {
         tags: ['Documents'],
         summary: 'Restore a document from the trash',
         description:
-          'Clears the deletion time and returns the restored row. Refused with 404 for a document that is not in the trash, and also for one whose permanent deletion has already begun — such a row carries purgePending, its stored object is gone or going, and the garbage collector will remove the row, so restoring it would return a document that cannot be downloaded and then disappears.',
+          'Clears the deletion time and returns the restored row. Refused with 404 for a document that is not in the trash, and also for one whose permanent deletion has already begun — such a row carries purgePending, its stored object is gone or going, and the garbage collector will remove the row, so restoring it would return a document that cannot be downloaded and then disappears. ' +
+          DOCUMENT_WRITE_BUDGET,
         security: [{ bearerAuth: [], csrfToken: [] }],
         parameters: [DOCUMENT_ID_PARAM],
         responses: {
@@ -2739,7 +2756,8 @@ export const swaggerSpec: JsonObject = {
         tags: ['Documents'],
         summary: 'Permanently delete a trashed document',
         description:
-          'Destroys a trashed document for good, in three ordered steps: the row is marked purgePending, the stored object is deleted, and only then is the row deleted. A crash after any of them leaves a marker the hourly collector finishes, and the order is what stops an object outliving the row that names it. Deleting the row destroys the only wrapped copy of the document key, so any object that somehow survived is ciphertext under a key that exists nowhere — documents are deliberately absent from the backup payload. Only a document already in the trash may be purged.',
+          'Destroys a trashed document for good, in three ordered steps: the row is marked purgePending, the stored object is deleted, and only then is the row deleted. A crash after any of them leaves a marker the hourly collector finishes, and the order is what stops an object outliving the row that names it. Deleting the row destroys the only wrapped copy of the document key, so any object that somehow survived is ciphertext under a key that exists nowhere — documents are deliberately absent from the backup payload. Only a document already in the trash may be purged. ' +
+          DOCUMENT_WRITE_BUDGET,
         security: [{ bearerAuth: [], csrfToken: [] }],
         parameters: [DOCUMENT_ID_PARAM],
         responses: {
@@ -3131,7 +3149,9 @@ export const swaggerSpec: JsonObject = {
         tags: ['Auth'],
         summary: 'Mint an invitation to register',
         description:
-          'While the server registers by invitation (REGISTRATION_MODE=invite), an account listed in REGISTRATION_INVITERS mints a single-use invitation for one address, proving its master password. The response carries the invitation link once (`Cache-Control: no-store`); the server stores only a keyed hash of the token, never mails the link, and audits the mint (`invitation_create`, address masked). The invitation admits only that address, once, for 7 days. At most 10 per inviter per 24 hours. Rate limited: 5 req/user per 15 min (the master-password proof budget).',
+          'While the server registers by invitation (REGISTRATION_MODE=invite), an account listed in REGISTRATION_INVITERS mints a single-use invitation for one address, proving its master password. The response carries the invitation link once (`Cache-Control: no-store`); the server stores only a keyed hash of the token, never mails the link, and audits the mint (`invitation_create`, address masked). The invitation admits only that address, once, for 7 days. At most 10 per inviter per 24 hours. Rate limited: ' +
+          PASSWORD_VERIFY_LIMIT +
+          ' (the master-password proof budget).',
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: jsonRequestBody('CreateInvitationRequest'),
         responses: {
@@ -3378,7 +3398,9 @@ export const swaggerSpec: JsonObject = {
         tags: ['Vault'],
         summary: 'Bulk re-encrypt vault items',
         description:
-          'Re-encrypts an account onto a new vault key: every item, every folder and every document key, in one request. (Changing the master password does not need this: it re-wraps the SAME vault key, through PUT /user/change-password.) With `reseal: true` it re-seals every row under the SAME key instead, to move each row to the current field format, and stores no key. Verifies the current auth hash before proceeding. The payload must name EVERY row the account holds, including trashed ones — the request is refused with 409 when it does not, because a row created between the enumeration and the request would otherwise be left under the superseded key. Rate limited: 5 requests per account per 15 min, one budget shared by every request that re-checks the master password, counted before the body is read. Each server process admits at most one restore or key rotation per account at a time, and a few in total; a request past the process budget waits for a slot before its body is read.',
+          'Re-encrypts an account onto a new vault key: every item, every folder and every document key, in one request. (Changing the master password does not need this: it re-wraps the SAME vault key, through PUT /user/change-password.) With `reseal: true` it re-seals every row under the SAME key instead, to move each row to the current field format, and stores no key. Verifies the current auth hash before proceeding. The payload must name EVERY row the account holds, including trashed ones — the request is refused with 409 when it does not, because a row created between the enumeration and the request would otherwise be left under the superseded key. ' +
+          PASSWORD_VERIFY_LARGE_BODY_BUDGET +
+          ' Each server process admits at most one restore or key rotation per account at a time, and a few in total; a request past the process budget waits for a slot before its body is read.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: jsonRequestBody('BulkReEncryptRequest'),
         responses: {
@@ -3427,7 +3449,8 @@ export const swaggerSpec: JsonObject = {
         tags: ['Vault'],
         summary: 'Permanently delete entries no stored key can open',
         description:
-          "Permanently deletes the vault items and folders the owner's browser found it cannot open with any key the account stores (what a master password reset leaves behind: it replaces the vault key and keeps every row, which still counts against the storage quota). The server holds no key and cannot tell which rows those are, so it trusts the owner's client and bounds what that can do: the master password is required; the wrapper the client judged under must still be the account's (409 otherwise, nothing deleted); nothing is deleted while an interrupted rotation is outstanding or a rotation is running (409); and each row is deleted only while its stored IVs are the ones named, so a row rewritten since the check (re-sealed, recovered, restored or edited) is kept and counted as skipped, as is another account's id. A deleted folder's items, documents and child folders move to its parent. Cannot be undone. Rate limited: 5 req/user per 15 min, one budget per account shared by every request that re-checks the master password.",
+          "Permanently deletes the vault items and folders the owner's browser found it cannot open with any key the account stores (what a master password reset leaves behind: it replaces the vault key and keeps every row, which still counts against the storage quota). The server holds no key and cannot tell which rows those are, so it trusts the owner's client and bounds what that can do: the master password is required; the wrapper the client judged under must still be the account's (409 otherwise, nothing deleted); nothing is deleted while an interrupted rotation is outstanding or a rotation is running (409); and each row is deleted only while its stored IVs are the ones named, so a row rewritten since the check (re-sealed, recovered, restored or edited) is kept and counted as skipped, as is another account's id. A deleted folder's items, documents and child folders move to its parent. Cannot be undone. " +
+          PASSWORD_VERIFY_BUDGET,
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: jsonRequestBody('PurgeUnreadableRequest'),
         responses: {
@@ -3668,7 +3691,8 @@ export const swaggerSpec: JsonObject = {
         tags: ['User'],
         summary: 'Delete the account',
         description:
-          'Permanently deletes the account and everything it owns: vault items, folders, documents and their stored objects, uploads in progress, sessions, trusted devices, and its own audit and backup logs. Requires the password, and a current TOTP code (not a backup code) when two-factor authentication is enabled. Cannot be undone. Rate limited: 5 req/user per 15 min, one budget per account shared by every request that re-checks the master password.',
+          'Permanently deletes the account and everything it owns: vault items, folders, documents and their stored objects, uploads in progress, sessions, trusted devices, and its own audit and backup logs. Requires the password, and a current TOTP code (not a backup code) when two-factor authentication is enabled. Cannot be undone. ' +
+          PASSWORD_VERIFY_BUDGET,
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: jsonRequestBody('ReauthenticateWithCodeRequest'),
         responses: {
@@ -3723,7 +3747,8 @@ export const swaggerSpec: JsonObject = {
         tags: ['User'],
         summary: 'Choose which security emails are sent, with the master password',
         description:
-          'Turns security emails on or off, including the critical ones PUT /user/settings refuses to turn off. Requires the master-password proof; the write is conditioned on the credential it proved, so a proof of a password that has since changed is refused with 401. Turning critical notices off emails the owner once, saying which. Rate limited: 5 req/user per 15 min, one budget per account shared by every request that re-checks the master password.',
+          'Turns security emails on or off, including the critical ones PUT /user/settings refuses to turn off. Requires the master-password proof; the write is conditioned on the credential it proved, so a proof of a password that has since changed is refused with 401. Turning critical notices off emails the owner once, saying which. ' +
+          PASSWORD_VERIFY_BUDGET,
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: jsonRequestBody('UpdateNotificationPreferencesRequest'),
         responses: {
@@ -3746,7 +3771,8 @@ export const swaggerSpec: JsonObject = {
         tags: ['User'],
         summary: 'Change master password',
         description:
-          'Changes the master password, re-wrapping the SAME vault key under a key derived from the new one. Requires current auth hash for verification. Every refresh token, every trusted device and device proof granted under the old password, and every open two-factor challenge is revoked, and every backup recipient other than the account address is suspended until the owner saves the list again (PUT /backup/recipients). Rate limited: 5 req/user per 15 min, one budget per account shared by every request that re-checks the master password.',
+          'Changes the master password, re-wrapping the SAME vault key under a key derived from the new one. Requires current auth hash for verification. Every refresh token, every trusted device and device proof granted under the old password, and every open two-factor challenge is revoked, and every backup recipient other than the account address is suspended until the owner saves the list again (PUT /backup/recipients). ' +
+          PASSWORD_VERIFY_BUDGET,
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: jsonRequestBody('ChangePasswordRequest'),
         responses: {
@@ -3767,7 +3793,8 @@ export const swaggerSpec: JsonObject = {
         tags: ['User'],
         summary: 'Start 2FA setup',
         description:
-          'Initiates two-factor authentication setup. Returns a TOTP secret and QR code. Rate limited: 5 req/user per 15 min, one budget per account shared by every request that re-checks the master password.',
+          'Initiates two-factor authentication setup. Returns a TOTP secret and QR code. ' +
+          PASSWORD_VERIFY_BUDGET,
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: jsonRequestBody('Setup2faRequest'),
         responses: {
@@ -3849,7 +3876,8 @@ export const swaggerSpec: JsonObject = {
         tags: ['User'],
         summary: 'Disable 2FA',
         description:
-          'Disables two-factor authentication. Requires the password and a current TOTP code (not a backup code). Rate limited: 5 req/user per 15 min, one budget per account shared by every request that re-checks the master password.',
+          'Disables two-factor authentication. Requires the password and a current TOTP code (not a backup code). ' +
+          PASSWORD_VERIFY_BUDGET,
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: jsonRequestBody('Disable2faRequest'),
         responses: {
@@ -3870,7 +3898,8 @@ export const swaggerSpec: JsonObject = {
         tags: ['User'],
         summary: 'Regenerate 2FA backup codes',
         description:
-          'Replaces every backup code with a fresh set, returned once. Requires the password and a current TOTP code (not a backup code), and two-factor authentication must be enabled. Rate limited: 5 req/user per 15 min, one budget per account shared by every request that re-checks the master password.',
+          'Replaces every backup code with a fresh set, returned once. Requires the password and a current TOTP code (not a backup code), and two-factor authentication must be enabled. ' +
+          PASSWORD_VERIFY_BUDGET,
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: jsonRequestBody('ReauthenticateWithCodeRequest'),
         responses: {
@@ -4104,7 +4133,7 @@ export const swaggerSpec: JsonObject = {
         operationId: 'exportVault',
         tags: ['Tools'],
         summary: 'Export vault',
-        description: `Exports every live vault item (not the trash) and every folder, still encrypted, as a JSON file attachment (\`Content-Disposition: attachment\`), streamed as it is read from the database (chunked; no \`Content-Length\`), under the same send deadline as the backup download. Refused with 413, before the first byte, when the export would exceed EXPORT_MAX_SIZE_MB. Rate limited: 10 req/user per 15 min + 5 req/user per 15 min, one budget per account shared by every request that re-checks the master password.${HEAVY_RESPONSE_ADMISSION}`,
+        description: `Exports every live vault item (not the trash) and every folder, still encrypted, as a JSON file attachment (\`Content-Disposition: attachment\`), streamed as it is read from the database (chunked; no \`Content-Length\`), under the same send deadline as the backup download. Refused with 413, before the first byte, when the export would exceed EXPORT_MAX_SIZE_MB. Rate limited: 10 req/user per 15 min + ${PASSWORD_VERIFY_LIMIT}, one budget per account shared by every request that re-checks the master password.${HEAVY_RESPONSE_ADMISSION}`,
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: {
           required: true,
@@ -4237,7 +4266,8 @@ export const swaggerSpec: JsonObject = {
         tags: ['Backup'],
         summary: 'Setup backup encryption',
         description:
-          'Configures the backup encryption key (BWK). The client generates and encrypts the BWK before sending. Rate limited: 5 req/user per 15 min, one budget per account shared by every request that re-checks the master password.',
+          'Configures the backup encryption key (BWK). The client generates and encrypts the BWK before sending. ' +
+          PASSWORD_VERIFY_BUDGET,
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: jsonRequestBody('BackupSetupRequest'),
         responses: {
@@ -4291,7 +4321,8 @@ export const swaggerSpec: JsonObject = {
         tags: ['Backup'],
         summary: 'Replace the backup recipients',
         description:
-          "Replaces where mailed backups go. Requires the master-password proof. The account's own address is confirmed at once and an address that has already confirmed stays confirmed; every other address is stored unconfirmed and is emailed a single-use confirmation link (valid 24 hours), and receives no backup until it follows it. Confirmation emails count toward the account's daily limit of 30 backup emails; any not sent now are sent hourly. Saving the list is also how suspended addresses are approved again. Rate limited: 5 req/user per 15 min, one budget per account shared by every request that re-checks the master password.",
+          "Replaces where mailed backups go. Requires the master-password proof. The account's own address is confirmed at once and an address that has already confirmed stays confirmed; every other address is stored unconfirmed and is emailed a single-use confirmation link (valid 24 hours), and receives no backup until it follows it. Confirmation emails count toward the account's daily limit of 30 backup emails; any not sent now are sent hourly. Saving the list is also how suspended addresses are approved again. " +
+          PASSWORD_VERIFY_BUDGET,
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: jsonRequestBody('BackupRecipientsRequest'),
         responses: {
@@ -4397,8 +4428,7 @@ export const swaggerSpec: JsonObject = {
         operationId: 'changeBackupPassword',
         tags: ['Backup'],
         summary: 'Change backup password',
-        description:
-          'Re-encrypts the BWK with a new backup password. Rate limited: 5 req/user per 15 min, one budget per account shared by every request that re-checks the master password.',
+        description: 'Re-encrypts the BWK with a new backup password. ' + PASSWORD_VERIFY_BUDGET,
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: jsonRequestBody('BackupChangePasswordRequest'),
         responses: {
@@ -4422,7 +4452,9 @@ export const swaggerSpec: JsonObject = {
         tags: ['Backup'],
         summary: 'Restore from backup',
         description:
-          'Restores vault items and folders from an encrypted backup file. Supports skip, overwrite, and keep_both conflict strategies. Rate limited: 5 requests per account per 15 min, one budget shared by every request that re-checks the master password, counted before the body is read. Each server process admits at most one restore or key rotation per account at a time, and a few in total; a request past the process budget waits for a slot before its body is read.',
+          'Restores vault items and folders from an encrypted backup file. Supports skip, overwrite, and keep_both conflict strategies. ' +
+          PASSWORD_VERIFY_LARGE_BODY_BUDGET +
+          ' Each server process admits at most one restore or key rotation per account at a time, and a few in total; a request past the process budget waits for a slot before its body is read.',
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: jsonRequestBody('RestoreBackupRequest'),
         responses: {

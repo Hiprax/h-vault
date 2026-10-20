@@ -60,8 +60,8 @@ security posture, not a disclaimer.
   stores only a bcrypt hash of a derived auth value, and the vault key only as ciphertext
   it cannot unwrap. A full database dump yields ciphertext. Stored documents are the same
   bargain in a different shape: the bytes are sealed in the browser under a per-document
-  key the vault key only ever wraps, and the filename, type, tags and note are sealed with
-  them, so a dump of the database and the storage service together yields ciphertext, a
+  key the vault key only ever wraps, and the filename (and the original one), type, tags and
+  note are sealed with them, so a dump of the database and the storage service together yields ciphertext, a
   wrapped key and a set of sizes. **A hostile server cannot reorder, truncate, or splice one
   document into another either** — a segment's position and an end-of-file marker are inside
   its nonce, and the document's id is inside every key derivation, so each of those
@@ -160,6 +160,17 @@ security posture, not a disclaimer.
   That factor's emailed unlock link clears it, a password reset clears the password's, and
   turning two-factor off or enrolling a new authenticator clears the second factor's.
 
+  **Guessing the master password from inside a session.** The requests that re-check the master
+  password (changing it, 2FA changes, deleting the account, export, a key rotation, deleting
+  unreadable entries, backup setup and changes, security email preferences, invitations) share
+  one budget per account of 10 per fifteen minutes, 960 a day, with every request counted;
+  unlocking the vault allows 5 per five minutes, 1,440 a day. Neither feeds the sign-in lockout,
+  so someone holding a stolen, live session can make about 2,400 online guesses a day between
+  the two, each costing them a full key derivation, and every wrong one on a re-check is audited
+  (`password_verification_failed`). The re-check budget was 5 until 0.19.0; it was raised because
+  counting successful requests stopped ordinary use, and a mistyped password now costs one attempt
+  rather than two (the app no longer refreshes the session and sends the same wrong proof again).
+
   **What a password lockout costs a stranger, and what it costs you.** While the password is
   locked, every sign-in that does not present a live device proof for the account gets exactly
   the answer a wrong password gets — the same status, message, delay and audit row — **whether
@@ -240,9 +251,14 @@ security posture, not a disclaimer.
   address alone. Every tier on an authenticated route keys on the account instead, because the account id comes from a
   verified token: neighbours behind one address never spend each other's budget, and an attacker
   holding a session cannot buy a fresh budget by moving to another address. That covers the
-  heavy-operation tier and the confirmation of a new 2FA setup. It also covers every vault-item
-  and folder write: each one leaves an audit row, so each is bounded per account, at a ceiling
-  sized for the app's own one-request-per-item bulk actions. That bounds how fast one account can
+  heavy-operation tier and the confirmation of a new 2FA setup. It also covers every vault-item,
+  folder and document write: each one leaves an audit row, so each is bounded per account, at a
+  ceiling sized for the app's own one-request-per-row bulk actions. That sizing is a trade, stated
+  here: a session can trash and then permanently delete every document an account holds within
+  one fifteen-minute window (as it already could every vault item), and documents are not in the
+  encrypted backup, so a stolen session is enough to destroy them, whether or not the vault is
+  unlocked: deleting a document needs no key. A smaller budget would
+  only make the app's own bulk Delete forever stop part-way through for a legitimate user. That bounds how fast one account can
   grow the log; how large it can grow is bounded separately (see **The audit log's size** below).
   Getting the key wrong on any of these tiers turns a limiter into a lockout of the legitimate
   user, an open door for the attacker, or both. Every IP-keyed tier buckets IPv6 by its **`/64` prefix** rather than by
@@ -297,8 +313,8 @@ security posture, not a disclaimer.
   trusted-device revocations and settings changes (one shared budget of 60 a minute, up to 86,400
   a day), imports (60 per 15 minutes, 5,760 a day), backup downloads (10 per 15 minutes, shared
   with the other heavy operations, 960 a day), backup restores and failed password checks (one
-  budget of 5 per 15 minutes, 480 a day) and failed unlocks (5 per 5 minutes, 1,440 a day): about
-  95,000 entries a day at most. Anyone who knows the master password can also write sign-in
+  budget of 10 per 15 minutes, 960 a day) and failed unlocks (5 per 5 minutes, 1,440 a day): about
+  95,500 entries a day at most. Anyone who knows the master password can also write sign-in
   entries, and those are limited per client address (20 per 15 minutes), not per account, so an
   attacker who holds the password and many addresses can grow an account's log further. Both are
   stated here rather than closed: capping them would mean trimming records of how the account was
@@ -424,8 +440,9 @@ security posture, not a disclaimer.
   account** can cost everyone else.
 - **One account exhausting the server's memory through the two large uploads.** A backup
   restore and a vault-key rotation each accept a body of up to 30 MB, which the server must
-  hold and parse whole. Both were rate limited to five attempts per account per fifteen
-  minutes, but the limit ran **after** the body had been read, so it bounded how many were
+  hold and parse whole. Both were rate limited per account per fifteen minutes (then five
+  attempts, now ten, one budget with every request that re-checks the master password), but the
+  limit ran **after** the body had been read, so it bounded how many were
   answered rather than how many were buffered. The limit now runs first, and the process
   admits only **two** of these requests at a time, sized against the container's measured
   memory, with the rest waiting before their body is read. **One account may hold one** of
@@ -535,8 +552,9 @@ security posture, not a disclaimer.
   mitigated: the server learns how many you have, when each was uploaded and last changed,
   which folder it is in, whether it is a favourite, whether it is in the trash — and **its
   size**, because the byte count is what range arithmetic and the storage quota are computed
-  from. It does not learn the filename, the extension, the MIME type, the tags, the note or a
-  byte of content: all six are sealed in one blob alongside the file's own SHA-256. Length is a
+  from. It does not learn the filename, the original filename, the extension, the MIME type, the
+  tags, the note or a byte of content: all seven are sealed in one blob alongside the file's own
+  SHA-256. Length is a
   real leak and it is worth naming: a size can identify a well-known file, and a set of sizes can
   characterise an account. Padding the ciphertext would hide it and is deliberately not done in
   this version, because it would cost every user storage and bandwidth on every document.
@@ -1517,7 +1535,8 @@ procedure, including why a file-level copy of a running storage engine is not a 
 
 That answer is only available to the operator, and on a shared deployment the operator and the
 account holder are not the same person. **Download all**, on the Documents page, is the half that
-belongs to the account holder: it saves every document the list is showing to their own device,
+belongs to the account holder: it saves every document the list is showing (or, while some are
+selected, just those, as **Download selected**) to their own device,
 one at a time, through the identical verified read a single download uses — each file checked
 against the digest sealed inside it before a byte of it is written, and no file produced at all
 for a document that fails that check. Nothing is combined into an archive, deliberately: a ZIP

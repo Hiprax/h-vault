@@ -133,7 +133,7 @@ const AUDIT_PAGE_SIZE = 20;
  * there and reported here. And the interesting views are all BEHIND a sign-in
  * that involves a 600,000-iteration key derivation, a vault key held only in
  * memory, and ciphertext that has to make a round trip; a suite that scanned only
- * what a signed-out browser can reach would miss most of the thirty-eight views below.
+ * what a signed-out browser can reach would miss most of the forty views below.
  *
  * ## One test, one registration
  *
@@ -141,13 +141,13 @@ const AUDIT_PAGE_SIZE = 20;
  * wall clock and the suite runs single-worker, so the whole authenticated walk
  * shares one account. Each view is a `test.step`, and every scan asserts SOFTLY
  * (`expect.soft`) so one failing view does not hide the state of the other
- * thirty-seven — an accessibility report that stops at the first finding is a
- * report somebody has to run thirty-eight times.
+ * thirty-nine — an accessibility report that stops at the first finding is a
+ * report somebody has to run forty times.
  */
 
 test.describe('accessibility: every primary view and modal', () => {
   test('has no moderate, serious or critical axe violations', async ({ page }, testInfo) => {
-    // Two 600k-iteration derivations for the sign-in, thirty-eight axe runs over a
+    // Two 600k-iteration derivations for the sign-in, forty axe runs over a
     // fully rendered SPA, and three real documents uploaded through the browser's
     // own AES-GCM to the storage engine the harness starts.
     // `registerAndSignInViaUI` raises the timeout to its own floor; this raises it
@@ -177,7 +177,7 @@ test.describe('accessibility: every primary view and modal', () => {
     /**
      * Scans the current DOM and records it.
      *
-     * Soft, so the walk continues: thirty-seven more views are worth more than
+     * Soft, so the walk continues: thirty-nine more views are worth more than
      * failing fast on the first, and the run still fails at the end.
      */
     const scan = async (view: string): Promise<void> => {
@@ -557,7 +557,22 @@ test.describe('accessibility: every primary view and modal', () => {
         // document lands and the two detail views below have something to open.
         await uploadDocument(page, DOCUMENT_PDF);
         await uploadDocument(page, DOCUMENT_MARKDOWN);
+        // One row selected, so the scan covers the selection bar and the rows in
+        // selection mode as well as the page; the trash view below covers rows at
+        // rest. Cleared straight after: a selected row selects instead of opening,
+        // and the download panel would offer "Download selected".
+        await page
+          .getByTestId('document-row')
+          .filter({ hasText: DOCUMENT_PDF })
+          .locator('label')
+          .click();
+        await expect(page.getByTestId('documents-selection-bar')).toBeVisible();
         await scan('documents-list');
+        await page
+          .getByTestId('documents-selection-bar')
+          .getByRole('button', { name: 'Clear' })
+          .click();
+        await expect(page.getByTestId('documents-selection-bar')).toHaveCount(0);
 
         // The upload panel's own controls, which exist only once a file is
         // picked and a transform has produced something to confirm. At rest the
@@ -588,6 +603,17 @@ test.describe('accessibility: every primary view and modal', () => {
           timeout: 90_000,
         });
         await scan('document-detail');
+
+        // Its Edit details dialog: the name without its fixed extension, and the
+        // original name, read-only. Cancelled, so nothing is re-sealed.
+        await page.getByRole('button', { name: 'Edit details' }).click();
+        const editDialog = page.getByRole('dialog', { name: 'Edit details' });
+        await expect(editDialog).toBeVisible();
+        await expect(page.getByTestId('document-edit-suffix')).toHaveText('.pdf');
+        await expect(page.getByTestId('document-edit-original-name')).toHaveText(DOCUMENT_PDF);
+        await scan('document-edit-details');
+        await editDialog.getByRole('button', { name: 'Cancel' }).click();
+        await expect(page.getByRole('dialog')).toHaveCount(0);
 
         // And the rendered half. The wait is on the RENDERER'S OWN shell inside
         // the frame rather than on the frame element, because an iframe is
@@ -657,6 +683,41 @@ test.describe('accessibility: every primary view and modal', () => {
         // left standing and a context left offline are both state this step has
         // no business handing to the next one.
         await page.getByRole('button', { name: 'Dismiss' }).click();
+        await page.context().setOffline(false);
+        await expect(page.getByTestId('documents-offline')).toHaveCount(0, { timeout: 60_000 });
+
+        // An upload PAUSED offline. The first part is refused as a dropped
+        // connection and the context then goes offline, so the row settles on the
+        // offline pause rather than racing a retry; every later part is let
+        // through, though none is sent before the scan.
+        const PARTS = '**/api/v1/documents/uploads/*/parts/*';
+        let cut = false;
+        await page.route(PARTS, async (route) => {
+          if (cut) {
+            await route.fallback();
+            return;
+          }
+          cut = true;
+          await route.abort('internetdisconnected');
+          await page.context().setOffline(true);
+        });
+        await page
+          .locator('#document-upload-input')
+          .setInputFiles(documentFixture(DOCUMENT_UGLY_JSON));
+        await page.getByRole('button', { name: 'Upload', exact: true }).click();
+        await expect(page.getByTestId('upload-status')).toHaveText(/^You are offline\./, {
+          timeout: 60_000,
+        });
+        await expect(
+          page.getByRole('button', { name: `Retry now: upload of ${DOCUMENT_UGLY_JSON}` }),
+        ).toBeVisible();
+        await scan('document-upload-waiting');
+
+        // Cancelled, then back online: a paused transfer and an offline context
+        // are state this walk has no business carrying past this step.
+        await page.getByRole('button', { name: `Cancel upload of ${DOCUMENT_UGLY_JSON}` }).click();
+        await expect(page.getByTestId('upload-row')).toHaveCount(0);
+        await page.unroute(PARTS);
         await page.context().setOffline(false);
         await expect(page.getByTestId('documents-offline')).toHaveCount(0, { timeout: 60_000 });
       });

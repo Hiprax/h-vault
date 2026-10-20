@@ -10,7 +10,7 @@ import type { DecryptedDocument } from '../stores/documentsStore';
  * byte counts, and whose row carries the stream salt and nonce prefix beside it.
  * A search that matched any of those would answer a query nobody typed on
  * purpose while burying the ones they did. The fields below are the ones a
- * person would search a filing cabinet by.
+ * person would search a filing cabinet by, the original file name among them.
  *
  * `mime` is deliberately absent even though the detail view renders it as
  * "Type": it is machine vocabulary, and matching it makes a search for "text"
@@ -31,6 +31,9 @@ export function documentMatchesQuery(doc: DecryptedDocument, query: string): boo
   const { meta } = doc;
   if (meta === null) return false;
   if (meta.name.toLowerCase().includes(query)) return true;
+  // A renamed document is still found by the name the file had when it was
+  // added, which is often the one a person remembers.
+  if (meta.originalName?.toLowerCase().includes(query) === true) return true;
   if (meta.ext.toLowerCase().includes(query)) return true;
   if (meta.note?.toLowerCase().includes(query) === true) return true;
   return meta.tags.some((tag) => tag.toLowerCase().includes(query));

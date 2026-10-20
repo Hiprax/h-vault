@@ -370,7 +370,7 @@ describe('production rate limiters (real limiter bodies + real Mongo store)', ()
       },
       {
         name: 'passwordVerifyLimiter',
-        limit: 5,
+        limit: 10,
         prefix: 'pwverify:',
         message: 'Too many password verification attempts, please try again later',
       },

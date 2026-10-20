@@ -99,6 +99,25 @@ export function documentExtension(name: string): string {
 }
 
 /**
+ * A document name split into the part a person may rename and the part that
+ * names its file type.
+ *
+ * `suffix` is `''`, or the LAST dot and everything after it exactly as written,
+ * so `Photo.JPG` keeps its capital letters; `stem` is everything before it. The
+ * split is the same rule as {@link documentExtension}, which is why it lives
+ * beside it: `stem + suffix === name` always, and
+ * `documentExtension(name) === suffix.slice(1).toLowerCase()` always, so a name
+ * built from any non-empty stem and this suffix keeps the type the preview, the
+ * renderer and the download all key on. A name with no dot, or whose only dot is
+ * leading (`Dockerfile`, `.bashrc`), has no suffix at all.
+ */
+export function splitDocumentName(name: string): { stem: string; suffix: string } {
+  const lastDot = name.lastIndexOf('.');
+  if (lastDot <= 0) return { stem: name, suffix: '' };
+  return { stem: name.slice(0, lastDot), suffix: name.slice(lastDot) };
+}
+
+/**
  * The render mode a decrypted document name resolves to.
  *
  * ONE definition of the rule, in the package both sides import, because the

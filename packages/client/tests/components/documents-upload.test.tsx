@@ -30,7 +30,15 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, cleanup, act, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import React from 'react';
-import { DOCUMENT_PLAINTEXT_CHUNK_BYTES, MAX_FORMATTABLE_SIZE_BYTES } from '@hvault/shared';
+import {
+  DOCUMENT_PLAINTEXT_CHUNK_BYTES,
+  MAX_DOCUMENT_EXT_LENGTH,
+  MAX_DOCUMENT_MIME_LENGTH,
+  MAX_DOCUMENT_NAME_LENGTH,
+  MAX_DOCUMENT_TAGS,
+  MAX_FORMATTABLE_SIZE_BYTES,
+} from '@hvault/shared';
+import { AxiosError } from 'axios';
 import type { DocumentResponse, DocumentUsageResponse } from '@hvault/shared';
 
 /* -------------------------------------------------------------------------- */
@@ -109,6 +117,27 @@ vi.mock('../../src/components/ui/Toast', () => ({
   Toaster: () => null,
 }));
 
+// A pass-through: the real engine still loads, but the panel's preload, and what
+// it does with a load that fails, can be observed. A PLAIN function rather than a
+// `vi.fn`, because a mock function marks every promise it returns as handled,
+// which would hide exactly the unhandled rejection one case below looks for.
+const recoveryLoader = vi.hoisted(() => ({
+  calls: 0,
+  refuse: false,
+}));
+vi.mock('../../src/lib/lazyUploadRecovery', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../../src/lib/lazyUploadRecovery')>();
+  return {
+    ...real,
+    loadUploadRecovery: () => {
+      recoveryLoader.calls += 1;
+      return recoveryLoader.refuse
+        ? Promise.reject(new Error('chunk load failed'))
+        : real.loadUploadRecovery();
+    },
+  };
+});
+
 vi.mock('react-window', () => ({
   List: ({
     rowComponent: Row,
@@ -147,12 +176,18 @@ vi.mock('react-window', () => ({
 /* -------------------------------------------------------------------------- */
 
 import {
+  DOCUMENT_TYPE_LOCKED_MESSAGE,
   UploadCancelledError,
   useDocumentsStore,
   type DecryptedDocument,
   type DocumentUploadProgress,
+  type StartUploadInput,
 } from '../../src/stores/documentsStore';
 import { useVaultStore } from '../../src/stores/vaultStore';
+import {
+  INTERRUPTED_MESSAGE,
+  UploadStoppedError,
+} from '../../src/services/documents/uploadRecovery';
 import { useUploadUnloadGuard } from '../../src/hooks/useUploadUnloadGuard';
 import DocumentsPage from '../../src/pages/DocumentsPage';
 import { DocumentList } from '../../src/components/documents/DocumentList';
@@ -416,8 +451,11 @@ describe('DocumentsPage — the surrounding notices', () => {
   it('says documents are not cached offline when the server is unreachable', async () => {
     harness.isOnline = false;
     renderPage();
-    expect(await screen.findByTestId('documents-offline')).toHaveTextContent(
-      /not kept in the offline cache/i,
+    const banner = await screen.findByTestId('documents-offline');
+    expect(banner).toHaveTextContent(/not kept in the offline cache/i);
+    // And what happens to an upload already running, with the two conditions.
+    expect(banner).toHaveTextContent(
+      'An upload already running pauses and continues when you are back online, as long as this tab stays open and the vault unlocked.',
     );
   });
 
@@ -568,6 +606,9 @@ describe('DocumentList — its four states', () => {
           mode={{ kind: 'all' }}
           folderNames={new Map()}
           searching={false}
+          isSelected={() => false}
+          selecting={false}
+          onToggleSelect={vi.fn()}
           {...props}
         />
       </MemoryRouter>,
@@ -975,9 +1016,13 @@ describe('DocumentUploadPanel — a transfer in progress', () => {
     });
     renderPanel();
 
-    expect(
-      screen.getByText(/Retry to send only the parts the server does not already hold/),
-    ).toBeInTheDocument();
+    expect(screen.getByTestId('upload-status')).toHaveTextContent(
+      /Retry to send only the parts the server does not already hold/,
+    );
+    // Said once to assistive technology too, in the row's own live region.
+    expect(screen.getByTestId('upload-announcement')).toHaveTextContent(
+      /Retry to send only the parts the server does not already hold/,
+    );
     // Awaited, because the click now settles a pending state on the way back:
     // firing it bare leaves that update outside `act` and React says so.
     await act(async () => {
@@ -1049,7 +1094,9 @@ describe('DocumentUploadPanel — a transfer in progress', () => {
     });
     renderPanel();
 
-    expect(screen.getByText(/Upload failed\. the socket dropped/)).toBeInTheDocument();
+    expect(screen.getByTestId('upload-status')).toHaveTextContent(
+      /Upload failed\. the socket dropped/,
+    );
     fireEvent.click(screen.getByRole('button', { name: 'Retry upload of holiday.zip' }));
     await waitFor(() => {
       expect(harness.toast).toHaveBeenCalledWith({
@@ -1101,6 +1148,15 @@ describe('useUploadUnloadGuard — the confirmation outlives the page that start
 
   it('asks the browser to confirm while a transfer is live', () => {
     useDocumentsStore.setState({ uploads: { 'up-1': makeUpload() } });
+    render(<GuardHarness />);
+
+    expect(dispatchUnload().defaultPrevented).toBe(true);
+  });
+
+  it('still asks while a transfer is paused waiting for the connection, because closing the tab loses it', () => {
+    useDocumentsStore.setState({
+      uploads: { 'up-1': makeUpload({ status: 'waiting', waitReason: 'offline' }) },
+    });
     render(<GuardHarness />);
 
     expect(dispatchUnload().defaultPrevented).toBe(true);
@@ -1530,6 +1586,107 @@ describe('DocumentUploadPanel — format and repair', () => {
       toolVersion: '3.9.5',
       originalSha256: '0'.repeat(64),
     });
+  });
+
+  it("carries the typed details through a review, under the picked file's extension", async () => {
+    harness.transformDocument.mockResolvedValue(reviewOf('{ "a": 1 }\n'));
+    renderPanel();
+    pick('config.json', 500);
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'settings' } });
+    fireEvent.change(screen.getByLabelText('Tags'), { target: { value: 'ops' } });
+    fireEvent.click(screen.getByLabelText(/Format this document/));
+    fireEvent.click(screen.getByRole('button', { name: /Prepare and review/ }));
+    await screen.findByTestId('transform-review');
+    // Still editable while the review is open.
+    expect(screen.getByLabelText('Name')).toBeEnabled();
+    fireEvent.change(screen.getByLabelText('Note'), { target: { value: 'formatted' } });
+
+    fireEvent.click(screen.getByRole('button', { name: /Upload the formatted file/ }));
+
+    await waitFor(() => {
+      expect(startUpload).toHaveBeenCalledTimes(1);
+    });
+    expect(startUpload.mock.calls[0]?.[0]).toMatchObject({
+      name: 'settings.json',
+      originalName: 'config.json',
+      tags: ['ops'],
+      note: 'formatted',
+      transform: { formatted: true },
+    });
+  });
+
+  it('carries tags added as chips through a review as well as one still typed', async () => {
+    harness.transformDocument.mockResolvedValue(reviewOf('{ "a": 1 }\n'));
+    renderPanel();
+    pick('config.json', 500);
+    fireEvent.change(screen.getByLabelText('Tags'), { target: { value: 'ops' } });
+    fireEvent.keyDown(screen.getByLabelText('Tags'), { key: 'Enter' });
+    fireEvent.click(screen.getByLabelText(/Format this document/));
+    fireEvent.click(screen.getByRole('button', { name: /Prepare and review/ }));
+    await screen.findByTestId('transform-review');
+    fireEvent.change(screen.getByLabelText('Tags'), { target: { value: 'json' } });
+
+    fireEvent.click(screen.getByRole('button', { name: /Upload the formatted file/ }));
+
+    await waitFor(() => {
+      expect(startUpload).toHaveBeenCalledTimes(1);
+    });
+    expect(startUpload.mock.calls[0]?.[0]).toMatchObject({ tags: ['ops', 'json'] });
+  });
+
+  it.each([
+    { button: /Upload the formatted file/, transform: true },
+    { button: /Upload the original unchanged/, transform: false },
+  ])('starts ONE upload when $button is pressed twice', async ({ button, transform }) => {
+    startUpload.mockReturnValue(new Promise<string>(() => {}));
+    harness.transformDocument.mockResolvedValue(reviewOf('{ "a": 1 }\n'));
+    renderPanel();
+    pick('config.json', 500);
+    fireEvent.click(screen.getByLabelText(/Format this document/));
+    fireEvent.click(screen.getByRole('button', { name: /Prepare and review/ }));
+    await screen.findByTestId('transform-review');
+    const control = screen.getByRole('button', { name: button });
+
+    // Both presses inside one act: no render between them, as with a fast
+    // double click, so only the panel's own guard can stop the second.
+    act(() => {
+      control.click();
+      control.click();
+    });
+
+    expect(startUpload).toHaveBeenCalledTimes(1);
+    // The formatted bytes carry their provenance; the original carries none.
+    if (transform) expect(startUpload.mock.calls[0]?.[0]).toHaveProperty('transform');
+    else expect(startUpload.mock.calls[0]?.[0]).not.toHaveProperty('transform');
+    // And while it starts, every way forward in the review is disabled.
+    const review = screen.getByTestId('transform-review');
+    for (const element of within(review).getAllByRole('button')) {
+      expect(element).toBeDisabled();
+    }
+  });
+
+  it("starts ONE upload when the failure panel's way forward is pressed twice", async () => {
+    startUpload.mockReturnValue(new Promise<string>(() => {}));
+    harness.transformDocument.mockResolvedValue({
+      status: 'failed',
+      failure: { message: 'Unexpected end', line: 1, column: 2, excerpt: '{' },
+    });
+    renderPanel();
+    pick('config.json', 500);
+    fireEvent.click(screen.getByLabelText(/Repair syntax errors/));
+    fireEvent.click(screen.getByRole('button', { name: /Prepare and review/ }));
+    const failure = await screen.findByTestId('transform-failure');
+    const control = within(failure).getByRole('button', { name: /Upload the original unchanged/ });
+
+    act(() => {
+      control.click();
+      control.click();
+    });
+
+    expect(startUpload).toHaveBeenCalledTimes(1);
+    for (const element of within(failure).getAllByRole('button')) {
+      expect(element).toBeDisabled();
+    }
   });
 
   it('lets the user take the original instead, and records no provenance for it', async () => {
@@ -2137,18 +2294,47 @@ describe('DocumentsPage — the surface the folder, the favorite and the trash l
     expect(screen.getByTestId('document-row')).toHaveTextContent('Being deleted');
   });
 
-  it('keeps every row a single link with no other control, in every mode', async () => {
+  it('gives every row one link and, beside it, one selection checkbox, in every mode', async () => {
+    // Operator decision, 0.19.0: documents get the vault list's multi-select, so a
+    // row now also carries its checkbox. It sits BESIDE the link, never inside it:
+    // a control nested in an anchor is lost to a screen reader, and the anchor is
+    // what gives the row keyboard activation, middle-click and a new tab.
     await renderWith({ documents: [loose()], trashDocuments: [binned()], trashLoaded: true });
 
     for (const mode of [/^All Documents/, /^Trash/]) {
       fireEvent.click(screen.getByRole('button', { name: mode }));
       const row = screen.getByTestId('document-row');
-      // The row is an anchor precisely so it gets keyboard activation,
-      // middle-click and open-in-a-new-tab for free; a control inside it would
-      // nest one interactive element in another and cost all three.
-      expect(within(row).getAllByRole('link')).toHaveLength(1);
+      const link = within(row).getByRole('link');
+      const checkbox = within(row).getByRole('checkbox');
+      expect(checkbox).not.toBeChecked();
+      expect(link.contains(checkbox)).toBe(false);
       expect(within(row).queryAllByRole('button')).toHaveLength(0);
     }
+  });
+
+  it('turns the rows into selectors while any is selected, and back into links after', async () => {
+    await renderWith({
+      documents: [
+        loose(),
+        { ...loose(), id: 'doc-loose-2', meta: { ...loose().meta!, name: 'b.pdf' } },
+      ],
+    });
+    const rows = (): HTMLElement[] => screen.getAllByTestId('document-row');
+    expect(rows().map((row) => within(row).queryAllByRole('link').length)).toEqual([1, 1]);
+
+    fireEvent.click(within(rows()[0]!).getByRole('checkbox'));
+
+    // No row navigates now: a click on the row selects it, as on the vault list.
+    expect(rows().map((row) => within(row).queryAllByRole('link').length)).toEqual([0, 0]);
+    fireEvent.click(within(rows()[1]!).getByTestId('document-row-toggle'));
+    expect(
+      rows().map((row) => (within(row).getByRole('checkbox') as HTMLInputElement).checked),
+    ).toEqual([true, true]);
+    expect(screen.getByText('2 selected')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+    expect(rows().map((row) => within(row).queryAllByRole('link').length)).toEqual([1, 1]);
+    expect(screen.queryByTestId('documents-selection-bar')).not.toBeInTheDocument();
   });
 
   it('explains an empty list differently in each mode', async () => {
@@ -2430,6 +2616,534 @@ describe('DocumentsPage — the surface the folder, the favorite and the trash l
 
     await waitFor(() => {
       expect(startUpload).toHaveBeenCalledWith(expect.objectContaining({ folderId: FOLDER_ID }));
+    });
+  });
+});
+
+/* ========================================================================== */
+/*  DocumentUploadPanel — name, tags and note, typed before the upload         */
+/* ========================================================================== */
+
+describe('DocumentUploadPanel — details typed before the upload', () => {
+  let startUpload = vi.fn<(input: StartUploadInput) => Promise<string>>();
+
+  beforeEach(() => {
+    startUpload = vi.fn<(input: StartUploadInput) => Promise<string>>().mockResolvedValue('up-1');
+    useDocumentsStore.setState({ startUpload });
+  });
+
+  /** The single input `startUpload` was called with. */
+  function sentInput(): StartUploadInput {
+    expect(startUpload).toHaveBeenCalledTimes(1);
+    return startUpload.mock.calls[0]![0];
+  }
+
+  it('fills the name from the file, with its extension fixed beside it and nothing else filled in', () => {
+    renderPanel();
+    pick('Quarterly report.final.PDF', 4096);
+
+    const name = screen.getByLabelText('Name');
+    expect(name).toHaveValue('Quarterly report.final');
+    expect(screen.getByTestId('document-upload-suffix')).toHaveTextContent(/^\.PDF$/);
+    expect(name).toHaveAccessibleDescription(
+      'The file type stays .PDF: it is fixed when a document is added.',
+    );
+    expect(screen.getByLabelText('Tags')).toHaveValue('');
+    expect(screen.getByLabelText('Note')).toHaveValue('');
+    // The original name is the file being chosen, so the panel does not repeat it.
+    expect(screen.queryByText('Original name')).not.toBeInTheDocument();
+  });
+
+  it('sends the typed name, tags and note, with the picked name as the original name', async () => {
+    renderPanel();
+    pick('report.pdf', 4096, 'application/pdf');
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: '  Q3 report  ' } });
+    // The vault item editor's chips: Enter adds one, Add adds one, and a tag
+    // still in the box when Upload is pressed goes too, unless it is already there.
+    const tags = screen.getByLabelText('Tags');
+    fireEvent.change(tags, { target: { value: ' tax ' } });
+    fireEvent.keyDown(tags, { key: 'Enter' });
+    fireEvent.change(tags, { target: { value: '2025' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    fireEvent.change(tags, { target: { value: 'tax' } });
+    fireEvent.change(screen.getByLabelText('Note'), { target: { value: '  Signed copy  ' } });
+
+    fireEvent.click(screen.getByRole('button', { name: /^Upload$/ }));
+
+    await waitFor(() => {
+      expect(startUpload).toHaveBeenCalledTimes(1);
+    });
+    expect(sentInput()).toMatchObject({
+      name: 'Q3 report.pdf',
+      originalName: 'report.pdf',
+      mime: 'application/pdf',
+      tags: ['tax', '2025'],
+      note: 'Signed copy',
+    });
+  });
+
+  it('sends the file under its own name, with no tags and no note, when nothing was typed', async () => {
+    renderPanel();
+    pick('report.pdf', 4096);
+
+    fireEvent.click(screen.getByRole('button', { name: /^Upload$/ }));
+
+    await waitFor(() => {
+      expect(startUpload).toHaveBeenCalledTimes(1);
+    });
+    const input = sentInput();
+    expect(input).toMatchObject({ name: 'report.pdf', originalName: 'report.pdf', tags: [] });
+    expect(input).not.toHaveProperty('note');
+  });
+
+  it('refuses an empty name, keeping the file and everything typed', () => {
+    renderPanel();
+    pick('report.pdf', 4096);
+    fireEvent.change(screen.getByLabelText('Tags'), { target: { value: 'keep me' } });
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: '   ' } });
+
+    fireEvent.click(screen.getByRole('button', { name: /^Upload$/ }));
+
+    expect(screen.getByTestId('upload-details-refusal')).toHaveTextContent(
+      'A document needs a name.',
+    );
+    expect(screen.getByTestId('upload-details-refusal')).toHaveAttribute('role', 'alert');
+    expect(startUpload).not.toHaveBeenCalled();
+    expect(screen.getByText('report.pdf (4 KB)')).toBeInTheDocument();
+    // The typed tag was taken as a chip on the way, so nothing typed is lost.
+    expect(screen.getByRole('button', { name: 'Remove tag keep me' })).toBeInTheDocument();
+  });
+
+  it('keeps a comma inside one tag, as the vault item editor does', async () => {
+    renderPanel();
+    pick('report.pdf', 4096);
+    fireEvent.change(screen.getByLabelText('Tags'), { target: { value: 'a, b' } });
+    fireEvent.keyDown(screen.getByLabelText('Tags'), { key: 'Enter' });
+
+    fireEvent.click(screen.getByRole('button', { name: /^Upload$/ }));
+
+    await waitFor(() => {
+      expect(startUpload).toHaveBeenCalledTimes(1);
+    });
+    expect(sentInput().tags).toEqual(['a, b']);
+  });
+
+  it('clears the tags with the file, so the next file starts with none', () => {
+    renderPanel();
+    pick('report.pdf', 4096);
+    fireEvent.change(screen.getByLabelText('Tags'), { target: { value: 'old' } });
+    fireEvent.keyDown(screen.getByLabelText('Tags'), { key: 'Enter' });
+    expect(screen.getByRole('button', { name: 'Remove tag old' })).toBeInTheDocument();
+
+    pick('other.pdf', 10);
+
+    expect(screen.queryByRole('button', { name: /^Remove tag/ })).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Tags')).toHaveValue('');
+  });
+
+  it('refuses a dot typed into a name that has no extension', () => {
+    renderPanel();
+    pick('Makefile', 100);
+    expect(screen.getByLabelText('Name')).toHaveValue('Makefile');
+    expect(screen.queryByTestId('document-upload-suffix')).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Make.file' } });
+    fireEvent.click(screen.getByRole('button', { name: /^Upload$/ }));
+
+    expect(screen.getByTestId('upload-details-refusal')).toHaveTextContent(
+      DOCUMENT_TYPE_LOCKED_MESSAGE,
+    );
+    expect(startUpload).not.toHaveBeenCalled();
+  });
+
+  it('refuses a tag past the limit in the field, and an Upload carrying one before anything is read', () => {
+    // The editor itself now refuses the extra tag, as the vault item editor does;
+    // the save-time sentence for more than twenty is pinned on `documentMetaRefusal`
+    // directly (`document-details.test.ts`), since no typing can reach it any more.
+    renderPanel();
+    const { reads } = pick('report.pdf', 4096);
+    const tags = screen.getByLabelText('Tags');
+    for (let i = 0; i < MAX_DOCUMENT_TAGS; i++) {
+      fireEvent.change(tags, { target: { value: `t${String(i)}` } });
+      fireEvent.keyDown(tags, { key: 'Enter' });
+    }
+    fireEvent.change(tags, { target: { value: 'one-more' } });
+    fireEvent.keyDown(tags, { key: 'Enter' });
+    expect(
+      screen.getByText(`A document can have up to ${String(MAX_DOCUMENT_TAGS)} tags.`),
+    ).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: /^Remove tag/ })).toHaveLength(MAX_DOCUMENT_TAGS);
+
+    fireEvent.click(screen.getByRole('button', { name: /^Upload$/ }));
+
+    expect(
+      screen.getByText(
+        `That tag was not added because a document can have ${String(MAX_DOCUMENT_TAGS)} tags. Clear the box or remove a tag to save.`,
+      ),
+    ).toBeInTheDocument();
+    expect(tags).toHaveFocus();
+    expect(screen.queryByTestId('upload-details-refusal')).not.toBeInTheDocument();
+    expect(startUpload).not.toHaveBeenCalled();
+    expect(reads).toEqual([]);
+  });
+
+  it('refuses details the schema will not store even when no typed bound is hit', () => {
+    // A file type the operating system reported past the stored bound: nobody
+    // typed it, so it is the schema's own check that refuses it, in a sentence.
+    renderPanel();
+    pick('odd.bin', 10, `a/${'x'.repeat(MAX_DOCUMENT_MIME_LENGTH)}`);
+
+    fireEvent.click(screen.getByRole('button', { name: /^Upload$/ }));
+
+    expect(screen.getByTestId('upload-details-refusal')).toHaveTextContent(
+      'The details of this file cannot be stored with it.',
+    );
+    expect(startUpload).not.toHaveBeenCalled();
+  });
+
+  it('forgets a refusal and the typed details when another file is chosen', () => {
+    renderPanel();
+    pick('report.pdf', 4096);
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: '' } });
+    fireEvent.change(screen.getByLabelText('Note'), { target: { value: 'for the first file' } });
+    fireEvent.click(screen.getByRole('button', { name: /^Upload$/ }));
+    expect(screen.getByTestId('upload-details-refusal')).toBeInTheDocument();
+
+    pick('other.txt', 10);
+
+    expect(screen.queryByTestId('upload-details-refusal')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Name')).toHaveValue('other');
+    expect(screen.getByLabelText('Note')).toHaveValue('');
+  });
+
+  it('refuses a file whose name or extension cannot be stored, at the bound and not before, reading nothing', () => {
+    renderPanel();
+    const atBound = `${'x'.repeat(MAX_DOCUMENT_NAME_LENGTH - 4)}.pdf`;
+    pick(atBound, 10);
+    expect(screen.queryByTestId('upload-refusal')).not.toBeInTheDocument();
+
+    const { reads } = pick(`x${atBound}`, 10);
+    expect(screen.getByTestId('upload-refusal')).toHaveTextContent(
+      `This file's name is longer than ${String(MAX_DOCUMENT_NAME_LENGTH)} characters. Rename the file, then choose it again.`,
+    );
+    expect(reads).toEqual([]);
+
+    pick(`a.${'e'.repeat(MAX_DOCUMENT_EXT_LENGTH)}`, 10);
+    expect(screen.queryByTestId('upload-refusal')).not.toBeInTheDocument();
+
+    pick(`a.${'e'.repeat(MAX_DOCUMENT_EXT_LENGTH + 1)}`, 10);
+    expect(screen.getByTestId('upload-refusal')).toHaveTextContent(
+      `This file's extension is longer than ${String(MAX_DOCUMENT_EXT_LENGTH)} characters. Rename the file, then choose it again.`,
+    );
+    expect(screen.queryByRole('button', { name: /^Upload$/ })).not.toBeInTheDocument();
+  });
+
+  it('keeps the file and the details when the server refuses the start', async () => {
+    startUpload.mockRejectedValue(new Error('Storage quota exceeded'));
+    renderPanel();
+    pick('report.pdf', 4096);
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Typed name' } });
+
+    fireEvent.click(screen.getByRole('button', { name: /^Upload$/ }));
+
+    await waitFor(() => {
+      expect(harness.toast).toHaveBeenCalledWith({
+        title: 'Storage quota exceeded',
+        type: 'error',
+      });
+    });
+    expect(screen.getByLabelText('Name')).toHaveValue('Typed name');
+    expect(screen.getByLabelText('Name')).toBeEnabled();
+    expect(screen.getByRole('button', { name: /^Upload$/ })).toBeEnabled();
+  });
+
+  it('says in words that the server could not be reached, keeping the file', async () => {
+    startUpload.mockRejectedValue(new AxiosError('Network Error', AxiosError.ERR_NETWORK));
+    renderPanel();
+    pick('report.pdf', 4096);
+
+    fireEvent.click(screen.getByRole('button', { name: /^Upload$/ }));
+
+    await waitFor(() => {
+      expect(harness.toast).toHaveBeenCalledWith({
+        title: 'Could not reach the server. Check your connection and try again.',
+        type: 'error',
+      });
+    });
+    expect(screen.getByRole('button', { name: /^Upload$/ })).toBeInTheDocument();
+  });
+
+  it('clears the selection the moment the transfer is registered, before it finishes', () => {
+    startUpload.mockImplementation((input) => {
+      input.onRegistered?.('up-1');
+      return new Promise<string>(() => {});
+    });
+    renderPanel();
+    pick('report.pdf', 4096);
+
+    fireEvent.click(screen.getByRole('button', { name: /^Upload$/ }));
+
+    expect(screen.queryByRole('button', { name: /^Upload$/ })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Name')).not.toBeInTheDocument();
+    // The window is over, so the picker is usable again for the next file.
+    expect(screen.getByLabelText('File to upload')).toBeEnabled();
+  });
+
+  it('puts the Upload button after the details, where the reading and tab order end', () => {
+    renderPanel();
+    pick('report.pdf', 4096);
+
+    const upload = screen.getByRole('button', { name: /^Upload$/ });
+    for (const field of ['Name', 'Tags', 'Note']) {
+      // DOCUMENT_POSITION_FOLLOWING: the button comes after the field.
+      expect(screen.getByLabelText(field).compareDocumentPosition(upload) & 4).toBe(4);
+    }
+  });
+
+  it('disables every control while the upload is starting, and ignores a drop', () => {
+    startUpload.mockReturnValue(new Promise<string>(() => {}));
+    renderPanel();
+    pick('config.json', 4096);
+
+    fireEvent.click(screen.getByRole('button', { name: /^Upload$/ }));
+
+    expect(screen.getByRole('button', { name: /^Upload$/ })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Clear selected file' })).toBeDisabled();
+    expect(screen.getByLabelText('File to upload')).toBeDisabled();
+    expect(screen.getByLabelText('Name')).toBeDisabled();
+    expect(screen.getByLabelText('Tags')).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Add' })).toBeDisabled();
+    expect(screen.getByLabelText('Note')).toBeDisabled();
+    expect(screen.getByLabelText(/Format this document/)).toBeDisabled();
+
+    const { file: other } = makeFile('other.txt', 10);
+    fireEvent.drop(screen.getByTestId('document-dropzone'), { dataTransfer: { files: [other] } });
+    expect(screen.getByText('config.json (4 KB)')).toBeInTheDocument();
+    expect(startUpload).toHaveBeenCalledTimes(1);
+  });
+
+  it('starts ONE upload when Upload is pressed twice before it can disable itself', () => {
+    startUpload.mockReturnValue(new Promise<string>(() => {}));
+    renderPanel();
+    pick('report.pdf', 4096);
+    const upload = screen.getByRole('button', { name: /^Upload$/ });
+
+    act(() => {
+      upload.click();
+      upload.click();
+    });
+
+    expect(startUpload).toHaveBeenCalledTimes(1);
+  });
+
+  it('fetches the upload engine while the person is still choosing, and shrugs off a failed fetch', async () => {
+    recoveryLoader.calls = 0;
+    renderPanel();
+    expect(recoveryLoader.calls).toBe(1);
+    cleanup();
+
+    recoveryLoader.refuse = true;
+    try {
+      renderPanel();
+      // A rejection left unhandled here fails the run on its own.
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(recoveryLoader.calls).toBe(2);
+      expect(harness.toast).not.toHaveBeenCalled();
+    } finally {
+      recoveryLoader.refuse = false;
+    }
+  });
+});
+
+/* ========================================================================== */
+/*  DocumentTransfers — a transfer that is waiting                             */
+/* ========================================================================== */
+
+describe('DocumentTransfers — a transfer that is paused', () => {
+  const resumeUploadNow = vi.fn();
+
+  beforeEach(() => {
+    resumeUploadNow.mockReset();
+    useDocumentsStore.setState({ resumeUploadNow });
+  });
+
+  function showUpload(overrides: Partial<DocumentUploadProgress>): void {
+    act(() => {
+      useDocumentsStore.setState({ uploads: { 'up-1': makeUpload(overrides) } });
+    });
+  }
+
+  it.each([
+    {
+      waitReason: 'offline' as const,
+      sentence:
+        'You are offline. The upload is paused and continues by itself when you are back online, as long as this tab stays open and the vault unlocked.',
+      retryNow: true,
+    },
+    {
+      waitReason: 'connection' as const,
+      sentence: 'Cannot reach the server. Trying again automatically…',
+      retryNow: true,
+    },
+    {
+      waitReason: 'interrupted' as const,
+      sentence: 'The connection was interrupted part-way. Trying again…',
+      retryNow: false,
+    },
+    {
+      waitReason: 'server' as const,
+      sentence: 'The server is busy or not answering properly. Trying again shortly…',
+      retryNow: false,
+    },
+  ])(
+    'waiting for $waitReason: says so, offers Retry now: $retryNow',
+    ({ waitReason, sentence, retryNow }) => {
+      useDocumentsStore.setState({
+        uploads: { 'up-1': makeUpload({ status: 'waiting', waitReason, sentBytes: 500 }) },
+      });
+      renderPanel();
+
+      expect(screen.getByTestId('upload-status')).toHaveTextContent(sentence);
+      expect(screen.getByTestId('upload-announcement')).toHaveTextContent(sentence);
+      expect(screen.getByTestId('upload-bar').className).toContain('bg-yellow-500');
+      // A paused transfer is not a failed one: there is nothing to resume by hand.
+      expect(screen.queryByRole('button', { name: /^Retry upload/ })).not.toBeInTheDocument();
+      expect(
+        screen.getByRole('button', { name: 'Cancel upload of holiday.zip' }),
+      ).toBeInTheDocument();
+      const now = screen.queryByRole('button', { name: 'Retry now: upload of holiday.zip' });
+      if (retryNow) {
+        expect(now).toHaveTextContent('Retry now');
+        fireEvent.click(now!);
+        expect(resumeUploadNow).toHaveBeenCalledWith('up-1');
+      } else {
+        expect(now).not.toBeInTheDocument();
+      }
+      // Still a live transfer, so the note about leaving the page stays.
+      expect(screen.getByText(/closing the tab does not/)).toBeInTheDocument();
+    },
+  );
+
+  it('reads a pause with no recorded reason as a connection that cannot be reached', () => {
+    useDocumentsStore.setState({ uploads: { 'up-1': makeUpload({ status: 'waiting' }) } });
+    renderPanel();
+
+    expect(screen.getByTestId('upload-status')).toHaveTextContent(
+      'Cannot reach the server. Trying again automatically…',
+    );
+  });
+
+  it('says a part is being sent again rather than restarting its count', () => {
+    const totalBytes = DOCUMENT_PLAINTEXT_CHUNK_BYTES * 2 + 100;
+    useDocumentsStore.setState({
+      uploads: {
+        'up-1': makeUpload({
+          totalBytes,
+          sentBytes: DOCUMENT_PLAINTEXT_CHUNK_BYTES + 10,
+          resending: true,
+        }),
+      },
+    });
+    renderPanel();
+
+    expect(screen.getByTestId('upload-status')).toHaveTextContent(/^Resending part 2 of 3…$/);
+    expect(screen.getByTestId('upload-bar').className).toContain('bg-[hsl(var(--primary))]');
+  });
+
+  it('colours the bar by state and animates only its width', () => {
+    renderPanel();
+    showUpload({ status: 'uploading' });
+    const bar = (): string => screen.getByTestId('upload-bar').className;
+    expect(bar()).toContain('bg-[hsl(var(--primary))]');
+    expect(bar()).toContain('transition-[width]');
+    expect(bar()).not.toContain('transition-all');
+
+    showUpload({ status: 'failed' });
+    expect(bar()).toContain('bg-red-500');
+    expect(bar()).not.toContain('bg-yellow-500');
+
+    showUpload({ status: 'waiting', waitReason: 'offline' });
+    expect(bar()).toContain('bg-yellow-500');
+    expect(bar()).not.toContain('bg-red-500');
+  });
+
+  it('announces a pause once, keeps it through retries, and clears it once a part is stored', () => {
+    const totalBytes = DOCUMENT_PLAINTEXT_CHUNK_BYTES * 3;
+    renderPanel();
+    const region = (): HTMLElement => screen.getByTestId('upload-announcement');
+
+    showUpload({ totalBytes, status: 'uploading', sentBytes: 100 });
+    // Mounted from the start, empty and visually hidden.
+    expect(region()).toHaveTextContent(/^$/);
+    expect(region()).toHaveAttribute('role', 'status');
+    expect(region().className).toBe('sr-only');
+
+    showUpload({ totalBytes, status: 'waiting', waitReason: 'connection', sentBytes: 100 });
+    expect(region()).toHaveTextContent('Cannot reach the server');
+
+    // A retry that moves a little, then waits again for the same reason: the
+    // region is not re-announced, and the visible line follows every step.
+    showUpload({ totalBytes, status: 'uploading', sentBytes: 4000 });
+    expect(region()).toHaveTextContent('Cannot reach the server');
+    expect(screen.getByTestId('upload-status')).toHaveTextContent(/^Part 1 of 3/);
+    showUpload({ totalBytes, status: 'waiting', waitReason: 'connection', sentBytes: 4000 });
+    expect(region()).toHaveTextContent('Cannot reach the server');
+
+    // A different reason is news.
+    showUpload({ totalBytes, status: 'waiting', waitReason: 'offline', sentBytes: 4000 });
+    expect(region()).toHaveTextContent('You are offline');
+
+    // Moving again within the same part keeps it; a STORED part clears it.
+    showUpload({ totalBytes, status: 'uploading', sentBytes: 5000 });
+    expect(region()).toHaveTextContent('You are offline');
+    showUpload({ totalBytes, status: 'uploading', sentBytes: DOCUMENT_PLAINTEXT_CHUNK_BYTES });
+    expect(region()).toHaveTextContent(/^$/);
+  });
+
+  it('never shows the bar full while the last byte is still awaiting the server', () => {
+    renderPanel();
+    showUpload({ totalBytes: 1000, sentBytes: 999 });
+    const bar = screen.getByRole('progressbar', { name: /holiday\.zip/ });
+    // 99.9% rounds to 100, which would read as stored.
+    expect(bar).toHaveAttribute('aria-valuenow', '99');
+
+    showUpload({ totalBytes: 1000, sentBytes: 1000 });
+    expect(bar).toHaveAttribute('aria-valuenow', '100');
+  });
+
+  it('toasts a stopped upload in exactly the words its row shows', async () => {
+    useDocumentsStore.setState({
+      retryUpload: vi.fn().mockRejectedValue(new UploadStoppedError(INTERRUPTED_MESSAGE, null)),
+      uploads: { 'up-1': makeUpload({ status: 'failed', error: INTERRUPTED_MESSAGE }) },
+    });
+    renderPanel();
+    expect(screen.getByTestId('upload-status')).toHaveTextContent(INTERRUPTED_MESSAGE);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry upload of holiday.zip' }));
+
+    await waitFor(() => {
+      expect(harness.toast).toHaveBeenCalledWith({ title: INTERRUPTED_MESSAGE, type: 'error' });
+    });
+  });
+
+  it('says in words when a resume could not reach the server', async () => {
+    useDocumentsStore.setState({
+      retryUpload: vi
+        .fn()
+        .mockRejectedValue(new AxiosError('Network Error', AxiosError.ERR_NETWORK)),
+      uploads: { 'up-1': makeUpload({ status: 'failed' }) },
+    });
+    renderPanel();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry upload of holiday.zip' }));
+
+    await waitFor(() => {
+      expect(harness.toast).toHaveBeenCalledWith({
+        title: 'Could not reach the server. Check your connection and try again.',
+        type: 'error',
+      });
     });
   });
 });

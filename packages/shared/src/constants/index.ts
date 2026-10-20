@@ -98,6 +98,24 @@ export const LOGIN_RATE_LIMIT_WINDOW_MINUTES = 15;
 // for guessing. The precise anti-brute-force controls are elsewhere: the
 // `MAX_LOGIN_ATTEMPTS` account lockout and the progressive per-email delay.
 export const LOGIN_RATE_LIMIT_MAX_PER_IP = 20;
+// Per-ACCOUNT ceiling on the requests that re-check the master password, per
+// LOGIN_RATE_LIMIT_WINDOW_MINUTES: changing it, 2FA setup, disable and new
+// backup codes, deleting the account, export, a vault key rotation, deleting
+// unreadable entries, backup setup, restore, password and recipients, security
+// email preferences and minting an invitation all share ONE budget. Every request
+// counts, successful ones included (the two 30 MB routes rely on that to bound
+// how often one account can send them). Ten is 960 guesses a day for someone
+// holding a stolen session, below the 1,440 the unlock screen already allows
+// (5 per 5 minutes), and enough for a person doing several protected things in a
+// row. Raised from 5 in 0.19.0; the server's `passwordVerifyLimiter` enforces it.
+export const PASSWORD_VERIFY_RATE_LIMIT_MAX = 10;
+// The one sentence every route that re-checks the master password answers a
+// WRONG proof with (a 401). Such a 401 is only ever produced after the session
+// was accepted, so the client recognises this exact sentence and reports it as a
+// typo instead of refreshing the session and sending the same proof again, which
+// cost the shared budget above a second attempt. Any other 401 is still treated
+// as a possibly expired session.
+export const MASTER_PASSWORD_PROOF_REFUSED_MESSAGE = 'Current password is incorrect';
 export const BACKUP_CODES_COUNT = 8;
 export const DEFAULT_PASSWORD_LENGTH = 20;
 
@@ -690,8 +708,9 @@ export const MIN_SUSTAINED_UPLOAD_BYTES_PER_SECOND = 128 * 1024;
 // browser's write pre-flight and again on read), never by the server, which sees
 // only the sealed bytes.
 //
-// 255 for the name and the MIME type, measured in UTF-16 code units, because that
-// is what a Zod `.max()` counts. 255 units is exactly NTFS's own filename limit;
+// 255 for the name (the original name shares it) and the MIME type, measured in
+// UTF-16 code units, because that is what a Zod `.max()` counts. 255 units is
+// exactly NTFS's own filename limit;
 // ext4 bounds a filename at 255 BYTES instead, so a name of 255 multi-byte
 // characters is legal here and may still be shortened by the browser when it
 // writes the download to such a filesystem. That is the right trade for a store
@@ -719,7 +738,7 @@ export const MAX_DOCUMENT_TAGS = 20;
 // are the same kind of value and a package name and a semver are both short; 64
 // units is generous against `prettier`/`jsonrepair` and a version string, and
 // narrow enough that the pair costs at most 384 of the metadata budget's bytes
-// (measured: the whole worst-case blob is 35_472 bytes of the 36_864 below).
+// (measured: the whole worst-case blob is 36_254 bytes of the 38_400 below).
 // They are the only two free-text fields in the blob that no user types, so the
 // bound exists to keep a hostile or buggy writer from spending the budget here
 // rather than to accommodate anyone.
@@ -744,12 +763,16 @@ export const MAX_DOCUMENT_TIMESTAMP_LENGTH = 40;
 // `.max()` over UTF-16 CODE UNITS, and one code unit costs up to 3 UTF-8 bytes
 // (Cyrillic 2, CJK 3; an astral character is 2 units and 4 bytes, so 2 per unit),
 // so the worst case a real user can write is three times the code-unit budget:
-// (255 + 255 + 32 + 10_000 + 20 * 50) * 3 = 34_626 bytes, plus the 64-character
-// hex digest and the JSON structure itself. 36 KiB covers 34_626 + 64 and leaves
-// about 2.1 KiB for the keys, the numbers, the timestamp and the transform record.
+// (255 + 255 + 255 + 32 + 10_000 + 20 * 50) * 3 = 35_391 bytes (the name, the
+// original name, the MIME type, the extension, the note and the tags), plus the
+// 64-character hex digest and the JSON structure itself. 37.5 KiB covers
+// 35_391 + 64 and leaves about 2.9 KiB for the keys, the numbers, the timestamp and
+// the transform record. It was 36 KiB until the original name joined the blob in
+// 0.19.0, and a stored blob only ever gets smaller than the bound, so raising it
+// leaves every existing document as it was.
 // MEASURED against the real schema rather than estimated: every string field at its
 // bound in 3-byte characters, both hex digests, an ISO instant, the three framing
-// numbers and the transform record serialize to 35_472 bytes, so 1_392 bytes are
+// numbers and the transform record serialize to 36_254 bytes, so 2_146 bytes are
 // spare and the budget provably admits a metadata object whose every field is
 // individually legal (`document-schema.test.ts` builds that object and asserts it,
 // which is what turns a new field or a raised field bound into a red test rather
@@ -763,13 +786,13 @@ export const MAX_DOCUMENT_TIMESTAMP_LENGTH = 40;
 // MAX_ENCRYPTED_DOCUMENT_META_LENGTH bounds the STORED string, which is base64 of
 // the ciphertext and therefore pure ASCII. AES-GCM ciphertext is exactly as long
 // as its plaintext, and the tag lives in its own column, so this is exactly the
-// base64 expansion of the byte budget: 36_864 / 3 * 4. A test pins that
+// base64 expansion of the byte budget: 38_400 / 3 * 4. A test pins that
 // derivation, because a stored bound that is merely "about right" is what refuses
 // a document whose every field is individually legal, on the write pre-flight,
 // with the file already chosen. A CODE-UNIT count is the wrong shape for either
 // number, which is why neither of them is one.
-export const MAX_DOCUMENT_META_JSON_BYTES = 36_864;
-export const MAX_ENCRYPTED_DOCUMENT_META_LENGTH = 49_152;
+export const MAX_DOCUMENT_META_JSON_BYTES = 38_400;
+export const MAX_ENCRYPTED_DOCUMENT_META_LENGTH = 51_200;
 
 // Ceiling past which the upload panel's optional format and repair transforms are
 // unavailable. Both run in the browser and hold the whole document plus its

@@ -24,6 +24,7 @@ import { describe, it, expect } from 'vitest';
 import {
   DOCUMENT_PLAINTEXT_CHUNK_BYTES,
   MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER,
+  MAX_DOCUMENTS_PER_USER,
 } from '@hvault/shared';
 import { config } from '../src/config/index.js';
 import {
@@ -31,6 +32,8 @@ import {
   DOCUMENT_RATE_LIMIT_WINDOW_MS,
   DOCUMENT_READ_RATE_LIMIT_MAX,
   DOCUMENT_UPLOAD_RATE_LIMIT_MAX,
+  DOCUMENT_WRITE_RATE_LIMIT_MAX,
+  VAULT_WRITE_RATE_LIMIT_WINDOW_MS,
   documentPartBudgetFor,
   documentPartLimiter,
   documentReadLimiter,
@@ -126,5 +129,29 @@ describe('the three limiters are three limiters', () => {
 
   it('spends every budget over the same fifteen-minute window', () => {
     expect(DOCUMENT_RATE_LIMIT_WINDOW_MS).toBe(15 * 60 * 1000);
+  });
+});
+
+describe('documentWriteLimiter budget', () => {
+  // The most document rows an account can actually hold: the count is checked
+  // when a transfer OPENS, so with the limit minus one stored, all three
+  // concurrent transfers may still commit.
+  const reachableRows = MAX_DOCUMENTS_PER_USER + MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER - 1;
+
+  it('covers two bulk actions over every document the account can hold, back to back', () => {
+    // A bulk action sends one per-row request per selected document: tag every
+    // document, then purge a full trash, is two such passes. A budget below that
+    // stops a legitimate bulk action part-way through.
+    expect(DOCUMENT_WRITE_RATE_LIMIT_MAX).toBeGreaterThanOrEqual(reachableRows * 2);
+  });
+
+  it('stays a bound: no more than three whole-collection passes per window', () => {
+    // Every one of these writes an audit row kept for a year, so a budget grown
+    // past a few passes would be an open-ended audit-log writer again.
+    expect(DOCUMENT_WRITE_RATE_LIMIT_MAX).toBeLessThanOrEqual(reachableRows * 3);
+  });
+
+  it('is spent over the same fifteen-minute window as the vault-write budgets', () => {
+    expect(VAULT_WRITE_RATE_LIMIT_WINDOW_MS).toBe(15 * 60 * 1000);
   });
 });

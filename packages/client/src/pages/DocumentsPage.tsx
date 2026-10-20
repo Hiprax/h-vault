@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, Loader2, Trash2, WifiOff } from 'lucide-react';
 import { formatBytes } from '@hvault/shared';
 import type { DocumentUsageResponse } from '@hvault/shared';
@@ -6,21 +6,19 @@ import { getApiErrorMessage } from '../lib/utils';
 import { useConnectionStatus } from '../hooks/useConnectionStatus';
 import { useDocumentsConfig } from '../hooks/useDocumentsConfig';
 import { useDocumentsFilterView } from '../hooks/useDocumentsFilterView';
+import { useDocumentSelection } from '../hooks/useDocumentSelection';
 import { useDocumentsStore } from '../stores/documentsStore';
 import { useToast } from '../components/ui/Toast';
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '../components/ui/Dialog';
+import { ConfirmDialog } from '../components/ui/ConfirmDialog';
 import { DOCUMENT_SEARCH_RESULTS_ID, SearchBar } from '../components/vault/SearchBar';
 import { FolderRail } from '../components/folders/FolderRail';
 import { RailLayout } from '../components/layout/RailLayout';
 import { DocumentBulkDownload } from '../components/documents/DocumentBulkDownload';
 import { DocumentList } from '../components/documents/DocumentList';
+import {
+  DocumentSelectionBar,
+  type BulkRunGuard,
+} from '../components/documents/DocumentSelectionBar';
 import { DocumentTransfers } from '../components/documents/DocumentTransfers';
 import { DocumentUploadPanel } from '../components/documents/DocumentUploadPanel';
 import { StorageUnavailable } from '../components/documents/StorageUnavailable';
@@ -102,6 +100,40 @@ interface DocumentsViewProps {
 
 function DocumentsView({ config }: DocumentsViewProps) {
   const view = useDocumentsFilterView(true);
+  const selection = useDocumentSelection(view.rows, view.mode);
+  const headingRef = useRef<HTMLHeadingElement>(null);
+
+  // A running bulk action, owned here rather than by the bar (see `BulkRunGuard`).
+  // The ref is the synchronous claim: two presses in one frame both see `busy`
+  // false, and a second run would send every request twice.
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const bulkRunning = useRef(false);
+  const bulkRun = useMemo<BulkRunGuard>(
+    () => ({
+      busy: bulkBusy,
+      start: () => {
+        if (bulkRunning.current) return false;
+        bulkRunning.current = true;
+        setBulkBusy(true);
+        return true;
+      },
+      finish: () => {
+        bulkRunning.current = false;
+        setBulkBusy(false);
+      },
+    }),
+    [bulkBusy],
+  );
+
+  // When a selection ends (an action finished, or Clear), the bar that held focus
+  // is gone and focus would fall to the page itself; it is handed to the heading,
+  // as the vault page does when the control that had it disappears.
+  const wasSelecting = useRef(selection.active);
+  useEffect(() => {
+    const ended = wasSelecting.current && !selection.active;
+    wasSelecting.current = selection.active;
+    if (ended && document.activeElement === document.body) headingRef.current?.focus();
+  }, [selection.active]);
   const usage = useDocumentsStore((s) => s.usage);
   const trashCount = useDocumentsStore((s) => s.trashDocuments.length);
   const liveTransferCount = useDocumentsStore((s) => Object.keys(s.uploads).length);
@@ -234,7 +266,13 @@ function DocumentsView({ config }: DocumentsViewProps) {
       >
         <div className="space-y-6">
           <div className="space-y-1">
-            <h1 className="text-2xl font-bold text-[hsl(var(--foreground))]">Documents</h1>
+            <h1
+              ref={headingRef}
+              tabIndex={-1}
+              className="text-2xl font-bold text-[hsl(var(--foreground))] focus:outline-none"
+            >
+              Documents
+            </h1>
             <p className="text-sm text-[hsl(var(--muted-foreground))]">
               Any file, encrypted in your browser before a byte of it is sent. The server stores
               ciphertext and never learns a document&apos;s name, its type, its tags or its
@@ -249,7 +287,9 @@ function DocumentsView({ config }: DocumentsViewProps) {
             >
               <WifiOff className="h-4 w-4 shrink-0" />
               You are offline. Documents are deliberately not kept in the offline cache, so
-              uploading and opening one both need a connection.
+              uploading and opening one both need a connection. An upload already running pauses and
+              continues when you are back online, as long as this tab stays open and the vault
+              unlocked.
             </p>
           )}
 
@@ -288,7 +328,22 @@ function DocumentsView({ config }: DocumentsViewProps) {
               favorites or trash filter, the same search. A control placed in the
               toolbar beside the search box would have read as an action on the
               page rather than on that list. */}
-          <DocumentBulkDownload documents={view.rows} invalidCount={view.invalidCount} />
+          <DocumentBulkDownload
+            documents={selection.active ? selection.rows : view.rows}
+            invalidCount={view.invalidCount}
+            selected={selection.active}
+          />
+
+          {/* Directly above the rows it acts on, and only while some of them are
+              selected, as on the vault list. */}
+          {selection.active && (
+            <DocumentSelectionBar
+              mode={view.mode}
+              selection={selection}
+              run={bulkRun}
+              onStorageReleased={readUsage}
+            />
+          )}
 
           <DocumentList
             id={DOCUMENT_SEARCH_RESULTS_ID}
@@ -299,40 +354,22 @@ function DocumentsView({ config }: DocumentsViewProps) {
             mode={view.mode}
             folderNames={view.folderNames}
             searching={searchQuery.trim() !== ''}
+            isSelected={selection.isSelected}
+            selecting={selection.active}
+            onToggleSelect={selection.toggle}
           />
         </div>
       </RailLayout>
 
-      <Dialog open={showEmptyTrash} onOpenChange={setShowEmptyTrash}>
-        <DialogContent className="max-w-sm">
-          <DialogHeader>
-            <DialogTitle>Empty the document trash</DialogTitle>
-            <DialogDescription>
-              This permanently deletes all {trashCount} document(s) in the trash. Each stored file
-              is removed from object storage and the only copy of the key that decrypts it is
-              destroyed with it. Nothing can bring them back. The storage they occupy is released.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <button
-              type="button"
-              onClick={() => setShowEmptyTrash(false)}
-              className="rounded-md px-3 py-2 text-sm text-[hsl(var(--foreground))] transition-colors hover:bg-[hsl(var(--accent))]"
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              onClick={handleEmptyTrash}
-              disabled={emptying}
-              className="inline-flex items-center gap-2 rounded-md bg-[hsl(var(--destructive))] px-3 py-2 text-sm font-medium text-[hsl(var(--destructive-foreground))] transition-opacity hover:opacity-90 disabled:opacity-50"
-            >
-              {emptying && <Loader2 className="h-4 w-4 animate-spin" />}
-              Delete all forever
-            </button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <ConfirmDialog
+        open={showEmptyTrash}
+        onOpenChange={setShowEmptyTrash}
+        title="Empty the document trash"
+        description={`This permanently deletes all ${String(trashCount)} document(s) in the trash. Each stored file is removed from object storage and the only copy of the key that decrypts it is destroyed with it. Nothing can bring them back. The storage they occupy is released.`}
+        confirmLabel="Delete all forever"
+        onConfirm={handleEmptyTrash}
+        busy={emptying}
+      />
     </>
   );
 }

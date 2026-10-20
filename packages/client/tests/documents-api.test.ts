@@ -150,10 +150,17 @@ describe('documentsApi — upload lifecycle', () => {
     expect(mockPost).toHaveBeenCalledWith('/documents/uploads', body);
   });
 
-  it('reads one staging row', async () => {
+  it('reads one staging row, with no signal key unless one is given', async () => {
     await getDocumentUploadApi(DOC_ID);
+    expect(mockGet).toHaveBeenCalledWith(`/documents/uploads/${DOC_ID}`, {});
 
-    expect(mockGet).toHaveBeenCalledWith(`/documents/uploads/${DOC_ID}`);
+    // A resume's ledger read is a step of a live transfer, so going offline must
+    // be able to end it: the signal reaches axios unchanged.
+    const controller = new AbortController();
+    await getDocumentUploadApi(DOC_ID, controller.signal);
+    expect(mockGet).toHaveBeenLastCalledWith(`/documents/uploads/${DOC_ID}`, {
+      signal: controller.signal,
+    });
   });
 
   it('sends a part as binary, with the digest header and the 1-based part number', async () => {
@@ -219,7 +226,13 @@ describe('documentsApi — upload lifecycle', () => {
 
     // The wrapped key crosses the wire a second time here on purpose: it is what
     // makes a rotation refusal cost one request instead of the whole file.
-    expect(mockPost).toHaveBeenCalledWith(`/documents/uploads/${DOC_ID}/complete`, body);
+    expect(mockPost).toHaveBeenCalledWith(`/documents/uploads/${DOC_ID}/complete`, body, {});
+
+    const controller = new AbortController();
+    await completeDocumentUploadApi(DOC_ID, body, controller.signal);
+    expect(mockPost).toHaveBeenLastCalledWith(`/documents/uploads/${DOC_ID}/complete`, body, {
+      signal: controller.signal,
+    });
   });
 
   it('aborts a transfer with a bounded per-call timeout when one is given', async () => {
@@ -239,10 +252,15 @@ describe('documentsApi — upload lifecycle', () => {
 });
 
 describe('documentsApi — one document', () => {
-  it('reads one row', async () => {
+  it('reads one row, forwarding a signal only when one is given', async () => {
     await getDocumentApi(DOC_ID);
+    expect(mockGet).toHaveBeenCalledWith(`/documents/${DOC_ID}`, {});
 
-    expect(mockGet).toHaveBeenCalledWith(`/documents/${DOC_ID}`);
+    const controller = new AbortController();
+    await getDocumentApi(DOC_ID, controller.signal);
+    expect(mockGet).toHaveBeenLastCalledWith(`/documents/${DOC_ID}`, {
+      signal: controller.signal,
+    });
   });
 
   it('reads a segment as an ArrayBuffer at its 0-based index', async () => {

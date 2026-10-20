@@ -726,7 +726,7 @@ export async function gotoTotpImportTool(page: Page): Promise<void> {
   await expect(page).toHaveURL(/\/tools\/totp-import/);
   // A lazy chunk, like the file-encryption panel: this is the request that makes
   // the dev server transform it on demand.
-  await expect(page.getByText(/Transfer accounts/i)).toBeVisible({
+  await expect(page.getByText(/Transfer codes/i)).toBeVisible({
     timeout: LAZY_ROUTE_TIMEOUT_MS,
   });
 }

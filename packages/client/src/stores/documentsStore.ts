@@ -71,6 +71,7 @@
  */
 
 import { create } from 'zustand';
+import { isAxiosError } from 'axios';
 import {
   DOCUMENT_NONCE_PREFIX_BYTES,
   DOCUMENT_PLAINTEXT_CHUNK_BYTES,
@@ -79,7 +80,6 @@ import {
   documentExtension,
   documentMetaSchema,
   documentResponseSchema,
-  documentUploadResponseSchema,
 } from '@hvault/shared';
 import type {
   ApiResponse,
@@ -90,15 +90,12 @@ import type {
   UpdateDocumentInput,
 } from '@hvault/shared';
 import type { EmptyDocumentTrashResult } from '../services/api/documentsApi.js';
-import { staleVaultKeyVersion } from '../services/api/staleVaultKey.js';
 import {
   DOCUMENT_PAGE_SIZE,
   MAX_DOCUMENT_PAGES,
   abortDocumentUploadApi,
-  completeDocumentUploadApi,
   deleteDocumentApi,
   emptyDocumentTrashApi,
-  getDocumentUploadApi,
   getDocumentUsageApi,
   initDocumentUploadApi,
   listDocumentTrashApi,
@@ -106,12 +103,8 @@ import {
   purgeDocumentApi,
   restoreDocumentApi,
   updateDocumentApi,
-  uploadDocumentPartApi,
 } from '../services/api/documentsApi.js';
-import { getProfileApi } from '../services/api/userApi.js';
 import { checkHeldVaultKey } from './heldVaultKey.js';
-import { ensureCsrfToken } from '../services/api/client.js';
-import { isSessionGone } from '../services/auth/sessionFailure.js';
 import { cryptoService } from '../services/crypto/cryptoService.js';
 import {
   decryptMeta,
@@ -126,7 +119,9 @@ import {
   zeroDek,
   type DocumentBytes,
 } from '../services/crypto/documentCryptoService.js';
+import type { TransferContext } from '../services/documents/uploadRecovery.js';
 import { getSha256Factory } from '../lib/lazySha256.js';
+import { loadUploadRecovery } from '../lib/lazyUploadRecovery.js';
 import { logger } from '../lib/logger.js';
 import { useAuthStore } from './authStore.js';
 import { DECRYPTION_CONCURRENCY, mapWithConcurrency } from './vaultStore.js';
@@ -179,7 +174,18 @@ export interface DecryptedDocument {
  * dead-code gate is answered by removing an `export` keyword, never by an ignore
  * entry.
  */
-type DocumentUploadStatus = 'uploading' | 'finalizing' | 'failed';
+type DocumentUploadStatus = 'uploading' | 'waiting' | 'finalizing' | 'failed';
+
+/**
+ * Why a `waiting` transfer is not moving bytes, which decides what its row says.
+ *
+ * `offline` and `connection` are waits that cost the server nothing and never
+ * end the transfer: the browser reports offline, or the server could not be
+ * reached at all. `interrupted` is a part the server WAS reached for and cut off
+ * part-way, which is retried a bounded number of times. `server` is the server
+ * answering with an error, retried on its own ladder.
+ */
+type DocumentUploadWaitReason = 'offline' | 'connection' | 'interrupted' | 'server';
 
 /**
  * The renderable half of one transfer: every field serializable, `error` already a
@@ -191,9 +197,20 @@ export interface DocumentUploadProgress {
   fileName: string;
   /** Plaintext bytes in the whole document. */
   totalBytes: number;
-  /** Plaintext bytes sent so far, measured from the start of the current part. */
+  /**
+   * How far the transfer has got, in plaintext bytes: ABSOLUTE (the confirmed
+   * prefix plus the current part's fraction, never an accumulation) and a
+   * HIGH-WATER MARK, so it never moves backwards. A part re-sent after an
+   * interruption covers ground the bar already shows rather than dragging it back,
+   * and a part's in-flight bytes stop one short of its end until the server has
+   * confirmed it, so nothing reads as stored before it is.
+   */
   sentBytes: number;
   status: DocumentUploadStatus;
+  /** Present only while `status` is `waiting`. */
+  waitReason?: DocumentUploadWaitReason | undefined;
+  /** True while a part that had already shown progress is being sent again. */
+  resending?: boolean | undefined;
   error?: string | undefined;
 }
 
@@ -215,7 +232,11 @@ export interface DocumentUploadProgress {
  * its parts are already stored and a retry re-sends only what the server does
  * not hold — so closing the tab on one costs nothing a confirmation would save.
  *
- * A predicate rather than two `!== 'failed'` comparisons, so a fourth status
+ * A `waiting` transfer IS live: it is paused for the network or the server and
+ * resumes by itself, and closing the tab is the one thing that loses that resume
+ * (the DEK is memory-only).
+ *
+ * A predicate rather than two `!== 'failed'` comparisons, so a fifth status
  * cannot be added in a way that leaves the guard and the transfer list
  * answering differently. {@link DocumentUploadStatus} stays unexported deliberately, which
  * is why this is the shape the answer travels in.
@@ -225,8 +246,23 @@ export function isLiveTransfer(transfer: DocumentUploadProgress): boolean {
 }
 
 /** The handles, key material and inputs one transfer needs, kept out of the state tree. */
-interface UploadSession {
+export interface UploadSession {
   controller: AbortController;
+  /**
+   * The recovery engine this transfer was started with. A session exists only
+   * once the engine has loaded, so a resume reads it from here rather than
+   * awaiting a load that can no longer fail.
+   */
+  recovery: UploadRecoveryModule;
+  /**
+   * What "Retry now" calls, or `null` when there is nothing to cut short.
+   *
+   * Set only by the recovery engine while a transfer waits to retry (it ends the
+   * wait) or makes the attempt that follows a wait (it ends that attempt, which
+   * costs the server nothing, and starts the next at once). It never creates a
+   * controller or a loop, so it cannot orphan one.
+   */
+  wake: (() => void) | null;
   /**
    * Whether a resume is being PREPARED for this transfer right now.
    *
@@ -266,6 +302,7 @@ interface UploadSession {
    */
   sliceDigests: DocumentBytes[];
   name: string;
+  originalName: string;
   mime: string;
   tags: string[];
   note?: string | undefined;
@@ -288,12 +325,27 @@ export interface StartUploadInput {
   source: Blob;
   /** The document's name, sealed into the metadata and never sent in the clear. */
   name: string;
+  /**
+   * The name of the file as it was handed over, sealed beside `name` and never
+   * rewritten afterwards. Defaults to `name`: a caller that does not let anyone
+   * rename the file first (the authenticator import) uploads it under its own
+   * name, and only the upload panel, where the name can be edited before the
+   * upload starts, has two different values to pass.
+   */
+  originalName?: string | undefined;
   /** The MIME type, which may legitimately be empty for a type the OS did not recognise. */
   mime: string;
   folderId?: string | undefined;
   tags?: string[] | undefined;
   note?: string | undefined;
   transform?: DocumentMeta['transform'];
+  /**
+   * Called, synchronously, the moment the transfer is registered and has a row
+   * of its own. Until then nothing is on screen for it, which is why the upload
+   * panel keeps the file and the details it collected until this fires: a start
+   * the server refuses, or one attempted offline, must not throw them away.
+   */
+  onRegistered?: ((uploadId: string) => void) | undefined;
 }
 
 /** The metadata fields a caller may rewrite after a document is committed. */
@@ -359,6 +411,8 @@ interface DocumentsState {
   fetchUsage: () => Promise<void>;
   startUpload: (input: StartUploadInput) => Promise<string>;
   retryUpload: (uploadId: string) => Promise<string>;
+  /** Cut a waiting transfer's wait short ("Retry now"); a no-op otherwise. */
+  resumeUploadNow: (uploadId: string) => void;
   cancelUpload: (uploadId: string) => void;
   updateDocumentMeta: (id: string, changes: DocumentMetaUpdate) => Promise<void>;
   setFavorite: (id: string, favorite: boolean) => Promise<void>;
@@ -392,18 +446,18 @@ interface DocumentsState {
 // Tunables
 // ---------------------------------------------------------------------------
 
+/** The recovery engine's module, typed without importing it eagerly. */
+type UploadRecoveryModule = typeof import('../services/documents/uploadRecovery.js');
+
 /**
- * The waits before each retry of one part, in order.
+ * What the store says when a rename would change a document's file type.
  *
- * Three retries after the first attempt, so a part is attempted four times in
- * total before the transfer is marked failed. The doubling matters more than the
- * count: a transient drop clears in under a second, while a captive portal or a
- * sleeping radio does not, and a fixed short delay would spend the whole budget
- * inside the outage. After the last one the upload stops and stays RESUMABLE — the
- * parts already stored are still stored, and a retry re-reads the ledger and skips
- * them.
+ * Defined HERE, in the store that enforces it, and imported by the detail
+ * helpers that pre-check it, never the other way round: those helpers live in
+ * lazy page chunks, and this store is in the initial payload.
  */
-const PART_RETRY_DELAYS_MS = [1_000, 2_000, 4_000] as const;
+export const DOCUMENT_TYPE_LOCKED_MESSAGE =
+  "A document's file type is fixed when it is added: rename the part of the name before the extension.";
 
 /**
  * Bounded per-call timeout for the best-effort abort fired during a lock or a
@@ -428,6 +482,15 @@ let fetchDocumentsGeneration = 0;
 let fetchTrashGeneration = 0;
 let fetchUsageGeneration = 0;
 let mutationGeneration = 0;
+
+/**
+ * The current mutation generation, for a caller that queues its own writes (a
+ * bulk action paced through `sendPaced`) and must stop once a lock or sign-out
+ * has cleared this store.
+ */
+export function documentsMutationGeneration(): number {
+  return mutationGeneration;
+}
 
 let fetchDocumentsInFlight: Promise<void> | null = null;
 let fetchTrashInFlight: Promise<void> | null = null;
@@ -561,7 +624,7 @@ function base64ToBytes(value: string): DocumentBytes {
  * throw rather than fall back: a 200 that says `success: false` means something is
  * wrong that nothing else would notice.
  */
-function payloadOf<T>(response: { data: ApiResponse<T> }, action: string): T {
+export function payloadOf<T>(response: { data: ApiResponse<T> }, action: string): T {
   const body = response.data;
   if (!body.success) throw new Error(`Failed to ${action}`);
   return body.data;
@@ -596,7 +659,7 @@ function randomDocumentId(): string {
  * the re-check after each one is what stops the loop sealing another segment under
  * a key that has just been zeroed.
  */
-function isAborted(signal: AbortSignal): boolean {
+export function isAborted(signal: AbortSignal): boolean {
   return signal.aborted;
 }
 
@@ -607,18 +670,23 @@ function isAborted(signal: AbortSignal): boolean {
  * are checked. Every SHA-256 renders to the same 64 characters, so a placeholder
  * makes the pre-flight measure exactly the byte budget the real blob will have.
  */
-const PLACEHOLDER_DIGEST = '0'.repeat(64);
+export const PLACEHOLDER_DIGEST = '0'.repeat(64);
 
 /**
  * Everything about a document's metadata that is known before the file is read.
  *
- * One definition, called twice: once by the pre-flight with a placeholder digest,
- * once by the seal with the real one. Written out twice, a bound checked up front
- * and a value sealed at the end could describe different documents.
+ * One definition, called three times: by the upload panel's own pre-check and by
+ * the store's pre-flight, each with a placeholder digest, and by the seal with
+ * the real one. Written out more than once, a bound checked up front and a value
+ * sealed at the end could describe different documents.
+ *
+ * The original name falls back to `name` here, in the one place the blob is
+ * shaped, so the store's session and the pre-checks cannot disagree about it.
  */
-function metaShapeFor(
+export function metaShapeFor(
   source: {
     name: string;
+    originalName?: string | undefined;
     mime: string;
     tags?: string[] | undefined;
     note?: string | undefined;
@@ -630,6 +698,7 @@ function metaShapeFor(
 ): Omit<DocumentMeta, 'sha256'> {
   return {
     name: source.name,
+    originalName: source.originalName ?? source.name,
     mime: source.mime,
     ext: documentExtension(source.name),
     plaintextBytes,
@@ -640,26 +709,6 @@ function metaShapeFor(
     ...(source.transform === undefined ? {} : { transform: source.transform }),
     capturedAt,
   };
-}
-
-/**
- * A promise that settles after `ms`, or as soon as the transfer is aborted.
- *
- * There is deliberately NO "already aborted on entry" guard. The one caller checks
- * the signal in its own `catch` and throws, with nothing awaited between that check
- * and this call, so entering here aborted is impossible by construction — and a
- * branch that cannot be reached is a branch no test can fail on.
- */
-function delay(ms: number, signal: AbortSignal): Promise<void> {
-  return new Promise((resolve) => {
-    function finish(): void {
-      clearTimeout(timer);
-      signal.removeEventListener('abort', finish);
-      resolve();
-    }
-    const timer = setTimeout(finish, ms);
-    signal.addEventListener('abort', finish, { once: true });
-  });
 }
 
 /**
@@ -761,6 +810,7 @@ const EMPTY_DOCUMENTS_STATE = {
   | 'fetchUsage'
   | 'startUpload'
   | 'retryUpload'
+  | 'resumeUploadNow'
   | 'cancelUpload'
   | 'updateDocumentMeta'
   | 'setFavorite'
@@ -919,6 +969,15 @@ export const useDocumentsStore = create<DocumentsState>((set, get) => ({
   // -----------------------------------------------------------------------
 
   startUpload: async (input: StartUploadInput): Promise<string> => {
+    // Captured FIRST, before anything is awaited: a lock that lands while the
+    // recovery engine is being fetched, or while the transfer is being opened,
+    // moves this, and both windows are checked against the same capture.
+    const myGeneration = mutationGeneration;
+    // The engine is the FIRST await, so a chunk that cannot be fetched fails the
+    // start before a key exists or a staging row is opened, and leaves nothing to
+    // clean up.
+    const recovery = await loadUploadRecovery();
+    if (myGeneration !== mutationGeneration) throw new UploadCancelledError();
     const vaultKey = getVaultKey();
 
     const totalBytes = input.source.size;
@@ -934,17 +993,24 @@ export const useDocumentsStore = create<DocumentsState>((set, get) => ({
     //
     // The digest is not known yet, so a placeholder of the right SHAPE stands in
     // for it. Every SHA-256 is the same length, so the byte budget this checks is
-    // the byte budget the real blob will have.
-    documentMetaSchema.parse({
+    // the byte budget the real blob will have. A refusal is the first issue's own
+    // sentence, never a serialized issue list: the upload panel runs the fuller
+    // `uploadRefusal` before it calls this, so this is the backstop for any other
+    // caller.
+    const preflight = documentMetaSchema.safeParse({
       ...metaShapeFor(input, totalBytes, chunkCount, capturedAt),
       sha256: PLACEHOLDER_DIGEST,
     });
+    if (!preflight.success) {
+      throw new Error(
+        preflight.error.issues[0]?.message ?? 'These document details cannot be stored.',
+      );
+    }
 
     const dek = generateDek();
     const streamSalt = randomBytes(DOCUMENT_STREAM_SALT_BYTES);
     const noncePrefix = randomBytes(DOCUMENT_NONCE_PREFIX_BYTES);
 
-    const myGeneration = mutationGeneration;
     let init: { uploadId: string; vaultKeyVersion: number; chunkPlaintextBytes: number };
     try {
       // The wrapped key sent HERE is provisional, and the server never reads it
@@ -1004,12 +1070,15 @@ export const useDocumentsStore = create<DocumentsState>((set, get) => ({
 
     sessions.set(uploadId, {
       controller: new AbortController(),
+      recovery,
+      wake: null,
       retrying: false,
       dek,
       source: input.source,
       sourceSize: totalBytes,
       sliceDigests: [],
       name: input.name,
+      originalName: input.originalName ?? input.name,
       mime: input.mime,
       tags: input.tags ?? [],
       ...(input.note === undefined ? {} : { note: input.note }),
@@ -1032,6 +1101,14 @@ export const useDocumentsStore = create<DocumentsState>((set, get) => ({
         },
       },
     }));
+    // The transfer has its row now, so the caller may let go of what it holds. A
+    // callback that throws is the caller's bug and must not strand a registered
+    // transfer with nothing running it.
+    try {
+      input.onRegistered?.(uploadId);
+    } catch (error) {
+      logger.error('An upload registration callback failed', { error });
+    }
 
     return runTransfer(set, uploadId, new Set<number>());
   },
@@ -1051,7 +1128,7 @@ export const useDocumentsStore = create<DocumentsState>((set, get) => ({
     // OVERWRITES the first's, so the first loop keeps running against a controller
     // nothing in this module holds. `cancelUpload` then aborts the surviving
     // controller and zeroes the DEK, while the orphan — whose own signal was never
-    // aborted, so `completeTransfer`'s abort check cannot help it — walks on to
+    // aborted, so the completion's abort check cannot help it — walks on to
     // `wrapDek` and commits a key made of 32 zero bytes. The metadata key derives
     // from the same zeroes, so the row LISTS with its real name while its segments,
     // sealed under the stream key derived from the REAL DEK, can never be opened
@@ -1064,46 +1141,79 @@ export const useDocumentsStore = create<DocumentsState>((set, get) => ({
     session.retrying = true;
 
     // The ledger, not a local guess, decides what still has to be sent. A part the
-    // server already holds is skipped, but its slice is still read and hashed
-    // below: the whole-file digest has to cover bytes that are not being re-sent.
-    // A resume is the one moment a slice is read a second time, and whether it is
-    // the SAME slice is decided by its bytes, in `runTransfer`, before it is
-    // sealed (see `UploadSession.sliceDigests`).
-    const held = new Set<number>();
+    // server already holds is skipped, but its slice is still read and hashed: the
+    // whole-file digest has to cover bytes that are not being re-sent. Whether a
+    // re-read slice is the SAME slice is decided by its bytes, in `runTransfer`
+    // (see `UploadSession.sliceDigests`).
+    const { recovery } = session;
+    let plan: Awaited<ReturnType<UploadRecoveryModule['prepareResume']>>;
     try {
       try {
-        // Validated, like every committed row this client reads: the part numbers
-        // below decide which segments are re-sent, so a malformed ledger would
-        // silently re-send everything or throw somewhere less obvious than here.
-        const staging = documentUploadResponseSchema.parse(
-          payloadOf(await getDocumentUploadApi(uploadId), 'read the upload'),
-        );
-        for (const part of staging.parts) held.add(part.partNumber);
+        // Through the recovery engine, on the session's existing controller: a
+        // Retry pressed while still offline WAITS and resumes by itself, and a
+        // Cancel or a lock still ends it.
+        plan = await recovery.prepareResume(transferContext(set, uploadId, session));
       } catch (error) {
-        // The staging row is gone — its TTL fired, or it was cancelled elsewhere — so
-        // there is nothing to resume onto and the DEK must not outlive the attempt.
-        endSession(set, uploadId, { zero: true });
-        throw error;
+        // Ended from outside while it was being prepared: a cancel, a lock or a
+        // logout, which has already torn the session down and must not be
+        // reported as a failure of the file.
+        if (
+          sessions.get(uploadId) !== session ||
+          error instanceof UploadCancelledError ||
+          isAborted(session.controller.signal)
+        ) {
+          throw new UploadCancelledError();
+        }
+        // Anything else KEEPS the transfer. Only a staging row that is really gone
+        // ends it (below), and that was the defect here: an offline ledger read
+        // used to be treated as one, ending the session and destroying a
+        // perfectly resumable upload together with its key.
+        const stopped = recovery.toStoppedError(error, 'resume');
+        updateProgress(set, uploadId, (current) => ({
+          ...withoutWaitState(current),
+          status: 'failed',
+          error: stopped.message,
+        }));
+        throw stopped;
       }
+      if (sessions.get(uploadId) !== session) throw new UploadCancelledError();
 
-      session.controller = new AbortController();
-      updateProgress(set, uploadId, (current) => ({
-        ...current,
-        status: 'uploading',
-        error: undefined,
-        sentBytes: 0,
-      }));
+      if (plan.kind === 'resume') {
+        session.controller = new AbortController();
+        // `sentBytes` is deliberately NOT reset: the bar never moves backwards, and
+        // the parts the ledger holds are still held.
+        updateProgress(set, uploadId, (current) => ({
+          ...withoutWaitState(current),
+          status: 'uploading',
+          error: undefined,
+        }));
+      }
     } finally {
-      // Released on EVERY exit, including both of the throwing ones above. On the
-      // way out through the bottom the status is already `'uploading'`, so the
-      // guard above takes over from here — which is what lets a resume that fails
-      // again be resumed once more, instead of leaving a Retry button that refuses
-      // for the rest of the session. `runTransfer` is deliberately started OUTSIDE
-      // this block: the claim covers the preparation, never the transfer.
+      // Released on EVERY exit, including the throwing ones above. On the way out
+      // through the bottom the status is already `'uploading'`, so the status
+      // guard takes over from here — which is what lets a resume that fails again
+      // be resumed once more. `runTransfer` is deliberately started OUTSIDE this
+      // block: the claim covers the preparation, never the transfer.
       session.retrying = false;
     }
 
-    return runTransfer(set, uploadId, held);
+    if (plan.kind === 'gone') {
+      // The staging row is gone (its TTL fired, or it was cancelled elsewhere) and
+      // no document committed under its id: nothing to resume onto, and the DEK
+      // must not outlive the attempt.
+      endSession(set, uploadId, { zero: true });
+      throw new Error(plan.message);
+    }
+    if (plan.kind === 'committed') {
+      // The completion committed but its answer never arrived: adopt the document
+      // rather than ask for the file to be uploaded a second time.
+      return adoptCommittedRow(set, uploadId, plan.row, getVaultKey(), session.controller.signal);
+    }
+    return runTransfer(set, uploadId, plan.held);
+  },
+
+  resumeUploadNow: (uploadId: string): void => {
+    sessions.get(uploadId)?.wake?.();
   },
 
   cancelUpload: (uploadId: string): void => {
@@ -1129,7 +1239,20 @@ export const useDocumentsStore = create<DocumentsState>((set, get) => ({
       // row a reader is supposed to check against it.
       throw new Error('This document cannot be renamed: its metadata could not be opened.');
     }
+    // The file type is fixed when the document is added. The preview, the
+    // renderer and the download all key on the name's extension, so a rename that
+    // moved it would silently change how the document opens. Compared with the
+    // CURRENT name, so a document renamed to another extension before this rule
+    // existed keeps the one it shows today.
+    if (
+      changes.name !== undefined &&
+      documentExtension(changes.name) !== documentExtension(current.meta.name)
+    ) {
+      throw new Error(DOCUMENT_TYPE_LOCKED_MESSAGE);
+    }
 
+    // The spread carries everything the caller cannot change forward unchanged:
+    // the original name above all, which is recorded once at upload.
     const next: DocumentMeta = { ...current.meta };
     if (changes.name !== undefined) next.name = changes.name;
     if (changes.tags !== undefined) next.tags = changes.tags;
@@ -1437,10 +1560,28 @@ type SetState = (
   partial: Partial<DocumentsState> | ((state: DocumentsState) => Partial<DocumentsState>),
 ) => void;
 
-/** Tell the server a transfer is over, best-effort and bounded. */
-function fireAbort(uploadId: string): void {
+/**
+ * Tell the server a transfer is over, best-effort and bounded.
+ *
+ * An abort that got NO answer (the vault locked while offline, which a transfer
+ * that waits for the network makes the ordinary way for one to end) is tried
+ * ONCE more, on the next `online` event while this tab is open: otherwise the
+ * dead staging row would hold one of the account's three concurrent-upload slots
+ * and its reserved bytes until it expired a day later. A second failure is left
+ * to that expiry; this is a courtesy, never a loop.
+ */
+function fireAbort(uploadId: string, retryWhenOnline = true): void {
   void abortDocumentUploadApi(uploadId, ABORT_TIMEOUT_MS).catch((err: unknown) => {
     logger.warn('Failed to cancel an upload server-side', err);
+    if (retryWhenOnline && isAxiosError(err) && err.response === undefined) {
+      window.addEventListener(
+        'online',
+        () => {
+          fireAbort(uploadId, false);
+        },
+        { once: true },
+      );
+    }
   });
 }
 
@@ -1515,7 +1656,14 @@ async function isSliceFirstRead(
   return same;
 }
 
-/** Apply a change to one progress entry, leaving the rest of the registry alone. */
+/**
+ * Apply a change to one progress entry, leaving the rest of the registry alone.
+ *
+ * A change that hands back the entry it was given writes NOTHING: the callback
+ * returns the state itself, which zustand recognises as no change and does not
+ * announce, so a progress tick that does not move the high-water mark costs no
+ * render.
+ */
 function updateProgress(
   set: SetState,
   uploadId: string,
@@ -1523,9 +1671,33 @@ function updateProgress(
 ): void {
   set((state) => {
     const current = state.uploads[uploadId];
-    if (!current) return {};
-    return { uploads: { ...state.uploads, [uploadId]: change(current) } };
+    if (!current) return state;
+    const next = change(current);
+    if (next === current) return state;
+    return { uploads: { ...state.uploads, [uploadId]: next } };
   });
+}
+
+/** `current` without the fields that only describe a wait. */
+function withoutWaitState(current: DocumentUploadProgress): DocumentUploadProgress {
+  const { waitReason: _waitReason, resending: _resending, ...rest } = current;
+  return rest;
+}
+
+/** The handle the recovery engine drives one transfer through. */
+function transferContext(set: SetState, uploadId: string, session: UploadSession): TransferContext {
+  return {
+    uploadId,
+    session,
+    signal: session.controller.signal,
+    report: (patch) => {
+      updateProgress(set, uploadId, (current) =>
+        current.status === patch.status && current.waitReason === patch.waitReason
+          ? current
+          : { ...current, status: patch.status, waitReason: patch.waitReason },
+      );
+    },
+  };
 }
 
 /** Find a document in either list. */
@@ -1621,146 +1793,14 @@ async function fetchAllPages(
 }
 
 /**
- * How a failed part is answered.
- *
- * `retry` re-sends the identical sealed buffer after a backoff. `fail` stops the
- * transfer but leaves it RESUMABLE, because the parts already stored are still
- * stored. `abandon` stops it and takes the session with it, for the refusals where
- * a Retry button could only ever fail the same way.
- */
-type PartVerdict = 'retry' | 'fail' | 'abandon';
-
-/**
- * What to do about one failed part.
- *
- * A 401, and a 403 that is a CSRF rejection, never reach here as themselves: the
- * shared axios interceptor refreshes the access token and replays, and refreshes
- * the CSRF token and replays once, before either can surface. What arrives is
- * whatever the REPLAY produced, which is why a 401 seen here means the refresh
- * itself failed — the session is over, not the part.
- */
-function classifyPartFailure(error: unknown): PartVerdict {
-  const status = httpStatusOf(error);
-
-  // No response at all: offline, DNS, a dropped socket. The plan's named case, and
-  // the only one where waiting is the whole remedy.
-  if (status === null) return 'retry';
-
-  // The staging row is gone — expired, or cancelled from another tab. Every
-  // remaining part will answer the same way, `GET /uploads/:id` will too, and the
-  // object key and framing all belonged to that row. Offering a Retry here would
-  // be offering a button that 404s for ever.
-  if (status === 404) return 'abandon';
-
-  // The session, not the transfer, is what failed. The interceptor has already
-  // refreshed and replayed, and on an authoritative refusal it may already have
-  // begun logging out.
-  if (isSessionGone(error)) return 'abandon';
-
-  // The user-keyed part budget is a FIFTEEN MINUTE window. A 1s/2s/4s backoff
-  // exhausts itself in seven seconds and then fails anyway, having spent three
-  // more slots out of a budget that is already empty — so this fails at once and
-  // stays resumable, which is the outcome those seven seconds were going to reach.
-  if (status === 429) return 'fail';
-
-  // 5xx, including the 503 of a storage engine that is briefly unreachable and the
-  // 503 of an account that already has its share of part uploads in flight.
-  if (status >= 500) return 'retry';
-
-  // The server gave up waiting for this body: a stalled uplink, a laptop that
-  // slept mid-part, a deadline the transfer missed. Retried rather than failed,
-  // and deliberately on the SAME footing as a dropped socket — that is the same
-  // server-side event, and which of the two a browser reports depends only on
-  // whether it read the response before the connection went. Classifying them
-  // differently would make one stall resumable and the other fatal for a
-  // difference the user cannot see.
-  if (status === 408) return 'retry';
-
-  // Everything else is the server refusing this exact request on its merits: a
-  // missing length (411), a body over the parser's limit (413) or of the wrong
-  // type (415), a part outside the transfer, a length that is not the framing's,
-  // or a digest that does not match (400). Re-sending identical bytes cannot
-  // change any of them.
-  return 'fail';
-}
-
-/** The HTTP status behind a rejection, or `null` when no response ever arrived. */
-function httpStatusOf(error: unknown): number | null {
-  if (typeof error !== 'object' || error === null || !('response' in error)) return null;
-  const response: unknown = error.response;
-  if (typeof response !== 'object' || response === null || !('status' in response)) return null;
-  const status: unknown = response.status;
-  return typeof status === 'number' ? status : null;
-}
-
-/** Raised for a refusal that no retry could survive, so the session ends with it. */
-class UnresumableUploadError extends Error {
-  constructor(readonly cause: unknown) {
-    super(cause instanceof Error ? cause.message : String(cause));
-    this.name = 'UnresumableUploadError';
-  }
-}
-
-/**
- * Send one part, retrying a transient failure with the backoff above.
- *
- * The abort check comes FIRST in the catch, before the status is even looked at.
- * An aborted request rejects with no `response`, which the classifier would read as
- * "offline" and answer with a sleep and a re-send — after a lock, that means
- * sealing another segment under a DEK that has just been filled with zeroes.
- */
-async function sendPartWithRetry(
-  uploadId: string,
-  partNumber: number,
-  body: ArrayBuffer,
-  digest: string,
-  signal: AbortSignal,
-  onProgress: (loaded: number, total: number) => void,
-): Promise<void> {
-  for (let attempt = 0; ; attempt += 1) {
-    if (isAborted(signal)) throw new UploadCancelledError();
-    try {
-      // The CSRF token is resolved as an explicit step of this transfer rather
-      // than left to the request interceptor, which would also await it. The
-      // difference is not which token the part carries, and it is NOT that a
-      // replay is avoided — the interceptor's own fetch-and-replay already
-      // guarantees that, for every write in this application. What it buys is
-      // attribution: a token fetch that fails offline, or that the csrf-token
-      // endpoint's own limiter refuses, surfaces HERE, where it is known to be a
-      // token failure, instead of arriving as a rejection carrying the token
-      // request's config that this classifier would have to identify by sniffing
-      // a URL. It is retried by the loop below either way.
-      await ensureCsrfToken();
-      await uploadDocumentPartApi(uploadId, partNumber, body, {
-        digest,
-        signal,
-        onUploadProgress: (event) => {
-          onProgress(event.loaded, event.total ?? body.byteLength);
-        },
-      });
-      return;
-    } catch (error) {
-      if (isAborted(signal) || error instanceof UploadCancelledError) {
-        throw new UploadCancelledError();
-      }
-      const verdict = classifyPartFailure(error);
-      if (verdict === 'abandon') throw new UnresumableUploadError(error);
-      const nextDelay = PART_RETRY_DELAYS_MS[attempt];
-      if (verdict === 'fail' || nextDelay === undefined) throw error;
-      logger.warn('Retrying a document part', { uploadId, partNumber, attempt: attempt + 1 });
-      await delay(nextDelay, signal);
-    }
-  }
-}
-
-/**
  * Walk the file: hash every slice, seal and send the parts the server does not
  * already hold, then seal the metadata and commit.
  *
  * `alreadyHeld` carries PART numbers (1-based) from the staging ledger. Every slice
  * is still read and hashed even when its part is skipped, because the digest in the
  * metadata covers the whole file and a resumed transfer must arrive at the same
- * one.
+ * one. Every request goes through the recovery engine, which decides what a
+ * failure means (see `services/documents/uploadRecovery.ts`).
  */
 async function runTransfer(
   set: SetState,
@@ -1770,6 +1810,8 @@ async function runTransfer(
   const session = sessions.get(uploadId);
   if (!session) throw new UploadCancelledError();
   const { signal } = session.controller;
+  const { recovery } = session;
+  const ctx = transferContext(set, uploadId, session);
 
   try {
     // The key and the generation it belongs to, read together — the completion
@@ -1793,45 +1835,60 @@ async function runTransfer(
         // seal a whole-file digest of bytes the server does not hold: the transfer
         // cannot continue either way, so it ends here, key zeroed, row released.
         fireAbort(uploadId);
-        throw new UnresumableUploadError(new Error(SOURCE_CHANGED_MESSAGE));
+        throw new recovery.UnresumableUploadError(new Error(SOURCE_CHANGED_MESSAGE));
       }
       hasher.update(slice);
 
       const partNumber = index + 1;
       if (!alreadyHeld.has(partNumber)) {
+        // Sealed ONCE and re-sent byte for byte by every retry of this part.
         const sealed = await encryptSegment(
           streamKey,
           { noncePrefix: session.noncePrefix, index, isLast: index === session.chunkCount - 1 },
           slice,
         );
-        await sendPartWithRetry(
-          uploadId,
-          partNumber,
-          sealed.buffer,
-          await sealedSegmentDigest(sealed),
-          signal,
-          // Progress is ABSOLUTE — the completed prefix plus this part's own
-          // fraction — never an accumulator. The interceptor replays a whole part
-          // after a token refresh and `onUploadProgress` restarts it at zero, so a
-          // running total would count those bytes twice and push the bar past the
-          // end of the file.
-          (loaded, total) => {
-            const fraction = total > 0 ? Math.min(1, loaded / total) : 0;
-            updateProgress(set, uploadId, (current) => ({
-              ...current,
-              sentBytes: Math.min(current.totalBytes, start + Math.round(slice.length * fraction)),
-            }));
+        // A part's in-flight bytes stop one short of its end: the browser can hand
+        // a whole part over before the server has stored it, and the bar must not
+        // read as stored until it is. A zero-byte part caps at its own start.
+        const inFlightCap = Math.max(0, slice.length - 1);
+        await recovery.sendPart(ctx, partNumber, sealed.buffer, await sealedSegmentDigest(sealed), {
+          // A part that had already shown progress is being sent again: say so,
+          // because the bar will not move until the re-send passes it.
+          onAttempt: () => {
+            updateProgress(set, uploadId, (current) =>
+              current.sentBytes > start && current.resending !== true
+                ? { ...current, resending: true }
+                : current,
+            );
           },
-        );
+          // Progress is ABSOLUTE (the completed prefix plus this part's own
+          // fraction, never an accumulator) and a HIGH-WATER mark: a retried part
+          // restarts at zero, and a running total or a plain write would drag the
+          // bar backwards on every attempt.
+          onProgress: (loaded, total) => {
+            const fraction = total > 0 ? Math.min(1, loaded / total) : 0;
+            const reached = start + Math.min(Math.round(slice.length * fraction), inFlightCap);
+            updateProgress(set, uploadId, (current) =>
+              reached > current.sentBytes
+                ? { ...current, sentBytes: Math.min(current.totalBytes, reached) }
+                : current,
+            );
+          },
+        });
       }
-      updateProgress(set, uploadId, (current) => ({
-        ...current,
-        sentBytes: Math.min(current.totalBytes, start + slice.length),
-      }));
+      updateProgress(set, uploadId, (current) => {
+        const confirmed = Math.min(current.totalBytes, start + slice.length);
+        if (confirmed <= current.sentBytes && current.resending === undefined) return current;
+        const { resending: _resending, ...rest } = current;
+        return { ...rest, sentBytes: Math.max(current.sentBytes, confirmed) };
+      });
     }
 
     if (isAborted(signal)) throw new UploadCancelledError();
-    updateProgress(set, uploadId, (current) => ({ ...current, status: 'finalizing' }));
+    updateProgress(set, uploadId, (current) => ({
+      ...withoutWaitState(current),
+      status: 'finalizing',
+    }));
 
     const meta: DocumentMeta = {
       ...metaShapeFor(session, session.sourceSize, session.chunkCount, session.capturedAt),
@@ -1842,50 +1899,8 @@ async function runTransfer(
       meta,
     );
 
-    const row = await completeTransfer(
-      session,
-      uploadId,
-      sealedMeta,
-      vaultKey,
-      vaultKeyVersion,
-      signal,
-    );
-    endSession(set, uploadId, { zero: true });
-    // The document IS committed, so this is not a failure and nothing is thrown —
-    // but opening it for the list is a LOCAL write, and a lock or a logout that
-    // landed while the completion was in flight must not have it put decrypted
-    // plaintext back into a store `clearStore()` has just emptied. The captured
-    // vault key would still decrypt: clearing a key zeroes an exported copy, not
-    // the live handle.
-    if (isAborted(signal)) return uploadId;
-
-    // FROM HERE ON THE SIGNAL CAN NO LONGER MOVE, WHICH IS WHY THE GUARD CHANGES.
-    // `endSession` has removed this transfer from `sessions`, and that map is the
-    // only thing `clearStore()` and `cancelUpload` iterate — so nothing in this
-    // codebase can abort this controller any more, and a second `isAborted` check
-    // here would be a guard that cannot fire, reading as protection while
-    // providing none. `mutationGeneration` is what a lock or a logout actually
-    // moves, and it is the guard every other post-await writer in this file uses.
-    // That counter is incremented in exactly one place, `clearStore()`, so it says
-    // "everything was discarded" and nothing else — an ordinary delete or rename
-    // does not move it, and capturing it here rather than earlier is simply the
-    // narrowest honest window rather than a way to dodge one.
-    // Without it, a lock landing inside `openDocumentRow` — which is
-    // several Web Crypto round trips — put a fully decrypted name, type, note and
-    // digest into the store the lock had just emptied, where it survived until the
-    // next fetch and, on the logout path, into the next account on the same tab.
-    const myGeneration = mutationGeneration;
-    const opened = await openDocumentRow(row, vaultKey);
-    if (myGeneration !== mutationGeneration) return uploadId;
-    // The committed row is added to the list only when it is the row this transfer
-    // asked about. A response describing a DIFFERENT document is not something to
-    // recover from here — the upload did commit — but inserting it would put a row
-    // under an id whose keys it was not sealed with, and the next fetch reads the
-    // truth anyway.
-    if (opened?.id === uploadId) {
-      set((state) => ({ documents: [opened, ...state.documents] }));
-    }
-    return uploadId;
+    const row = await recovery.completeTransfer(ctx, sealedMeta, vaultKey, vaultKeyVersion);
+    return await adoptCommittedRow(set, uploadId, row, vaultKey, signal);
   } catch (error) {
     if (error instanceof UploadCancelledError || isAborted(signal)) {
       // Cancellation is not a failure of the file and leaves nothing to retry:
@@ -1893,122 +1908,72 @@ async function runTransfer(
       // is deliberately no entry left to mark.
       throw error instanceof UploadCancelledError ? error : new UploadCancelledError();
     }
-    if (error instanceof UnresumableUploadError) {
+    if (error instanceof recovery.UnresumableUploadError) {
       endSession(set, uploadId, { zero: true });
-      throw error.cause;
+      throw new recovery.UploadStoppedError(error.message, error.cause);
     }
+    // RESUMABLE: the entry and the DEK both survive, so the UI can offer a retry
+    // that re-sends under the same key (parts the server holds would otherwise
+    // become garbage). The row and the error say the same sentence.
+    const stopped = recovery.toStoppedError(error);
     updateProgress(set, uploadId, (current) => ({
-      ...current,
+      ...withoutWaitState(current),
       status: 'failed',
-      error: error instanceof Error ? error.message : String(error),
+      error: stopped.message,
     }));
-    throw error;
+    throw stopped;
   }
 }
 
 /**
- * Commit the transfer, recovering once from a vault-key rotation that landed
- * mid-upload.
+ * Put a committed document in front of the reader and end its transfer.
  *
- * The wrapped key is sent HERE, not taken from the staging row, and that is the
- * whole reason a rotation costs one request instead of the entire file: the id is
- * bound into every derivation, so re-initiating would mint a new id and force every
- * segment to be re-encrypted and re-sent. On a 409 carrying a version the client
- * re-reads its profile, decrypts the NEW vault key with the MEK it still holds,
- * rewraps the DEK it still holds, and retries THIS request alone — no part is
- * re-sent, and the negative that proves it is that no part request is issued.
+ * Shared by the ordinary end of a transfer and by a resume that found the
+ * completion had already committed while its answer was lost, so the two cannot
+ * differ. The session ends here, exactly once, with its key zeroed.
  *
- * `vaultKeyVersion` is THIS SESSION'S — the generation `authStore` recorded
- * alongside the wrapped vault key it signed in with — and never the number init
- * echoed back. The echo is the SERVER's own current version, so sending it back
- * asks the server to compare a number with itself: it agrees no matter which key
- * this session is actually holding. A rotation performed from another session
- * revokes nothing and refreshes no key here, so "still holding the superseded
- * key" is an ordinary state, not an exotic one — and the row that would commit is
- * one that lists, charges the quota, never opens, and blocks every future
- * rotation of the account. Sending the session's own number turns that silent
- * loss into the 409 below, which costs one request.
- *
- * Exactly one retry. A second 409 means a second rotation landed inside the
- * recovery, which is a race for the user to resolve by retrying, not one to spin
- * on.
+ * The committed row is opened only while nothing has discarded the store:
+ * opening it is a LOCAL write, and a lock or a logout that landed while the
+ * completion was in flight must not have it put decrypted plaintext back into a
+ * store `clearStore()` has just emptied. The captured vault key would still
+ * decrypt: clearing a key zeroes an exported copy, not the live handle.
  */
-async function completeTransfer(
-  session: UploadSession,
+async function adoptCommittedRow(
+  set: SetState,
   uploadId: string,
-  sealedMeta: { encryptedMeta: string; metaIv: string; metaTag: string },
+  row: unknown,
   vaultKey: CryptoKey,
-  vaultKeyVersion: number,
   signal: AbortSignal,
-): Promise<unknown> {
-  const send = async (key: CryptoKey, version: number): Promise<unknown> => {
-    const wrapKey = await deriveWrapKey(key, uploadId);
-    // Checked immediately before the DEK is read, with nothing awaited in between.
-    // `clearStore()` aborts and then SYNCHRONOUSLY zeroes, so a check any earlier
-    // leaves a window in which this wraps 32 zero bytes — and the server commits
-    // the row from THIS body, so the result is a document whose segments nothing
-    // can ever open. Web Crypto copies its input when `encrypt` is called, which
-    // is reached synchronously from here, so the copy is of the real key.
-    if (isAborted(signal)) throw new UploadCancelledError();
-    const wrapped = await wrapDek(session.dek, wrapKey);
-    return payloadOf(
-      await completeDocumentUploadApi(uploadId, {
-        ...sealedMeta,
-        ...wrapped,
-        vaultKeyVersion: version,
-      }),
-      'complete the upload',
-    );
-  };
+): Promise<string> {
+  endSession(set, uploadId, { zero: true });
+  if (isAborted(signal)) return uploadId;
 
-  try {
-    return await send(vaultKey, vaultKeyVersion);
-  } catch (error) {
-    // Discriminated on the PRESENCE of an integer `data.vaultKeyVersion`, never on
-    // the message: this is the one refusal in the surface that carries a number,
-    // and a 409 without one is an ordinary conflict.
-    const version = staleVaultKeyVersion(error);
-    if (version === null) throw error;
-    if (isAborted(signal)) throw new UploadCancelledError();
-
-    logger.info('Rewrapping a document key after a vault key rotation', { uploadId, version });
-    const rotatedKey = await currentVaultKey();
-    // The profile read is a full round trip, and an auto-lock is a wall-clock
-    // deadline that does not wait for it.
-    if (isAborted(signal)) {
-      await cryptoService.clearCryptoKey(rotatedKey);
-      throw new UploadCancelledError();
-    }
-    try {
-      return await send(rotatedKey, version);
-    } finally {
-      await cryptoService.clearCryptoKey(rotatedKey);
-    }
+  // FROM HERE ON THE SIGNAL CAN NO LONGER MOVE, WHICH IS WHY THE GUARD CHANGES.
+  // `endSession` has removed this transfer from `sessions`, and that map is the
+  // only thing `clearStore()` and `cancelUpload` iterate — so nothing in this
+  // codebase can abort this controller any more. `mutationGeneration` is what a
+  // lock or a logout actually moves, and it is the guard every other post-await
+  // writer in this file uses.
+  const myGeneration = mutationGeneration;
+  const opened = await openDocumentRow(row, vaultKey);
+  if (myGeneration !== mutationGeneration) return uploadId;
+  // The committed row is added only when it is the row this transfer asked about:
+  // a row under another id was not sealed with this transfer's keys, and the next
+  // fetch reads the truth anyway. Inserted with a dedupe filter, because a
+  // listing that ran meanwhile may already hold it.
+  if (opened?.id === uploadId) {
+    set((state) => {
+      if (opened.deletedAt === undefined) {
+        return { documents: [opened, ...state.documents.filter((doc) => doc.id !== uploadId)] };
+      }
+      // `GET /documents/:id` also answers for a trashed row: it belongs in the
+      // trash, and only in a trash that has actually been read.
+      return state.trashLoaded
+        ? {
+            trashDocuments: [opened, ...state.trashDocuments.filter((doc) => doc.id !== uploadId)],
+          }
+        : state;
+    });
   }
-}
-
-/**
- * Re-derive the account's CURRENT vault key from the server's copy and the MEK.
- *
- * Deliberately does NOT write it into `authStore`. Adopting a rotated vault key
- * mid-session is a decision about the whole session — every item already in memory
- * was decrypted under the old one — and making it as a side effect of finishing one
- * upload would be exactly the kind of hidden state change nobody can reason about
- * later. The key returned here lives for one rewrap and is then cleared.
- */
-async function currentVaultKey(): Promise<CryptoKey> {
-  const { mek } = useAuthStore.getState();
-  if (!mek) throw new Error('Vault is locked. Unlock it before performing document operations.');
-  const profile = payloadOf(await getProfileApi(), 'read the profile');
-  const raw = await cryptoService.decryptVaultKey(
-    profile.encryptedVaultKey,
-    profile.vaultKeyIv,
-    profile.vaultKeyTag,
-    mek,
-  );
-  try {
-    return await cryptoService.importVaultKey(raw);
-  } finally {
-    cryptoService.clearKey(raw);
-  }
+  return uploadId;
 }

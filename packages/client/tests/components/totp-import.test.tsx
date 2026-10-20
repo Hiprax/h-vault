@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
+import { AxiosError } from 'axios';
 
 /**
  * The import flow, driven through the PASTE path.
@@ -66,7 +67,11 @@ vi.mock('../../src/stores/vaultStore', () => ({
 }));
 
 const mockStartUpload = vi.fn().mockResolvedValue('doc-1');
-vi.mock('../../src/stores/documentsStore', () => ({
+vi.mock('../../src/stores/documentsStore', async (importOriginal) => ({
+  // The REAL class, because the flow tells a cancellation apart with
+  // `instanceof`, and a stand-in would let that check pass against itself.
+  UploadCancelledError: (await importOriginal<typeof import('../../src/stores/documentsStore')>())
+    .UploadCancelledError,
   useDocumentsStore: { getState: () => ({ startUpload: mockStartUpload }) },
 }));
 
@@ -765,6 +770,107 @@ describe('saving to Documents', () => {
     expect(text.split('\n').filter((line) => line.startsWith('otpauth://'))).toHaveLength(2);
     // The file says what it is, in the file.
     expect(text).toContain('Anyone who reads this file can generate');
+  });
+
+  it('records the generated name as the original name, and says where to follow a registered upload', async () => {
+    let commit = (): void => {};
+    mockStartUpload.mockImplementationOnce((input: { onRegistered?: (id: string) => void }) => {
+      input.onRegistered?.('up-1');
+      return new Promise<string>((resolve) => {
+        commit = () => {
+          resolve('doc-1');
+        };
+      });
+    });
+    await renderFlow();
+    await readExport();
+    await screen.findByText('Acme');
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /save all to documents/i }));
+    });
+
+    const call = mockStartUpload.mock.calls[0]?.[0] as { name: string; originalName?: string };
+    expect(call.originalName).toBe(call.name);
+    expect(mockToast).toHaveBeenCalledWith({
+      title: 'Saving the codes to Documents. You can follow the upload on the Documents page.',
+      type: 'info',
+    });
+    // Registered is not stored: the button stays disabled, says where the codes
+    // are going, and no success is claimed yet.
+    const saving = screen.getByRole('button', { name: 'Saving to Documents' });
+    expect(saving).toBeDisabled();
+    expect(mockToast).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'success' }) as unknown as Record<string, unknown>,
+    );
+
+    await act(async () => {
+      commit();
+      await Promise.resolve();
+    });
+    expect(mockToast).toHaveBeenCalledWith({ title: `Saved as "${call.name}"`, type: 'success' });
+    expect(screen.getByRole('button', { name: 'Save all to Documents' })).toBeEnabled();
+    expect(mockStartUpload).toHaveBeenCalledTimes(1);
+  });
+
+  it('stores the codes once when the button is pressed twice before it can disable itself', async () => {
+    await renderFlow();
+    await readExport();
+    await screen.findByText('Acme');
+    const button = screen.getByRole('button', { name: /save all to documents/i });
+
+    // Two clicks inside ONE act: React has not re-rendered between them, so the
+    // button is still enabled for the second, exactly as a fast double click is.
+    await act(async () => {
+      button.click();
+      button.click();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'success' }) as unknown as Record<string, unknown>,
+      );
+    });
+    expect(mockFreshConfig).toHaveBeenCalledTimes(1);
+    expect(mockStartUpload).toHaveBeenCalledTimes(1);
+  });
+
+  it('says nothing when the upload is cancelled by a lock, and offers the button again', async () => {
+    const { UploadCancelledError } = await import('../../src/stores/documentsStore');
+    mockStartUpload.mockRejectedValueOnce(new UploadCancelledError());
+    await renderFlow();
+    await readExport();
+    await screen.findByText('Acme');
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /save all to documents/i }));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Save all to Documents' })).toBeEnabled();
+    });
+    expect(mockStartUpload).toHaveBeenCalledTimes(1);
+    expect(mockToast).not.toHaveBeenCalled();
+  });
+
+  it('says in words that the server could not be reached, never "Network Error"', async () => {
+    mockStartUpload.mockRejectedValueOnce(new AxiosError('Network Error', AxiosError.ERR_NETWORK));
+    await renderFlow();
+    await readExport();
+    await screen.findByText('Acme');
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /save all to documents/i }));
+    });
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith({
+        title: 'Could not reach the server. Check your connection and try again.',
+        type: 'error',
+      });
+    });
+    expect(mockToast).toHaveBeenCalledTimes(1);
   });
 
   it('refuses rather than pretending, when the server has no document storage', async () => {

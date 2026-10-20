@@ -82,7 +82,7 @@ stack that publishes exactly one loopback port, and a test suite that gates ever
 | **No enumeration oracles**        | Registration, login, lockout, password reset and verification-resend are all built so that response body _and_ response time are identical whether or not the account exists.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | **Account lockout**               | Per factor: 10 wrong passwords lock new sign-ins for 30 minutes, renewed while the guessing goes on, and 10 wrong codes lock the 2FA step. A locked sign-in answers a right and a wrong password identically, so it never confirms a guess; existing sessions are never locked out, and a browser holding a live device proof (left by a completed sign-in on this version, kept for 30 days of use) signs in normally. Progressive delays and an unlock email that also proves the browser that follows it.                                                                                                                                                                                                                                                                                                                                |
 | **Registration control**          | `REGISTRATION_MODE` makes registration `open` (the default, warned about at every production boot), `invite` (only an address holding an invitation minted for it, by the operator's CLI or by an account listed in `REGISTRATION_INVITERS`, single-use, 7 days, handed over as a link and never mailed) or `closed`; `REGISTRATION_ALLOWED_DOMAINS` restricts it to your domains.                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| **CSRF + rate limiting**          | HMAC-SHA256 double-submit tokens with constant-time verification, and [twenty rate-limit tiers](#rate-limiting), all but two backed by MongoDB, keyed per IP or per account, with IPv6 `/64` aggregation.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| **CSRF + rate limiting**          | HMAC-SHA256 double-submit tokens with constant-time verification, and [twenty-one rate-limit tiers](#rate-limiting), all but two backed by MongoDB, keyed per IP or per account, with IPv6 `/64` aggregation.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | **Breach detection**              | HaveIBeenPwned via k-anonymity — only a 5-character SHA-1 prefix ever leaves the server.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | **Audit log**                     | A searchable security log covering **55 distinct operations**, with TTL-based retention and a size bound per account: routine vault activity is capped at 100,000 entries (oldest removed first, and a run of identical edits counted into one entry), while security events are never trimmed (failed sign-ins and other entries a stranger can cause are capped separately at 5,000).                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | **Security emails**               | Email to the owner when something security-relevant happens: a correct master password entered during a lockout, a password reset or change, two-factor changes, a trusted browser, backup recipient changes, a copied session, the account being deleted. Only to a verified address, never with a link or a token, the same email never twice in a row within an hour, except the email saying security emails were turned off, which is always sent. You choose which in Settings; turning off the ones about a stolen password or session needs the master password and is itself emailed.                                                                                                                                                                                                                                              |
@@ -171,8 +171,8 @@ the sidebar and nothing to switch off.
   encrypted in segments that each seal to exactly 8 MiB — every segment carrying its own position
   and an end-of-file marker inside its nonce, so a hostile server cannot reorder, truncate, or
   splice one document into another without the decryption failing. What the server stores is ciphertext, a wrapped key and
-  sizes: **no filename, no MIME type, no tag, no note, no content**. The name, type, tags, note
-  and a whole-file SHA-256 live in their own sealed blob, and a download is checked against that
+  sizes: **no filename, no MIME type, no tag, no note, no content**. The name, the file's original
+  name, type, tags, note and a whole-file SHA-256 live in their own sealed blob, and a download is checked against that
   digest on the way out — so what comes back is byte-identical or it is discarded and you are
   told.
 - **Any file type uploads.** `DOCUMENT_ALLOWED_EXTENSIONS` is a **browser-side convenience**, not
@@ -183,8 +183,39 @@ the sidebar and nothing to switch off.
 - **Filed, favorited and findable.** Documents share the vault's folders, and the Documents page
   has the same rail the vault does: all documents, favorites, the trash, and the folder tree with
   a count per folder. A file uploaded while a folder is open is filed there. Search reaches a
-  document's name, its type, its tags and its note — every one of which is decrypted in your
-  browser, so what you searched for never leaves it.
+  document's name, its original name, its type, its tags and its note — every one of which is
+  decrypted in your browser, so what you searched for never leaves it.
+- **Named and described before it is sent.** The upload panel takes a name, tags and a note
+  beside the chosen file, the name filled in from the file's own, checked against the same limits
+  Edit details applies before a byte is read; a start the server refuses keeps the file and
+  everything typed. Tags are edited exactly as a vault item's are, in the upload panel and in Edit
+  details alike: each one a chip with its own remove button, added with Enter or Add, a duplicate or
+  a twenty-first refused with a sentence saying so, and a tag still typed in the box when you press
+  Upload or Save saved with the rest. **The file type is fixed when a document is added**: Edit details renames only
+  the part before the extension, shown beside the field, because the preview, the renderer and the
+  download all follow it. The **original name**, the file's name when it was added, is sealed with
+  the rest, shown on the document's page and never changed by a rename; documents added before
+  0.19.0 have none recorded and say so. A tab still running an earlier version does not know the
+  field and drops it if it edits a new document's details, so reload tabs opened before an update.
+- **Uploads wait out a lost connection.** An upload that goes offline, or cannot reach the
+  server, pauses and carries on by itself when the connection returns, as long as the tab stays
+  open and the vault unlocked; the row says why it is waiting, and **Retry now** tries at once.
+  Progress never moves backwards and counts a part only once the server has stored it. The limits
+  are stated rather than hidden: a part the server keeps cutting off part-way (a connection that
+  keeps dropping, or one too slow for the server's per-part deadline) gets four attempts, the
+  server's own allowance, and then stops with the parts already sent kept for **Retry**; and on a
+  link that is "connected" but reaches nothing, an attempt already in flight ends only when the
+  browser or the operating system gives up (Retry now shortens a wait for the connection, and a retry that has not
+  sent anything yet, but not a first attempt or one already sending). Closing the tab, Cancel or a
+  lock ends the upload.
+- **Select several and act on them at once.** Each row has a checkbox, as in the vault; while any is
+  ticked a bar above the list offers Delete, Move and Tag, and in the trash Restore and Delete
+  forever, with Select all and Clear. Every action is one request per document, paced, and reports
+  exactly what happened: the documents that could not be changed stay selected, with the reason, so
+  trying again is one click. If the server stops answering (no answer, a 5xx, or a rate limit
+  that is not a short pause the app waits out by itself), the run stops there and says how many were not sent, rather than leaving every remaining
+  document marked as being deleted. A selection belongs to the list it was made in, survives a search that
+  hides some of it (only what is visible is acted on) and is cleared when you change list.
 - **A trash you can actually open.** Deleting a document keeps it for thirty days, where it can be
   restored or destroyed for good, and it still occupies storage until it is. Emptying the trash
   tells you how many were destroyed, and says so plainly when the storage engine could not remove
@@ -193,7 +224,8 @@ the sidebar and nothing to switch off.
   what you see is what is really still in it. Nothing is destroyed on that path and nothing is lost.
 - **Take them all with you, in one action.** "Download all" on the Documents page saves every
   document the list is showing — which makes the folder, favorites, trash and search filters part
-  of the export, and is how a library too large for one run is broken into pieces. They go **one
+  of the export, and is how a library too large for one run is broken into pieces. While documents
+  are selected it becomes "Download selected" and saves just those. They go **one
   at a time and through exactly the same verified read a single download uses**, so every file is
   checked against the digest sealed with it before a byte reaches your disk; nothing is combined
   into an archive, because building one would mean assembling attacker-supplied bytes in the page
@@ -288,7 +320,7 @@ running storage engine is not a backup are in
 [Back up the database AND the document storage](#back-up-the-database-and-the-document-storage).
 
 That is the operator's answer, and it is not available to somebody who merely _uses_ an instance
-someone else runs. Theirs is **Download all** on the Documents page: plain decrypted files on their
+someone else runs. Theirs is **Download all** (or **Download selected**) on the Documents page: plain decrypted files on their
 own device, verified on the way out, owing nothing to the server afterwards. It is not a substitute
 for the operator's backup — it is a copy of what one account can see at one moment, and it lands
 wherever that browser puts downloads rather than anywhere the account controls — but it does mean
@@ -302,7 +334,7 @@ no user of a shared deployment is stuck inside it.
   live regions, and correct ARIA roles on virtualized lists (`react-window` above 50 items).
   Every page has one `main` landmark and one `h1` (a loading screen has only the `main`), headings
   never skip a level, and the `a11y` gate fails on any axe finding above minor (moderate, serious,
-  critical, or one axe gives no impact) in the thirty-eight views it scans.
+  critical, or one axe gives no impact) in the forty views it scans.
 - **Keyboard-first** — `Ctrl`+`L` lock, `Ctrl`+`N` new item, `Ctrl`+`K` search, `Ctrl`+`↑`/`↓`
   reorder folders (`Cmd` on macOS).
 - **Auto-lock on a wall-clock deadline** — the vault locks when your configured idle timeout has
@@ -464,7 +496,7 @@ flowchart TD
         HK2 --> SK["Segment key"]
         HK2 --> MK["Metadata key"]
         SK -->|"AES-256-GCM<br/>nonce = prefix + index + last-flag"| SEG["Sealed 8 MiB segments"]
-        MK -->|"AES-256-GCM<br/>fresh IV on every seal"| META["Sealed metadata:<br/>name · type · tags · note · SHA-256"]
+        MK -->|"AES-256-GCM<br/>fresh IV on every seal"| META["Sealed metadata:<br/>name · original name · type · tags · note · SHA-256"]
     end
 
     subgraph server["THE SERVER"]
@@ -497,7 +529,8 @@ could edit into one it cannot.
 Content is immutable after upload — a segment is never rewritten, so a nonce is never reused under
 a segment key — and replacing bytes means a new document. A resumed upload re-reads the file, and
 ends unless every slice is byte-identical (by SHA-256) to the one first read at its position. Renaming or retagging re-seals only the
-metadata blob, under a freshly generated IV each time.
+metadata blob, under a freshly generated IV each time, and carries the original name forward
+unchanged.
 
 ### Cryptographic parameters
 
@@ -1429,7 +1462,7 @@ are replaced with the generic status text, so an internal failure cannot leak it
 
 ## Rate limiting
 
-Twenty tiers, all but the two diagnostic ones backed by MongoDB so they hold across a PM2
+Twenty-one tiers, all but the two diagnostic ones backed by MongoDB so they hold across a PM2
 cluster. IP-keyed limiters collapse an IPv6 address to its `/64` prefix, so rotating the source
 address inside one allocation does not buy an attacker a fresh bucket.
 
@@ -1469,14 +1502,15 @@ Four rules govern where a limiter goes, and all four were learned the hard way:
 | Token verify     | 20 / IP       | 15 min | verify-email, reset-password, unlock-account, 2FA login, backup recipient confirmation                                                                                                                                                                                                                                                                                                           |
 | Refresh          | 200 / IP      | 15 min | token refresh — keyed by IP alone (the one identity an unauthenticated caller cannot forge), so it is shared by everyone behind one egress address; sized for ~60 open tabs                                                                                                                                                                                                                      |
 | Unlock           | 5 / user      | 5 min  | vault unlock verification                                                                                                                                                                                                                                                                                                                                                                        |
-| Password verify  | 5 / user      | 15 min | every re-authentication: change password, 2FA setup/disable/regenerate, delete account, export, vault key rotation, deleting unreadable entries, backup setup/restore/change-password/recipients, security email preferences, invitation minting                                                                                                                                                 |
+| Password verify  | 10 / user     | 15 min | every re-authentication: change password, 2FA setup/disable/regenerate, delete account, export, vault key rotation, deleting unreadable entries, backup setup/restore/change-password/recipients, security email preferences, invitation minting                                                                                                                                                 |
 | Breach check     | 30 / user     | 15 min | HaveIBeenPwned lookups (single prefix)                                                                                                                                                                                                                                                                                                                                                           |
 | Breach batch     | 300 / user    | 15 min | batched HaveIBeenPwned lookups — sized to cover a full-vault scan (many prefixes per request) without a partial result                                                                                                                                                                                                                                                                           |
-| General auth     | 60 / user     | 1 min  | profile, settings, sessions, trusted devices, audit log, folder list, document list, document trash, document usage, one document's metadata, the transfers in progress and one transfer, renaming, moving or favouriting a document, trashing, restoring and permanently deleting one document, backup settings and history, the four release routes, lock, logout, logout-all                  |
+| General auth     | 60 / user     | 1 min  | profile, settings, sessions, trusted devices, audit log, folder list, document list, document trash, document usage, one document's metadata, the transfers in progress and one transfer, backup settings and history, the four release routes, lock, logout, logout-all                                                                                                                         |
 | Heavy Ops        | 10 / user     | 15 min | empty trash (vault and documents), bulk delete, bulk move, export, backup trigger, backup download; keyed by account, so two people behind one address never share it                                                                                                                                                                                                                            |
 | Import           | 60 / user     | 15 min | vault import — a dedicated, larger budget because a big migration is sent as several encrypted batches                                                                                                                                                                                                                                                                                           |
 | Vault item write | 20,000 / user | 15 min | creating, editing, trashing, restoring and permanently deleting a vault item. Derived: two passes over the most items an account may hold, because the app sends one request per item for a bulk tag or a trash purge, and a smaller budget would stop one part-way through                                                                                                                      |
 | Folder write     | 1,000 / user  | 15 min | creating, renaming or re-parenting, deleting and re-sorting a folder. Derived the same way: two drags that re-sort every folder an account may hold                                                                                                                                                                                                                                              |
+| Document write   | 10,006 / user | 15 min | renaming, retagging or re-noting, favouriting or moving, trashing, restoring and permanently deleting one document. Derived the same way: two passes over the most documents an account can hold, because the app sends one request per document for a bulk action                                                                                                                               |
 | Vault list       | 3,100 / user  | 15 min | listing vault items and the trash, one page (up to 200 rows) per request. Derived: the fifty pages the largest vault takes at 200 a page, 62 times over: the app re-reads the whole vault, and the first page of the trash, every time the vault page opens, so this allows one visit to the largest vault every fifteen seconds for the whole window. Not the general tier, which logout shares |
 | 2FA setup        | 20 / user     | 15 min | confirming the code that finishes 2FA setup                                                                                                                                                                                                                                                                                                                                                      |
 | Document upload  | 120 / user    | 15 min | opening, completing and cancelling a document transfer — three requests per document whatever its size                                                                                                                                                                                                                                                                                           |
@@ -1508,8 +1542,8 @@ on a 429.
 
 In front of all of these, the golden host Nginx limits every address to 40 requests a second with a
 burst of 40, host-wide, and answers anything past that with its own 429 and `Retry-After: 5`. The
-app's bulk actions (tagging, permanent deletion and folder reordering, which send one request per
-row) therefore keep at most four requests in flight and wait out a 429 that asks for ten seconds or
+app's bulk actions (tagging, permanent deletion and folder reordering in the vault, and every bulk
+action on documents, which send one request per row) therefore keep at most four requests in flight and wait out a 429 that asks for ten seconds or
 less by themselves, up to three times, which costs a large action about five seconds for every forty
 entries past the first forty; a longer wait is the app's own budget running out, and is reported.
 Where many people share one address, render the site with `newapp --burst N` to raise that burst.
@@ -1713,7 +1747,7 @@ measurement you can check rather than a claim from the day it was written. They 
 | `config`           | T1   | `actionlint` on the workflow, `hadolint` on the three Dockerfiles, `spectral` on the generated OpenAPI document                                                                                                                                                                                                                                                                                                                | _new_                      |
 | `openapi`          | T1   | `oasdiff` against the committed contract snapshot: a breaking API change fails unless the version's MAJOR component was raised in the same commit                                                                                                                                                                                                                                                                              | _new_                      |
 | `e2e`              | T1   | Playwright against an auto-started stack (dev server, in-memory MongoDB, the pinned storage engine in a container): Chromium over every spec, and a second Firefox project over the two whose answers depend on the engine — clipboard hygiene and auto-lock                                                                                                                                                                   | `e2e` job                  |
-| `a11y`             | T1   | axe-core over thirty-eight primary views and modals in the real authenticated DOM, plus the focus behaviours a scanner cannot infer                                                                                                                                                                                                                                                                                            | _new_                      |
+| `a11y`             | T1   | axe-core over forty primary views and modals in the real authenticated DOM, plus the focus behaviours a scanner cannot infer                                                                                                                                                                                                                                                                                                   | _new_                      |
 | `sandbox`          | T1   | A real browser renders every preview mode and the committed hostile corpus under the **built artifact's** own headers, and the engine refuses nothing but images named by address                                                                                                                                                                                                                                              | _new_                      |
 | `docker`           | T1   | Builds all 4 images, `nginx -t`, `docker compose config`, 3 × Trivy scans (fails on new fixable CRITICAL/HIGH; see the baseline below)                                                                                                                                                                                                                                                                                         | `docker-build` job         |
 | `bundle`           | T1   | The built client's initial payload and every chunk against a committed size budget, so a deliberately lazy library cannot become a static import                                                                                                                                                                                                                                                                               | _new_                      |
@@ -2218,7 +2252,7 @@ is the point of the paragraph.
 and Trivy-scans three of them — the database image is built and deliberately not scanned;
 `storage` (push tier) runs the storage port against the pinned engine in a container;
 `e2e` and `a11y` (push tier) drive a harness that starts that same engine, because the
-document store is switched off without it and its journeys and seven of its scanned views
+document store is switched off without it and its journeys and nine of its scanned views
 would fail for a reason that is not about them; `sandbox` (push tier) starts the same
 engine beside the built artifact for the same reason; `flake` (release tier) runs the
 Playwright suite three times over and so inherits the same need; and `deploy` (release

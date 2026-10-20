@@ -23,7 +23,6 @@ import {
   Eye,
   EyeOff,
   Undo2,
-  X,
   AlertTriangle,
 } from 'lucide-react';
 import { cn, getApiErrorMessage } from '../../lib/utils';
@@ -47,6 +46,8 @@ import {
 } from '../../stores/vaultStore';
 import { useToast } from '../ui/Toast';
 import { FormAlert } from '../ui/FormAlert';
+import { TagEditor } from '../ui/TagEditor';
+import { useTagField } from '../../hooks/useTagField';
 import { CardExpiryNotice } from './CardExpiry';
 import { readCardExpiry } from '../../lib/cardExpiry';
 import { describeTotpFailure, parseTotpValue } from '../../lib/totp';
@@ -1852,10 +1853,10 @@ export function VaultItemForm({
 
   const [itemType, setItemType] = useState<ItemType>(item?.itemType ?? defaultType ?? 'login');
   const [folderId, setFolderId] = useState(item?.folderId ?? defaultFolderId ?? '');
-  const [tags, setTags] = useState(item?.tags ?? []);
-  const [tagInput, setTagInput] = useState('');
-  /** Why the last "Add" did not add a tag, shown under the input until it changes. */
-  const [tagNotice, setTagNotice] = useState<'duplicate' | 'limit' | null>(null);
+  // The one tag editor, shared with the document details. A tag that is not
+  // added says why, instead of the input simply emptying: at the limit, or
+  // already on the item.
+  const tagField = useTagField(item?.tags ?? [], MAX_TAGS_PER_ITEM);
   const [favorite, setFavorite] = useState(item?.favorite ?? false);
   const [saving, setSaving] = useState(false);
   const [showPasswordGen, setShowPasswordGen] = useState(false);
@@ -2390,31 +2391,13 @@ export function VaultItemForm({
     [isEditing, reset],
   );
 
-  // Tag management. A tag that is not added says why, instead of the input simply
-  // emptying: at the limit, or already on the item.
-  const handleAddTag = useCallback(() => {
-    const tag = tagInput.trim();
-    if (!tag) return;
-    if (tags.includes(tag)) {
-      setTagNotice('duplicate');
-      return;
-    }
-    if (tags.length >= MAX_TAGS_PER_ITEM) {
-      setTagNotice('limit');
-      return;
-    }
-    setTags((prev) => [...prev, tag]);
-    setTagInput('');
-    setTagNotice(null);
-  }, [tagInput, tags]);
-
-  const handleRemoveTag = useCallback((tag: string) => {
-    setTags((prev) => prev.filter((t) => t !== tag));
-  }, []);
-
   // Submit handler
   const onSubmit: SubmitHandler<Record<string, unknown>> = useCallback(
     async (values) => {
+      // A tag typed but never added is saved with the item rather than silently
+      // dropped; at the limit nothing is saved and the tag field says why.
+      const tags = tagField.commitPending();
+      if (tags === null) return;
       setSaving(true);
       try {
         const name = values.name as string;
@@ -2460,7 +2443,7 @@ export function VaultItemForm({
       isEditing,
       item,
       folderId,
-      tags,
+      tagField,
       favorite,
       createItem,
       updateItem,
@@ -3289,72 +3272,7 @@ export function VaultItemForm({
         </FormField>
 
         {/* Tags */}
-        <div>
-          <label
-            htmlFor="field-tags"
-            className="mb-1.5 block text-sm font-medium text-[hsl(var(--foreground))]"
-          >
-            Tags
-          </label>
-          <div className="mb-2 flex flex-wrap gap-1.5">
-            {tags.map((tag) => (
-              <span
-                key={tag}
-                className="inline-flex items-center gap-1 rounded-full bg-[hsl(var(--secondary))] px-2.5 py-0.5 text-xs font-medium text-[hsl(var(--secondary-foreground))]"
-              >
-                {tag}
-                <button
-                  type="button"
-                  onClick={() => handleRemoveTag(tag)}
-                  className="rounded-full p-0.5 hover:bg-[hsl(var(--muted))]"
-                  aria-label={`Remove tag ${tag}`}
-                >
-                  <X className="h-3 w-3" />
-                </button>
-              </span>
-            ))}
-          </div>
-          <div className="flex gap-2">
-            <input
-              id="field-tags"
-              type="text"
-              value={tagInput}
-              onChange={(e) => {
-                setTagInput(e.target.value);
-                if (tagNotice !== null) setTagNotice(null);
-              }}
-              aria-describedby={tagNotice !== null ? 'field-tags-notice' : undefined}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  e.preventDefault();
-                  handleAddTag();
-                }
-              }}
-              placeholder="Add a tag..."
-              maxLength={50}
-              className={cn(inputClass, 'flex-1')}
-            />
-            <button
-              type="button"
-              onClick={handleAddTag}
-              disabled={!tagInput.trim()}
-              className="rounded-md border border-[hsl(var(--input))] px-3 py-2 text-sm text-[hsl(var(--foreground))] hover:bg-[hsl(var(--accent))] disabled:opacity-50 transition-colors"
-            >
-              Add
-            </button>
-          </div>
-          {tagNotice !== null && (
-            <p
-              id="field-tags-notice"
-              role="status"
-              className="mt-1 text-xs text-[hsl(var(--muted-foreground))]"
-            >
-              {tagNotice === 'duplicate'
-                ? 'That tag is already on this item.'
-                : `An item can have up to ${String(MAX_TAGS_PER_ITEM)} tags.`}
-            </p>
-          )}
-        </div>
+        <TagEditor id="field-tags" field={tagField} subject="item" />
 
         {/* Favorite toggle */}
         <label className="flex cursor-pointer items-center gap-2">

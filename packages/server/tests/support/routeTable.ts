@@ -871,7 +871,7 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     // The ONLY document route carrying `heavyOpLimiter`, and the only one that
     // should: it is one genuinely unbounded operation, up to
     // MAX_DOCUMENTS_PER_USER rows each with an object delete. Every per-row
-    // document route deliberately carries `generalAuthLimiter` instead, because
+    // document write deliberately carries `documentWriteLimiter` instead, because
     // this per-user budget of 10 per 15 minutes is shared with export, backup
     // download and every bulk vault operation.
     limiters: ['heavyOpLimiter'],
@@ -974,7 +974,9 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     path: '/api/v1/documents/:id',
     auth: 'required',
     csrf: 'required',
-    limiters: ['generalAuthLimiter'],
+    // One request per selected document for a bulk tag or move: a budget sized
+    // for a whole-collection pass, apart from the `general:` bucket logout shares.
+    limiters: ['documentWriteLimiter'],
     owned: { param: 'id', resource: 'document' },
     when: 'always',
     note: 'Metadata and attributes only. The allowlist cannot reach a framing field, the wrapped key or the object key, and it is deliberately not rotation-fenced.',
@@ -984,7 +986,7 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     path: '/api/v1/documents/:id',
     auth: 'required',
     csrf: 'required',
-    limiters: ['generalAuthLimiter'],
+    limiters: ['documentWriteLimiter'],
     owned: { param: 'id', resource: 'document' },
     when: 'always',
     note: 'Soft delete. The object stays in the bucket and the document still counts against the quota.',
@@ -994,7 +996,7 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     path: '/api/v1/documents/:id/restore',
     auth: 'required',
     csrf: 'required',
-    limiters: ['generalAuthLimiter'],
+    limiters: ['documentWriteLimiter'],
     owned: { param: 'id', resource: 'trashedDocument' },
     when: 'always',
   },
@@ -1003,10 +1005,10 @@ export const ROUTE_TABLE: readonly RouteRow[] = [
     path: '/api/v1/documents/:id/permanent',
     auth: 'required',
     csrf: 'required',
-    // `generalAuthLimiter`, NOT `heavyOpLimiter`: this is a per-row route, and
+    // `documentWriteLimiter`, NOT `heavyOpLimiter`: this is a per-row route, and
     // that per-user budget of 10 per 15 minutes would 429 a user who purged
     // eleven documents and then lock them out of emptying their vault trash.
-    limiters: ['generalAuthLimiter'],
+    limiters: ['documentWriteLimiter'],
     owned: { param: 'id', resource: 'trashedDocument' },
     when: 'always',
     note: 'Marks purgePending, deletes the object, then deletes the row, so a crash between any two leaves a marker the collector finishes.',

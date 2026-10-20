@@ -163,7 +163,11 @@ export const A11Y_VIEWS = [
     description:
       'the authenticator-import tool showing decoded accounts, reached by pasting an export link rather than by using a camera',
   },
-  { id: 'documents-list', description: 'the documents page with two documents stored' },
+  {
+    id: 'documents-list',
+    description:
+      'the documents page with two documents stored and one of them selected: the selection bar and the rows in selection mode (the unselected rows are scanned in documents-trash; the trash selection bar, the Tag popover, the Move menu and the confirmations are not)',
+  },
   {
     // NOT the panel at rest. At rest it is already inside `documents-list` — it
     // is a plain `<section>` mounted unconditionally on that page, not a dialog
@@ -182,6 +186,15 @@ export const A11Y_VIEWS = [
     // look at the same page.
     id: 'document-detail',
     description: 'a stored PDF, which is download-only, so the detail view draws no frame',
+  },
+  {
+    // The same page with its Edit details dialog open: the one dialog in which a
+    // name is edited WITHOUT its extension, so the fixed suffix beside the field,
+    // the hint that describes it and the read-only original name are scanned by
+    // nothing else.
+    id: 'document-edit-details',
+    description:
+      'the Edit details dialog over the stored PDF: the name without its fixed extension, the tags, the note and the read-only original name',
   },
   {
     id: 'document-viewer',
@@ -219,6 +232,15 @@ export const A11Y_VIEWS = [
     id: 'documents-download-all',
     description:
       'the documents page after a bulk export run offline, settled on its summary with the failure list showing',
+  },
+  {
+    // A transfer PAUSED, which is DOM no other state of the row draws: the
+    // waiting sentence, the yellow bar, the row's live region carrying a real
+    // sentence and the Retry now control. Driven by refusing the first part and
+    // then taking the context offline, so the pause is the offline one.
+    id: 'document-upload-waiting',
+    description:
+      'the documents page with an upload paused offline: its waiting sentence, its live region and Retry now',
   },
   {
     id: 'about-page',

@@ -206,6 +206,59 @@ describe('sendPaced', () => {
     expect(results).toEqual([{ status: 'rejected', reason: new Error(BULK_ABANDONED_MESSAGE) }]);
   });
 
+  it("follows the generation it is GIVEN: another store's lock abandons the rest, a vault lock does not", async () => {
+    // A document bulk action runs on the documents store's generation, which a
+    // sign-out moves BEFORE its request where the vault store's moves only after.
+    let documentsGeneration = 0;
+    const generation = (): number => documentsGeneration;
+
+    const sentWhileVaultLocked: number[] = [];
+    const vaultLocked = await sendPaced(
+      Array.from({ length: 6 }, (_, index) => () => {
+        sentWhileVaultLocked.push(index);
+        if (index === 0) useVaultStore.getState().clearStore();
+        return Promise.resolve(index);
+      }),
+      undefined,
+      generation,
+    );
+    // The vault's generation moved and nothing stopped: it is not the one given.
+    expect(sentWhileVaultLocked).toEqual([0, 1, 2, 3, 4, 5]);
+    expect(vaultLocked.every((result) => result.status === 'fulfilled')).toBe(true);
+
+    const sent: number[] = [];
+    const documentsLocked = await sendPaced(
+      Array.from({ length: 6 }, (_, index) => () => {
+        sent.push(index);
+        if (index === 0) documentsGeneration += 1;
+        return Promise.resolve(index);
+      }),
+      undefined,
+      generation,
+    );
+    expect(sent).toEqual([0]);
+    for (const result of documentsLocked.slice(1)) {
+      expect((result as PromiseRejectedResult).reason).toEqual(new Error(BULK_ABANDONED_MESSAGE));
+    }
+  });
+
+  it('does not resend after its given generation moved during a rate-limit wait', async () => {
+    let generation = 0;
+    const send = vi
+      .fn<() => Promise<string>>()
+      .mockRejectedValueOnce(httpError(429, '1'))
+      .mockResolvedValueOnce('too late');
+    const moveDuringWait = (): Promise<void> => {
+      generation += 1;
+      return Promise.resolve();
+    };
+
+    const results = await sendPaced([send], moveDuringWait, () => generation);
+
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(results).toEqual([{ status: 'rejected', reason: new Error(BULK_ABANDONED_MESSAGE) }]);
+  });
+
   it('waits on the real clock by default', async () => {
     vi.useFakeTimers();
     try {

@@ -9,6 +9,7 @@ import {
   HIBP_MAX_MISSES_PER_USER_PER_WINDOW,
   HIBP_MISS_BUDGET_WINDOW_MINUTES,
   MAX_PREVIEW_BYTES,
+  PASSWORD_VERIFY_RATE_LIMIT_MAX,
   PREVIEW_MODES,
   formatBytes,
 } from '@hvault/shared';
@@ -21,8 +22,12 @@ import { NUMBER_WORDS } from './support/numberWords';
 import * as rateLimiters from '../src/middleware/rateLimiter.js';
 import { swaggerSpec } from '../src/config/swagger.js';
 
-const { FOLDER_WRITE_RATE_LIMIT_MAX, VAULT_ITEM_WRITE_RATE_LIMIT_MAX, VAULT_LIST_RATE_LIMIT_MAX } =
-  rateLimiters;
+const {
+  DOCUMENT_WRITE_RATE_LIMIT_MAX,
+  FOLDER_WRITE_RATE_LIMIT_MAX,
+  VAULT_ITEM_WRITE_RATE_LIMIT_MAX,
+  VAULT_LIST_RATE_LIMIT_MAX,
+} = rateLimiters;
 /**
  * The limiters the middleware module exports: its MIDDLEWARE (three parameters)
  * named `…Limiter`. The module also exports helpers (`resolveClientKey`,
@@ -148,7 +153,7 @@ describe('README documentation sync', () => {
       );
     });
 
-    it('quotes the two derived write budgets from their constants, in the README and the API reference', () => {
+    it('quotes the three derived write budgets from their constants, in the README and the API reference', () => {
       // Both are DERIVED (two passes over the most rows an account may hold), so
       // a change to the per-user caps moves them, and a hand-copied number would
       // not move with it.
@@ -157,6 +162,9 @@ describe('README documentation sync', () => {
         `${formatted(VAULT_ITEM_WRITE_RATE_LIMIT_MAX)} / user`,
       );
       expect(limitCell('Folder write')).toBe(`${formatted(FOLDER_WRITE_RATE_LIMIT_MAX)} / user`);
+      expect(limitCell('Document write')).toBe(
+        `${formatted(DOCUMENT_WRITE_RATE_LIMIT_MAX)} / user`,
+      );
 
       const descriptions = Object.values(
         swaggerSpec.paths as Record<string, Record<string, { description?: unknown }>>,
@@ -165,10 +173,18 @@ describe('README documentation sync', () => {
         .map((operation) =>
           typeof operation.description === 'string' ? operation.description : '',
         );
-      const quoting = (scope: 'item' | 'folder'): string[] =>
+      const quoting = (scope: 'item' | 'folder' | 'document'): string[] =>
         descriptions.filter((text) => text.includes(`one budget across every ${scope} mutation`));
       expect(quoting('item').length).toBeGreaterThan(0);
       expect(quoting('folder').length).toBeGreaterThan(0);
+      // The four per-row document writes: rename/retag/move/favorite, trash,
+      // restore and permanent delete.
+      expect(quoting('document')).toHaveLength(4);
+      for (const text of quoting('document')) {
+        expect(text).toContain(
+          `Rate limited: ${formatted(DOCUMENT_WRITE_RATE_LIMIT_MAX)} req/user`,
+        );
+      }
       for (const text of quoting('item')) {
         expect(text).toContain(
           `Rate limited: ${formatted(VAULT_ITEM_WRITE_RATE_LIMIT_MAX)} req/user`,
@@ -176,6 +192,34 @@ describe('README documentation sync', () => {
       }
       for (const text of quoting('folder')) {
         expect(text).toContain(`Rate limited: ${formatted(FOLDER_WRITE_RATE_LIMIT_MAX)} req/user`);
+      }
+    });
+
+    it('quotes the re-authentication budget from its constant, in the README and on every route that spends it', () => {
+      // One budget shared by every route that re-checks the master password. The
+      // number was 5 and is now 10; a hand-copied figure in either document would
+      // keep telling an operator the old one.
+      expect(rowNamed('Password verify')?.split('|')[2]?.trim()).toBe(
+        `${String(PASSWORD_VERIFY_RATE_LIMIT_MAX)} / user`,
+      );
+      const descriptions = Object.values(
+        swaggerSpec.paths as Record<string, Record<string, { description?: unknown }>>,
+      )
+        .flatMap((methods) => Object.values(methods))
+        .map((operation) =>
+          typeof operation.description === 'string' ? operation.description : '',
+        )
+        .filter((text) => text.includes('re-checks the master password'));
+      // The twelve routes with a proof that quote the budget this way, plus the
+      // backup restore that shares it without one (invitations word it as "the
+      // master-password proof budget").
+      expect(descriptions).toHaveLength(13);
+      for (const text of descriptions) {
+        expect(text).toMatch(
+          new RegExp(
+            `Rate limited: (10 req/user per 15 min \\+ )?${String(PASSWORD_VERIFY_RATE_LIMIT_MAX)} (req/user|requests per account) per 15 min`,
+          ),
+        );
       }
     });
   });

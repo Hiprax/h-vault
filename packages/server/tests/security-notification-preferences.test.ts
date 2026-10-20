@@ -10,6 +10,7 @@ import mongoose from 'mongoose';
 import request from 'supertest';
 import {
   CRITICAL_SECURITY_NOTIFICATION_EVENTS,
+  MASTER_PASSWORD_PROOF_REFUSED_MESSAGE,
   SECURITY_NOTIFICATION_PREFERENCE_EVENTS,
 } from '@hvault/shared';
 
@@ -290,6 +291,14 @@ describe('F-26: PUT /user/notifications (master password)', () => {
       notifications: { password_changed: false },
     });
     expect(res.status).toBe(401);
+    // The proof was RIGHT when it was checked, so this is not the wrong-password
+    // sentence: that one tells the client a refresh cannot help and to report it
+    // as a typo, which would be false here. This one stays an ordinary 401.
+    const message = (res.body as { message: string }).message;
+    expect(message).toBe(
+      'Your master password changed while your security emails were being saved. Sign in again and retry.',
+    );
+    expect(message).not.toBe(MASTER_PASSWORD_PROOF_REFUSED_MESSAGE);
     expect(await storedPreferences(user.id)).toBeUndefined();
     await settle();
     expect(transport.sent).toEqual([]);

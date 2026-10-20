@@ -1,11 +1,14 @@
 import { describe, it, expect, vi } from 'vitest';
+import fc from 'fast-check';
 import {
   maskEmail,
   formatBytes,
   generateId,
   normalizeUri,
   documentExtension,
+  splitDocumentName,
 } from '../src/utils/index.js';
+import { propertyBanner, propertyRun } from '../../../tests/harness/property.js';
 
 // ---------------------------------------------------------------------------
 // maskEmail
@@ -374,5 +377,73 @@ describe('documentExtension', () => {
     // The negative that matters: nothing here trims, strips or validates, so a
     // caller can never mistake this for a claim about what the file contains.
     expect(documentExtension('weird.na me')).toBe('na me');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// splitDocumentName
+//
+// The rename dialog and the upload panel edit only the STEM and show the suffix
+// as fixed, so this split has to agree with `documentExtension` on every name:
+// a disagreement is a rename that silently changes how a document opens.
+// ---------------------------------------------------------------------------
+describe('splitDocumentName', () => {
+  it('splits at the last dot and keeps the suffix exactly as written', () => {
+    expect(splitDocumentName('report.pdf')).toEqual({ stem: 'report', suffix: '.pdf' });
+    // The capitals stay: the suffix is shown and re-attached verbatim, and only
+    // the lookup key is lower-cased.
+    expect(splitDocumentName('Photo.JPG')).toEqual({ stem: 'Photo', suffix: '.JPG' });
+  });
+
+  it('keys a multi-dot name on its LAST dot, like documentExtension', () => {
+    expect(splitDocumentName('archive.tar.gz')).toEqual({ stem: 'archive.tar', suffix: '.gz' });
+  });
+
+  it('gives a name with no dot, or only a leading one, no suffix at all', () => {
+    expect(splitDocumentName('Dockerfile')).toEqual({ stem: 'Dockerfile', suffix: '' });
+    expect(splitDocumentName('.bashrc')).toEqual({ stem: '.bashrc', suffix: '' });
+    expect(splitDocumentName('')).toEqual({ stem: '', suffix: '' });
+  });
+
+  it('keeps a trailing dot as a suffix that names no type', () => {
+    // `report.` has no extension, and keeping the dot in the suffix is what makes
+    // a renamed `draft.` still have none.
+    expect(splitDocumentName('report.')).toEqual({ stem: 'report', suffix: '.' });
+    expect(documentExtension('report.')).toBe('');
+  });
+
+  it('reads the suffix of a dotfile that also has an extension', () => {
+    expect(splitDocumentName('.eslintrc.json')).toEqual({ stem: '.eslintrc', suffix: '.json' });
+  });
+
+  it('re-joins to the original name and agrees with documentExtension, for any name (property)', () => {
+    fc.assert(
+      fc.property(fc.string({ maxLength: 40 }), (name) => {
+        const { stem, suffix } = splitDocumentName(name);
+        expect(stem + suffix, propertyBanner()).toBe(name);
+        expect(suffix.slice(1).toLowerCase(), propertyBanner()).toBe(documentExtension(name));
+        // The suffix holds at most its own leading dot, so nothing a person types
+        // into the stem can be mistaken for part of the type.
+        expect(suffix.slice(1).includes('.'), propertyBanner()).toBe(false);
+      }),
+      propertyRun(),
+    );
+  });
+
+  it('keeps the type for ANY non-empty stem joined to a non-empty suffix (property)', () => {
+    // The guarantee the stem-only rename rests on: whatever a person types in front
+    // of a fixed `.pdf`, the result is still a `.pdf`.
+    fc.assert(
+      fc.property(
+        fc.string({ minLength: 1, maxLength: 20 }),
+        fc.string({ maxLength: 8 }).map((ext) => `.${ext.replaceAll('.', '')}`),
+        (stem, suffix) => {
+          expect(documentExtension(stem + suffix), propertyBanner()).toBe(
+            suffix.slice(1).toLowerCase(),
+          );
+        },
+      ),
+      propertyRun(),
+    );
   });
 });

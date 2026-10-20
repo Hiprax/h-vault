@@ -2,6 +2,7 @@ import { useCallback, useState } from 'react';
 import { Loader2, RefreshCw, X } from 'lucide-react';
 import { DOCUMENT_PLAINTEXT_CHUNK_BYTES, documentChunkCountFor, formatBytes } from '@hvault/shared';
 import { cn, getApiErrorMessage } from '../../lib/utils';
+import { describeTransientFailure } from '../../services/auth/sessionFailure';
 import { useToast } from '../ui/Toast';
 import {
   UploadCancelledError,
@@ -14,12 +15,41 @@ import {
 // One transfer in progress
 // ---------------------------------------------------------------------------
 
-/** The sentence under one transfer's bar, for each of the three states it has. */
+type WaitReason = NonNullable<DocumentUploadProgress['waitReason']>;
+
+/**
+ * What a paused transfer says, by why it is paused.
+ *
+ * Each names what the reader can expect rather than what went wrong: none of
+ * these is a failure, and the transfer carries on by itself from every one. The
+ * offline sentence also states the two conditions it carries on under, because
+ * a closed tab or a locked vault ends it.
+ */
+const WAIT_SENTENCES: Readonly<Record<WaitReason, string>> = {
+  offline:
+    'You are offline. The upload is paused and continues by itself when you are back online, as long as this tab stays open and the vault unlocked.',
+  connection: 'Cannot reach the server. Trying again automatically…',
+  interrupted: 'The connection was interrupted part-way. Trying again…',
+  // A gateway error, another 5xx, or a completion the server is still busy with
+  // (its version-less 409): the sentence has to be true of all three.
+  server: 'The server is busy or not answering properly. Trying again shortly…',
+};
+
+/** The waits "Retry now" can shorten: the ones where nothing reached the server. */
+function canRetryNow(upload: DocumentUploadProgress): boolean {
+  return (
+    upload.status === 'waiting' &&
+    (upload.waitReason === 'offline' || upload.waitReason === 'connection')
+  );
+}
+
+/** The sentence under one transfer's bar, for each of the states it has. */
 function describeTransfer(upload: DocumentUploadProgress): string {
   if (upload.status === 'failed') {
     return `Upload failed. ${upload.error ?? 'Retry to send only the parts the server does not already hold.'}`;
   }
   if (upload.status === 'finalizing') return 'Sealing the file details and finishing…';
+  if (upload.status === 'waiting') return WAIT_SENTENCES[upload.waitReason ?? 'connection'];
 
   // One crypto segment is one uploaded part, so the part numbers are DERIVED
   // from the byte counts the store already keeps rather than reported beside
@@ -39,7 +69,36 @@ function describeTransfer(upload: DocumentUploadProgress): string {
     totalParts,
     Math.floor(upload.sentBytes / DOCUMENT_PLAINTEXT_CHUNK_BYTES) + 1,
   );
+  if (upload.resending === true) {
+    return `Resending part ${String(currentPart)} of ${String(totalParts)}…`;
+  }
   return `Part ${String(currentPart)} of ${String(totalParts)} — ${formatBytes(upload.sentBytes)} of ${formatBytes(upload.totalBytes)}`;
+}
+
+/**
+ * What the row's live region says: a pause or a failure, and nothing else.
+ *
+ * COARSE, for the reason `DocumentBulkDownload` records: a connection that keeps
+ * dropping flips a row between waiting and uploading every few seconds, and a
+ * region announcing each flip would queue the same sentence for ever. So a
+ * sentence stays in the region until it is replaced by a different one, or
+ * until a part is CONFIRMED (the in-flight bar stops short of a part's end, so
+ * a whole part only counts once the server has stored it), which is when the
+ * next pause is news again.
+ */
+function useCoarseAnnouncement(upload: DocumentUploadProgress): string {
+  const sentence =
+    upload.status === 'waiting' || upload.status === 'failed' ? describeTransfer(upload) : null;
+  const confirmedParts = Math.floor(upload.sentBytes / DOCUMENT_PLAINTEXT_CHUNK_BYTES);
+  const [announced, setAnnounced] = useState({ text: '', parts: confirmedParts });
+  // Adjusted during render, React's documented pattern for state that follows a
+  // prop, so the region never paints one frame behind the row.
+  if (sentence !== null && sentence !== announced.text) {
+    setAnnounced({ text: sentence, parts: confirmedParts });
+  } else if (sentence === null && announced.text !== '' && confirmedParts > announced.parts) {
+    setAnnounced({ text: '', parts: confirmedParts });
+  }
+  return announced.text;
 }
 
 interface UploadRowProps {
@@ -47,14 +106,27 @@ interface UploadRowProps {
   onCancel: (id: string) => void;
   /** Resolves when the resume has been prepared or refused; never rejects. */
   onRetry: (id: string) => Promise<void>;
+  /** End a paused transfer's wait and try again at once. */
+  onRetryNow: (id: string) => void;
 }
 
-function UploadRow({ upload, onCancel, onRetry }: UploadRowProps) {
+function UploadRow({ upload, onCancel, onRetry, onRetryNow }: UploadRowProps) {
   // A zero-byte document has nothing to send, so it is complete the moment it
   // starts; dividing by its size would report NaN and render an empty bar.
+  //
+  // Never 100 before the last byte is stored: the in-flight count stops one byte
+  // short of a part's end until the server confirms it, and rounding would turn
+  // that one byte back into "finished".
   const percent =
-    upload.totalBytes === 0 ? 100 : Math.round((upload.sentBytes / upload.totalBytes) * 100);
+    upload.totalBytes === 0
+      ? 100
+      : Math.min(
+          Math.round((upload.sentBytes / upload.totalBytes) * 100),
+          upload.sentBytes < upload.totalBytes ? 99 : 100,
+        );
   const failed = upload.status === 'failed';
+  const waiting = upload.status === 'waiting';
+  const announcement = useCoarseAnnouncement(upload);
 
   /**
    * Whether this row's resume is being prepared.
@@ -120,6 +192,20 @@ function UploadRow({ upload, onCancel, onRetry }: UploadRowProps) {
             {retrying ? 'Retrying' : 'Retry'}
           </button>
         )}
+        {canRetryNow(upload) && (
+          /* Only while nothing reached the server: those waits are the ones the
+             reader may know are over (the connection is back) before the browser
+             does. Named after the file, like Retry, for the same reason. */
+          <button
+            type="button"
+            aria-label={`Retry now: upload of ${upload.fileName}`}
+            onClick={() => onRetryNow(upload.id)}
+            className="inline-flex shrink-0 items-center gap-1 rounded px-2 py-1 text-xs font-medium text-[hsl(var(--primary))] hover:bg-[hsl(var(--accent))]"
+          >
+            <RefreshCw className="h-3 w-3" />
+            Retry now
+          </button>
+        )}
         <button
           type="button"
           onClick={() => onCancel(upload.id)}
@@ -139,15 +225,24 @@ function UploadRow({ upload, onCancel, onRetry }: UploadRowProps) {
         className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-[hsl(var(--muted))]"
       >
         <div
+          data-testid="upload-bar"
           className={cn(
-            'h-full transition-all',
-            failed ? 'bg-red-500' : 'bg-[hsl(var(--primary))]',
+            'h-full transition-[width]',
+            failed ? 'bg-red-500' : waiting ? 'bg-yellow-500' : 'bg-[hsl(var(--primary))]',
           )}
           style={{ width: `${String(percent)}%` }}
         />
       </div>
 
-      <p className="mt-1 text-xs text-[hsl(var(--muted-foreground))]">{describeTransfer(upload)}</p>
+      <p data-testid="upload-status" className="mt-1 text-xs text-[hsl(var(--muted-foreground))]">
+        {describeTransfer(upload)}
+      </p>
+      {/* An announcement channel only, mounted with the row and always visually
+          hidden: the line above is what is SEEN, and it always shows the current
+          state. */}
+      <p role="status" data-testid="upload-announcement" className="sr-only">
+        {announcement}
+      </p>
     </li>
   );
 }
@@ -173,6 +268,7 @@ export function DocumentTransfers() {
   const uploads = useDocumentsStore((s) => s.uploads);
   const cancelUpload = useDocumentsStore((s) => s.cancelUpload);
   const retryUpload = useDocumentsStore((s) => s.retryUpload);
+  const resumeUploadNow = useDocumentsStore((s) => s.resumeUploadNow);
   const { toast } = useToast();
   const transfers = Object.values(uploads);
   const anyLive = transfers.some(isLiveTransfer);
@@ -190,7 +286,9 @@ export function DocumentTransfers() {
           // on purpose does not need an error about it.
           if (error instanceof UploadCancelledError) return;
           toast({
-            title: getApiErrorMessage(error, 'The upload could not be resumed.'),
+            title:
+              describeTransientFailure(error) ??
+              getApiErrorMessage(error, 'The upload could not be resumed.'),
             type: 'error',
           });
         },
@@ -209,6 +307,7 @@ export function DocumentTransfers() {
             upload={transfer}
             onCancel={cancelUpload}
             onRetry={handleRetry}
+            onRetryNow={resumeUploadNow}
           />
         ))}
       </ul>

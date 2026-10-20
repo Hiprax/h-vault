@@ -1596,6 +1596,158 @@ describe('SettingsPage — error paths and branches', () => {
     );
   });
 
+  describe('a refused re-authentication says why instead of blaming the password', () => {
+    // These four forms used to answer EVERY failure with "check your password",
+    // including the re-authentication budget's 429, so a person who had typed the
+    // right password retried, and every retry spent more of the budget they were
+    // waiting on. A real wrong password keeps the form's own wording.
+    function refusal(status: number | undefined, headers: Record<string, string> = {}): AxiosError {
+      const error = new AxiosError(
+        status === undefined
+          ? 'Network Error'
+          : `Request failed with status code ${String(status)}`,
+      );
+      if (status !== undefined) {
+        error.response = {
+          status,
+          statusText: '',
+          data: { success: false, message: 'server says no', statusCode: status, statusText: '' },
+          headers: new AxiosHeaders(headers),
+          config: { headers: new AxiosHeaders() },
+        };
+      }
+      return error;
+    }
+
+    const RATE_LIMITED = 'Too many attempts. Please try again in 10 minutes.';
+    const OFFLINE = 'Could not reach the server. Check your connection and try again.';
+    const UNAVAILABLE = 'The server is temporarily unavailable. Please try again in a moment.';
+
+    interface Site {
+      name: string;
+      fallback: string;
+      api: Mock;
+      twoFactorEnabled: boolean;
+      submit: () => Promise<void>;
+    }
+
+    const sites: Site[] = [
+      {
+        name: 'starting 2FA setup',
+        fallback: 'Incorrect password or failed to start 2FA setup',
+        api: mockSetup2faApi,
+        twoFactorEnabled: false,
+        submit: async () => {
+          await act(async () => {
+            fireEvent.click(screen.getByText('Enable'));
+          });
+          fireEvent.change(screen.getByPlaceholderText('Master password'), {
+            target: { value: 'MasterPassword1!' },
+          });
+          await act(async () => {
+            fireEvent.click(screen.getByText('Continue'));
+          });
+        },
+      },
+      {
+        name: 'turning 2FA off',
+        fallback: 'Invalid code or password',
+        api: mockDisable2faApi,
+        twoFactorEnabled: true,
+        submit: async () => {
+          fireEvent.click(screen.getByText('Disable'));
+          fireEvent.change(screen.getByPlaceholderText('Master password'), {
+            target: { value: 'MasterPassword1!' },
+          });
+          fireEvent.change(screen.getByPlaceholderText('6-digit code'), {
+            target: { value: '123456' },
+          });
+          await act(async () => {
+            fireEvent.click(screen.getByText('Disable 2FA'));
+          });
+        },
+      },
+      {
+        name: 'regenerating backup codes',
+        fallback: 'Failed to regenerate backup codes. Check your password.',
+        api: mockRegenerateBackupCodesApi,
+        twoFactorEnabled: true,
+        submit: async () => {
+          fireEvent.click(screen.getByText('Regenerate Codes'));
+          await waitFor(() => screen.getByPlaceholderText('Master password'));
+          fireEvent.change(screen.getByPlaceholderText('Master password'), {
+            target: { value: 'MasterPassword1!' },
+          });
+          fireEvent.change(screen.getByPlaceholderText('6-digit 2FA code'), {
+            target: { value: '123456' },
+          });
+          await act(async () => {
+            fireEvent.click(screen.getByText('Regenerate'));
+          });
+        },
+      },
+      {
+        name: 'exporting the encrypted vault',
+        fallback: 'Failed to export vault. Check your password.',
+        api: mockExportVaultApi,
+        twoFactorEnabled: false,
+        submit: async () => {
+          fireEvent.click(screen.getByText('Export Vault'));
+          fireEvent.change(screen.getByPlaceholderText('Enter your master password'), {
+            target: { value: 'MasterPassword1!' },
+          });
+          await act(async () => {
+            fireEvent.click(screen.getByText('I Understand, Export'));
+          });
+        },
+      },
+    ];
+
+    const outcomes: { label: string; error: () => AxiosError; title: (site: Site) => string }[] = [
+      {
+        label: 'a 429 names the wait from Retry-After',
+        error: () => refusal(429, { 'retry-after': '600' }),
+        title: () => RATE_LIMITED,
+      },
+      { label: 'a lost connection says so', error: () => refusal(undefined), title: () => OFFLINE },
+      {
+        label: 'a 503 says the server is unavailable',
+        error: () => refusal(503),
+        title: () => UNAVAILABLE,
+      },
+      {
+        label: 'a wrong password keeps the form wording',
+        error: () => refusal(401),
+        title: (site) => site.fallback,
+      },
+    ];
+
+    for (const site of sites) {
+      for (const outcome of outcomes) {
+        it(`${site.name}: ${outcome.label}`, async () => {
+          setProfile({ twoFactorEnabled: site.twoFactorEnabled });
+          site.api.mockRejectedValue(outcome.error());
+          await renderSettings();
+
+          await site.submit();
+
+          const expected = outcome.title(site);
+          await waitFor(() => {
+            expect(mockToast).toHaveBeenCalledWith(
+              expect.objectContaining({ title: expected, type: 'error' }),
+            );
+          });
+          expect(site.api).toHaveBeenCalledTimes(1);
+          // Only the right sentence: never the password blame beside a wait.
+          for (const other of [RATE_LIMITED, OFFLINE, UNAVAILABLE, site.fallback]) {
+            if (other === expected) continue;
+            expect(mockToast).not.toHaveBeenCalledWith(expect.objectContaining({ title: other }));
+          }
+        });
+      }
+    }
+  });
+
   // -------------------------------------------------------------------------
   // Vault key rotation
   // -------------------------------------------------------------------------

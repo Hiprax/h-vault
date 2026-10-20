@@ -8,6 +8,7 @@ import { acquireJobLock, releaseJobLock } from './jobLock.js';
 import { createModuleLogger, errorMessage } from './logger.js';
 import { withdrawCountedRow, type CountedKind } from './vaultQuota.js';
 import { createAuditLog } from '../services/auditService.js';
+import { MASTER_PASSWORD_PROOF_REFUSED_MESSAGE } from '@hvault/shared';
 import { SESSION_INVALID_MESSAGE } from '../constants/index.js';
 
 const logger = createModuleLogger('controller-helpers');
@@ -583,7 +584,7 @@ export async function assertMasterPasswordProof(
     ctx.ip,
     ctx.userAgent,
   );
-  throw httpErrors.unauthorized('Current password is incorrect');
+  throw httpErrors.unauthorized(MASTER_PASSWORD_PROOF_REFUSED_MESSAGE);
 }
 
 /**

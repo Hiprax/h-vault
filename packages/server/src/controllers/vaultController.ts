@@ -27,6 +27,7 @@ import {
   StaleVaultKeyError,
   vaultKeyVersionFilter,
 } from '../utils/controllerHelpers.js';
+import { MASTER_PASSWORD_PROOF_REFUSED_MESSAGE } from '@hvault/shared';
 import { carriesBoundField } from '../utils/vaultFieldFormat.js';
 import { supportsTransactions } from '../utils/transactionSupport.js';
 import {
@@ -835,7 +836,7 @@ export const bulkReEncrypt = catchAsync(async (req: Request, res: Response): Pro
       failCtx.ip,
       failCtx.userAgent,
     );
-    throw httpErrors.unauthorized('Password verification failed');
+    throw httpErrors.unauthorized(MASTER_PASSWORD_PROOF_REFUSED_MESSAGE);
   }
 
   /**

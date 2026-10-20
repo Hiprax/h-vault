@@ -1909,10 +1909,12 @@ describe('machine-readable reports', () => {
       'documents-list',
       'document-upload-review',
       'document-detail',
+      'document-edit-details',
       'document-viewer',
       'document-viewer-expanded',
       'documents-trash',
       'documents-download-all',
+      'document-upload-waiting',
       'about-page',
       'whats-new-dialog',
       'unlock-screen',
@@ -1930,10 +1932,12 @@ describe('machine-readable reports', () => {
     for (const view of [
       'documents-list',
       'document-detail',
+      'document-edit-details',
       'document-viewer',
       'document-viewer-expanded',
       'documents-trash',
       'documents-download-all',
+      'document-upload-waiting',
     ]) {
       expect(A11Y_VIEW_IDS.indexOf(view), view).toBeLessThan(
         A11Y_VIEW_IDS.indexOf('unlock-screen'),

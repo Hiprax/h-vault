@@ -62,6 +62,7 @@ import {
   MAX_ENCRYPTED_DATA_LENGTH,
   MAX_ENCRYPTED_NAME_LENGTH,
   MAX_ITEMS_PER_USER,
+  MASTER_PASSWORD_PROOF_REFUSED_MESSAGE,
 } from '@hvault/shared';
 import type {
   CheckBreachInput,
@@ -709,7 +710,7 @@ export const exportVault = catchAsync(async (req: Request, res: Response): Promi
       failCtx.ip,
       failCtx.userAgent,
     );
-    throw httpErrors.unauthorized('Current password is incorrect');
+    throw httpErrors.unauthorized(MASTER_PASSWORD_PROOF_REFUSED_MESSAGE);
   }
 
   const maxSizeBytes = config.EXPORT_MAX_SIZE_MB * 1024 * 1024;

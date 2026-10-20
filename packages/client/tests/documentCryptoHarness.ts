@@ -297,12 +297,13 @@ function fromBase64(base64: string): DocumentBytes {
  * UTF-8 bytes; `MAX_ENCRYPTED_DOCUMENT_META_LENGTH` is its exact base64
  * expansion), and Section 1.5 records that the pair was wrong once already.
  */
-export function worstCaseMetaFixture(): DocumentMeta {
+export function worstCaseMetaFixture(): Required<DocumentMeta> {
   // U+4E2D: one UTF-16 code unit, which every field bound counts, and three UTF-8
   // bytes, which the blob's byte budget counts. That gap is the whole point.
   const wide = '中';
   return {
     name: wide.repeat(MAX_DOCUMENT_NAME_LENGTH),
+    originalName: wide.repeat(MAX_DOCUMENT_NAME_LENGTH),
     mime: wide.repeat(MAX_DOCUMENT_MIME_LENGTH),
     ext: wide.repeat(MAX_DOCUMENT_EXT_LENGTH),
     plaintextBytes: 6,

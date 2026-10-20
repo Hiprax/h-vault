@@ -158,6 +158,117 @@ test.describe('documents: the encrypted document store', () => {
     expect(readFileSync(savedPath).equals(documentFixtureBytes(README))).toBe(true);
   });
 
+  test('takes a name, tags and a note at upload, records the original name, and renames only the part before the extension', async ({
+    page,
+  }) => {
+    test.setTimeout(300_000);
+    await registerAndSignInViaUI(page);
+    await gotoDocuments(page);
+
+    // The details are typed BEFORE anything is sent, beside the chosen file.
+    await page.locator('#document-upload-input').setInputFiles(documentFixture(CSV));
+    const name = page.locator('#document-upload-name');
+    await expect(name).toHaveValue('contacts');
+    await expect(page.getByTestId('document-upload-suffix')).toHaveText('.csv');
+    await name.fill('Team contacts');
+    // The vault item editor's tag chips: Enter adds one, and a tag still typed
+    // in the box when Upload is pressed goes with the file too.
+    const tags = page.locator('#document-upload-tags');
+    await tags.fill('people');
+    await tags.press('Enter');
+    await expect(page.getByRole('button', { name: 'Remove tag people' })).toBeVisible();
+    await tags.fill('work');
+    await page.locator('#document-upload-note').fill('Exported from the old address book.');
+    await page.getByRole('button', { name: 'Upload', exact: true }).click();
+
+    const stored = 'Team contacts.csv';
+    await expect(page.getByTestId('document-name').filter({ hasText: stored })).toBeVisible({
+      timeout: 60_000,
+    });
+    // The fields went with the file once the transfer was registered.
+    await expect(page.locator('#document-upload-name')).toHaveCount(0);
+    // NEGATIVE: listed under the typed name only, never under the picked one.
+    // Anchored, because `hasText` matches a substring and the typed name ends
+    // with the picked one.
+    await expect(
+      page.getByTestId('document-name').filter({ hasText: /^contacts\.csv$/ }),
+    ).toHaveCount(0);
+    await expect(page.getByTestId('document-name')).toHaveCount(1);
+
+    // Everything typed came back out of the sealed blob, and so did the name
+    // the file had when it was added.
+    await openDocument(page, stored);
+    await expect(page.getByTestId('document-original-name')).toHaveText(CSV);
+    await expect(page.getByText('Exported from the old address book.')).toBeVisible();
+    await expect(page.getByText('people', { exact: true })).toBeVisible();
+    await expect(page.getByText('work', { exact: true })).toBeVisible();
+
+    // A rename edits the stem; the extension is fixed beside it.
+    await page.getByRole('button', { name: 'Edit details' }).click();
+    const editName = page.locator('#document-edit-name');
+    await expect(editName).toHaveValue('Team contacts');
+    await expect(page.getByTestId('document-edit-suffix')).toHaveText('.csv');
+    // The stored tags open as chips, edited as a vault item's are.
+    await expect(page.getByRole('button', { name: 'Remove tag people' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Remove tag work' })).toBeVisible();
+    await expect(page.getByTestId('document-edit-original-name')).toHaveText(CSV);
+    await editName.fill('Contacts 2026');
+    await page.getByRole('button', { name: 'Save' }).click();
+    await expect(page.getByRole('heading', { name: 'Contacts 2026.csv', level: 1 })).toBeVisible({
+      timeout: 60_000,
+    });
+    // The original name is the one thing a rename never touches.
+    await expect(page.getByTestId('document-original-name')).toHaveText(CSV);
+  });
+
+  test('pauses an upload that loses its connection, and finishes it when the connection returns', async ({
+    page,
+    context,
+  }) => {
+    test.setTimeout(300_000);
+    await registerAndSignInViaUI(page);
+    await gotoDocuments(page);
+
+    // The first part is refused as a dropped connection and the browser then
+    // goes offline, the order a real interface drop produces; every later
+    // request goes through untouched.
+    const parts = '**/api/v1/documents/uploads/*/parts/*';
+    let cut = false;
+    await page.route(parts, async (route) => {
+      if (cut) {
+        await route.fallback();
+        return;
+      }
+      cut = true;
+      await route.abort('internetdisconnected');
+      await context.setOffline(true);
+    });
+
+    await page.locator('#document-upload-input').setInputFiles(documentFixture(README));
+    await page.getByRole('button', { name: 'Upload', exact: true }).click();
+
+    // Paused, not failed: the row says what will happen and offers no Retry,
+    // because there is nothing for the reader to resume by hand.
+    const status = page.getByTestId('upload-status');
+    await expect(status).toHaveText(/^You are offline\. The upload is paused/, { timeout: 60_000 });
+    await expect(page.getByRole('button', { name: `Retry upload of ${README}` })).toHaveCount(0);
+    await expect(
+      page.getByRole('button', { name: `Retry now: upload of ${README}` }),
+    ).toBeVisible();
+    await expect(page.getByTestId('document-name')).toHaveCount(0);
+
+    // Back online: the transfer carries on by itself and commits.
+    await context.setOffline(false);
+    await expect(page.getByTestId('document-name').filter({ hasText: README })).toBeVisible({
+      timeout: 60_000,
+    });
+    await expect(page.getByTestId('upload-row')).toHaveCount(0);
+    // NEGATIVE: one document, and it opens; a resume that re-sealed a part under
+    // another key would be listed as unreadable rather than missing.
+    await expect(page.getByTestId('document-name')).toHaveCount(1);
+    await expect(page.getByTestId('documents-degraded')).toHaveCount(0);
+  });
+
   test('uploads a rewritten document only after its diff is confirmed, and refuses one it cannot repair', async ({
     page,
   }) => {
@@ -366,6 +477,106 @@ test.describe('documents: the encrypted document store', () => {
     // here from the trash.
     await reopenByUrl(page, `/documents/${id}`, password);
     await expect(page.getByTestId('document-not-found')).toBeVisible({ timeout: 60_000 });
+  });
+
+  test('selects documents and tags, trashes, restores and deletes them in bulk', async ({
+    page,
+  }) => {
+    test.setTimeout(300_000);
+    const { password } = await registerAndSignInViaUI(page);
+    await gotoDocuments(page);
+    for (const fixture of [README, CSV, UGLY_JSON]) await uploadDocument(page, fixture);
+
+    const row = (fixture: string) => page.getByTestId('document-row').filter({ hasText: fixture });
+    const bar = page.getByTestId('documents-selection-bar');
+    // The row's own label: the checkbox inside it is visually hidden, so the
+    // visible box is what a person presses.
+    const tick = (fixture: string) => row(fixture).locator('label').click();
+    const rowHeight = async (fixture: string): Promise<number> =>
+      (await row(fixture).boundingBox())?.height ?? 0;
+
+    // react-window takes the row height as a constant; the checkbox must not
+    // change it, in either mode (jsdom does no layout, so only this can tell).
+    expect(await rowHeight(README)).toBe(78);
+
+    // A keyboard user sees where focus is, on a checkbox that is visually hidden.
+    const box = page.getByRole('checkbox', { name: `Select ${README}` });
+    const icon = box.locator('xpath=following-sibling::span');
+    const ringAtRest = await icon.evaluate((el) => getComputedStyle(el).boxShadow);
+    await box.focus();
+    await page.keyboard.press('Shift+Tab');
+    await page.keyboard.press('Tab');
+    await expect(box).toBeFocused();
+    const ringFocused = await icon.evaluate((el) => getComputedStyle(el).boxShadow);
+    expect(ringFocused).not.toBe(ringAtRest);
+    expect(ringFocused).not.toBe('none');
+
+    await tick(README);
+    await tick(CSV);
+    await expect(bar).toContainText('2 selected');
+    expect(await rowHeight(README)).toBe(78);
+    // While selecting, a row selects instead of opening.
+    await expect(row(UGLY_JSON).getByRole('link')).toHaveCount(0);
+
+    // Tag the two.
+    await bar.getByRole('button', { name: 'Tag' }).click();
+    await page.getByPlaceholder('Enter tag name').fill('batch');
+    await page.getByRole('button', { name: 'Apply' }).click();
+    await expect(page.getByText('Tag "batch" added to 2 documents')).toBeVisible({
+      timeout: 60_000,
+    });
+    await expect(bar).toHaveCount(0);
+
+    // Sealed into each one's own metadata: it survives a reload, and only the
+    // selected ones carry it.
+    await reopenByUrl(page, '/documents', password);
+    await expect(page.getByTestId('document-name')).toHaveCount(3, { timeout: 60_000 });
+    await openDocument(page, README);
+    await expect(page.getByText('batch', { exact: true })).toBeVisible();
+    await page.goBack();
+    await openDocument(page, UGLY_JSON);
+    await expect(page.getByRole('heading', { name: UGLY_JSON, level: 1 })).toBeVisible();
+    await expect(page.getByText('batch', { exact: true })).toHaveCount(0);
+    await page.goBack();
+    await expect(page.getByTestId('document-name')).toHaveCount(3, { timeout: 60_000 });
+
+    // Trash the same two.
+    await tick(README);
+    await tick(CSV);
+    await bar.getByRole('button', { name: 'Delete', exact: true }).click();
+    const trashDialog = page.getByRole('dialog', { name: 'Move 2 documents to the trash' });
+    await trashDialog.getByRole('button', { name: 'Move to trash' }).click();
+    await expect(page.getByText('2 documents moved to the trash')).toBeVisible({ timeout: 60_000 });
+    await expect(page.getByTestId('document-name')).toHaveCount(1);
+
+    // Restore both from the trash at once.
+    await page.getByRole('button', { name: /^Trash/ }).click();
+    await expect(page.getByTestId('document-name')).toHaveCount(2, { timeout: 60_000 });
+    await tick(README);
+    // The select-all box is the bar's first label, pressed like every other box.
+    await bar.locator('label').first().click();
+    await expect(bar).toContainText('2 selected');
+    await bar.getByRole('button', { name: 'Restore' }).click();
+    await expect(page.getByText('2 documents restored')).toBeVisible({ timeout: 60_000 });
+    await page.getByRole('button', { name: /^All Documents/ }).click();
+    await expect(page.getByTestId('document-name')).toHaveCount(3, { timeout: 60_000 });
+
+    // And one for good.
+    await tick(UGLY_JSON);
+    await bar.getByRole('button', { name: 'Delete', exact: true }).click();
+    await page
+      .getByRole('dialog', { name: 'Move 1 document to the trash' })
+      .getByRole('button', { name: 'Move to trash' })
+      .click();
+    await page.getByRole('button', { name: /^Trash/ }).click();
+    await expect(page.getByTestId('document-name')).toHaveCount(1, { timeout: 60_000 });
+    await tick(UGLY_JSON);
+    await bar.getByRole('button', { name: 'Delete forever' }).click();
+    const purgeDialog = page.getByRole('dialog', { name: 'Delete 1 document for good' });
+    await expect(purgeDialog).toContainText('Nothing can bring it back');
+    await purgeDialog.getByRole('button', { name: 'Delete forever' }).click();
+    await expect(page.getByText('1 document permanently deleted')).toBeVisible({ timeout: 60_000 });
+    await expect(page.getByText('The trash is empty')).toBeVisible();
   });
 
   test('refuses an upload that would take the account past its storage allowance', async ({

@@ -36,6 +36,8 @@ import React from 'react';
 import {
   DOCUMENT_PLAINTEXT_CHUNK_BYTES,
   MAX_DOCUMENT_META_JSON_BYTES,
+  MAX_DOCUMENT_NAME_LENGTH,
+  MAX_DOCUMENT_NOTE_LENGTH,
   MAX_DOCUMENT_TAGS,
   MAX_TAG_LENGTH,
   documentMetaJsonByteLength,
@@ -94,7 +96,11 @@ import {
   DocumentDownloadCancelledError,
   DocumentIntegrityError,
 } from '../../src/services/documents/download';
-import { useDocumentsStore, type DecryptedDocument } from '../../src/stores/documentsStore';
+import {
+  DOCUMENT_TYPE_LOCKED_MESSAGE,
+  useDocumentsStore,
+  type DecryptedDocument,
+} from '../../src/stores/documentsStore';
 import { useVaultStore } from '../../src/stores/vaultStore';
 import { DocumentDetail } from '../../src/components/documents/DocumentDetail';
 import DocumentPage from '../../src/pages/DocumentPage';
@@ -404,15 +410,22 @@ describe('DocumentDetail — editing name, tags and note', () => {
     renderDetail(makeDocument({ meta: makeMeta({ tags: ['old'], note: 'was here' }) }));
 
     openEditor();
-    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'renamed.pdf' } });
-    fireEvent.change(screen.getByLabelText('Tags'), { target: { value: ' a , b , a ' } });
+    // Only the part before the extension is typed: the type is fixed.
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'renamed' } });
+    // The stored tags open as chips, edited exactly as a vault item's are.
+    fireEvent.click(screen.getByRole('button', { name: 'Remove tag old' }));
+    const tags = screen.getByLabelText('Tags');
+    fireEvent.change(tags, { target: { value: ' a ' } });
+    fireEvent.keyDown(tags, { key: 'Enter' });
+    // Typed and never added: saved with the rest rather than dropped.
+    fireEvent.change(tags, { target: { value: 'b' } });
     fireEvent.change(screen.getByLabelText('Note'), { target: { value: 'now this' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
     await waitFor(() => {
       expect(updateDocumentMeta).toHaveBeenCalledWith(DOC_ID, {
         name: 'renamed.pdf',
-        // Trimmed and de-duplicated, the way the shared schema stores a tag.
+        // Trimmed, the way the shared schema stores a tag.
         tags: ['a', 'b'],
         note: 'now this',
       });
@@ -421,6 +434,158 @@ describe('DocumentDetail — editing name, tags and note', () => {
       title: 'Document details updated',
       type: 'success',
     });
+  });
+
+  it('edits only the part of the name before the extension, and says the type is fixed', () => {
+    renderDetail(makeDocument({ meta: makeMeta({ name: 'Backup.Final.ZIP', ext: 'zip' }) }));
+
+    openEditor();
+
+    const name = screen.getByLabelText('Name');
+    expect(name).toHaveValue('Backup.Final');
+    // Written exactly as the file had it, capital letters included.
+    expect(screen.getByTestId('document-edit-suffix')).toHaveTextContent(/^\.ZIP$/);
+    expect(name).toHaveAccessibleDescription(
+      'The file type stays .ZIP: it is fixed when a document is added.',
+    );
+    // The bound counts the extension, so the field cannot hold a name the store
+    // would refuse.
+    expect(name).toHaveAttribute('maxLength', String(MAX_DOCUMENT_NAME_LENGTH - '.ZIP'.length));
+  });
+
+  it('shows a document with no extension whole, with nothing fixed beside it', () => {
+    renderDetail(makeDocument({ meta: makeMeta({ name: 'Dockerfile', ext: '' }) }));
+
+    openEditor();
+
+    expect(screen.getByLabelText('Name')).toHaveValue('Dockerfile');
+    expect(screen.queryByTestId('document-edit-suffix')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Name')).not.toHaveAttribute('aria-describedby');
+  });
+
+  it('refuses a dot typed into a name that has no extension, sending nothing', async () => {
+    const updateDocumentMeta = vi.fn().mockResolvedValue(undefined);
+    useDocumentsStore.setState({ updateDocumentMeta });
+    renderDetail(makeDocument({ meta: makeMeta({ name: 'Dockerfile', ext: '' }) }));
+
+    openEditor();
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Docker.file' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    expect(await screen.findByTestId('document-edit-refusal')).toHaveTextContent(
+      DOCUMENT_TYPE_LOCKED_MESSAGE,
+    );
+    expect(updateDocumentMeta).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+  });
+
+  it('keeps the type a document renamed before this rule already shows', async () => {
+    // Added as Markdown, renamed to .txt by an earlier version: the CURRENT name
+    // decides the type, so a rename keeps .txt rather than reverting to .md.
+    const updateDocumentMeta = vi.fn().mockResolvedValue(undefined);
+    useDocumentsStore.setState({ updateDocumentMeta });
+    renderDetail(makeDocument({ meta: makeMeta({ name: 'notes.txt', ext: 'md' }) }));
+
+    openEditor();
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'minutes' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => {
+      expect(updateDocumentMeta).toHaveBeenCalledWith(DOC_ID, {
+        name: 'minutes.txt',
+        tags: [],
+        note: null,
+      });
+    });
+  });
+
+  it('accepts a name exactly at the bound, extension included, and refuses one past it', async () => {
+    const updateDocumentMeta = vi.fn().mockResolvedValue(undefined);
+    useDocumentsStore.setState({ updateDocumentMeta });
+    renderDetail(makeDocument());
+
+    openEditor();
+    // `.pdf` is four characters, so a stem of bound - 3 makes a name one over.
+    fireEvent.change(screen.getByLabelText('Name'), {
+      target: { value: 'x'.repeat(MAX_DOCUMENT_NAME_LENGTH - 3) },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(await screen.findByTestId('document-edit-refusal')).toHaveTextContent(
+      `A name can be at most ${String(MAX_DOCUMENT_NAME_LENGTH)} characters, including its extension.`,
+    );
+    expect(updateDocumentMeta).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByLabelText('Name'), {
+      target: { value: 'x'.repeat(MAX_DOCUMENT_NAME_LENGTH - 4) },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => {
+      expect(updateDocumentMeta).toHaveBeenCalledWith(DOC_ID, {
+        name: `${'x'.repeat(MAX_DOCUMENT_NAME_LENGTH - 4)}.pdf`,
+        tags: [],
+        note: null,
+      });
+    });
+  });
+
+  it('refuses a note longer than a note may be, before anything is sealed', async () => {
+    const updateDocumentMeta = vi.fn().mockResolvedValue(undefined);
+    useDocumentsStore.setState({ updateDocumentMeta });
+    renderDetail(makeDocument());
+
+    openEditor();
+    // A paste can exceed the field's own `maxLength` where the browser does not
+    // enforce it, so the bound is checked again before the seal.
+    fireEvent.change(screen.getByLabelText('Note'), {
+      target: { value: 'x'.repeat(MAX_DOCUMENT_NOTE_LENGTH + 1) },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    expect(await screen.findByTestId('document-edit-refusal')).toHaveTextContent(
+      `A note can be at most ${String(MAX_DOCUMENT_NOTE_LENGTH)} characters.`,
+    );
+    expect(updateDocumentMeta).not.toHaveBeenCalled();
+  });
+
+  it('shows the original name, read-only, in the details and in the editor, and never sends it', async () => {
+    const updateDocumentMeta = vi.fn().mockResolvedValue(undefined);
+    useDocumentsStore.setState({ updateDocumentMeta });
+    renderDetail(
+      makeDocument({ meta: makeMeta({ name: 'Tax return.pdf', originalName: 'Scan 0042.pdf' }) }),
+    );
+
+    expect(screen.getByTestId('document-original-name')).toHaveTextContent(/^Scan 0042\.pdf$/);
+
+    openEditor();
+    expect(screen.getByTestId('document-edit-original-name')).toHaveTextContent(/^Scan 0042\.pdf$/);
+    // Shown as text, never as a control anything could change.
+    expect(screen.queryByDisplayValue('Scan 0042.pdf')).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Taxes 2025' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => {
+      expect(updateDocumentMeta).toHaveBeenCalledTimes(1);
+    });
+    expect(updateDocumentMeta.mock.calls[0]?.[1]).toEqual({
+      name: 'Taxes 2025.pdf',
+      tags: [],
+      note: null,
+    });
+  });
+
+  it('says the original name was not recorded for a document added before it was, guessing nothing', () => {
+    renderDetail(makeDocument({ meta: makeMeta({ name: 'Renamed later.pdf' }) }));
+
+    expect(screen.getByTestId('document-original-name')).toHaveTextContent(
+      /^Not recorded for this document\.$/,
+    );
+    openEditor();
+    expect(screen.getByTestId('document-edit-original-name')).toHaveTextContent(
+      /^Not recorded for this document\.$/,
+    );
+    expect(
+      screen.queryByText('Renamed later.pdf', { selector: '[data-testid$="original-name"]' }),
+    ).toBeNull();
   });
 
   it('removes a note by sending null, which is what a cleared field has to mean', async () => {
@@ -443,20 +608,42 @@ describe('DocumentDetail — editing name, tags and note', () => {
     });
   });
 
-  it('refuses more tags than a document may carry, before anything is sealed', async () => {
+  it('refuses a 21st tag in the field, and a save carrying one, before anything is sealed', async () => {
+    // The editor now refuses the extra tag itself, as the vault item editor does
+    // (operator decision, 0.19.0); the save-time "at most twenty" sentence is
+    // pinned on `documentMetaRefusal` directly, which no typing can reach now.
     const updateDocumentMeta = vi.fn().mockResolvedValue(undefined);
     useDocumentsStore.setState({ updateDocumentMeta });
-    renderDetail(makeDocument());
+    const full = Array.from({ length: MAX_DOCUMENT_TAGS }, (_, i) => `t${String(i)}`);
+    renderDetail(makeDocument({ meta: makeMeta({ tags: full }) }));
 
     openEditor();
-    const tooMany = Array.from({ length: MAX_DOCUMENT_TAGS + 1 }, (_, i) => `t${String(i)}`);
-    fireEvent.change(screen.getByLabelText('Tags'), { target: { value: tooMany.join(',') } });
+    const tags = screen.getByLabelText('Tags');
+    fireEvent.change(tags, { target: { value: 'one-more' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add' }));
+    expect(
+      screen.getByText(`A document can have up to ${String(MAX_DOCUMENT_TAGS)} tags.`),
+    ).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: /^Remove tag/ })).toHaveLength(MAX_DOCUMENT_TAGS);
+
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
-    expect(await screen.findByTestId('document-edit-refusal')).toHaveTextContent(
-      `at most ${String(MAX_DOCUMENT_TAGS)} tags`,
-    );
+    expect(
+      await screen.findByText(
+        `That tag was not added because a document can have ${String(MAX_DOCUMENT_TAGS)} tags. Clear the box or remove a tag to save.`,
+      ),
+    ).toBeInTheDocument();
     expect(updateDocumentMeta).not.toHaveBeenCalled();
+
+    // Clearing the box is enough: the twenty are saved as they were.
+    fireEvent.change(tags, { target: { value: '' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => {
+      expect(updateDocumentMeta).toHaveBeenCalledWith(
+        DOC_ID,
+        expect.objectContaining({ tags: full }),
+      );
+    });
   });
 
   it('refuses a tag longer than a tag may be, naming the one that is', async () => {
@@ -465,8 +652,12 @@ describe('DocumentDetail — editing name, tags and note', () => {
     renderDetail(makeDocument());
 
     openEditor();
+    // jsdom does not enforce `maxLength`, so this reaches past the field's own
+    // bound to the save-time check that quotes the tag (a pasted value in a
+    // browser is cut at the bound instead).
     const overlong = 'x'.repeat(MAX_TAG_LENGTH + 1);
-    fireEvent.change(screen.getByLabelText('Tags'), { target: { value: `fine, ${overlong}` } });
+    fireEvent.change(screen.getByLabelText('Tags'), { target: { value: overlong } });
+    fireEvent.keyDown(screen.getByLabelText('Tags'), { key: 'Enter' });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
     const refusal = await screen.findByTestId('document-edit-refusal');
@@ -544,7 +735,7 @@ describe('DocumentDetail — editing name, tags and note', () => {
     renderDetail(makeDocument());
 
     openEditor();
-    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'discarded.pdf' } });
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'discarded' } });
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
 
     await waitFor(() => {

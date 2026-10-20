@@ -1,4 +1,4 @@
-import { memo } from 'react';
+import { memo, type ReactNode } from 'react';
 import { Link } from 'react-router';
 import { List } from 'react-window';
 import type { RowComponentProps } from 'react-window';
@@ -17,6 +17,7 @@ import { cn } from '../../lib/utils';
 import { UNOPENABLE_DOCUMENT_NAME } from '../../services/documents/downloadAll';
 import type { DecryptedDocument } from '../../stores/documentsStore';
 import type { DocumentListMode } from '../../hooks/useDocumentsFilterView';
+import { SelectionCheckbox } from '../ui/SelectionCheckbox';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -90,24 +91,36 @@ interface DocumentRowProps {
    * changed.
    */
   folderName: string | undefined;
+  isSelected: boolean;
+  /** At least one row on screen is selected, so a click selects instead of opening. */
+  selecting: boolean;
+  /** Stable across renders (the selection hook's), so the memo comparison holds. */
+  onToggleSelect: (id: string) => void;
 }
 
 /**
- * One document, as a single link.
+ * One document: a selection checkbox, then the document itself.
  *
- * A real `<Link>` rather than the vault list's `role="button"` div, and the
- * difference is a consequence rather than an inconsistency: a vault row hosts a
- * selection checkbox and changes what a click means in multi-select mode, so its
- * activator cannot be an anchor without nesting one interactive element inside
- * another. A document row has neither, so the anchor is available — and it brings
- * keyboard activation, middle-click and "open in a new tab" without a line of
- * event handling to write or to get wrong.
+ * The checkbox is a SIBLING of the activator, never inside it, as on the vault
+ * list: a checkbox nested in a link or a `role="button"` is stripped from the
+ * accessibility tree. It is the one selection control for a keyboard or a screen
+ * reader, and it stays mounted in both modes, so focus on it survives the first
+ * tick turning selection on.
  *
- * THE TRASH ADDS NO CONTROLS HERE, and that is what preserves the property. A
- * trashed row links to the same detail route, which already resolves it from the
- * trash list and already offers Restore and Delete Forever behind confirmations.
+ * Outside selection the activator is a real `<Link>`, which brings keyboard
+ * activation, middle-click and "open in a new tab" without a line of event
+ * handling. While anything on screen is selected, a click on the row selects it
+ * (as on the vault list) instead of opening it, so the activator becomes a plain
+ * element with the same layout that toggles on a pointer click; it is not a
+ * second tab stop, because the checkbox beside it already is.
  */
-const DocumentRow = memo(function DocumentRow({ doc, folderName }: DocumentRowProps) {
+const DocumentRow = memo(function DocumentRow({
+  doc,
+  folderName,
+  isSelected,
+  selecting,
+  onToggleSelect,
+}: DocumentRowProps) {
   const { meta } = doc;
   const degraded = meta === null;
   // Derived from the DATA, never from the mode: a row carries `deletedAt` because
@@ -128,73 +141,98 @@ const DocumentRow = memo(function DocumentRow({ doc, folderName }: DocumentRowPr
     year: 'numeric',
   });
 
+  const body: ReactNode = (
+    <>
+      <span
+        className={cn(
+          'flex h-10 w-10 shrink-0 items-center justify-center rounded-lg',
+          degraded
+            ? 'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300'
+            : trashed
+              ? 'bg-[hsl(var(--muted))] text-[hsl(var(--muted-foreground))]'
+              : 'bg-sky-100 text-sky-800 dark:bg-sky-900/30 dark:text-sky-300',
+        )}
+      >
+        {degraded ? <FileWarning className="h-5 w-5" /> : <FileText className="h-5 w-5" />}
+      </span>
+
+      <span className="flex min-w-0 flex-1 flex-col gap-1">
+        <span
+          data-testid="document-name"
+          className="truncate text-sm font-medium text-[hsl(var(--card-foreground))]"
+        >
+          {name}
+        </span>
+        <span className="flex min-w-0 items-center gap-2">
+          <span className="inline-flex shrink-0 rounded-full bg-[hsl(var(--muted))] px-2 py-0.5 text-xs font-medium text-[hsl(var(--muted-foreground))]">
+            {badge}
+          </span>
+          {subtitle !== '' && (
+            <span className="truncate text-xs text-[hsl(var(--muted-foreground))]">{subtitle}</span>
+          )}
+          {/* Where the document is filed, shown wherever it resolves — including
+                inside a folder view, where it is redundant but consistent, and in
+                the trash, where it says where a restore will put it back. An id
+                that resolves to nothing renders nothing, which is the right answer
+                for a folder that has been deleted. */}
+          {folderName !== undefined && (
+            <span
+              data-testid="document-folder"
+              className="inline-flex min-w-0 shrink items-center gap-1 rounded-full bg-[hsl(var(--muted))] px-2 py-0.5 text-xs font-medium text-[hsl(var(--muted-foreground))]"
+            >
+              <Folder className="h-3 w-3 shrink-0" />
+              <span className="truncate">{folderName}</span>
+            </span>
+          )}
+        </span>
+      </span>
+
+      {doc.favorite && <Star className="h-4 w-4 shrink-0 fill-yellow-400 text-yellow-400" />}
+
+      <span className="hidden shrink-0 text-xs text-[hsl(var(--muted-foreground))] sm:block">
+        {/* A row already being destroyed says so rather than showing a date it
+              will not outlive. `purgePending` became reachable the moment this
+              list gained an Empty-trash control. */}
+        {doc.purgePending === true ? 'Being deleted' : trashed ? `Deleted ${stamp}` : stamp}
+      </span>
+    </>
+  );
+
   return (
     <div
       // The element whose rendered height must equal `ROW_HEIGHT`. Named so an
       // end-to-end measurement can find the CARD rather than the link inside it.
       data-testid="document-row"
-      className="flex items-center gap-4 rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--card))] p-4 transition-colors hover:bg-[hsl(var(--accent))]"
+      className={cn(
+        'flex items-center gap-4 rounded-lg border bg-[hsl(var(--card))] p-4 transition-colors',
+        isSelected
+          ? 'border-[hsl(var(--primary))] bg-[hsl(var(--primary)/0.05)]'
+          : 'border-[hsl(var(--border))] hover:bg-[hsl(var(--accent))]',
+      )}
     >
-      <Link
-        to={`/documents/${doc.id}`}
-        title={name}
-        className="flex min-w-0 flex-1 items-center gap-4"
-      >
-        <span
-          className={cn(
-            'flex h-10 w-10 shrink-0 items-center justify-center rounded-lg',
-            degraded
-              ? 'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300'
-              : trashed
-                ? 'bg-[hsl(var(--muted))] text-[hsl(var(--muted-foreground))]'
-                : 'bg-sky-100 text-sky-800 dark:bg-sky-900/30 dark:text-sky-300',
-          )}
+      <SelectionCheckbox
+        checked={isSelected}
+        onChange={() => onToggleSelect(doc.id)}
+        label={`Select ${name}`}
+      />
+      {selecting ? (
+        <div
+          data-testid="document-row-toggle"
+          title={name}
+          onClick={() => onToggleSelect(doc.id)}
+          className="flex min-w-0 flex-1 cursor-pointer items-center gap-4"
         >
-          {degraded ? <FileWarning className="h-5 w-5" /> : <FileText className="h-5 w-5" />}
-        </span>
-
-        <span className="flex min-w-0 flex-1 flex-col gap-1">
-          <span
-            data-testid="document-name"
-            className="truncate text-sm font-medium text-[hsl(var(--card-foreground))]"
-          >
-            {name}
-          </span>
-          <span className="flex min-w-0 items-center gap-2">
-            <span className="inline-flex shrink-0 rounded-full bg-[hsl(var(--muted))] px-2 py-0.5 text-xs font-medium text-[hsl(var(--muted-foreground))]">
-              {badge}
-            </span>
-            {subtitle !== '' && (
-              <span className="truncate text-xs text-[hsl(var(--muted-foreground))]">
-                {subtitle}
-              </span>
-            )}
-            {/* Where the document is filed, shown wherever it resolves — including
-                inside a folder view, where it is redundant but consistent, and in
-                the trash, where it says where a restore will put it back. An id
-                that resolves to nothing renders nothing, which is the right answer
-                for a folder that has been deleted. */}
-            {folderName !== undefined && (
-              <span
-                data-testid="document-folder"
-                className="inline-flex min-w-0 shrink items-center gap-1 rounded-full bg-[hsl(var(--muted))] px-2 py-0.5 text-xs font-medium text-[hsl(var(--muted-foreground))]"
-              >
-                <Folder className="h-3 w-3 shrink-0" />
-                <span className="truncate">{folderName}</span>
-              </span>
-            )}
-          </span>
-        </span>
-
-        {doc.favorite && <Star className="h-4 w-4 shrink-0 fill-yellow-400 text-yellow-400" />}
-
-        <span className="hidden shrink-0 text-xs text-[hsl(var(--muted-foreground))] sm:block">
-          {/* A row already being destroyed says so rather than showing a date it
-              will not outlive. `purgePending` became reachable the moment this
-              list gained an Empty-trash control. */}
-          {doc.purgePending === true ? 'Being deleted' : trashed ? `Deleted ${stamp}` : stamp}
-        </span>
-      </Link>
+          {body}
+        </div>
+      ) : (
+        <Link
+          to={`/documents/${doc.id}`}
+          title={name}
+          className="flex min-w-0 flex-1 items-center gap-4"
+        >
+          {body}
+        </Link>
+      )}
     </div>
   );
 });
@@ -206,10 +244,22 @@ const DocumentRow = memo(function DocumentRow({ doc, folderName }: DocumentRowPr
 interface RowData {
   documents: DecryptedDocument[];
   folderNames: ReadonlyMap<string, string>;
+  isSelected: (id: string) => boolean;
+  selecting: boolean;
+  onToggleSelect: (id: string) => void;
 }
 
 function VirtualizedRow(props: RowComponentProps<RowData>) {
-  const { index, style, ariaAttributes, documents, folderNames } = props;
+  const {
+    index,
+    style,
+    ariaAttributes,
+    documents,
+    folderNames,
+    isSelected,
+    selecting,
+    onToggleSelect,
+  } = props;
   const doc = documents[index];
   if (!doc) return null;
   return (
@@ -218,6 +268,9 @@ function VirtualizedRow(props: RowComponentProps<RowData>) {
       <DocumentRow
         doc={doc}
         folderName={doc.folderId === undefined ? undefined : folderNames.get(doc.folderId)}
+        isSelected={isSelected(doc.id)}
+        selecting={selecting}
+        onToggleSelect={onToggleSelect}
       />
     </div>
   );
@@ -309,7 +362,7 @@ function EmptyState({
         return {
           icon: Folder,
           heading: `Nothing in “${folderNames.get(mode.id) ?? 'this folder'}”`,
-          body: 'Move a document into this folder from its own page, or upload a file while this folder is selected.',
+          body: 'Move documents here from their own page, or select them in All Documents and choose Move, or upload a file while this folder is selected.',
         };
       case 'all':
       default:
@@ -349,6 +402,11 @@ interface DocumentListProps {
   searching: boolean;
   /** So the search field can name this list as the thing it controls. */
   id?: string;
+  /** Whether a row is selected; the selection hook's, so it is stable. */
+  isSelected: (id: string) => boolean;
+  /** At least one row on screen is selected. */
+  selecting: boolean;
+  onToggleSelect: (id: string) => void;
 }
 
 /**
@@ -368,6 +426,9 @@ export function DocumentList({
   folderNames,
   searching,
   id,
+  isSelected,
+  selecting,
+  onToggleSelect,
 }: DocumentListProps) {
   if (loading) return <LoadingSkeleton />;
   if (error !== null) return <ErrorState message={error} onRetry={onRetry} />;
@@ -385,7 +446,7 @@ export function DocumentList({
         rowComponent={VirtualizedRow}
         rowCount={documents.length}
         rowHeight={ROW_HEIGHT + ROW_GAP}
-        rowProps={{ documents, folderNames }}
+        rowProps={{ documents, folderNames, isSelected, selecting, onToggleSelect }}
         overscanCount={5}
         role="list"
         {...(id === undefined ? {} : { id })}
@@ -400,6 +461,9 @@ export function DocumentList({
           <DocumentRow
             doc={doc}
             folderName={doc.folderId === undefined ? undefined : folderNames.get(doc.folderId)}
+            isSelected={isSelected(doc.id)}
+            selecting={selecting}
+            onToggleSelect={onToggleSelect}
           />
         </div>
       ))}

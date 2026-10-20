@@ -7,7 +7,7 @@ import {
   type DecryptedVaultItem,
 } from '../src/stores/vaultStore';
 import { computeItemIdentity } from '../src/services/import/identity';
-import { MAX_URI_LENGTH, URI_TOO_LONG_MESSAGE } from '@hvault/shared';
+import { MAX_TAGS_PER_ITEM, MAX_URI_LENGTH, URI_TOO_LONG_MESSAGE } from '@hvault/shared';
 
 // ---------------------------------------------------------------------------
 // Mocks
@@ -1441,6 +1441,103 @@ describe('VaultItemForm — tags and folder', () => {
 
     await waitFor(() => expect(mockCreateItem).toHaveBeenCalledTimes(1));
     expect(createdOptions().tags).toEqual(['personal']);
+  });
+
+  it('saves a tag that was typed but never added, trimmed, with the ones that were', async () => {
+    // Pressing Save with text still in the tag box used to throw that text away
+    // without a word. It is now saved as one more tag (operator decision, 0.19.0).
+    renderForm();
+    const tagInput = screen.getByPlaceholderText('Add a tag...');
+    fireEvent.change(tagInput, { target: { value: 'work' } });
+    fireEvent.keyDown(tagInput, { key: 'Enter' });
+    fireEvent.change(tagInput, { target: { value: '  typed, not added  ' } });
+    typeIn('Item name', 'Pending');
+
+    submit();
+
+    await waitFor(() => expect(mockCreateItem).toHaveBeenCalledTimes(1));
+    expect(createdOptions().tags).toEqual(['work', 'typed, not added']);
+  });
+
+  it('saves without a second copy when the typed tag is already there', async () => {
+    renderForm({
+      item: asItem({
+        id: 'i1',
+        itemType: 'login',
+        tags: ['work'],
+        favorite: false,
+        name: 'Tagged',
+        data: {},
+        createdAt: '',
+        updatedAt: '',
+      }),
+    });
+    const tagInput = screen.getByPlaceholderText('Add a tag...');
+    fireEvent.change(tagInput, { target: { value: ' work ' } });
+
+    submit('Update');
+
+    await waitFor(() => expect(mockUpdateItem).toHaveBeenCalledTimes(1));
+    const options = mockUpdateItem.mock.calls[0]![4] as Record<string, unknown>;
+    expect(options.tags).toEqual(['work']);
+    expect(screen.queryByText(/already on this item/)).not.toBeInTheDocument();
+  });
+
+  it('saves one more typed tag at 19, and refuses the save at 20 with the reason and the focus on the tags', async () => {
+    const tagsOf = (count: number): string[] =>
+      Array.from({ length: count }, (_, i) => `t${String(i)}`);
+    const item = (count: number) =>
+      asItem({
+        id: 'i1',
+        itemType: 'login',
+        tags: tagsOf(count),
+        favorite: false,
+        name: 'Full',
+        data: {},
+        createdAt: '',
+        updatedAt: '',
+      });
+
+    // n-1: the twentieth tag fits.
+    const first = renderForm({ item: item(MAX_TAGS_PER_ITEM - 1) });
+    fireEvent.change(screen.getByPlaceholderText('Add a tag...'), { target: { value: 'last' } });
+    submit('Update');
+    await waitFor(() => expect(mockUpdateItem).toHaveBeenCalledTimes(1));
+    expect((mockUpdateItem.mock.calls[0]![4] as { tags: string[] }).tags).toEqual([
+      ...tagsOf(MAX_TAGS_PER_ITEM - 1),
+      'last',
+    ]);
+    first.unmount();
+    mockUpdateItem.mockClear();
+
+    // n: nothing is saved, the typed text stays, and the field says what to do.
+    renderForm({ item: item(MAX_TAGS_PER_ITEM) });
+    const tagInput = screen.getByPlaceholderText('Add a tag...');
+    fireEvent.change(tagInput, { target: { value: 'overflow' } });
+    submit('Update');
+
+    await waitFor(() =>
+      expect(
+        screen.getByText(
+          `That tag was not added because an item can have ${String(MAX_TAGS_PER_ITEM)} tags. Clear the box or remove a tag to save.`,
+        ),
+      ).toBeInTheDocument(),
+    );
+    expect(mockUpdateItem).not.toHaveBeenCalled();
+    expect(mockCreateItem).not.toHaveBeenCalled();
+    expect(tagInput).toHaveValue('overflow');
+    expect(tagInput).toHaveFocus();
+    expect(tagInput).toHaveAttribute('aria-describedby', 'field-tags-notice');
+    // Not left looking busy: the save button is still the save button.
+    expect(screen.getByRole('button', { name: 'Update' })).toBeEnabled();
+
+    // Clearing the box is enough to save.
+    fireEvent.change(tagInput, { target: { value: '' } });
+    submit('Update');
+    await waitFor(() => expect(mockUpdateItem).toHaveBeenCalledTimes(1));
+    expect((mockUpdateItem.mock.calls[0]![4] as { tags: string[] }).tags).toEqual(
+      tagsOf(MAX_TAGS_PER_ITEM),
+    );
   });
 
   it('refuses to add a tag beyond MAX_TAGS_PER_ITEM', () => {

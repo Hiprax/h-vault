@@ -297,9 +297,12 @@ export function TotpScanPanel({ onDecoded, onError, status }: TotpScanPanelProps
   return (
     <div className="space-y-4">
       <div className="rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--card))] p-4 space-y-3">
+        {/* Google Authenticator names this menu differently per platform, so the
+            guide gives both: Android says Transfer codes and Export codes, the
+            iPhone app Transfer accounts and Export accounts. */}
         <p className="text-sm font-medium text-[hsl(var(--foreground))]">
-          On your phone: Google Authenticator, then the menu, then Transfer accounts, then Export
-          accounts.
+          On Android: Google Authenticator, then the menu, then Transfer codes, then Export codes.
+          On iPhone: Transfer accounts, then Export accounts.
         </p>
         <p className="text-xs text-[hsl(var(--muted-foreground))]">
           Those codes contain your actual secret keys. Anyone who photographs this screen can clone

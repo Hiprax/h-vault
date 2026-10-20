@@ -21,8 +21,10 @@ import {
   isRateLimited,
   retryAfterSeconds,
   describeTransientFailure,
+  isMasterPasswordRefusal,
   ACCOUNT_LOCKED_MESSAGE,
 } from '../src/services/auth/sessionFailure';
+import { MASTER_PASSWORD_PROOF_REFUSED_MESSAGE } from '@hvault/shared';
 import { getApiErrorMessage } from '../src/lib/utils';
 
 function axiosError(
@@ -105,6 +107,50 @@ describe('isSessionGone', () => {
     // exactly, not "403s we feel hopeful about": widening it would silently turn
     // every future 403 into a session the client refuses to end.
     expect(isSessionGone(axiosError(403, { message }))).toBe(true);
+  });
+});
+
+describe('isMasterPasswordRefusal', () => {
+  // The server's one wrong-proof answer: a 401 that can only follow an ACCEPTED
+  // session, so a refresh could not change it.
+  const refusal = (): AxiosError =>
+    axiosError(401, { success: false, message: MASTER_PASSWORD_PROOF_REFUSED_MESSAGE });
+
+  it('is true for a 401 carrying exactly the shared sentence', () => {
+    expect(isMasterPasswordRefusal(refusal())).toBe(true);
+  });
+
+  it('is false for any other sentence on a 401, however close', () => {
+    for (const message of [
+      `${MASTER_PASSWORD_PROOF_REFUSED_MESSAGE}.`,
+      `Error: ${MASTER_PASSWORD_PROOF_REFUSED_MESSAGE}`,
+      MASTER_PASSWORD_PROOF_REFUSED_MESSAGE.toLowerCase(),
+      'Invalid or expired token',
+      '',
+    ]) {
+      expect(isMasterPasswordRefusal(axiosError(401, { message }))).toBe(false);
+    }
+    expect(isMasterPasswordRefusal(axiosError(401, {}))).toBe(false);
+    expect(isMasterPasswordRefusal(axiosError(401, 'Current password is incorrect'))).toBe(false);
+  });
+
+  it('is false for the same sentence on any other status, and for non-HTTP failures', () => {
+    for (const status of [400, 403, 409, 429, 500]) {
+      expect(
+        isMasterPasswordRefusal(
+          axiosError(status, { message: MASTER_PASSWORD_PROOF_REFUSED_MESSAGE }),
+        ),
+      ).toBe(false);
+    }
+    expect(isMasterPasswordRefusal(axiosError())).toBe(false);
+    expect(isMasterPasswordRefusal(new Error(MASTER_PASSWORD_PROOF_REFUSED_MESSAGE))).toBe(false);
+    expect(isMasterPasswordRefusal(null)).toBe(false);
+  });
+
+  it('is never read as an ended session, so no caller signs a user out over a typo', () => {
+    expect(isSessionGone(refusal())).toBe(false);
+    // Every other 401 still is.
+    expect(isSessionGone(axiosError(401, { message: 'Invalid or expired token' }))).toBe(true);
   });
 });
 

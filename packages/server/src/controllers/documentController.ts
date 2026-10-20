@@ -2505,14 +2505,15 @@ export const restoreDocument = catchAsync(async (req: Request, res: Response): P
  * — not on the server, not in the browser, not in a backup, because documents are
  * deliberately absent from the backup payload. SECURITY.md says so.
  *
- * ## Why `generalAuthLimiter` and not `heavyOpLimiter`
+ * ## Why `documentWriteLimiter` and not `heavyOpLimiter`
  *
  * `heavyOpLimiter` allows a user 10 per 15 minutes and is shared with export,
  * backup download, bulk delete, bulk move and empty-trash. On a PER-ROW route it
  * would 429 a user who purged eleven documents and then lock them out of emptying
  * their vault trash for a quarter of an hour. The per-item equivalent carries
  * `vaultItemWriteLimiter`, sized for the client's one-request-per-row trash purge;
- * this one carries the ordinary authenticated budget.
+ * this one carries its document counterpart, sized the same way for the
+ * documents page's bulk Delete forever.
  */
 export const purgeDocument = catchAsync(async (req: Request, res: Response): Promise<void> => {
   const userId = getUserId(req);

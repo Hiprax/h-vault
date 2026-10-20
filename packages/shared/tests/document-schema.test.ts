@@ -275,15 +275,32 @@ describe('documentMetaJsonByteLength — bytes, not code units', () => {
 // ---------------------------------------------------------------------------
 
 describe('documentMetaSchema — the encrypted blob', () => {
-  it('accepts a blob with neither optional field, and adds neither', () => {
+  it('accepts a blob with none of the optional fields, and adds none of them', () => {
     const result = documentMetaSchema.safeParse(validMeta);
     expect(result.success, JSON.stringify(paths(result))).toBe(true);
     expect(result.success ? result.data : null).toEqual(validMeta);
-    // The negative that matters: no `note: ''` and no `transform: {}` appear out
-    // of nowhere. A default here would change the blob of every document that
-    // never had one.
+    // The negative that matters: no `note: ''`, no `transform: {}` and no invented
+    // `originalName` appear out of nowhere. A default here would change the blob of
+    // every document that never had one, and a document uploaded before the
+    // original name was recorded must keep reading as "not recorded".
     expect(result.success ? 'note' in result.data : true).toBe(false);
     expect(result.success ? 'transform' in result.data : true).toBe(false);
+    expect(result.success ? 'originalName' in result.data : true).toBe(false);
+  });
+
+  it('keeps the original name exactly as recorded, spaces included', () => {
+    // Not trimmed: it is a record of what the picked file was called, and a
+    // trimming schema would rewrite that record on the next re-seal.
+    const withOriginal = { ...validMeta, originalName: '  Scan 0042 .PDF' };
+    const result = documentMetaSchema.safeParse(withOriginal);
+    expect(result.success, JSON.stringify(paths(result))).toBe(true);
+    expect(result.success ? result.data.originalName : null).toBe('  Scan 0042 .PDF');
+  });
+
+  it('refuses an empty original name rather than recording nothing as a name', () => {
+    const result = documentMetaSchema.safeParse({ ...validMeta, originalName: '' });
+    expect(result.success).toBe(false);
+    expect(paths(result)).toEqual(['originalName']);
   });
 
   it('accepts a blob carrying the note and the transform provenance', () => {
@@ -331,6 +348,7 @@ describe('documentMetaSchema — the encrypted blob', () => {
 
   it.each([
     { field: 'name', max: MAX_DOCUMENT_NAME_LENGTH },
+    { field: 'originalName', max: MAX_DOCUMENT_NAME_LENGTH },
     { field: 'mime', max: MAX_DOCUMENT_MIME_LENGTH },
     { field: 'ext', max: MAX_DOCUMENT_EXT_LENGTH },
     { field: 'note', max: MAX_DOCUMENT_NOTE_LENGTH },
@@ -450,7 +468,7 @@ describe('documentMetaSchema — the encrypted blob', () => {
     const refused = documentMetaSchema.safeParse(pathological);
     expect(refused.success).toBe(false);
     // The FIELD refuses it. The aggregate byte budget would not have: with every
-    // other field minimal there is room for a 30 KB timestamp inside 36,864 bytes,
+    // other field minimal there is room for a 30 KB timestamp inside 38,400 bytes,
     // which is what makes this a field-level bound rather than a duplicate of the
     // budget refine.
     expect(paths(refused)).toEqual(['capturedAt']);
@@ -587,12 +605,14 @@ describe('documentMetaSchema — the encrypted blob', () => {
      * Every string field at its bound, in 3-byte characters, plus both digests,
      * an ISO instant, the three framing numbers and the transform record.
      *
-     * Typed as `DocumentMeta` on purpose: a field added to the schema without
-     * being added here is a compile error, which is the only way this measurement
-     * stays honest.
+     * Typed as `Required<DocumentMeta>` on purpose: a field added to the schema
+     * without being added here is a compile error, OPTIONAL fields included, which
+     * is the only way this measurement stays honest. (Typed as plain
+     * `DocumentMeta` it silently admitted a new optional field left out of it.)
      */
-    const worstCase: DocumentMeta = {
+    const worstCase: Required<DocumentMeta> = {
       name: chars(MAX_DOCUMENT_NAME_LENGTH, '漢'),
+      originalName: chars(MAX_DOCUMENT_NAME_LENGTH, '漢'),
       mime: chars(MAX_DOCUMENT_MIME_LENGTH, '漢'),
       ext: chars(MAX_DOCUMENT_EXT_LENGTH, '漢'),
       plaintextBytes: MAX_DOCUMENT_CHUNK_COUNT * DOCUMENT_PLAINTEXT_CHUNK_BYTES,
@@ -660,7 +680,7 @@ describe('documentMetaSchema — the encrypted blob', () => {
 
     it('accepts a blob of exactly the budget and refuses one byte more', () => {
       // The boundary pair, and the reason it is needed: without it the budget is
-      // pinned only somewhere between 35,471 bytes (the fattest well-formed blob,
+      // pinned only somewhere between 36,254 bytes (the fattest well-formed blob,
       // above) and 60,002 (the escaped one), so `<=` becoming `<`, or the constant
       // moving by a kilobyte either way, changes no test. The user-visible symptom
       // of that surviving mutant is an upload refused on the write pre-flight with

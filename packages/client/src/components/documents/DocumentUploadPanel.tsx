@@ -1,7 +1,19 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { AlertTriangle, Upload, X } from 'lucide-react';
-import { documentExtension, formatBytes } from '@hvault/shared';
+import {
+  MAX_DOCUMENT_EXT_LENGTH,
+  MAX_DOCUMENT_NAME_LENGTH,
+  MAX_DOCUMENT_TAGS,
+  documentExtension,
+  formatBytes,
+  splitDocumentName,
+} from '@hvault/shared';
 import { cn, getApiErrorMessage } from '../../lib/utils';
+import { nameFromStem, uploadRefusal } from '../../lib/documentDetails';
+import { useTagField } from '../../hooks/useTagField';
+import { loadUploadRecovery } from '../../lib/lazyUploadRecovery';
+import { describeTransientFailure } from '../../services/auth/sessionFailure';
+import { DocumentDetailsFields, type DocumentDetailsValues } from './DocumentDetailsFields';
 import {
   DocumentTransformControls,
   TransformFailurePanel,
@@ -80,9 +92,17 @@ function reportFailure(
 ): (error: unknown) => void {
   return (error: unknown) => {
     if (error instanceof UploadCancelledError) return;
-    toast({ title: getApiErrorMessage(error, fallback), type: 'error' });
+    // A start that could not reach the server says so in words, the way every
+    // other request in the client does, rather than as axios's "Network Error".
+    toast({
+      title: describeTransientFailure(error) ?? getApiErrorMessage(error, fallback),
+      type: 'error',
+    });
   };
 }
+
+/** The details of a selection nothing has been typed into yet. */
+const EMPTY_DETAILS: DocumentDetailsValues = { stem: '', note: '' };
 
 /**
  * Where the optional transforms have got to, and WHICH FILE they got there for.
@@ -168,6 +188,21 @@ export function DocumentUploadPanel({ config, folder }: DocumentUploadPanelProps
   // the file before it must never be confirmable against the file after it.
   const [transforms, setTransforms] = useState({ format: false, repair: false });
   const [phase, setPhase] = useState<TransformPhase>(IDLE_PHASE);
+  // What the person typed about the file: the name before its extension, the
+  // tags and the note. Set from the file by `select`, and kept until the transfer
+  // is REGISTERED, so a start the server refuses, or one tried offline, keeps
+  // everything they typed.
+  const [details, setDetails] = useState<DocumentDetailsValues>(EMPTY_DETAILS);
+  const tagField = useTagField([], MAX_DOCUMENT_TAGS);
+  const [detailsRefusal, setDetailsRefusal] = useState<string | null>(null);
+  /**
+   * An upload is being started: from the click until the store registers the
+   * transfer (or refuses it). Taken SYNCHRONOUSLY in a ref, because two clicks
+   * inside one frame both see the state from before either of them, and a second
+   * start would upload the file twice; mirrored in state so the controls show it.
+   */
+  const startingRef = useRef(false);
+  const [starting, setStarting] = useState(false);
   /**
    * Which SELECTION is current, so an answer for an older one can be dropped.
    *
@@ -241,6 +276,15 @@ export function DocumentUploadPanel({ config, folder }: DocumentUploadPanelProps
   function refusalFor(candidate: File): string | null {
     const oversize = oversizeRefusal('That file', candidate.size);
     if (oversize !== null) return oversize;
+    // The picked name becomes the document's original name, which nobody can
+    // change afterwards, so a name that cannot be stored is refused here, before
+    // a byte is read, rather than as a failed transfer.
+    if (candidate.name.length > MAX_DOCUMENT_NAME_LENGTH) {
+      return `This file's name is longer than ${String(MAX_DOCUMENT_NAME_LENGTH)} characters. Rename the file, then choose it again.`;
+    }
+    if (documentExtension(candidate.name).length > MAX_DOCUMENT_EXT_LENGTH) {
+      return `This file's extension is longer than ${String(MAX_DOCUMENT_EXT_LENGTH)} characters. Rename the file, then choose it again.`;
+    }
     if (
       allowedExtensions.length > 0 &&
       !allowedExtensions.includes(documentExtension(candidate.name))
@@ -251,10 +295,21 @@ export function DocumentUploadPanel({ config, folder }: DocumentUploadPanelProps
   }
 
   function select(candidate: File | null): void {
+    // A file chosen while an upload is starting would be cleared the moment that
+    // upload registers. The controls are disabled meanwhile; a drop is not a
+    // control, so it is refused here.
+    if (startingRef.current) return;
     setFile(candidate);
     setRefusal(candidate === null ? null : refusalFor(candidate));
     setTransforms({ format: false, repair: false });
     setPhase(IDLE_PHASE);
+    setDetails(
+      candidate === null
+        ? EMPTY_DETAILS
+        : { ...EMPTY_DETAILS, stem: splitDocumentName(candidate.name).stem },
+    );
+    tagField.reset([]);
+    setDetailsRefusal(null);
     transformGeneration.current += 1;
   }
 
@@ -263,12 +318,22 @@ export function DocumentUploadPanel({ config, folder }: DocumentUploadPanelProps
     setRefusal(null);
     setTransforms({ format: false, repair: false });
     setPhase(IDLE_PHASE);
+    setDetails(EMPTY_DETAILS);
+    tagField.reset([]);
+    setDetailsRefusal(null);
     transformGeneration.current += 1;
     setPickerGeneration((generation) => generation + 1);
   }
 
+  // The recovery engine is fetched while the person is still typing, so pressing
+  // Upload does not wait on it. A failure here is ignored: the upload's own load
+  // is tried again, and that one says what went wrong.
+  useEffect(() => {
+    loadUploadRecovery().catch(() => undefined);
+  }, []);
+
   /**
-   * Send bytes, under the picked file's NAME.
+   * Send bytes, under the name typed for them.
    *
    * Takes the file as an ARGUMENT rather than reading the `file` state it sits
    * beside, and both kinds of caller now depend on that. The button that sends
@@ -281,21 +346,81 @@ export function DocumentUploadPanel({ config, folder }: DocumentUploadPanelProps
    * `source` and `name` are separate arguments to the store for the matching
    * reason: a transformed upload is a `Blob` held in memory, and the store
    * deliberately never reads `File.name`, so a rewritten document cannot end up
-   * named after the file it no longer is. The MIME type comes from the picked
-   * file either way — a formatter changes a document's bytes, never its type.
+   * named after the file it no longer is. The name is the typed stem with the
+   * picked file's own extension put back (the type is fixed at upload), and the
+   * picked name itself is sealed beside it as the original name. The MIME type
+   * comes from the picked file either way: a formatter changes a document's
+   * bytes, never its type.
+   *
+   * The selection is cleared once the transfer is REGISTERED, never before: until
+   * then nothing else on screen holds the file or the details, so a start the
+   * server refuses keeps both, and one cancelled by a lock clears them silently.
    */
   function send(picked: File, source: Blob, transform?: TransformReview['transform']): void {
-    clearSelection();
+    if (startingRef.current) return;
+    // A tag typed but never added goes with the file; at the limit nothing is
+    // sent and the tag field says why.
+    const tags = tagField.commitPending();
+    if (tags === null) {
+      setDetailsRefusal(null);
+      return;
+    }
+    const named = nameFromStem(details.stem, splitDocumentName(picked.name).suffix, picked.name);
+    if ('refusal' in named) {
+      setDetailsRefusal(named.refusal);
+      return;
+    }
+    const note = details.note.trim();
+    const described = {
+      name: named.name,
+      originalName: picked.name,
+      mime: picked.type,
+      tags,
+      ...(note === '' ? {} : { note }),
+      ...(transform === undefined ? {} : { transform }),
+    };
+    const refused = uploadRefusal(described, source.size);
+    if (refused !== null) {
+      setDetailsRefusal(refused);
+      return;
+    }
+    setDetailsRefusal(null);
+    startingRef.current = true;
+    setStarting(true);
+    let settled = false;
+    // Ends the starting window and, when asked, the selection. Runs once: on
+    // registration, or when the start settles without one (a refusal, a
+    // cancellation, a caller that never registers). No newer selection can exist
+    // by then: `select` refuses while starting and every control is disabled.
+    const finishStarting = (clear: boolean): void => {
+      if (settled) return;
+      settled = true;
+      startingRef.current = false;
+      setStarting(false);
+      if (clear) clearSelection();
+    };
+    const report = reportFailure('The upload could not be started.', toast);
     void startUpload({
       source,
-      name: picked.name,
-      mime: picked.type,
+      ...described,
       // The folder the rail has open. The store and the server have always
       // accepted this; nothing was ever sending it, so every upload landed
       // outside every folder and had to be moved by hand.
       ...(folder === undefined ? {} : { folderId: folder.id }),
-      ...(transform === undefined ? {} : { transform }),
-    }).catch(reportFailure('The upload could not be started.', toast));
+      onRegistered: () => {
+        finishStarting(true);
+      },
+    }).then(
+      () => {
+        finishStarting(true);
+      },
+      (error: unknown) => {
+        // A lock or a cancel before registration clears the selection: the vault
+        // closed, and nothing was refused. Any other refusal keeps it.
+        finishStarting(error instanceof UploadCancelledError);
+        report(error);
+      },
+    );
   }
 
   /**
@@ -452,8 +577,9 @@ export function DocumentUploadPanel({ config, folder }: DocumentUploadPanelProps
             id="document-upload-input"
             key={pickerGeneration}
             type="file"
+            disabled={starting}
             onChange={(event) => select(event.target.files?.[0] ?? null)}
-            className="block w-full text-sm text-[hsl(var(--foreground))] file:mr-4 file:rounded-md file:border-0 file:bg-[hsl(var(--primary))] file:px-4 file:py-2 file:text-sm file:font-medium file:text-[hsl(var(--primary-foreground))]"
+            className="block w-full text-sm disabled:opacity-50 text-[hsl(var(--foreground))] file:mr-4 file:rounded-md file:border-0 file:bg-[hsl(var(--primary))] file:px-4 file:py-2 file:text-sm file:font-medium file:text-[hsl(var(--primary-foreground))]"
           />
         </div>
       </div>
@@ -489,40 +615,64 @@ export function DocumentUploadPanel({ config, folder }: DocumentUploadPanelProps
               <button
                 type="button"
                 onClick={clearSelection}
+                disabled={starting}
                 aria-label="Clear selected file"
-                className="rounded p-1 text-[hsl(var(--muted-foreground))] hover:text-[hsl(var(--destructive))]"
+                className="rounded p-1 text-[hsl(var(--muted-foreground))] hover:text-[hsl(var(--destructive))] disabled:opacity-50"
               >
                 <X className="h-4 w-4" />
               </button>
-              {/*
-                The Upload button is ABSENT while a transform is running or its
-                result is unconfirmed, rather than merely disabled. A disabled
-                button beside an open review reads as "something else is wrong";
-                its absence reads as "answer this first", which is what the
-                review is for.
-              */}
-              {phase.status === 'idle' && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    handleUpload(file);
-                  }}
-                  className="inline-flex items-center gap-2 rounded-md bg-[hsl(var(--primary))] px-4 py-2 text-sm font-medium text-[hsl(var(--primary-foreground))] hover:opacity-90"
-                >
-                  <Upload className="h-4 w-4" />
-                  {transforms.format || transforms.repair ? 'Prepare and review' : 'Upload'}
-                </button>
-              )}
             </div>
           </div>
+
+          <DocumentDetailsFields
+            idPrefix="document-upload"
+            values={details}
+            tagField={tagField}
+            suffix={splitDocumentName(file.name).suffix}
+            onChange={setDetails}
+            disabled={starting}
+          />
+          {detailsRefusal !== null && (
+            <p
+              role="alert"
+              data-testid="upload-details-refusal"
+              className="text-xs text-red-700 dark:text-red-300"
+            >
+              {detailsRefusal}
+            </p>
+          )}
 
           <DocumentTransformControls
             availability={transformAvailability(file.name, file.size)}
             format={transforms.format}
             repair={transforms.repair}
             onChange={setTransforms}
-            locked={phase.status !== 'idle'}
+            locked={phase.status !== 'idle' || starting}
           />
+
+          {/*
+            After the details and the transforms, so the action comes last in
+            reading and tab order, where a form puts it. ABSENT while a
+            transform is running or its result is unconfirmed, rather than
+            merely disabled: a disabled button beside an open review reads as
+            "something else is wrong"; its absence reads as "answer this first",
+            which is what the review is for.
+          */}
+          {phase.status === 'idle' && (
+            <div className="flex justify-end">
+              <button
+                type="button"
+                onClick={() => {
+                  handleUpload(file);
+                }}
+                disabled={starting}
+                className="inline-flex items-center gap-2 rounded-md bg-[hsl(var(--primary))] px-4 py-2 text-sm font-medium text-[hsl(var(--primary-foreground))] hover:opacity-90 disabled:opacity-50"
+              >
+                <Upload className="h-4 w-4" />
+                {transforms.format || transforms.repair ? 'Prepare and review' : 'Upload'}
+              </button>
+            </div>
+          )}
 
           {phase.status === 'running' && <TransformRunning />}
 
@@ -541,6 +691,7 @@ export function DocumentUploadPanel({ config, folder }: DocumentUploadPanelProps
               onCancel={() => {
                 setPhase(IDLE_PHASE);
               }}
+              busy={starting}
             />
           )}
 
@@ -553,6 +704,7 @@ export function DocumentUploadPanel({ config, folder }: DocumentUploadPanelProps
               onCancel={() => {
                 setPhase(IDLE_PHASE);
               }}
+              busy={starting}
             />
           )}
         </>

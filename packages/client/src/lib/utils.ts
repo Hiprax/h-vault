@@ -95,8 +95,14 @@ export function hasValidEmailTld(email: string): boolean {
   return labels.every((label) => label.length > 0 && !/[\s@]/.test(label));
 }
 
-/** Maximum length for user-facing error messages to prevent UI disruption. */
-const MAX_ERROR_MESSAGE_LENGTH = 200;
+/**
+ * Maximum length for user-facing error messages to prevent UI disruption.
+ *
+ * Exported so a module that writes its own sentences (the document upload's
+ * recovery engine) can keep them inside it: a sentence longer than this reaches
+ * a toast cut off mid-word while the row beside it shows it whole.
+ */
+export const MAX_ERROR_MESSAGE_LENGTH = 200;
 
 /**
  * Extracts a human-readable error message from an API error.

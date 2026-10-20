@@ -42,7 +42,7 @@
  */
 
 import { isAxiosError } from 'axios';
-import { ERROR_CODES } from '@hvault/shared';
+import { ERROR_CODES, MASTER_PASSWORD_PROOF_REFUSED_MESSAGE } from '@hvault/shared';
 
 /**
  * Whether a 403 came from the CSRF middleware rather than from a handler that
@@ -106,6 +106,24 @@ export function isAccountLocked(error: unknown): boolean {
 }
 
 /**
+ * Whether `error` is the server refusing a WRONG master-password proof: a 401
+ * carrying exactly `MASTER_PASSWORD_PROOF_REFUSED_MESSAGE`.
+ *
+ * Every route that re-checks the master password answers a wrong proof that way,
+ * and only after `authenticate` has accepted the session, so the session is
+ * known to be fine: refreshing it cannot change the answer, and replaying the
+ * request would spend a second unit of the account's small re-authentication
+ * budget on the same typo. The status AND the exact sentence are the signal; a
+ * 401 with any other wording is still a possibly expired session.
+ */
+export function isMasterPasswordRefusal(error: unknown): boolean {
+  if (!isAxiosError(error)) return false;
+  if (error.response?.status !== 401) return false;
+  const message: unknown = (error.response.data as Record<string, unknown> | undefined)?.message;
+  return message === MASTER_PASSWORD_PROOF_REFUSED_MESSAGE;
+}
+
+/**
  * Whether `error` proves the session is authoritatively gone and the user must
  * sign in again.
  *
@@ -128,11 +146,16 @@ export function isAccountLocked(error: unknown): boolean {
  * can now receive it, and no caller may ever read it as "log out". Everything
  * else — an unknown, expired or replayed token, a deleted or unverified user, a
  * 401 from any authenticated route — is unaffected.
+ *
+ * **A wrong master-password proof is excluded too** ({@link isMasterPasswordRefusal}):
+ * the server sends it only after accepting the session, so reading it as an
+ * ended session would sign a user out over a typo.
  */
 export function isSessionGone(error: unknown): boolean {
   if (!isAxiosError(error)) return false;
   if (isCsrfRejection(error)) return false;
   if (isAccountLocked(error)) return false;
+  if (isMasterPasswordRefusal(error)) return false;
   const status = error.response?.status;
   return status === 401 || status === 403;
 }

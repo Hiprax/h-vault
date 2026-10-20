@@ -11,15 +11,12 @@ import {
   Star,
   Plus,
   ShieldOff,
-  CheckSquare,
-  Square,
   Trash2,
   FolderOpen,
   Loader2,
   ArrowUpDown,
   ArrowUp,
   ArrowDown,
-  Tag,
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { itemMatchesSearch } from '../../lib/vaultSearch';
@@ -37,6 +34,8 @@ import {
 import { bulkDeleteApi, bulkMoveApi, permanentDeleteApi } from '../../services/api/vaultApi';
 import { useToast } from '../ui/Toast';
 import { useInlineDialog } from '../ui/Dialog';
+import { SelectionCheckbox } from '../ui/SelectionCheckbox';
+import { BulkTagPopover } from '../ui/BulkTagPopover';
 import type { ItemType } from '@hvault/shared';
 import { refreshInBackground } from '../../lib/backgroundRefresh';
 
@@ -294,18 +293,11 @@ const VaultListItem = memo(function VaultListItem({
       )}
     >
       {/* Checkbox — a SIBLING of the activator, never a descendant of it. */}
-      <label className="shrink-0 relative flex items-center cursor-pointer">
-        <input
-          type="checkbox"
-          checked={isSelected}
-          onChange={() => onToggleSelect(item.id)}
-          className="peer sr-only"
-          aria-label={isSelected ? 'Deselect item' : 'Select item'}
-        />
-        <span className="text-[hsl(var(--muted-foreground))] peer-checked:text-[hsl(var(--primary))] hover:text-[hsl(var(--foreground))] transition-colors">
-          {isSelected ? <CheckSquare className="h-5 w-5" /> : <Square className="h-5 w-5" />}
-        </span>
-      </label>
+      <SelectionCheckbox
+        checked={isSelected}
+        onChange={() => onToggleSelect(item.id)}
+        label={isSelected ? 'Deselect item' : 'Select item'}
+      />
 
       <div
         role="button"
@@ -445,8 +437,6 @@ export function VaultList({ onCreateNew }: VaultListProps) {
   const [selectedItems, setSelectedItems] = useState(() => new Set<string>());
   const [bulkLoading, setBulkLoading] = useState(false);
   const [showMoveMenu, setShowMoveMenu] = useState(false);
-  const [showTagMenu, setShowTagMenu] = useState(false);
-  const [bulkTagInput, setBulkTagInput] = useState('');
   const [showSortMenu, setShowSortMenu] = useState(false);
   const [showBulkDeleteConfirm, setShowBulkDeleteConfirm] = useState(false);
 
@@ -468,6 +458,44 @@ export function VaultList({ onCreateNew }: VaultListProps) {
   }, []);
 
   const multiSelectMode = selectedItems.size > 0;
+
+  // Adds one tag to every selected item. Resolves whether it was applied, which is
+  // what clears the popover's typed tag (a failure keeps it for another try).
+  const applyBulkTag = useCallback(
+    async (tag: string): Promise<boolean> => {
+      setBulkLoading(true);
+      try {
+        const sourceItems = items;
+        // Paced, not all at once: see `sendPaced`.
+        const results = await sendPaced(
+          [...selectedItems].map((id) => () => {
+            const item = sourceItems.find((i) => i.id === id);
+            if (!item) return Promise.resolve();
+            const newTags = item.tags.includes(tag) ? item.tags : [...item.tags, tag];
+            // Tags are metadata: updateItemMeta sends them alone and re-encrypts
+            // nothing. updateItem() would encrypt JSON.stringify(item.data) over the
+            // item's real ciphertext — and for an item that failed to decode,
+            // item.data is only a placeholder wrapper, so this bulk action could
+            // destroy every selected broken item at once.
+            return useVaultStore.getState().updateItemMeta(id, { tags: newTags });
+          }),
+        );
+        throwFirstRejection(results);
+        toast({
+          title: `Tag "${tag}" applied to ${selectedItems.size} items`,
+          type: 'success',
+        });
+        setSelectedItems(new Set());
+        return true;
+      } catch {
+        toast({ title: 'Failed to apply tags', type: 'error' });
+        return false;
+      } finally {
+        setBulkLoading(false);
+      }
+    },
+    [items, selectedItems, toast],
+  );
 
   // Filter items based on store state
   const filteredItems = useMemo(() => {
@@ -590,30 +618,18 @@ export function VaultList({ onCreateNew }: VaultListProps) {
       {multiSelectMode && (
         <div className="mb-3 flex items-center gap-3 rounded-lg border border-[hsl(var(--primary)/0.3)] bg-[hsl(var(--primary)/0.05)] p-3">
           {/* Select All checkbox */}
-          <label className="shrink-0 relative flex items-center cursor-pointer">
-            <input
-              type="checkbox"
-              checked={selectedItems.size === filteredItems.length}
-              onChange={() => {
-                if (selectedItems.size === filteredItems.length) {
-                  setSelectedItems(new Set());
-                } else {
-                  setSelectedItems(new Set(filteredItems.map((i) => i.id)));
-                }
-              }}
-              className="peer sr-only"
-              aria-label={
-                selectedItems.size === filteredItems.length ? 'Deselect all' : 'Select all'
+          <SelectionCheckbox
+            tone="all"
+            checked={selectedItems.size === filteredItems.length}
+            onChange={() => {
+              if (selectedItems.size === filteredItems.length) {
+                setSelectedItems(new Set());
+              } else {
+                setSelectedItems(new Set(filteredItems.map((i) => i.id)));
               }
-            />
-            <span className="text-[hsl(var(--primary))]">
-              {selectedItems.size === filteredItems.length ? (
-                <CheckSquare className="h-5 w-5" />
-              ) : (
-                <Square className="h-5 w-5" />
-              )}
-            </span>
-          </label>
+            }}
+            label={selectedItems.size === filteredItems.length ? 'Deselect all' : 'Select all'}
+          />
           <span className="text-sm font-medium text-[hsl(var(--foreground))]">
             {selectedItems.size} selected
           </span>
@@ -718,90 +734,7 @@ export function VaultList({ onCreateNew }: VaultListProps) {
               </div>
             )}
             {/* Bulk Tag */}
-            {!showTrash && (
-              <div
-                className="relative"
-                onBlur={(e) => {
-                  if (!e.currentTarget.contains(e.relatedTarget)) setShowTagMenu(false);
-                }}
-              >
-                <button
-                  type="button"
-                  disabled={bulkLoading}
-                  onClick={() => setShowTagMenu((p) => !p)}
-                  aria-haspopup="true"
-                  aria-expanded={showTagMenu}
-                  className="inline-flex items-center gap-1.5 rounded-md border border-[hsl(var(--input))] px-3 py-1.5 text-sm font-medium text-[hsl(var(--foreground))] hover:bg-[hsl(var(--accent))] transition-colors disabled:opacity-50"
-                >
-                  <Tag className="h-4 w-4" />
-                  Tag
-                </button>
-                {showTagMenu && (
-                  <div className="absolute right-0 top-full z-20 mt-1 w-64 rounded-md border border-[hsl(var(--border))] bg-[hsl(var(--popover))] p-3 shadow-lg">
-                    <div className="space-y-2">
-                      <input
-                        type="text"
-                        value={bulkTagInput}
-                        onChange={(e) => setBulkTagInput(e.target.value)}
-                        placeholder="Enter tag name"
-                        maxLength={50}
-                        className="w-full rounded-md border border-[hsl(var(--input))] bg-[hsl(var(--background))] px-2 py-1.5 text-sm text-[hsl(var(--foreground))] placeholder:text-[hsl(var(--muted-foreground))] focus:outline-none focus:ring-1 focus:ring-[hsl(var(--ring))]"
-                      />
-                      <button
-                        type="button"
-                        disabled={!bulkTagInput.trim() || bulkLoading}
-                        onClick={() => {
-                          void (async () => {
-                            const tag = bulkTagInput.trim();
-                            if (!tag) return;
-                            setBulkLoading(true);
-                            setShowTagMenu(false);
-                            try {
-                              const sourceItems = items;
-                              // Paced, not all at once: see `sendPaced`.
-                              const results = await sendPaced(
-                                [...selectedItems].map((id) => () => {
-                                  const item = sourceItems.find((i) => i.id === id);
-                                  if (!item) return Promise.resolve();
-                                  const newTags = item.tags.includes(tag)
-                                    ? item.tags
-                                    : [...item.tags, tag];
-                                  // Tags are metadata: updateItemMeta sends them
-                                  // alone and re-encrypts nothing. updateItem()
-                                  // would encrypt JSON.stringify(item.data) over
-                                  // the item's real ciphertext — and for an item
-                                  // that failed to decode, item.data is only a
-                                  // placeholder wrapper, so this bulk action
-                                  // could destroy every selected broken item at
-                                  // once.
-                                  return useVaultStore
-                                    .getState()
-                                    .updateItemMeta(id, { tags: newTags });
-                                }),
-                              );
-                              throwFirstRejection(results);
-                              toast({
-                                title: `Tag "${tag}" applied to ${selectedItems.size} items`,
-                                type: 'success',
-                              });
-                              setSelectedItems(new Set());
-                              setBulkTagInput('');
-                            } catch {
-                              toast({ title: 'Failed to apply tags', type: 'error' });
-                            } finally {
-                              setBulkLoading(false);
-                            }
-                          })();
-                        }}
-                        className="w-full rounded-md bg-[hsl(var(--primary))] px-3 py-1.5 text-sm font-medium text-[hsl(var(--primary-foreground))] hover:opacity-90 disabled:opacity-50"
-                      >
-                        Apply
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
+            {!showTrash && <BulkTagPopover disabled={bulkLoading} onApply={applyBulkTag} />}
           </div>
         </div>
       )}

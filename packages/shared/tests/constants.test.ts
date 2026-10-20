@@ -26,6 +26,8 @@ import {
   MAX_LOGIN_ATTEMPTS,
   LOGIN_RATE_LIMIT_WINDOW_MINUTES,
   LOGIN_RATE_LIMIT_MAX_PER_IP,
+  PASSWORD_VERIFY_RATE_LIMIT_MAX,
+  MASTER_PASSWORD_PROOF_REFUSED_MESSAGE,
   BACKUP_CODES_COUNT,
   DEFAULT_PASSWORD_LENGTH,
   MIN_PASSWORD_LENGTH,
@@ -451,8 +453,8 @@ describe('Document-store constants', () => {
     ['MAX_DOCUMENT_TAGS', MAX_DOCUMENT_TAGS, 20],
     ['MAX_DOCUMENT_TRANSFORM_LABEL_LENGTH', MAX_DOCUMENT_TRANSFORM_LABEL_LENGTH, 64],
     ['MAX_DOCUMENT_TIMESTAMP_LENGTH', MAX_DOCUMENT_TIMESTAMP_LENGTH, 40],
-    ['MAX_DOCUMENT_META_JSON_BYTES', MAX_DOCUMENT_META_JSON_BYTES, 36_864],
-    ['MAX_ENCRYPTED_DOCUMENT_META_LENGTH', MAX_ENCRYPTED_DOCUMENT_META_LENGTH, 49_152],
+    ['MAX_DOCUMENT_META_JSON_BYTES', MAX_DOCUMENT_META_JSON_BYTES, 38_400],
+    ['MAX_ENCRYPTED_DOCUMENT_META_LENGTH', MAX_ENCRYPTED_DOCUMENT_META_LENGTH, 51_200],
     ['MAX_FORMATTABLE_SIZE_BYTES', MAX_FORMATTABLE_SIZE_BYTES, 5_242_880],
     ['MAX_TRANSFORM_EXCERPT_LENGTH', MAX_TRANSFORM_EXCERPT_LENGTH, 200],
   ])('%s is %i', (_name, actual, expected) => {
@@ -564,7 +566,10 @@ describe('Document-store constants', () => {
     // with a real encoder rather than a multiplier, on a real string: a 10,000
     // character note in a non-Latin script is a document any user may write, and it
     // is 3 bytes per character on the wire.
+    // The name and the original name each count: the original name is a second
+    // free-text field of the same bound, sealed in the same blob.
     const codeUnitBudget =
+      MAX_DOCUMENT_NAME_LENGTH +
       MAX_DOCUMENT_NAME_LENGTH +
       MAX_DOCUMENT_MIME_LENGTH +
       MAX_DOCUMENT_EXT_LENGTH +
@@ -573,10 +578,10 @@ describe('Document-store constants', () => {
     const worstCaseTextBytes = new TextEncoder().encode('\u6587'.repeat(codeUnitBudget)).length;
     expect(worstCaseTextBytes).toBe(codeUnitBudget * 3);
     // Plus the hex digest, and an allowance for the JSON keys, the numbers, the
-    // timestamp and the transform record. 2 KiB is far above what eleven short keys
+    // timestamp and the transform record. 2 KiB is far above what twelve short keys
     // and a handful of integers cost. The shape is no longer hypothetical: with
     // `documentMetaSchema` defined, the same worst case measured against the real
-    // field set is 35_472 bytes, and `document-schema.test.ts` asserts THAT
+    // field set is 36_254 bytes, and `document-schema.test.ts` asserts THAT
     // directly. This case stays because it is the arithmetic reason the budget is
     // what it is, and it fails if a field bound is raised without the budget.
     const structureAllowance = 2_048;
@@ -785,6 +790,21 @@ describe('Rate limiting constants', () => {
 
   it('LOGIN_RATE_LIMIT_MAX_PER_IP is 20', () => {
     expect(LOGIN_RATE_LIMIT_MAX_PER_IP).toBe(20);
+  });
+
+  it('PASSWORD_VERIFY_RATE_LIMIT_MAX is 10', () => {
+    // Raised from 5 in 0.19.0 at the operator's request: five per quarter hour,
+    // with every successful re-authentication counted, stopped an ordinary user
+    // doing a few protected actions in a row. Pinned literally so a change is a
+    // decision with a CHANGELOG entry, not an edit to a derived number.
+    expect(PASSWORD_VERIFY_RATE_LIMIT_MAX).toBe(10);
+  });
+
+  it('MASTER_PASSWORD_PROOF_REFUSED_MESSAGE is the exact refusal sentence', () => {
+    // The client matches this sentence EXACTLY to tell a wrong proof from an
+    // expired session, so a reworded copy would silently bring back the second,
+    // replayed request a typo used to cost.
+    expect(MASTER_PASSWORD_PROOF_REFUSED_MESSAGE).toBe('Current password is incorrect');
   });
 
   it('the per-IP budget covers several complete 2FA sign-ins', () => {

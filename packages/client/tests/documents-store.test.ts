@@ -32,6 +32,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import axios, {
   AxiosError,
+  CanceledError,
   type AxiosAdapter,
   type AxiosProgressEvent,
   type AxiosResponse,
@@ -89,7 +90,17 @@ import {
 } from '../src/services/crypto/documentCryptoService.js';
 import { api, clearCsrfToken } from '../src/services/api/client.js';
 import { useAuthStore } from '../src/stores/authStore.js';
-import { UploadCancelledError, useDocumentsStore } from '../src/stores/documentsStore.js';
+import {
+  DOCUMENT_TYPE_LOCKED_MESSAGE,
+  UploadCancelledError,
+  useDocumentsStore,
+} from '../src/stores/documentsStore.js';
+import {
+  INTERRUPTED_MESSAGE,
+  SERVER_UNAVAILABLE_MESSAGE,
+  UPLOAD_GONE_MESSAGE,
+  UploadStoppedError,
+} from '../src/services/documents/uploadRecovery.js';
 
 // ---------------------------------------------------------------------------
 // The stub server
@@ -123,12 +134,40 @@ let ledgerParts: number[] = [];
  * that status with a generic body, and the object form carries a body — which is
  * what the classifier needs, since a 403 is routed by its `message`.
  */
-let partOutcomes: (number | null | { status: number; data: unknown })[] = [];
+let partOutcomes: (
+  | number
+  | null
+  | { status: number; data: unknown }
+  /** Half the body moves, THEN the connection drops with no answer. */
+  | { progressThen: -1 }
+  /** Half the body moves, then nothing: a dead link, or a part queued for a slot. */
+  | 'hang'
+  /** The WHOLE body is handed over, then the answer is lost. */
+  | 'fullThenDrop'
+)[] = [];
 let partAttempt = 0;
 
-/** How each completion attempt is answered. */
-let completeOutcomes: ('ok' | { status: number; data?: unknown })[] = ['ok'];
+/**
+ * Releases every part held on `'hang'`, which then SUCCEEDS: the server answering
+ * a part it had queued. A hang the attempt's own signal ends rejects instead, the
+ * way axios rejects an aborted request.
+ */
+let releaseHungParts = (): void => {};
+
+/** How each completion attempt is answered; `-1` is no answer at all. */
+let completeOutcomes: ('ok' | -1 | { status: number; data?: unknown })[] = ['ok'];
 let completeAttempt = 0;
+
+/** How `GET /documents/uploads/:id` (a resume's ledger read) is answered. */
+let ledgerOutcomes: ('ok' | -1 | 'malformed' | number)[] = [];
+let ledgerAttempt = 0;
+
+/**
+ * How `GET /documents/:id` (a resume's probe for a lost completion) is answered:
+ * the committed row, the same row in the trash, no answer, or a status.
+ */
+let probeOutcomes: ('committed' | 'trashed' | -1 | number)[] = [];
+let probeAttempt = 0;
 
 /** The row a successful completion commits, and the bodies it was sent. */
 let committedRow: DocumentResponse | null = null;
@@ -136,13 +175,15 @@ let completeBodies: Record<string, unknown>[] = [];
 
 /** The profile `GET /user/profile` answers with, for the rewrap path. */
 let profileBody: Record<string, unknown> | null = null;
+/** When true, the next profile read gets no answer at all. */
+let profileFailsOnce = false;
 
 /** Bumped on each `/auth/refresh`; the adapter 401s a part until one has happened. */
 let refreshCount = 0;
 let partsNeedFreshToken = false;
 
-/** When true, the best-effort cancel endpoint refuses. */
-let abortFails = false;
+/** When true, the best-effort cancel endpoint refuses; `'offline'` gets no answer. */
+let abortFails: boolean | 'offline' = false;
 
 /** When true, the list and usage reads answer a `success: false` envelope on a 200. */
 let listEnvelopeFails = false;
@@ -225,6 +266,10 @@ const adapter: AxiosAdapter = (config) => {
     return Promise.resolve(ok({ success: true, data: { accessToken: 'fresh-token' } }, config));
   }
   if (url === '/user/profile') {
+    if (profileFailsOnce) {
+      profileFailsOnce = false;
+      return offline(config);
+    }
     return Promise.resolve(ok({ success: true, data: profileBody }, config));
   }
 
@@ -235,6 +280,36 @@ const adapter: AxiosAdapter = (config) => {
     const outcome = partOutcomes[partAttempt] ?? null;
     partAttempt += 1;
     if (outcome === -1) return offline(config);
+    if (outcome === 'fullThenDrop') {
+      const wholeBody = (config.data as ArrayBuffer).byteLength;
+      config.onUploadProgress?.(progressEvent(wholeBody, wholeBody));
+      return offline(config);
+    }
+    if (
+      outcome === 'hang' ||
+      (typeof outcome === 'object' && outcome !== null && 'progressThen' in outcome)
+    ) {
+      const bytes = (config.data as ArrayBuffer).byteLength;
+      config.onUploadProgress?.(progressEvent(Math.floor(bytes / 2), bytes));
+      if (outcome !== 'hang') return offline(config);
+      return new Promise((resolve, reject) => {
+        const signal = config.signal as AbortSignal | undefined;
+        const previousRelease = releaseHungParts;
+        signal?.addEventListener('abort', () => {
+          reject(new CanceledError(undefined, undefined, config as InternalAxiosRequestConfig));
+        });
+        releaseHungParts = () => {
+          previousRelease();
+          config.onUploadProgress?.(progressEvent(bytes, bytes));
+          resolve(
+            ok(
+              { success: true, data: { partNumber: Number(part[1]), bytes, receivedBytes: bytes } },
+              config,
+            ),
+          );
+        };
+      });
+    }
     if (typeof outcome === 'object' && outcome !== null) {
       return fail(outcome.status, config, outcome.data);
     }
@@ -263,6 +338,7 @@ const adapter: AxiosAdapter = (config) => {
     completeBodies.push(JSON.parse(config.data as string) as Record<string, unknown>);
     const outcome = completeOutcomes[completeAttempt] ?? 'ok';
     completeAttempt += 1;
+    if (outcome === -1) return offline(config);
     if (outcome !== 'ok') return fail(outcome.status, config, outcome.data);
     return Promise.resolve(ok({ success: true, data: committedRow }, config, 201));
   }
@@ -286,9 +362,17 @@ const adapter: AxiosAdapter = (config) => {
 
   if (/^\/documents\/uploads\/[a-f0-9]{24}$/.test(url)) {
     if (method === 'DELETE') {
+      if (abortFails === 'offline') return offline(config);
       return abortFails
         ? fail(500, config)
         : Promise.resolve(ok({ success: true, message: 'Upload cancelled' }, config));
+    }
+    const ledgerOutcome = ledgerOutcomes[ledgerAttempt] ?? 'ok';
+    ledgerAttempt += 1;
+    if (ledgerOutcome === -1) return offline(config);
+    if (typeof ledgerOutcome === 'number') return fail(ledgerOutcome, config);
+    if (ledgerOutcome === 'malformed') {
+      return Promise.resolve(ok({ success: true, data: { _id: 'not-a-ledger' } }, config));
     }
     return Promise.resolve(
       ok(
@@ -378,6 +462,17 @@ const adapter: AxiosAdapter = (config) => {
   }
 
   const single = /^\/documents\/([a-f0-9]{24})(\/restore|\/permanent)?$/.exec(url);
+  if (single && method === 'GET' && single[2] === undefined) {
+    const probeOutcome = probeOutcomes[probeAttempt] ?? 404;
+    probeAttempt += 1;
+    if (probeOutcome === -1) return offline(config);
+    if (typeof probeOutcome === 'number') return fail(probeOutcome, config);
+    const row =
+      probeOutcome === 'trashed'
+        ? { ...(committedRow as DocumentResponse), deletedAt: '2026-03-03T00:00:00.000Z' }
+        : committedRow;
+    return Promise.resolve(ok({ success: true, data: row }, config));
+  }
   if (single) {
     if (method === 'DELETE') return Promise.resolve(ok({ success: true, data: null }, config));
     if (method === 'POST' || method === 'PUT') {
@@ -462,17 +557,25 @@ function untilParts(count: number): Promise<void> {
 }
 
 /**
- * Real turns until the retry deadline is actually armed.
+ * Real turns until a transfer is WAITING to retry, and its wait's timer is armed.
  *
  * Without this, a step-by-step timing test measures from the moment the REQUEST
  * was recorded rather than from the moment it FAILED, and the gap between the two
  * is however long the runner took to settle a rejection — so the same advance
- * lands before the timer on a quiet machine and after it on a busy one. Only the
- * backoff's own `setTimeout` is faked here (`timers: 'timeouts'`), so a pending
- * timer means the deadline and nothing else.
+ * lands before the timer on a quiet machine and after it on a busy one. The
+ * recovery engine writes `waiting` synchronously and arms the wait's timer in the
+ * same breath, with nothing awaited between, so `waiting` means the deadline is
+ * armed. (A pending-timer count no longer can: a part attempt arms a timer of its
+ * own while it runs.)
  */
-function untilRetryArmed(): Promise<void> {
-  return until(() => vi.getTimerCount() > 0, 'the retry deadline to be armed');
+function untilWaiting(id: string, reason?: string): Promise<void> {
+  return until(
+    () => {
+      const entry = useDocumentsStore.getState().uploads[id];
+      return entry?.status === 'waiting' && (reason === undefined || entry.waitReason === reason);
+    },
+    `the upload to be waiting${reason === undefined ? '' : ` (${reason})`}`,
+  );
 }
 
 /**
@@ -516,9 +619,10 @@ let vaultKey: CryptoKey;
 let mek: CryptoKey;
 
 /** A metadata blob whose framing matches a document of `plaintextBytes` bytes. */
-function metaFor(plaintextBytes: number, name: string): DocumentMeta {
+function metaFor(plaintextBytes: number, name: string, originalName?: string): DocumentMeta {
   return {
     name,
+    ...(originalName === undefined ? {} : { originalName }),
     mime: 'text/plain',
     ext: 'txt',
     plaintextBytes,
@@ -540,7 +644,7 @@ function metaFor(plaintextBytes: number, name: string): DocumentMeta {
 async function makeRow(
   id: string,
   name: string,
-  options: { plaintextBytes?: number; wrapUnder?: string } = {},
+  options: { plaintextBytes?: number; wrapUnder?: string; originalName?: string } = {},
 ): Promise<DocumentResponse> {
   const plaintextBytes = options.plaintextBytes ?? 5;
   const chunkCount = documentChunkCountFor(plaintextBytes, DOCUMENT_PLAINTEXT_CHUNK_BYTES);
@@ -550,7 +654,7 @@ async function makeRow(
   const wrapped = await wrapDek(dek, await deriveWrapKey(vaultKey, options.wrapUnder ?? id));
   const sealed = await encryptMeta(
     await deriveMetaKey(dek, streamSalt, id),
-    metaFor(plaintextBytes, name),
+    metaFor(plaintextBytes, name, options.originalName),
   );
   zeroDek(dek);
   return {
@@ -614,8 +718,14 @@ beforeEach(async () => {
   ledgerParts = [];
   partOutcomes = [];
   partAttempt = 0;
+  releaseHungParts = () => {};
+  profileFailsOnce = false;
   completeOutcomes = ['ok'];
   completeAttempt = 0;
+  ledgerOutcomes = [];
+  ledgerAttempt = 0;
+  probeOutcomes = [];
+  probeAttempt = 0;
   completeBodies = [];
   committedRow = null;
   profileBody = null;
@@ -1180,15 +1290,49 @@ describe('documentsStore — uploading', () => {
     expect(useDocumentsStore.getState().documents[0]?.id).toBe(ID_A);
   });
 
-  it('marks the upload failed after the initial attempt and all three retries fail offline', async () => {
+  it('keeps an upload that cannot reach the server waiting instead of failing it, then finishes it', async () => {
     // `timers: 'timeouts'` and NOT `'all'`: these tests drive the backoff deadline
     // forward while awaiting a WebAssembly instantiation, Web Crypto and
     // `Blob.arrayBuffer()` in the same test, and a faked `setImmediate` /
     // `queueMicrotask` makes those awaits hang rather than run late.
     installTestClock({ timers: 'timeouts' });
     await primeCommittedRow();
-    // -1 is the adapter's "no response at all": offline, DNS, a dropped socket.
-    partOutcomes = [-1, -1, -1, -1];
+    // -1 is the adapter's "no response at all" with no byte of the body moved: the
+    // server was never reached. FIVE of them, one more than the old four-attempt
+    // limit that used to end the transfer here.
+    partOutcomes = [-1, -1, -1, -1, -1, null];
+    const before = captured32.length;
+    const statuses = new Set<string>();
+    const unsubscribe = useDocumentsStore.subscribe((state) => {
+      const entry = state.uploads[ID_A];
+      if (entry) statuses.add(`${entry.status}:${entry.waitReason ?? ''}`);
+    });
+
+    await settleWithBackoff(
+      useDocumentsStore.getState().startUpload({
+        source: source(),
+        name: 'a.txt',
+        mime: 'text/plain',
+      }),
+    );
+    unsubscribe();
+
+    // Six attempts, the last one landing: nothing that never reached the server
+    // counts against the transfer.
+    expect(partRequests()).toHaveLength(6);
+    expect(statuses).toContain('waiting:connection');
+    // The negative the change exists for: it never failed on the way.
+    expect([...statuses].some((status) => status.startsWith('failed'))).toBe(false);
+    expect(useDocumentsStore.getState().documents[0]?.id).toBe(ID_A);
+    expect(useDocumentsStore.getState().uploads).toEqual({});
+    // The DEK lived the whole wait and was zeroed only when the transfer ended.
+    expect(captured32.slice(before).filter(isAllZero)).toHaveLength(1);
+  });
+
+  it('marks the upload failed, resumably, when the server keeps answering 500', async () => {
+    installTestClock({ timers: 'timeouts' });
+    await primeCommittedRow();
+    partOutcomes = [500, 500, 500, 500];
     const before = captured32.length;
 
     await expect(
@@ -1199,27 +1343,24 @@ describe('documentsStore — uploading', () => {
           mime: 'text/plain',
         }),
       ),
-    ).rejects.toThrow();
+    ).rejects.toThrow(SERVER_UNAVAILABLE_MESSAGE);
 
-    // Four attempts: the first, then one per backoff step.
+    // Four attempts: the first, then one per step of the 1s/2s/4s ladder.
     expect(partRequests()).toHaveLength(4);
     const entry = useDocumentsStore.getState().uploads[ID_A];
     expect(entry?.status).toBe('failed');
-    expect(entry?.error).toBeTruthy();
+    expect(entry?.error).toBe(SERVER_UNAVAILABLE_MESSAGE);
+    expect(entry?.waitReason).toBeUndefined();
     // RESUMABLE: the entry survives, so the UI can offer a retry, and the DEK is
     // deliberately NOT zeroed — a resume must re-send under the same key or every
     // part the server already holds becomes garbage.
     expect(captured32.slice(before).filter(isAllZero)).toHaveLength(0);
   });
 
-  it('waits 1s, then 2s, then 4s between attempts and no longer', async () => {
-    // `timers: 'timeouts'` and NOT `'all'`: these tests drive the backoff deadline
-    // forward while awaiting a WebAssembly instantiation, Web Crypto and
-    // `Blob.arrayBuffer()` in the same test, and a faked `setImmediate` /
-    // `queueMicrotask` makes those awaits hang rather than run late.
+  it('waits 1s, then 2s, then 4s between attempts on a 500 and no longer', async () => {
     installTestClock({ timers: 'timeouts' });
     await primeCommittedRow();
-    partOutcomes = [-1, -1, -1, -1];
+    partOutcomes = [500, 500, 500, 500];
 
     const pending = useDocumentsStore.getState().startUpload({
       source: source(),
@@ -1228,11 +1369,11 @@ describe('documentsStore — uploading', () => {
     });
     const guarded = pending.catch(() => undefined);
 
-    // Each step waits for the deadline to be ARMED before advancing, so the
+    // Each step waits for the wait to be ARMED before advancing, so the
     // measurement starts where the production code starts it — at the failure —
     // rather than at whatever moment the runner happened to record the request.
     await untilParts(1);
-    await untilRetryArmed();
+    await untilWaiting(ID_A, 'server');
     // 999 ms is not a second, and the negative is the whole assertion: the retry
     // is on a deadline, not on the next tick of whatever the event loop does.
     await vi.advanceTimersByTimeAsync(999);
@@ -1241,14 +1382,14 @@ describe('documentsStore — uploading', () => {
 
     await vi.advanceTimersByTimeAsync(1);
     await untilParts(2);
-    await untilRetryArmed();
+    await untilWaiting(ID_A, 'server');
     await vi.advanceTimersByTimeAsync(1_999);
     await realTurn();
     expect(partRequests()).toHaveLength(2);
 
     await vi.advanceTimersByTimeAsync(1);
     await untilParts(3);
-    await untilRetryArmed();
+    await untilWaiting(ID_A, 'server');
     await vi.advanceTimersByTimeAsync(3_999);
     await realTurn();
     expect(partRequests()).toHaveLength(3);
@@ -1257,7 +1398,7 @@ describe('documentsStore — uploading', () => {
     await untilParts(4);
 
     await guarded;
-    await expect(pending).rejects.toThrow();
+    await expect(pending).rejects.toThrow(SERVER_UNAVAILABLE_MESSAGE);
     // Bounded: a fourth failure ends the transfer rather than sleeping eight
     // seconds and trying again.
     await vi.advanceTimersByTimeAsync(30_000);
@@ -1759,11 +1900,13 @@ describe('documentsStore — uploading', () => {
     await primeCommittedRow();
     const before = captured32.length;
     let releaseInit = (): void => {};
+    let initRequested = false;
     const gate = new Promise<void>((resolve) => {
       releaseInit = resolve;
     });
     api.defaults.adapter = async (config) => {
       if (config.url === '/documents/uploads' && config.method?.toUpperCase() === 'POST') {
+        initRequested = true;
         await gate;
       }
       return adapter(config);
@@ -1774,6 +1917,9 @@ describe('documentsStore — uploading', () => {
       name: 'a.txt',
       mime: 'text/plain',
     });
+    // Waited for, because the recovery engine is loaded first and the window this
+    // test is about is the INIT request: the load window is the next test's.
+    await until(() => initRequested, 'the init request');
     // A lock lands while the transfer is still being opened. `clearStore()` has
     // already walked the session map, so registering afterwards would put a live
     // key and a progress row into a store that has just been emptied — and both
@@ -1789,18 +1935,41 @@ describe('documentsStore — uploading', () => {
     expect(requestsFor('DELETE', `/documents/uploads/${ID_A}`)).toHaveLength(1);
   });
 
+  it('starts nothing when a lock lands while the recovery engine is being loaded', async () => {
+    await primeCommittedRow();
+    const before = captured32.length;
+
+    const pending = useDocumentsStore.getState().startUpload({
+      source: source(),
+      name: 'a.txt',
+      mime: 'text/plain',
+    });
+    // Synchronously after the call, which is inside the engine's load: it is the
+    // first thing a start awaits, and the generation captured before it is what
+    // this lock moves.
+    useDocumentsStore.getState().clearStore();
+    await expect(pending).rejects.toBeInstanceOf(UploadCancelledError);
+
+    // Nothing was opened, so there is nothing to release and no key was ever drawn.
+    expect(requestsFor('POST', '/documents/uploads')).toHaveLength(0);
+    expect(requestsFor('DELETE', `/documents/uploads/${ID_A}`)).toHaveLength(0);
+    expect(captured32.slice(before)).toHaveLength(0);
+    expect(useDocumentsStore.getState().uploads).toEqual({});
+  });
+
   it('refuses a document whose metadata is over its bounds BEFORE uploading anything', async () => {
     // The bounds are checked on what is known up front, so a name a byte too long
     // costs one refusal rather than a whole transfer that fails at its last step
     // and leaves a "resumable" entry whose retry re-reads and re-hashes the file
     // only to fail identically.
-    await expect(
-      useDocumentsStore.getState().startUpload({
-        source: source(),
-        name: 'x'.repeat(MAX_DOCUMENT_NAME_LENGTH + 1),
-        mime: 'text/plain',
-      }),
-    ).rejects.toThrow();
+    const refused = useDocumentsStore.getState().startUpload({
+      source: source(),
+      name: 'x'.repeat(MAX_DOCUMENT_NAME_LENGTH + 1),
+      mime: 'text/plain',
+    });
+    await expect(refused).rejects.toThrow(/at most 255 characters|<=255/i);
+    // A sentence, never a serialized issue list.
+    await expect(refused).rejects.not.toThrow(/^\[/);
 
     expect(requestsFor('POST', '/documents/uploads')).toHaveLength(0);
     expect(partRequests()).toHaveLength(0);
@@ -2053,21 +2222,45 @@ describe('documentsStore — a vault key rotated mid-upload', () => {
     expect(requestsFor('GET', '/user/profile')).toHaveLength(0);
   });
 
-  it('surfaces a conflict that carries no version rather than treating it as a rotation', async () => {
+  it('waits out a conflict that carries no version, never treating it as a rotation', async () => {
+    installTestClock({ timers: 'timeouts' });
     committedRow = await makeRow(ID_A, 'a.txt', { plaintextBytes: 1 });
-    // The per-upload lock's own conflict: a number is exactly what it does not
-    // carry, so there is nothing to rewrap under.
-    completeOutcomes = [{ status: 409, data: { success: false, message: 'already completing' } }];
+    // The per-upload lock's own conflict ("already being completed, please wait a
+    // moment and retry"): a number is exactly what it does not carry, so there is
+    // nothing to rewrap under, and the patient ladder gives the other completion
+    // time to finish. Seven of them exhaust it.
+    const conflict = { status: 409, data: { success: false, message: 'already completing' } };
+    completeOutcomes = [conflict, conflict, conflict, conflict, conflict, conflict, conflict];
 
     await expect(
+      settleWithBackoff(
+        useDocumentsStore
+          .getState()
+          .startUpload({ source: new Blob([bytes(1)]), name: 'a.txt', mime: 'text/plain' }),
+      ),
+    ).rejects.toThrow(SERVER_UNAVAILABLE_MESSAGE);
+
+    // One attempt per step of the 1/2/4/8/16/30 s ladder, plus the first.
+    expect(completeBodies).toHaveLength(7);
+    // No profile was read, so nothing tried to rewrap under a key it could not name.
+    expect(requestsFor('GET', '/user/profile')).toHaveLength(0);
+    expect(useDocumentsStore.getState().uploads[ID_A]?.status).toBe('failed');
+  });
+
+  it('finishes once a conflict without a version clears', async () => {
+    installTestClock({ timers: 'timeouts' });
+    committedRow = await makeRow(ID_A, 'a.txt', { plaintextBytes: 1 });
+    completeOutcomes = [{ status: 409, data: { success: false, message: 'already completing' } }];
+
+    await settleWithBackoff(
       useDocumentsStore
         .getState()
         .startUpload({ source: new Blob([bytes(1)]), name: 'a.txt', mime: 'text/plain' }),
-    ).rejects.toThrow();
+    );
 
-    expect(completeBodies).toHaveLength(1);
-    // No profile was read, so nothing tried to rewrap under a key it could not name.
+    expect(completeBodies).toHaveLength(2);
     expect(requestsFor('GET', '/user/profile')).toHaveLength(0);
+    expect(useDocumentsStore.getState().documents[0]?.id).toBe(ID_A);
   });
 });
 
@@ -2189,7 +2382,7 @@ describe('documentsStore — cancel and teardown', () => {
     });
     const guarded = pending.catch(() => undefined);
     await untilParts(1);
-    await untilRetryArmed();
+    await untilWaiting(ID_A);
 
     // Cancelled mid-sleep. The transfer must give up at once rather than serve out
     // a deadline that no longer means anything.
@@ -2291,7 +2484,7 @@ describe('documentsStore — cancel and teardown', () => {
       useDocumentsStore
         .getState()
         .startUpload({ source: new Blob([bytes(1, 2, 3)]), name: 'a.txt', mime: 'text/plain' }),
-    ).rejects.toThrow(/status code 400/);
+    ).rejects.toThrow(/The server refused part of this upload \(nope\)/);
     expect(useDocumentsStore.getState().uploads[ID_A]?.status).toBe('failed');
 
     gatesArmed = true;
@@ -2371,12 +2564,14 @@ describe('documentsStore — cancel and teardown', () => {
       useDocumentsStore
         .getState()
         .startUpload({ source: new Blob([bytes(1, 2, 3)]), name: 'a.txt', mime: 'text/plain' }),
-    ).rejects.toThrow(/status code 400/);
+    ).rejects.toThrow(/The server refused part of this upload \(nope\)/);
 
     // The FIRST retry is admitted — it is the part that fails again, not the
     // claim, which is what makes the second retry below a test of the release
     // rather than of a refusal that never happened.
-    await expect(useDocumentsStore.getState().retryUpload(ID_A)).rejects.toThrow(/status code 400/);
+    await expect(useDocumentsStore.getState().retryUpload(ID_A)).rejects.toThrow(
+      /The server refused part of this upload \(nope\)/,
+    );
     expect(useDocumentsStore.getState().uploads[ID_A]?.status).toBe('failed');
 
     // The second retry is admitted and this time the part lands, so the document
@@ -2727,6 +2922,817 @@ describe('documentsStore — a resume seals a slice only if it is the slice it r
     expect(partRequests()).toHaveLength(2);
     expect(requestsFor('POST', '/complete')).toHaveLength(0);
     expect(useDocumentsStore.getState().uploads).toEqual({});
+  });
+});
+
+// ===========================================================================
+// A transfer that loses its connection
+// ===========================================================================
+
+/** Make the browser report `online`, and tell the page, as a real one would. */
+function setOnline(value: boolean): void {
+  vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(value);
+  window.dispatchEvent(new Event(value ? 'online' : 'offline'));
+}
+
+/** Every progress entry the store writes for `id`, in order. */
+function recordProgress(id: string): {
+  entries: { status: string; waitReason?: string; sentBytes: number; resending?: boolean }[];
+  stop: () => void;
+} {
+  const entries: { status: string; waitReason?: string; sentBytes: number; resending?: boolean }[] =
+    [];
+  const stop = useDocumentsStore.subscribe((state) => {
+    const entry = state.uploads[id];
+    if (entry) {
+      entries.push({
+        status: entry.status,
+        ...(entry.waitReason === undefined ? {} : { waitReason: entry.waitReason }),
+        sentBytes: entry.sentBytes,
+        ...(entry.resending === undefined ? {} : { resending: entry.resending }),
+      });
+    }
+  });
+  return { entries, stop };
+}
+
+describe('documentsStore — a transfer that loses its connection', () => {
+  const CONTENT = bytes(104, 118, 97, 117, 108, 116); // "hvault"
+
+  function source(content: DocumentBytes = CONTENT): Blob {
+    return new Blob([content]);
+  }
+
+  async function primeCommittedRow(name = 'notes.txt'): Promise<void> {
+    committedRow = await makeRow(ID_A, name, { plaintextBytes: CONTENT.length });
+  }
+
+  it('pauses while the browser is offline and resumes on its own when it comes back', async () => {
+    installTestClock({ timers: 'timeouts' });
+    await primeCommittedRow();
+    const before = captured32.length;
+    // Half the part moves, then the network goes away: the browser reports
+    // offline, so nothing reached the server and the wait has no limit.
+    partOutcomes = [{ progressThen: -1 }, null];
+    vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+    const progress = recordProgress(ID_A);
+
+    const pending = useDocumentsStore.getState().startUpload({
+      source: source(),
+      name: 'a.txt',
+      mime: 'text/plain',
+    });
+    await untilWaiting(ID_A, 'offline');
+    // The negative: while it waits, nothing is sent and nothing is zeroed.
+    for (let turn = 0; turn < 20; turn += 1) await realTurn();
+    expect(partRequests()).toHaveLength(1);
+    expect(captured32.slice(before).filter(isAllZero)).toHaveLength(0);
+
+    // Back online: the wait ends at once, without its timer running out.
+    setOnline(true);
+    await expect(pending).resolves.toBe(ID_A);
+    progress.stop();
+
+    expect(partRequests()).toHaveLength(2);
+    expect(useDocumentsStore.getState().documents[0]?.id).toBe(ID_A);
+    expect(useDocumentsStore.getState().uploads).toEqual({});
+    expect(captured32.slice(before).filter(isAllZero)).toHaveLength(1);
+    expect(progress.entries.some((entry) => entry.status === 'failed')).toBe(false);
+  });
+
+  it('never moves the bar backwards, never shows a part stored before it is, and says it is resending', async () => {
+    installTestClock({ timers: 'timeouts' });
+    await primeCommittedRow();
+    // Online, and the part had moved: the server WAS reached, so this is an
+    // interruption, retried on its bounded ladder.
+    partOutcomes = [{ progressThen: -1 }, null];
+    const progress = recordProgress(ID_A);
+
+    await settleWithBackoff(
+      useDocumentsStore.getState().startUpload({
+        source: source(),
+        name: 'a.txt',
+        mime: 'text/plain',
+      }),
+    );
+    progress.stop();
+
+    const sent = progress.entries.map((entry) => entry.sentBytes);
+    // Monotonic across the failed attempt and the re-send.
+    for (let index = 1; index < sent.length; index += 1) {
+      expect(sent[index], `write ${String(index)}`).toBeGreaterThanOrEqual(sent[index - 1] ?? 0);
+    }
+    // The half-sent part never read as stored: until the server confirmed it the
+    // bar stopped one byte short of the part's end.
+    const beforeConfirm = progress.entries.filter((entry) => entry.status !== 'finalizing');
+    expect(Math.max(...beforeConfirm.slice(0, -1).map((entry) => entry.sentBytes))).toBeLessThan(
+      CONTENT.length,
+    );
+    expect(Math.max(...sent)).toBe(CONTENT.length);
+    // It waited as an interruption, and said it was resending once it tried again.
+    expect(progress.entries.some((entry) => entry.waitReason === 'interrupted')).toBe(true);
+    expect(progress.entries.some((entry) => entry.resending === true)).toBe(true);
+    // And the flag is gone once the part landed.
+    expect(progress.entries.at(-1)?.resending).toBeUndefined();
+  });
+
+  it('does not drag the bar back when a part handed over whole has to be sent again', async () => {
+    installTestClock({ timers: 'timeouts' });
+    await primeCommittedRow();
+    // The whole body left, the answer never came, and the re-send starts from zero:
+    // exactly the "back and forth" a reader saw on every attempt.
+    partOutcomes = ['fullThenDrop', null];
+    const progress = recordProgress(ID_A);
+
+    await settleWithBackoff(
+      useDocumentsStore.getState().startUpload({
+        source: source(),
+        name: 'a.txt',
+        mime: 'text/plain',
+      }),
+    );
+    progress.stop();
+
+    const sent = progress.entries.map((entry) => entry.sentBytes);
+    for (let index = 1; index < sent.length; index += 1) {
+      expect(sent[index], `write ${String(index)}`).toBeGreaterThanOrEqual(sent[index - 1] ?? 0);
+    }
+    expect(Math.max(...sent)).toBe(CONTENT.length);
+  });
+
+  it('keeps the bar where it was when a failed upload is resumed', async () => {
+    committedRow = await makeRow(ID_A, 'a.txt', { plaintextBytes: CONTENT.length });
+    // Half the part moved before the server refused it on its merits.
+    partOutcomes = [{ status: 400, data: { success: false, message: 'refused' } }];
+    let refusedAfterProgress = false;
+    api.defaults.adapter = async (config) => {
+      if ((config.url ?? '').includes('/parts/') && !refusedAfterProgress) {
+        refusedAfterProgress = true;
+        const sentBody = (config.data as ArrayBuffer).byteLength;
+        config.onUploadProgress?.(progressEvent(Math.floor(sentBody / 2), sentBody));
+      }
+      return adapter(config);
+    };
+    await expect(
+      useDocumentsStore
+        .getState()
+        .startUpload({ source: source(), name: 'a.txt', mime: 'text/plain' }),
+    ).rejects.toThrow();
+    const shown = useDocumentsStore.getState().uploads[ID_A]?.sentBytes ?? 0;
+    expect(shown).toBeGreaterThan(0);
+
+    const progress = recordProgress(ID_A);
+    await useDocumentsStore.getState().retryUpload(ID_A);
+    progress.stop();
+
+    // Never below what the bar already showed, at any write of the resume.
+    for (const entry of progress.entries) expect(entry.sentBytes).toBeGreaterThanOrEqual(shown);
+  });
+
+  it('stops a part the server keeps cutting off after four attempts, resumably', async () => {
+    installTestClock({ timers: 'timeouts' });
+    await primeCommittedRow();
+    const before = captured32.length;
+    partOutcomes = [
+      { progressThen: -1 },
+      { progressThen: -1 },
+      { progressThen: -1 },
+      { progressThen: -1 },
+      null,
+    ];
+
+    const pending = useDocumentsStore.getState().startUpload({
+      source: source(),
+      name: 'a.txt',
+      mime: 'text/plain',
+    });
+    await expect(settleWithBackoff(pending)).rejects.toThrow(INTERRUPTED_MESSAGE);
+
+    // The server's own allowance, and not one attempt more: a too-slow link must
+    // not re-send for ever while holding one of the process's part slots.
+    expect(partRequests()).toHaveLength(4);
+    const entry = useDocumentsStore.getState().uploads[ID_A];
+    expect(entry?.status).toBe('failed');
+    expect(entry?.error).toBe(INTERRUPTED_MESSAGE);
+    expect(captured32.slice(before).filter(isAllZero)).toHaveLength(0);
+  });
+
+  it('refunds an interrupted attempt when the browser turns out to have gone offline', async () => {
+    installTestClock({ timers: 'timeouts' });
+    await primeCommittedRow();
+    partOutcomes = [
+      { progressThen: -1 },
+      { progressThen: -1 },
+      { progressThen: -1 },
+      { progressThen: -1 },
+      null,
+    ];
+
+    const pending = useDocumentsStore.getState().startUpload({
+      source: source(),
+      name: 'a.txt',
+      mime: 'text/plain',
+    });
+    const guarded = pending.catch(() => undefined);
+    await untilWaiting(ID_A, 'interrupted');
+    // The interface dropped and the error simply arrived before the event did.
+    setOnline(false);
+    expect(useDocumentsStore.getState().uploads[ID_A]?.waitReason).toBe('offline');
+    setOnline(true);
+
+    // That first failure no longer counts, so the fifth attempt is still allowed.
+    await settleWithBackoff(pending);
+    await guarded;
+    expect(partRequests()).toHaveLength(5);
+    expect(useDocumentsStore.getState().documents[0]?.id).toBe(ID_A);
+  });
+
+  it('does not abort a part the server is keeping queued, however long it waits', async () => {
+    installTestClock({ timers: 'timeouts' });
+    await primeCommittedRow();
+    // Half the body moves and then nothing: exactly what a part waiting for a
+    // server slot looks like, and exactly what a stall watchdog would kill.
+    partOutcomes = ['hang'];
+
+    const pending = useDocumentsStore.getState().startUpload({
+      source: source(),
+      name: 'a.txt',
+      mime: 'text/plain',
+    });
+    await untilParts(1);
+    await vi.advanceTimersByTimeAsync(120_000);
+    await realTurn();
+    expect(partRequests()).toHaveLength(1);
+    expect(useDocumentsStore.getState().uploads[ID_A]?.status).toBe('uploading');
+
+    releaseHungParts();
+    await expect(pending).resolves.toBe(ID_A);
+    expect(partRequests()).toHaveLength(1);
+  });
+
+  it('rides out a lost connection at completion, which is safe to send again', async () => {
+    installTestClock({ timers: 'timeouts' });
+    await primeCommittedRow();
+    completeOutcomes = [-1, 'ok'];
+    const progress = recordProgress(ID_A);
+
+    await settleWithBackoff(
+      useDocumentsStore.getState().startUpload({
+        source: source(),
+        name: 'a.txt',
+        mime: 'text/plain',
+      }),
+    );
+    progress.stop();
+
+    expect(completeBodies).toHaveLength(2);
+    expect(partRequests()).toHaveLength(1);
+    expect(progress.entries.some((entry) => entry.waitReason === 'connection')).toBe(true);
+    // The retry said "finishing" again rather than "cannot reach the server".
+    expect(
+      progress.entries.filter((entry) => entry.status === 'finalizing').length,
+    ).toBeGreaterThan(1);
+    expect(useDocumentsStore.getState().documents[0]?.id).toBe(ID_A);
+  });
+
+  it('re-sends a completion lost after a rewrap under the ROTATED key and version', async () => {
+    installTestClock({ timers: 'timeouts' });
+    const content = bytes(1, 2, 3);
+    committedRow = await makeRow(ID_A, 'a.txt', { plaintextBytes: content.length });
+    completeOutcomes = [
+      { status: 409, data: { success: false, message: 'rotated', data: { vaultKeyVersion: 3 } } },
+      -1,
+      'ok',
+    ];
+    const rotatedKey = await cryptoService.importVaultKey(cryptoService.generateVaultKey());
+    const wrapped = await cryptoService.encryptVaultKey(rotatedKey, mek);
+    profileBody = {
+      encryptedVaultKey: wrapped.encrypted,
+      vaultKeyIv: wrapped.iv,
+      vaultKeyTag: wrapped.tag,
+    };
+
+    await settleWithBackoff(
+      useDocumentsStore
+        .getState()
+        .startUpload({ source: new Blob([content]), name: 'a.txt', mime: 'text/plain' }),
+    );
+
+    expect(completeBodies).toHaveLength(3);
+    expect(completeBodies[1]?.vaultKeyVersion).toBe(3);
+    expect(completeBodies[2]?.vaultKeyVersion).toBe(3);
+    // The re-sent body is wrapped under the rotated key, never back under the old one.
+    const last = completeBodies[2] as Record<string, string>;
+    await expect(
+      unwrapDek(
+        {
+          encryptedDek: last.encryptedDek ?? '',
+          dekIv: last.dekIv ?? '',
+          dekTag: last.dekTag ?? '',
+        },
+        await deriveWrapKey(rotatedKey, ID_A),
+      ),
+    ).resolves.toBeInstanceOf(Uint8Array);
+    await expect(
+      unwrapDek(
+        {
+          encryptedDek: last.encryptedDek ?? '',
+          dekIv: last.dekIv ?? '',
+          dekTag: last.dekTag ?? '',
+        },
+        await deriveWrapKey(vaultKey, ID_A),
+      ),
+    ).rejects.toThrow();
+  });
+
+  it('recovers when the rewrap loses its profile read, clearing the rotated key it built', async () => {
+    installTestClock({ timers: 'timeouts' });
+    const content = bytes(1, 2, 3);
+    committedRow = await makeRow(ID_A, 'a.txt', { plaintextBytes: content.length });
+    completeOutcomes = [
+      { status: 409, data: { success: false, message: 'rotated', data: { vaultKeyVersion: 3 } } },
+      'ok',
+    ];
+    const rotatedKey = await cryptoService.importVaultKey(cryptoService.generateVaultKey());
+    const wrapped = await cryptoService.encryptVaultKey(rotatedKey, mek);
+    profileBody = {
+      encryptedVaultKey: wrapped.encrypted,
+      vaultKeyIv: wrapped.iv,
+      vaultKeyTag: wrapped.tag,
+    };
+    profileFailsOnce = true;
+    const cleared = vi.spyOn(cryptoService, 'clearCryptoKey');
+
+    await settleWithBackoff(
+      useDocumentsStore
+        .getState()
+        .startUpload({ source: new Blob([content]), name: 'a.txt', mime: 'text/plain' }),
+    );
+
+    expect(requestsFor('GET', '/user/profile')).toHaveLength(2);
+    expect(completeBodies).toHaveLength(2);
+    expect(useDocumentsStore.getState().documents[0]?.id).toBe(ID_A);
+    // The one rotated key that was built was cleared once the rewrap was done.
+    expect(cleared).toHaveBeenCalledTimes(1);
+  });
+
+  it('cancels a completion that is waiting to retry when the vault locks', async () => {
+    installTestClock({ timers: 'timeouts' });
+    await primeCommittedRow();
+    const before = captured32.length;
+    completeOutcomes = [-1];
+
+    const pending = useDocumentsStore.getState().startUpload({
+      source: source(),
+      name: 'a.txt',
+      mime: 'text/plain',
+    });
+    await untilWaiting(ID_A, 'connection');
+    useDocumentsStore.getState().clearStore();
+
+    await expect(pending).rejects.toBeInstanceOf(UploadCancelledError);
+    expect(completeBodies).toHaveLength(1);
+    expect(useDocumentsStore.getState().uploads).toEqual({});
+    expect(captured32.slice(before).filter(isAllZero)).toHaveLength(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('cuts a wait short with "Retry now", and does nothing for an upload that is not waiting', async () => {
+    installTestClock({ timers: 'timeouts' });
+    await primeCommittedRow();
+    partOutcomes = [-1, null];
+
+    const pending = useDocumentsStore.getState().startUpload({
+      source: source(),
+      name: 'a.txt',
+      mime: 'text/plain',
+    });
+    await untilWaiting(ID_A, 'connection');
+    // No timer is advanced: only the wake can end this wait.
+    useDocumentsStore.getState().resumeUploadNow(ID_A);
+    await expect(pending).resolves.toBe(ID_A);
+    expect(partRequests()).toHaveLength(2);
+
+    // Nothing to wake: no throw, no request.
+    const requestCount = requests.length;
+    useDocumentsStore.getState().resumeUploadNow(ID_A);
+    useDocumentsStore.getState().resumeUploadNow('ffffffffffffffffffffffff');
+    expect(requests).toHaveLength(requestCount);
+  });
+
+  it('keeps an upload whose Retry was pressed while still offline, and resumes it when back', async () => {
+    installTestClock({ timers: 'timeouts' });
+    committedRow = await makeRow(ID_A, 'a.txt', { plaintextBytes: 3 });
+    partOutcomes = [400];
+    const before = captured32.length;
+    await expect(
+      useDocumentsStore
+        .getState()
+        .startUpload({ source: new Blob([bytes(1, 2, 3)]), name: 'a.txt', mime: 'text/plain' }),
+    ).rejects.toThrow();
+    expect(useDocumentsStore.getState().uploads[ID_A]?.status).toBe('failed');
+
+    // Retry, while the ledger read cannot get an answer.
+    ledgerOutcomes = [-1];
+    vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+    const retried = useDocumentsStore.getState().retryUpload(ID_A);
+    await untilWaiting(ID_A, 'offline');
+
+    // The defect this pins: any failure of this read used to end the session and
+    // zero the key, destroying an upload that was perfectly resumable.
+    expect(useDocumentsStore.getState().uploads[ID_A]).toBeDefined();
+    expect(captured32.slice(before).filter(isAllZero)).toHaveLength(0);
+
+    setOnline(true);
+    await expect(retried).resolves.toBe(ID_A);
+    expect(useDocumentsStore.getState().documents[0]?.id).toBe(ID_A);
+    expect(captured32.slice(before).filter(isAllZero)).toHaveLength(1);
+  });
+
+  it.each([
+    {
+      label: 'a ledger read the server keeps failing',
+      ledger: [500, 500, 500, 500] as const,
+      message: SERVER_UNAVAILABLE_MESSAGE,
+    },
+    {
+      label: 'a ledger the client cannot read',
+      ledger: ['malformed'] as const,
+      message: /could not be read/,
+    },
+  ])(
+    'leaves the row failed, with Retry offered and the key kept, after $label',
+    async ({ ledger, message }) => {
+      installTestClock({ timers: 'timeouts' });
+      committedRow = await makeRow(ID_A, 'a.txt', { plaintextBytes: 3 });
+      partOutcomes = [400];
+      const before = captured32.length;
+      await expect(
+        useDocumentsStore
+          .getState()
+          .startUpload({ source: new Blob([bytes(1, 2, 3)]), name: 'a.txt', mime: 'text/plain' }),
+      ).rejects.toThrow();
+
+      ledgerOutcomes = [...ledger];
+      await expect(
+        settleWithBackoff(useDocumentsStore.getState().retryUpload(ID_A)),
+      ).rejects.toThrow(message);
+
+      const entry = useDocumentsStore.getState().uploads[ID_A];
+      expect(entry?.status).toBe('failed');
+      expect(entry?.waitReason).toBeUndefined();
+      expect(captured32.slice(before).filter(isAllZero)).toHaveLength(0);
+      // Still resumable: the next Retry is accepted and finishes the upload.
+      ledgerOutcomes = [];
+      await expect(useDocumentsStore.getState().retryUpload(ID_A)).resolves.toBe(ID_A);
+    },
+  );
+
+  it('adopts a document whose completion committed while its answer was lost, listed once', async () => {
+    installTestClock({ timers: 'timeouts' });
+    await primeCommittedRow();
+    completeOutcomes = [{ status: 500 }, { status: 500 }, { status: 500 }, { status: 500 }];
+    const drawnFrom = captured32.length;
+    await expect(
+      settleWithBackoff(
+        useDocumentsStore
+          .getState()
+          .startUpload({ source: source(), name: 'a.txt', mime: 'text/plain' }),
+      ),
+    ).rejects.toThrow(SERVER_UNAVAILABLE_MESSAGE);
+    // The key is KEPT through the failure, because the transfer is resumable.
+    expect(captured32.slice(drawnFrom).filter(isAllZero)).toHaveLength(0);
+    // A listing that ran meanwhile already shows it.
+    listPages = [[committedRow as DocumentResponse]];
+    await useDocumentsStore.getState().fetchDocuments();
+    const partsBefore = partRequests().length;
+
+    // The staging row is gone because the completion DID commit.
+    ledgerOutcomes = [404];
+    probeOutcomes = ['committed'];
+    await expect(useDocumentsStore.getState().retryUpload(ID_A)).resolves.toBe(ID_A);
+
+    expect(requestsFor('GET', `/documents/${ID_A}`)).toHaveLength(1);
+    expect(useDocumentsStore.getState().documents.filter((doc) => doc.id === ID_A)).toHaveLength(1);
+    expect(useDocumentsStore.getState().uploads).toEqual({});
+    // Nothing was uploaded a second time, and the key was zeroed once.
+    expect(partRequests()).toHaveLength(partsBefore);
+    expect(completeBodies).toHaveLength(4);
+    expect(captured32.slice(drawnFrom).filter(isAllZero)).toHaveLength(1);
+  });
+
+  it('files an adopted document that is already in the trash into the trash it was read into', async () => {
+    installTestClock({ timers: 'timeouts' });
+    await primeCommittedRow();
+    // A trash that already holds another document, which the adoption must keep.
+    trashRows = [await makeRow(ID_B, 'binned.txt')];
+    await useDocumentsStore.getState().fetchTrash();
+    completeOutcomes = [{ status: 500 }, { status: 500 }, { status: 500 }, { status: 500 }];
+    await expect(
+      settleWithBackoff(
+        useDocumentsStore
+          .getState()
+          .startUpload({ source: source(), name: 'a.txt', mime: 'text/plain' }),
+      ),
+    ).rejects.toThrow();
+
+    ledgerOutcomes = [404];
+    probeOutcomes = ['trashed'];
+    await expect(useDocumentsStore.getState().retryUpload(ID_A)).resolves.toBe(ID_A);
+
+    expect(useDocumentsStore.getState().documents.some((doc) => doc.id === ID_A)).toBe(false);
+    // Listed first, once, and the document already in the trash is still there.
+    expect(useDocumentsStore.getState().trashDocuments.map((doc) => doc.id)).toEqual([ID_A, ID_B]);
+  });
+
+  it('gives up a resume whose staging row and document are both gone, saying so', async () => {
+    committedRow = await makeRow(ID_A, 'a.txt', { plaintextBytes: 3 });
+    partOutcomes = [400];
+    const before = captured32.length;
+    await expect(
+      useDocumentsStore
+        .getState()
+        .startUpload({ source: new Blob([bytes(1, 2, 3)]), name: 'a.txt', mime: 'text/plain' }),
+    ).rejects.toThrow();
+
+    ledgerOutcomes = [404];
+    probeOutcomes = [404];
+    await expect(useDocumentsStore.getState().retryUpload(ID_A)).rejects.toThrow(
+      UPLOAD_GONE_MESSAGE,
+    );
+    expect(useDocumentsStore.getState().uploads).toEqual({});
+    expect(captured32.slice(before).filter(isAllZero)).toHaveLength(1);
+  });
+
+  it('cancels a resume whose probe is waiting when the vault locks, listing nothing', async () => {
+    installTestClock({ timers: 'timeouts' });
+    committedRow = await makeRow(ID_A, 'a.txt', { plaintextBytes: 3 });
+    partOutcomes = [400];
+    await expect(
+      useDocumentsStore
+        .getState()
+        .startUpload({ source: new Blob([bytes(1, 2, 3)]), name: 'a.txt', mime: 'text/plain' }),
+    ).rejects.toThrow();
+
+    ledgerOutcomes = [404];
+    probeOutcomes = [-1];
+    const retried = useDocumentsStore.getState().retryUpload(ID_A);
+    await untilWaiting(ID_A, 'connection');
+    useDocumentsStore.getState().clearStore();
+
+    await expect(retried).rejects.toBeInstanceOf(UploadCancelledError);
+    expect(useDocumentsStore.getState().documents).toEqual([]);
+  });
+
+  it('cancels a resume whose ledger read is waiting when the upload is cancelled', async () => {
+    installTestClock({ timers: 'timeouts' });
+    committedRow = await makeRow(ID_A, 'a.txt', { plaintextBytes: 3 });
+    partOutcomes = [400];
+    await expect(
+      useDocumentsStore
+        .getState()
+        .startUpload({ source: new Blob([bytes(1, 2, 3)]), name: 'a.txt', mime: 'text/plain' }),
+    ).rejects.toThrow();
+
+    ledgerOutcomes = [-1];
+    const retried = useDocumentsStore.getState().retryUpload(ID_A);
+    await untilWaiting(ID_A, 'connection');
+    useDocumentsStore.getState().cancelUpload(ID_A);
+
+    await expect(retried).rejects.toBeInstanceOf(UploadCancelledError);
+    expect(useDocumentsStore.getState().uploads).toEqual({});
+  });
+
+  it('throws the same sentence it shows, with the failure behind it as the cause', async () => {
+    committedRow = await makeRow(ID_A, 'a.txt', { plaintextBytes: 3 });
+    partOutcomes = [400];
+
+    const error: unknown = await useDocumentsStore
+      .getState()
+      .startUpload({ source: new Blob([bytes(1, 2, 3)]), name: 'a.txt', mime: 'text/plain' })
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(UploadStoppedError);
+    expect((error as UploadStoppedError).message).toBe(
+      useDocumentsStore.getState().uploads[ID_A]?.error,
+    );
+    expect((error as UploadStoppedError).cause).toBeInstanceOf(AxiosError);
+  });
+
+  it('says a rate-limited part is rate limited, and stops at once', async () => {
+    committedRow = await makeRow(ID_A, 'a.txt', { plaintextBytes: 3 });
+    partOutcomes = [429];
+
+    await expect(
+      useDocumentsStore
+        .getState()
+        .startUpload({ source: new Blob([bytes(1, 2, 3)]), name: 'a.txt', mime: 'text/plain' }),
+    ).rejects.toThrow('Too many attempts. Please wait a moment and try again.');
+    expect(partRequests()).toHaveLength(1);
+  });
+
+  it('keeps a registered transfer running when its registration callback throws', async () => {
+    await primeCommittedRow();
+    const onRegistered = vi.fn(() => {
+      throw new Error('a caller bug');
+    });
+
+    await expect(
+      useDocumentsStore
+        .getState()
+        .startUpload({ source: source(), name: 'a.txt', mime: 'text/plain', onRegistered }),
+    ).resolves.toBe(ID_A);
+    expect(onRegistered).toHaveBeenCalledWith(ID_A);
+    expect(useDocumentsStore.getState().documents[0]?.id).toBe(ID_A);
+  });
+
+  it('tells the server once more when an abort got no answer, on the next online event only', async () => {
+    installTestClock({ timers: 'timeouts' });
+    await primeCommittedRow();
+    partOutcomes = [-1];
+    abortFails = 'offline';
+    const pending = useDocumentsStore.getState().startUpload({
+      source: source(),
+      name: 'a.txt',
+      mime: 'text/plain',
+    });
+    const guarded = pending.catch(() => undefined);
+    await untilWaiting(ID_A);
+
+    useDocumentsStore.getState().cancelUpload(ID_A);
+    await guarded;
+    await until(
+      () => requestsFor('DELETE', `/documents/uploads/${ID_A}`).length === 1,
+      'the abort',
+    );
+    for (let turn = 0; turn < 10; turn += 1) await realTurn();
+
+    abortFails = false;
+    setOnline(true);
+    await until(
+      () => requestsFor('DELETE', `/documents/uploads/${ID_A}`).length === 2,
+      'the retried abort',
+    );
+    // Once, never a loop.
+    setOnline(true);
+    for (let turn = 0; turn < 10; turn += 1) await realTurn();
+    expect(requestsFor('DELETE', `/documents/uploads/${ID_A}`)).toHaveLength(2);
+  });
+});
+
+// ===========================================================================
+// What a document is called
+// ===========================================================================
+
+describe('documentsStore — the original name and the file type', () => {
+  const CONTENT = bytes(104, 118, 97, 117, 108, 116); // "hvault"
+
+  function source(content: DocumentBytes = CONTENT): Blob {
+    return new Blob([content]);
+  }
+
+  async function primeCommittedRow(name = 'notes.txt'): Promise<void> {
+    committedRow = await makeRow(ID_A, name, { plaintextBytes: CONTENT.length });
+  }
+
+  it('seals the original file name beside the name, and sends neither in the clear', async () => {
+    await primeCommittedRow('Q3 report.txt');
+
+    await useDocumentsStore.getState().startUpload({
+      source: source(),
+      name: 'Q3 report.txt',
+      originalName: 'IMG_0042 scan.txt',
+      mime: 'text/plain',
+    });
+
+    const complete = completeBodies[0] as unknown as Record<string, string>;
+    const init = JSON.parse(requestsFor('POST', '/documents/uploads')[0]?.data as string) as Record<
+      string,
+      string
+    >;
+    const dek = await unwrapDek(
+      {
+        encryptedDek: complete.encryptedDek ?? '',
+        dekIv: complete.dekIv ?? '',
+        dekTag: complete.dekTag ?? '',
+      },
+      await deriveWrapKey(vaultKey, ID_A),
+    );
+    const meta = await decryptMeta(
+      await deriveMetaKey(
+        dek as DocumentBytes,
+        new Uint8Array(cryptoService.base64ToArrayBuffer(init.streamSalt ?? '')),
+        ID_A,
+      ),
+      {
+        encryptedMeta: complete.encryptedMeta ?? '',
+        metaIv: complete.metaIv ?? '',
+        metaTag: complete.metaTag ?? '',
+      },
+    );
+    expect(meta.name).toBe('Q3 report.txt');
+    expect(meta.originalName).toBe('IMG_0042 scan.txt');
+
+    const wire = requests
+      .map((r) => `${r.url} ${typeof r.data === 'string' ? r.data : ''}`)
+      .join('\n');
+    expect(wire).not.toContain('IMG_0042');
+    expect(wire).not.toContain('Q3 report');
+  });
+
+  it('records the name itself as the original name when the caller passes none', async () => {
+    await primeCommittedRow();
+
+    await useDocumentsStore
+      .getState()
+      .startUpload({ source: source(), name: 'notes.txt', mime: 'text/plain' });
+
+    const complete = completeBodies[0] as unknown as Record<string, string>;
+    const init = JSON.parse(requestsFor('POST', '/documents/uploads')[0]?.data as string) as Record<
+      string,
+      string
+    >;
+    const dek = await unwrapDek(
+      {
+        encryptedDek: complete.encryptedDek ?? '',
+        dekIv: complete.dekIv ?? '',
+        dekTag: complete.dekTag ?? '',
+      },
+      await deriveWrapKey(vaultKey, ID_A),
+    );
+    const meta = await decryptMeta(
+      await deriveMetaKey(
+        dek as DocumentBytes,
+        new Uint8Array(cryptoService.base64ToArrayBuffer(init.streamSalt ?? '')),
+        ID_A,
+      ),
+      {
+        encryptedMeta: complete.encryptedMeta ?? '',
+        metaIv: complete.metaIv ?? '',
+        metaTag: complete.metaTag ?? '',
+      },
+    );
+    expect(meta.originalName).toBe('notes.txt');
+  });
+
+  it('keeps the original name through a rename, which has no way to change it', async () => {
+    listPages = [[await makeRow(ID_A, 'scan.pdf', { originalName: 'IMG_0042.pdf' })]];
+    await useDocumentsStore.getState().fetchDocuments();
+    committedRow = listPages[0]?.[0] ?? null;
+    requests = [];
+
+    await useDocumentsStore.getState().updateDocumentMeta(ID_A, { name: 'Passport.pdf' });
+
+    const body = JSON.parse(requestsFor('PUT', `/documents/${ID_A}`)[0]?.data as string) as Record<
+      string,
+      string
+    >;
+    const row = listPages[0]?.[0] as DocumentResponse;
+    const dek = await unwrapDek(row, await deriveWrapKey(vaultKey, ID_A));
+    const meta = await decryptMeta(
+      await deriveMetaKey(
+        dek as DocumentBytes,
+        new Uint8Array(cryptoService.base64ToArrayBuffer(row.streamSalt)),
+        ID_A,
+      ),
+      {
+        encryptedMeta: body.encryptedMeta ?? '',
+        metaIv: body.metaIv ?? '',
+        metaTag: body.metaTag ?? '',
+      },
+    );
+    expect(meta.name).toBe('Passport.pdf');
+    expect(meta.originalName).toBe('IMG_0042.pdf');
+  });
+
+  it.each([
+    { label: 'to another extension', name: 'report.txt' },
+    { label: 'by emptying the part before the extension', name: '.pdf' },
+    { label: 'by removing the extension', name: 'report' },
+  ])(
+    'refuses a rename that would change the file type $label, sending nothing',
+    async ({ name }) => {
+      listPages = [[await makeRow(ID_A, 'report.pdf')]];
+      await useDocumentsStore.getState().fetchDocuments();
+      requests = [];
+
+      await expect(useDocumentsStore.getState().updateDocumentMeta(ID_A, { name })).rejects.toThrow(
+        DOCUMENT_TYPE_LOCKED_MESSAGE,
+      );
+      expect(requestsFor('PUT', `/documents/${ID_A}`)).toHaveLength(0);
+      expect(useDocumentsStore.getState().documents[0]?.meta?.name).toBe('report.pdf');
+    },
+  );
+
+  it('accepts a rename that keeps the extension, whatever its case was', async () => {
+    listPages = [[await makeRow(ID_A, 'Photo.JPG')]];
+    await useDocumentsStore.getState().fetchDocuments();
+    committedRow = listPages[0]?.[0] ?? null;
+
+    await expect(
+      useDocumentsStore.getState().updateDocumentMeta(ID_A, { name: 'Holiday.JPG' }),
+    ).resolves.toBeUndefined();
+    expect(requestsFor('PUT', `/documents/${ID_A}`)).toHaveLength(1);
   });
 });
 

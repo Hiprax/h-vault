@@ -9,7 +9,7 @@
  * ## The defect this file pins
  *
  * Both chains used to run the 30 MB `express.json` FIRST and `passwordVerifyLimiter`
- * (5 per user per 15 minutes) second. A limiter placed after the parser cannot run
+ * (then 5 per user per 15 minutes) second. A limiter placed after the parser cannot run
  * until `raw-body` has buffered the whole body and `JSON.parse` has allocated it, so
  * the sixth request in a window was refused only after it had cost exactly what
  * the first five did. The limiter bounded how many requests were ANSWERED, never
@@ -48,6 +48,7 @@ import { createErrorMiddleware } from '@hiprax/errors';
 import {
   MAX_IN_FLIGHT_LARGE_BODY_REQUESTS,
   MAX_IN_FLIGHT_LARGE_BODY_REQUESTS_PER_USER,
+  PASSWORD_VERIFY_RATE_LIMIT_MAX,
 } from '@hvault/shared';
 
 /**
@@ -73,7 +74,7 @@ import {
 import { authHeader, createTestUser, type TestUser } from './helpers.js';
 
 /** `passwordVerifyLimiter`'s budget per window. Read back from the counter it writes, below. */
-const PASSWORD_VERIFY_LIMIT = 5;
+const PASSWORD_VERIFY_LIMIT = PASSWORD_VERIFY_RATE_LIMIT_MAX;
 
 /**
  * What the refused request declares it will send: comfortably inside the 30 MB

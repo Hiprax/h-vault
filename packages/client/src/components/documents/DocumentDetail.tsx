@@ -16,16 +16,12 @@ import {
   Trash2,
 } from 'lucide-react';
 import {
-  MAX_DOCUMENT_META_JSON_BYTES,
-  MAX_DOCUMENT_NAME_LENGTH,
-  MAX_DOCUMENT_NOTE_LENGTH,
   MAX_DOCUMENT_TAGS,
   MAX_PREVIEW_BYTES,
-  MAX_TAG_LENGTH,
   documentExtension,
-  documentMetaJsonByteLength,
   formatBytes,
   previewModeForName,
+  splitDocumentName,
 } from '@hvault/shared';
 import type { DocumentMeta, PreviewMode } from '@hvault/shared';
 import {
@@ -62,6 +58,13 @@ import {
   saveDocument,
 } from '../../services/documents/download';
 import { UNOPENABLE_DOCUMENT_NAME } from '../../services/documents/downloadAll';
+import {
+  ORIGINAL_NAME_NOT_RECORDED,
+  documentMetaRefusal,
+  nameFromStem,
+} from '../../lib/documentDetails';
+import { useTagField } from '../../hooks/useTagField';
+import { DocumentDetailsFields, type DocumentDetailsValues } from './DocumentDetailsFields';
 
 // ---------------------------------------------------------------------------
 // Copy that more than one element has to agree on
@@ -140,53 +143,6 @@ const PURGE_PENDING_NOTICE_ID = 'document-purge-pending-notice';
  */
 const PURGE_PENDING_HINT =
   'This document is already being deleted for good. What remains of it is removed automatically, and it cannot be restored.';
-
-// ---------------------------------------------------------------------------
-// Tags
-// ---------------------------------------------------------------------------
-
-/**
- * A comma-separated tag field, parsed the way the shared schema stores tags.
- *
- * `.trim()` and the empty drop mirror `documentMetaSchema`'s
- * `z.string().trim().min(1)`, and the de-duplication is this field's own: typing
- * the same tag twice is a slip rather than a request for two identical tags, and
- * it would otherwise spend one of the twenty slots.
- */
-function parseTagField(value: string): string[] {
-  const seen = new Set<string>();
-  for (const raw of value.split(',')) {
-    const tag = raw.trim();
-    if (tag !== '') seen.add(tag);
-  }
-  return [...seen];
-}
-
-/**
- * Why these metadata values cannot be stored, or `null` when they can.
- *
- * Every bound is checked here, before anything is sealed, for the reason the
- * vault form records: a value the store refuses fails inside `encryptMeta` as a
- * schema error whose message is a serialized issue list, which is not a sentence
- * anyone can act on. The BYTE budget is checked with the shared helper rather
- * than by counting characters, because every field bound above it counts UTF-16
- * code units while the sealed blob is bytes — a 10,000-character note in a
- * non-Latin script is three times its own length once encoded.
- */
-function refusalFor(meta: DocumentMeta): string | null {
-  if (meta.name === '') return 'A document needs a name.';
-  if (meta.tags.length > MAX_DOCUMENT_TAGS) {
-    return `A document can carry at most ${String(MAX_DOCUMENT_TAGS)} tags.`;
-  }
-  const overlongTag = meta.tags.find((tag) => tag.length > MAX_TAG_LENGTH);
-  if (overlongTag !== undefined) {
-    return `Tags can be at most ${String(MAX_TAG_LENGTH)} characters; "${overlongTag}" is longer.`;
-  }
-  if (documentMetaJsonByteLength(meta) > MAX_DOCUMENT_META_JSON_BYTES) {
-    return `The name, tags and note of a document have to fit in ${String(MAX_DOCUMENT_META_JSON_BYTES)} bytes once encoded. Shorten the note.`;
-  }
-  return null;
-}
 
 // ---------------------------------------------------------------------------
 // The two content states
@@ -484,9 +440,11 @@ export function DocumentDetail({ document: doc, isTrashed }: DocumentDetailProps
 
   const [downloading, setDownloading] = useState(false);
   const [showEdit, setShowEdit] = useState(false);
-  const [editName, setEditName] = useState('');
-  const [editTags, setEditTags] = useState('');
-  const [editNote, setEditNote] = useState('');
+  const [editDetails, setEditDetails] = useState<DocumentDetailsValues>({
+    stem: '',
+    note: '',
+  });
+  const editTags = useTagField([], MAX_DOCUMENT_TAGS);
   const [editRefusal, setEditRefusal] = useState<string | null>(null);
   const [editLoading, setEditLoading] = useState(false);
   const [showDelete, setShowDelete] = useState(false);
@@ -681,20 +639,36 @@ export function DocumentDetail({ document: doc, isTrashed }: DocumentDetailProps
       });
   }, [doc.id, meta, toast]);
 
+  // The fixed part of the name: the dialog edits only what comes before it.
+  const nameSuffix = meta === null ? '' : splitDocumentName(meta.name).suffix;
+
   const openEditor = useCallback(() => {
     if (!meta) return;
-    setEditName(meta.name);
-    setEditTags(meta.tags.join(', '));
-    setEditNote(meta.note ?? '');
+    setEditDetails({
+      stem: splitDocumentName(meta.name).stem,
+      note: meta.note ?? '',
+    });
+    editTags.reset(meta.tags);
     setEditRefusal(null);
     setShowEdit(true);
-  }, [meta]);
+  }, [meta, editTags]);
 
   const handleSaveDetails = useCallback(() => {
     if (!meta) return;
-    const name = editName.trim();
-    const tags = parseTagField(editTags);
-    const note = editNote.trim();
+    // A tag typed but never added is saved with the rest; at the limit nothing is
+    // saved and the tag field says why.
+    const tags = editTags.commitPending();
+    if (tags === null) {
+      setEditRefusal(null);
+      return;
+    }
+    const named = nameFromStem(editDetails.stem, nameSuffix, meta.name);
+    if ('refusal' in named) {
+      setEditRefusal(named.refusal);
+      return;
+    }
+    const { name } = named;
+    const note = editDetails.note.trim();
     // The note is REMOVED from the spread before it is conditionally put back,
     // because `{ ...meta, ...(note === '' ? {} : { note }) }` carries the OLD
     // note forward when the field has been cleared. The pre-flight would then
@@ -708,7 +682,7 @@ export function DocumentDetail({ document: doc, isTrashed }: DocumentDetailProps
       tags,
       ...(note === '' ? {} : { note }),
     };
-    const refusal = refusalFor(candidate);
+    const refusal = documentMetaRefusal(candidate);
     if (refusal !== null) {
       setEditRefusal(refusal);
       return;
@@ -728,7 +702,7 @@ export function DocumentDetail({ document: doc, isTrashed }: DocumentDetailProps
       .finally(() => {
         setEditLoading(false);
       });
-  }, [doc.id, editName, editNote, editTags, meta, toast, updateDocumentMeta]);
+  }, [doc.id, editDetails, editTags, meta, nameSuffix, toast, updateDocumentMeta]);
 
   const handleToggleFavorite = useCallback(() => {
     setFavoriteLoading(true);
@@ -1033,6 +1007,25 @@ export function DocumentDetail({ document: doc, isTrashed }: DocumentDetailProps
         {isTrashed && doc.deletedAt !== undefined && (
           <DetailRow label="Deleted">{formatTimestamp(doc.deletedAt)}</DetailRow>
         )}
+        {!degraded && (
+          <div className="col-span-2">
+            <p className="text-xs text-[hsl(var(--muted-foreground))]">Original name</p>
+            {/* The name the file had when it was added, which no edit changes.
+                Documents added before it was recorded say so rather than
+                showing a guess. */}
+            <p
+              data-testid="document-original-name"
+              className={cn(
+                'break-all text-sm',
+                meta.originalName === undefined
+                  ? 'text-[hsl(var(--muted-foreground))]'
+                  : 'text-[hsl(var(--foreground))]',
+              )}
+            >
+              {meta.originalName ?? ORIGINAL_NAME_NOT_RECORDED}
+            </p>
+          </div>
+        )}
         {!degraded && meta.note !== undefined && (
           <div className="col-span-2">
             <p className="text-xs text-[hsl(var(--muted-foreground))]">Note</p>
@@ -1058,64 +1051,26 @@ export function DocumentDetail({ document: doc, isTrashed }: DocumentDetailProps
       </div>
 
       <Dialog open={showEdit} onOpenChange={setShowEdit}>
-        <DialogContent className="max-w-md">
+        {/* Scrolls inside the viewport: twenty tags and a long note can make the
+            dialog taller than a laptop screen, which would put Save out of reach. */}
+        <DialogContent className="max-w-md sm:max-h-[85vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>Edit details</DialogTitle>
             <DialogDescription>
               The name, tags and note are re-sealed in your browser under this document&rsquo;s own
-              key. The stored file is not touched and not re-uploaded.
+              key. The stored file is not touched and not re-uploaded, and its type stays the same.
             </DialogDescription>
           </DialogHeader>
 
           <div className="space-y-3">
-            <div>
-              <label
-                htmlFor="document-edit-name"
-                className="mb-1.5 block text-sm font-medium text-[hsl(var(--foreground))]"
-              >
-                Name
-              </label>
-              <input
-                id="document-edit-name"
-                value={editName}
-                onChange={(event) => setEditName(event.target.value)}
-                maxLength={MAX_DOCUMENT_NAME_LENGTH}
-                autoComplete="off"
-                className="w-full rounded-md border border-[hsl(var(--input))] bg-[hsl(var(--background))] px-3 py-2 text-sm text-[hsl(var(--foreground))]"
-              />
-            </div>
-            <div>
-              <label
-                htmlFor="document-edit-tags"
-                className="mb-1.5 block text-sm font-medium text-[hsl(var(--foreground))]"
-              >
-                Tags
-              </label>
-              <input
-                id="document-edit-tags"
-                value={editTags}
-                onChange={(event) => setEditTags(event.target.value)}
-                placeholder="Separate tags with commas"
-                autoComplete="off"
-                className="w-full rounded-md border border-[hsl(var(--input))] bg-[hsl(var(--background))] px-3 py-2 text-sm text-[hsl(var(--foreground))]"
-              />
-            </div>
-            <div>
-              <label
-                htmlFor="document-edit-note"
-                className="mb-1.5 block text-sm font-medium text-[hsl(var(--foreground))]"
-              >
-                Note
-              </label>
-              <textarea
-                id="document-edit-note"
-                value={editNote}
-                onChange={(event) => setEditNote(event.target.value)}
-                maxLength={MAX_DOCUMENT_NOTE_LENGTH}
-                rows={4}
-                className="w-full rounded-md border border-[hsl(var(--input))] bg-[hsl(var(--background))] px-3 py-2 text-sm text-[hsl(var(--foreground))]"
-              />
-            </div>
+            <DocumentDetailsFields
+              idPrefix="document-edit"
+              values={editDetails}
+              tagField={editTags}
+              suffix={nameSuffix}
+              onChange={setEditDetails}
+              originalName={meta?.originalName ?? null}
+            />
             {editRefusal !== null && (
               <p
                 role="alert"

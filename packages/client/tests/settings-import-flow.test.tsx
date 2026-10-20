@@ -1557,8 +1557,12 @@ describe('SettingsPage import flow', () => {
     await waitFor(() => expect(mockImportVaultApi).toHaveBeenCalledTimes(1));
 
     // On the wire: three fields kept, the fourth moved into the notes as text,
-    // and neither hidden value anywhere.
+    // and neither hidden value anywhere. The page's post-import tail settles
+    // first, as in every other case here, so none of it lands outside act()
+    // while this test decodes with the real Web Crypto: without it, about one
+    // run of this file in four failed on the completion's state updates.
     const insert = lastImportBody().operations.inserts[0]!;
+    await settleImportFlow();
     const insertId = await insertRowId(insert);
     const data = JSON.parse(openSentField(insert, 'data', dataAad('login', insertId))) as {
       customFields: { name: string }[];

@@ -15,7 +15,7 @@ import axios, {
   type InternalAxiosRequestConfig,
 } from 'axios';
 import { useAuthStore } from '../../stores/authStore.js';
-import { isSessionGone, isCsrfRejection } from '../auth/sessionFailure.js';
+import { isSessionGone, isCsrfRejection, isMasterPasswordRefusal } from '../auth/sessionFailure.js';
 
 // Augment Axios's request config with a per-request flag that lets specific
 // requests opt out of the automatic "401 → token refresh → retry" behaviour
@@ -65,14 +65,16 @@ let csrfFetchPromise: Promise<string> | null = null;
  * prevent a replay: a refresh that lands mid-request clears the cache after the
  * header was attached, and the 403 replay is what recovers that — correctly.
  *
- * What it does change is WHERE a failure to obtain a token surfaces. The document
- * store sends one 8 MiB sealed segment per request under its own bounded retry
- * policy. If the CSRF fetch fails inside the interceptor (offline, or the
- * csrf-token endpoint rate-limited), the rejection arrives with no `response`,
+ * What it does change is WHERE a failure to obtain a token surfaces. A document
+ * upload sends one 8 MiB sealed segment per request under its own recovery
+ * policy (`services/documents/uploadRecovery.ts`, which is where this is called).
+ * If the CSRF fetch fails inside the interceptor (offline, or the csrf-token
+ * endpoint rate-limited), the rejection arrives with no `response`,
  * indistinguishable from the transport failing, and it arrives AFTER the part
  * body has been handed to Axios. Awaiting the token first makes that failure a
- * plain, classifiable step of the transfer that the store's own 1s/2s/4s backoff
- * retries, before a byte of the segment is committed to a request.
+ * plain, classifiable step of the transfer, one that never reached the server and
+ * so is waited out rather than counted against the part, before a byte of the
+ * segment is committed to a request.
  */
 export async function ensureCsrfToken(): Promise<string> {
   if (csrfToken) return csrfToken;
@@ -392,6 +394,15 @@ api.interceptors.response.use(
     // Guard: never attempt to refresh the refresh endpoint itself or logout,
     // as that would create infinite recursion (refresh → 401 → refresh → …).
     if (originalRequest.url === '/auth/refresh' || originalRequest.url === '/auth/logout') {
+      return Promise.reject(error);
+    }
+
+    // Guard: a wrong master-password proof. The server sends that exact 401 only
+    // after accepting the session, so a refresh cannot change it, and the replay
+    // would spend a second unit of the account's re-authentication budget on the
+    // same typo. Checked BEFORE the queue below: a refresh already in flight
+    // must not hold it either.
+    if (isMasterPasswordRefusal(error)) {
       return Promise.reject(error);
     }
 

@@ -37,8 +37,15 @@ export interface AuditLogParams {
 // Profile & Settings
 // ---------------------------------------------------------------------------
 
-export function getProfileApi(): Promise<AxiosResponse<ApiResponse<IUserProfile>>> {
-  return api.get('/user/profile');
+/**
+ * `signal` is optional and only the document upload's rewrap passes one, so that
+ * a browser going offline ends that read at once rather than leaving it to the
+ * operating system's own timeout.
+ */
+export function getProfileApi(
+  signal?: AbortSignal,
+): Promise<AxiosResponse<ApiResponse<IUserProfile>>> {
+  return api.get('/user/profile', signal ? { signal } : {});
 }
 
 export function updateSettingsApi(

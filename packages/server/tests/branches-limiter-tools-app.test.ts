@@ -170,7 +170,7 @@ describe('branches: rateLimiter / toolsController / app.ts', () => {
     // limiters sit behind `authenticate` on their routes, but express-rate-limit
     // evaluates the key generator for whatever reaches it. Without the
     // `resolveClientKey` fallback every anonymous request keys on the bare
-    // prefix (`pwverify:`), so ONE client could drain the 5-request budget for
+    // prefix (`pwverify:`), so ONE client could drain the per-key budget for
     // every other anonymous caller. Two distinct source IPs must therefore
     // produce two distinct counters.
     const cases: { name: string; limiter: RequestHandler; prefix: string }[] = [
@@ -214,10 +214,10 @@ describe('branches: rateLimiter / toolsController / app.ts', () => {
       });
     }
 
-    it('passwordVerifyLimiter still 429s the anonymous IP at its 5-request budget', async () => {
+    it('passwordVerifyLimiter still 429s the anonymous IP at its 10-request budget', async () => {
       const limiterApp = anonymousLimiterApp(passwordVerifyLimiter as RequestHandler);
 
-      for (let i = 0; i < 5; i++) {
+      for (let i = 0; i < 10; i++) {
         expect(
           (await request(limiterApp).get('/t').set('x-forwarded-for', '203.0.113.13')).status,
         ).toBe(200);

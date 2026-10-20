@@ -34,7 +34,11 @@ import QRCode from 'qrcode';
 import type zxcvbnType from 'zxcvbn';
 import { getZxcvbn } from '../lib/lazyZxcvbn';
 import { cn, getApiErrorMessage } from '../lib/utils';
-import { ACCOUNT_LOCKED_MESSAGE, isAccountLocked } from '../services/auth/sessionFailure';
+import {
+  ACCOUNT_LOCKED_MESSAGE,
+  describeTransientFailure,
+  isAccountLocked,
+} from '../services/auth/sessionFailure';
 import { downloadText } from '../lib/download';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../components/ui/Card';
 import {
@@ -628,13 +632,24 @@ const strengthColors: Record<number, string> = {
 // ---------------------------------------------------------------------------
 
 /**
+ * The toast for a refused request that re-checked the master password. A rate
+ * limit, a lost connection or an unavailable server says so (with the wait the
+ * server named), because blaming the password made a person who typed it right
+ * try again and spend more of the very budget they were waiting on. Anything
+ * else keeps the form's own wording.
+ */
+function reauthFailureTitle(error: unknown, otherwise: string): string {
+  return describeTransientFailure(error) ?? otherwise;
+}
+
+/**
  * The toast for a failed two-factor code check in Settings (turning 2FA off,
  * regenerating backup codes). A locked second factor gets its own sentence and
- * remedy; anything else keeps the form's own wording, which deliberately does not
- * say whether the password or the code was the wrong one.
+ * remedy; anything else is {@link reauthFailureTitle}, whose fallback wording
+ * deliberately does not say whether the password or the code was the wrong one.
  */
 function secondFactorFailureTitle(error: unknown, otherwise: string): string {
-  return isAccountLocked(error) ? ACCOUNT_LOCKED_MESSAGE : otherwise;
+  return isAccountLocked(error) ? ACCOUNT_LOCKED_MESSAGE : reauthFailureTitle(error, otherwise);
 }
 
 const THEME_OPTIONS = [
@@ -1160,8 +1175,11 @@ export default function SettingsPage() {
       setShow2faPasswordPrompt(false);
       setTwoFaPassword('');
       setShow2faSetup(true);
-    } catch {
-      toast({ title: 'Incorrect password or failed to start 2FA setup', type: 'error' });
+    } catch (err) {
+      toast({
+        title: reauthFailureTitle(err, 'Incorrect password or failed to start 2FA setup'),
+        type: 'error',
+      });
     } finally {
       setSetting2fa(false);
     }
@@ -1271,8 +1289,11 @@ export default function SettingsPage() {
       );
       setExportPassword('');
       toast({ title: 'Vault exported', type: 'success' });
-    } catch {
-      toast({ title: 'Failed to export vault. Check your password.', type: 'error' });
+    } catch (err) {
+      toast({
+        title: reauthFailureTitle(err, 'Failed to export vault. Check your password.'),
+        type: 'error',
+      });
     } finally {
       setExporting(false);
     }

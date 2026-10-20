@@ -70,6 +70,7 @@ import {
   ERROR_CODES,
   maskEmail,
   backupPayloadSchema,
+  MASTER_PASSWORD_PROOF_REFUSED_MESSAGE,
 } from '@hvault/shared';
 import type {
   BackupSetupInput,
@@ -1030,7 +1031,7 @@ export const changeBackupPassword = catchAsync(
         failCtx.ip,
         failCtx.userAgent,
       );
-      throw httpErrors.unauthorized('Current password is incorrect');
+      throw httpErrors.unauthorized(MASTER_PASSWORD_PROOF_REFUSED_MESSAGE);
     }
 
     // The same guard pair, for the same reason, on the same wrapper — see

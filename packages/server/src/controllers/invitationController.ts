@@ -1,7 +1,7 @@
 import type { Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
 import { catchAsync, httpErrors } from '@hiprax/errors';
-import { maskEmail } from '@hvault/shared';
+import { MASTER_PASSWORD_PROOF_REFUSED_MESSAGE, maskEmail } from '@hvault/shared';
 import type { CreateInvitationInput, CreatedInvitation } from '@hvault/shared';
 import { config } from '../config/index.js';
 import { User } from '../models/User.js';
@@ -55,7 +55,7 @@ export const createInvitation = catchAsync(async (req: Request, res: Response): 
       failCtx.ip,
       failCtx.userAgent,
     );
-    throw httpErrors.unauthorized('Password verification failed');
+    throw httpErrors.unauthorized(MASTER_PASSWORD_PROOF_REFUSED_MESSAGE);
   }
 
   const minted = await mintInvitation(email, userId);

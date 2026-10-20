@@ -246,6 +246,14 @@ const documentTransformSchema = z.object({
 export const documentMetaSchema = z
   .object({
     name: z.string().min(1).max(MAX_DOCUMENT_NAME_LENGTH),
+    // The name of the file as it was picked, recorded ONCE at upload and never
+    // rewritten: the rename path carries it forward and has no way to change it.
+    // Optional, because a document uploaded before this field existed never
+    // recorded one, and filling it in from the current name would assert a
+    // provenance nobody observed. Not trimmed: it is a record of what the file
+    // was called, spaces included, and the same bound as `name` because it is the
+    // same kind of value.
+    originalName: z.string().min(1).max(MAX_DOCUMENT_NAME_LENGTH).optional(),
     mime: z.string().max(MAX_DOCUMENT_MIME_LENGTH),
     // No charset rule and no `.toLowerCase()`: deriving the lookup key is the
     // caller's job (the lowercased segment after the last dot), and a regex here

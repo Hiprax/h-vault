@@ -8,9 +8,10 @@ import { TotpAttachDialog, type AttachChoice } from './TotpAttachDialog';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../ui/Dialog';
 import { useToast } from '../ui/Toast';
 import { useVaultStore } from '../../stores/vaultStore';
-import { useDocumentsStore } from '../../stores/documentsStore';
+import { UploadCancelledError, useDocumentsStore } from '../../stores/documentsStore';
 import { readDocumentsConfigFresh } from '../../services/api/configApi';
 import { getApiErrorMessage } from '../../lib/utils';
+import { describeTransientFailure } from '../../services/auth/sessionFailure';
 import { isMigrationUri, parseMigrationUri } from '../../services/totpImport/migrationUri';
 import { MigrationParseError } from '../../services/totpImport/migrationReader';
 import {
@@ -71,6 +72,12 @@ export function TotpImportFlow({ onStartOver }: TotpImportFlowProps) {
   const [attaching, setAttaching] = useState<ScannedEntry | null>(null);
   const [attachedTo, setAttachedTo] = useState<ReadonlyMap<string, string>>(new Map());
   const [savingDocument, setSavingDocument] = useState(false);
+  // Set once the upload is registered and showing on the Documents page, so the
+  // button can say where the codes are going while it stays disabled.
+  const [documentRegistered, setDocumentRegistered] = useState(false);
+  // Taken synchronously: two clicks inside one frame both see `savingDocument`
+  // as false, and the file holds live secrets, so it must never be stored twice.
+  const savingRef = useRef(false);
   const { toast } = useToast();
   const navigate = useNavigate();
   const createItem = useVaultStore((state) => state.createItem);
@@ -262,6 +269,8 @@ export function TotpImportFlow({ onStartOver }: TotpImportFlowProps) {
   );
 
   const handleSaveToDocuments = useCallback(async () => {
+    if (savingRef.current) return;
+    savingRef.current = true;
     setSavingDocument(true);
     try {
       // The UNCACHED read, and `null` fails closed: the memoised one collapses
@@ -278,18 +287,42 @@ export function TotpImportFlow({ onStartOver }: TotpImportFlowProps) {
       await useDocumentsStore.getState().startUpload({
         source: new Blob([text], { type: 'text/plain' }),
         name,
+        // Nobody renames this file before it is stored, so the name it is given
+        // is also the name it was added under.
+        originalName: name,
         mime: 'text/plain',
         tags: ['totp', 'import'],
         note: 'Imported from Google Authenticator. Contains live TOTP secrets.'.slice(
           0,
           MAX_DOCUMENT_NOTE_LENGTH,
         ),
+        // The upload can take a while on a slow or dropping connection, and it
+        // rides that out on its own; say where to follow it rather than leave a
+        // button reading "Saving" with no explanation.
+        onRegistered: () => {
+          setDocumentRegistered(true);
+          toast({
+            title:
+              'Saving the codes to Documents. You can follow the upload on the Documents page.',
+            type: 'info',
+          });
+        },
       });
       toast({ title: `Saved as "${name}"`, type: 'success' });
     } catch (error) {
-      toast({ title: getApiErrorMessage(error, 'Could not save those codes'), type: 'error' });
+      // A lock or a cancel ends the upload on purpose, and is not a failure.
+      if (!(error instanceof UploadCancelledError)) {
+        toast({
+          title:
+            describeTransientFailure(error) ??
+            getApiErrorMessage(error, 'Could not save those codes'),
+          type: 'error',
+        });
+      }
     } finally {
+      savingRef.current = false;
       setSavingDocument(false);
+      setDocumentRegistered(false);
     }
   }, [buildExportText, toast]);
 
@@ -320,7 +353,11 @@ export function TotpImportFlow({ onStartOver }: TotpImportFlowProps) {
                 className="inline-flex items-center gap-2 rounded-md border border-[hsl(var(--input))] px-3 py-2 text-sm text-[hsl(var(--foreground))] hover:bg-[hsl(var(--accent))] disabled:opacity-50"
               >
                 <Download className="h-4 w-4" />
-                {savingDocument ? 'Saving…' : 'Save all to Documents'}
+                {documentRegistered
+                  ? 'Saving to Documents'
+                  : savingDocument
+                    ? 'Saving…'
+                    : 'Save all to Documents'}
               </button>
             )}
             <button

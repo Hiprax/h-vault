@@ -7,12 +7,14 @@ import { config, isProduction } from '../config/index.js';
 import {
   DOCUMENT_PLAINTEXT_CHUNK_BYTES,
   MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER,
+  MAX_DOCUMENTS_PER_ROTATION,
   MAX_FOLDERS_PER_USER,
   PAGINATION_DEFAULTS,
   MAX_ITEMS_PER_USER,
   HIBP_BATCH_MAX_PREFIXES,
   LOGIN_RATE_LIMIT_WINDOW_MINUTES,
   LOGIN_RATE_LIMIT_MAX_PER_IP,
+  PASSWORD_VERIFY_RATE_LIMIT_MAX,
 } from '@hvault/shared';
 import { MAX_IP_ADDRESS_LENGTH } from '../utils/controllerHelpers.js';
 
@@ -257,12 +259,23 @@ export const tokenVerifyLimiter =
   );
 
 /**
- * Password verification rate limiter for authenticated endpoints that accept
- * `authHash` or `password` in the request body (change-password, 2fa/setup,
- * 2fa/disable, regenerate-backup-codes, backup/setup, backup/change-password,
- * backup/restore).
+ * The re-authentication budget: ONE window shared by every route that re-checks
+ * the master password (change-password, 2FA setup/disable/regenerate, delete
+ * account, export, rotation, deleting unreadable entries, backup setup /
+ * change-password / recipients, security email preferences, invitations) and by
+ * the backup restore, which carries no proof but needs a user-keyed limiter in
+ * front of its 30 MB parser (`largeBodyAdmission.ts`).
  *
- * Allows **5 requests per 15-minute window** per authenticated user.
+ * Allows {@link PASSWORD_VERIFY_RATE_LIMIT_MAX} (10) requests per 15-minute window
+ * per authenticated user, successful ones included. Successes still count on
+ * purpose: on the two 30 MB routes this count is what bounds how often one
+ * account can make the server buffer such a body. Ten is 960 proofs a day for
+ * someone holding a stolen session, under the 1,440 that `unlockLimiter` already
+ * allows on `verify-unlock`; the proof is a PBKDF2-derived hash, so each guess
+ * also costs the guesser a full key derivation. It was 5 until 0.19.0, which
+ * stopped an ordinary person doing a few protected actions in a row; the client
+ * also stopped replaying a wrong proof (see `MASTER_PASSWORD_PROOF_REFUSED_MESSAGE`),
+ * which had made every typo cost two.
  *
  * Keyed by userId (extracted from JWT) rather than IP so that an attacker
  * cannot rotate IPs to bypass the limit.
@@ -274,7 +287,7 @@ export const passwordVerifyLimiter =
     'passwordVerifyLimiter',
     rateLimit({
       windowMs: FIFTEEN_MINUTES_MS,
-      limit: 5,
+      limit: PASSWORD_VERIFY_RATE_LIMIT_MAX,
       standardHeaders: true,
       legacyHeaders: false,
       validate: { singleCount: false },
@@ -739,6 +752,15 @@ export const DOCUMENT_RATE_LIMIT_WINDOW_MS = FIFTEEN_MINUTES_MS;
  * matter of course — a dropped socket mid-transfer is ordinary — and a budget
  * that ignored retries would refuse a legitimate transfer PARTWAY THROUGH, which
  * is the exact failure `BREACH_BATCH_RATE_LIMIT_MAX` exists to prevent.
+ *
+ * The browser's recovery engine (`services/documents/uploadRecovery.ts`) holds to
+ * it for the failures it can attribute: a part the server cut off part-way gets
+ * exactly these four attempts, and attempts that never reached the server spend
+ * nothing here. It is not a hard ceiling on what one part costs: gateway errors
+ * are retried for about a minute (up to seven attempts, and a part-slot 503 is
+ * answered after this limiter has counted it), and an attempt the client abandons
+ * mid-body when the browser goes offline may still have been counted. Past the
+ * budget the answer is a 429, which stops the transfer resumably and never loops.
  */
 export const DOCUMENT_PART_RETRY_ALLOWANCE = 4;
 
@@ -881,6 +903,22 @@ export const VAULT_ITEM_WRITE_RATE_LIMIT_MAX = MAX_ITEMS_PER_USER * VAULT_WRITE_
 export const FOLDER_WRITE_RATE_LIMIT_MAX = MAX_FOLDERS_PER_USER * VAULT_WRITE_PASSES_PER_WINDOW;
 
 /**
+ * Document mutations one user may make per window: renaming, retagging or
+ * re-noting (a re-sealed metadata blob), favoriting, moving, trashing, restoring
+ * and permanently deleting ONE document.
+ *
+ * The client's bulk document actions send one request per selected document, as
+ * the vault's do, so the budget is derived the same way: two passes over every
+ * row an account can hold. The base is `MAX_DOCUMENTS_PER_ROTATION`
+ * (`MAX_DOCUMENTS_PER_USER + MAX_CONCURRENT_DOCUMENT_UPLOADS_PER_USER`), the cap
+ * the server already uses for "every document this account can have": a document
+ * count is checked when a transfer OPENS, so up to two transfers past the limit
+ * can still commit, and the constant keeps one more row of slack than that.
+ */
+export const DOCUMENT_WRITE_RATE_LIMIT_MAX =
+  MAX_DOCUMENTS_PER_ROTATION * VAULT_WRITE_PASSES_PER_WINDOW;
+
+/**
  * Item create, update, delete, restore and purge. Each writes an `AuditLog` row
  * that is kept for 365 days, so an unlimited route let a valid session flood the
  * audit log.
@@ -910,6 +948,24 @@ export const folderWriteLimiter =
     FOLDER_WRITE_RATE_LIMIT_MAX,
     VAULT_WRITE_RATE_LIMIT_WINDOW_MS,
     'Too many folder changes, please try again later',
+  );
+
+/**
+ * Per-row document writes (`PUT`/`DELETE /documents/:id`, `POST /:id/restore`,
+ * `DELETE /:id/permanent`), for the reasons `vaultItemWriteLimiter` gives: they
+ * were on `generalAuthLimiter`, whose ONE `general:` bucket of 60 a minute is
+ * shared with logout, so a bulk action over more than a minute's worth of
+ * documents would have been refused part-way and then refused the sign-out after
+ * it. Keyed by user and separate from the vault and folder budgets.
+ */
+export const documentWriteLimiter =
+  noopIfNonProduction() ??
+  createUserKeyedLimiter(
+    'documentWriteLimiter',
+    'documentWrite:',
+    DOCUMENT_WRITE_RATE_LIMIT_MAX,
+    VAULT_WRITE_RATE_LIMIT_WINDOW_MS,
+    'Too many document changes, please try again later',
   );
 
 // ---------------------------------------------------------------------------

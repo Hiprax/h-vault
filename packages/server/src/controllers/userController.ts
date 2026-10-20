@@ -64,6 +64,7 @@ import {
   SHOW_RELEASE_NOTES_DEFAULT,
   SECURITY_NOTIFICATION_PREFERENCE_EVENTS,
   CRITICAL_SECURITY_NOTIFICATION_EVENTS,
+  MASTER_PASSWORD_PROOF_REFUSED_MESSAGE,
 } from '@hvault/shared';
 import type {
   SecurityNotificationPreferenceEvent,
@@ -449,8 +450,12 @@ export const updateNotificationPreferences = catchAsync(
       .select('settings.notifications')
       .lean();
     if (!updated) {
-      // The password changed between the proof and the write.
-      throw httpErrors.unauthorized('Current password is incorrect');
+      // The password changed between the proof and the write. NOT the wrong-proof
+      // sentence: the proof was right when it was checked, and the client treats
+      // that sentence as a typo that no refresh can fix.
+      throw httpErrors.unauthorized(
+        'Your master password changed while your security emails were being saved. Sign in again and retry.',
+      );
     }
 
     const ctx = getRequestContext(req);
@@ -555,7 +560,7 @@ export const changePassword = catchAsync(async (req: Request, res: Response): Pr
       failCtx.ip,
       failCtx.userAgent,
     );
-    throw httpErrors.unauthorized('Current password is incorrect');
+    throw httpErrors.unauthorized(MASTER_PASSWORD_PROOF_REFUSED_MESSAGE);
   }
 
   // Minted BEFORE the guards below, even though a refused request throws both
@@ -922,7 +927,7 @@ export const setup2fa = catchAsync(async (req: Request, res: Response): Promise<
       failCtx.ip,
       failCtx.userAgent,
     );
-    throw httpErrors.unauthorized('Current password is incorrect');
+    throw httpErrors.unauthorized(MASTER_PASSWORD_PROOF_REFUSED_MESSAGE);
   }
 
   if (user.twoFactorEnabled) {
@@ -1103,7 +1108,7 @@ export const disable2fa = catchAsync(async (req: Request, res: Response): Promis
       failCtx.ip,
       failCtx.userAgent,
     );
-    throw httpErrors.unauthorized('Current password is incorrect');
+    throw httpErrors.unauthorized(MASTER_PASSWORD_PROOF_REFUSED_MESSAGE);
   }
 
   if (!user.twoFactorEnabled || !user.twoFactorSecret) {
@@ -1220,7 +1225,7 @@ export const regenerateBackupCodes = catchAsync(
         failCtx.ip,
         failCtx.userAgent,
       );
-      throw httpErrors.unauthorized('Current password is incorrect');
+      throw httpErrors.unauthorized(MASTER_PASSWORD_PROOF_REFUSED_MESSAGE);
     }
 
     // Require 2FA code when 2FA is enabled, checked by the ONE verifier: a wrong
@@ -1536,7 +1541,7 @@ export const deleteAccount = catchAsync(async (req: Request, res: Response): Pro
       failCtx.ip,
       failCtx.userAgent,
     );
-    throw httpErrors.unauthorized('Current password is incorrect');
+    throw httpErrors.unauthorized(MASTER_PASSWORD_PROOF_REFUSED_MESSAGE);
   }
 
   // Require 2FA code when 2FA is enabled, checked by the ONE verifier: a wrong

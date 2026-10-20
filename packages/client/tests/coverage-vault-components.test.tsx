@@ -619,6 +619,25 @@ describe('VaultList — bulk tag', () => {
     expect(updateItemMeta).toHaveBeenCalledWith('b', { tags: ['existing'] });
   });
 
+  it('applies the tag on Enter, as Apply does, and sends nothing for Enter on blank text', async () => {
+    selectAllAndOpenTagMenu();
+    const input = screen.getByPlaceholderText('Enter tag name');
+
+    fireEvent.change(input, { target: { value: '   ' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(updateItemMeta).not.toHaveBeenCalled();
+
+    fireEvent.change(input, { target: { value: 'urgent' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+
+    await waitFor(() => {
+      expect(updateItemMeta).toHaveBeenCalledTimes(2);
+    });
+    expect(updateItemMeta).toHaveBeenCalledWith('a', { tags: ['existing', 'urgent'] });
+    // The popover closed with the press, as it does for Apply.
+    expect(screen.queryByPlaceholderText('Enter tag name')).not.toBeInTheDocument();
+  });
+
   it('does not submit a whitespace-only tag', () => {
     selectAllAndOpenTagMenu();
 

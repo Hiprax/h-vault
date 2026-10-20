@@ -30,6 +30,7 @@ vi.mock('../src/utils/email.js', async (importOriginal) => {
 import request from 'supertest';
 import bcrypt from 'bcryptjs';
 import mongoose from 'mongoose';
+import { MASTER_PASSWORD_PROOF_REFUSED_MESSAGE } from '@hvault/shared';
 import app from '../src/app.js';
 import { config } from '../src/config/index.js';
 import { User } from '../src/models/User.js';
@@ -443,6 +444,9 @@ describe('POST /auth/invitations', () => {
   it('refuses a wrong master-password proof with 401, audits the failure and mints nothing', async () => {
     const res = await mint(inviter, 'friend@example.com', 'not-the-password');
     expect(res.status).toBe(401);
+    // The one refusal sentence every proof route shares, which the client matches
+    // exactly so a typo is reported without being refreshed and sent twice.
+    expect((res.body as { message: string }).message).toBe(MASTER_PASSWORD_PROOF_REFUSED_MESSAGE);
     expect(await invitations().countDocuments({})).toBe(0);
     const failed = await AuditLog.findOne({
       userId: inviter.id,

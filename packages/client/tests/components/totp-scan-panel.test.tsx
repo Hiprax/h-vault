@@ -100,9 +100,19 @@ describe('the ways in', () => {
     expect(screen.getByText(/paste an export link instead/i)).toBeInTheDocument();
   });
 
-  it('tells the user where the codes are on their phone', () => {
+  it("tells the user where the codes are, in Google Authenticator's own words on each platform", () => {
+    // Google's help names the menu differently per platform: Android says
+    // "Transfer codes" then "Export codes", the iPhone app "Transfer accounts"
+    // then "Export accounts". The whole sentence is pinned, because each of the
+    // old phrases survives as a substring of the new one and a substring match
+    // would stay green if the Android wording were reverted.
     renderPanel();
-    expect(screen.getByText(/Transfer accounts/)).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        'On Android: Google Authenticator, then the menu, then Transfer codes, then Export codes. On iPhone: Transfer accounts, then Export accounts.',
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/On your phone/)).not.toBeInTheDocument();
     expect(screen.getByText(/do this somewhere private/)).toBeInTheDocument();
   });
 

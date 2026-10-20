@@ -252,6 +252,12 @@ export interface TransformReviewPanelProps {
   readonly onConfirm: () => void;
   readonly onUploadOriginal: () => void;
   readonly onCancel: () => void;
+  /**
+   * An upload chosen here is being started, so no button may start another: the
+   * panel stays on screen until the transfer is registered, and a second press
+   * in that window would upload the file twice.
+   */
+  readonly busy?: boolean | undefined;
 }
 
 /** The confirmation: what changed, in numbers the application computed itself. */
@@ -261,6 +267,7 @@ export function TransformReviewPanel({
   onConfirm,
   onUploadOriginal,
   onCancel,
+  busy = false,
 }: TransformReviewPanelProps) {
   const delta = review.bytesAfter - review.bytesBefore;
   const deltaText =
@@ -318,7 +325,8 @@ export function TransformReviewPanel({
           <button
             type="button"
             onClick={onConfirm}
-            className="inline-flex items-center gap-2 rounded-md bg-[hsl(var(--primary))] px-4 py-2 text-sm font-medium text-[hsl(var(--primary-foreground))] hover:opacity-90"
+            disabled={busy}
+            className="inline-flex items-center gap-2 rounded-md bg-[hsl(var(--primary))] px-4 py-2 text-sm font-medium text-[hsl(var(--primary-foreground))] hover:opacity-90 disabled:opacity-50"
           >
             Upload the formatted file
           </button>
@@ -326,14 +334,16 @@ export function TransformReviewPanel({
         <button
           type="button"
           onClick={onUploadOriginal}
-          className="rounded-md border border-[hsl(var(--border))] px-3 py-2 text-sm text-[hsl(var(--foreground))] hover:bg-[hsl(var(--accent))]"
+          disabled={busy}
+          className="rounded-md border border-[hsl(var(--border))] px-3 py-2 text-sm text-[hsl(var(--foreground))] hover:bg-[hsl(var(--accent))] disabled:opacity-50"
         >
           Upload the original unchanged
         </button>
         <button
           type="button"
           onClick={onCancel}
-          className="rounded px-2 py-1 text-sm text-[hsl(var(--muted-foreground))] hover:text-[hsl(var(--foreground))]"
+          disabled={busy}
+          className="rounded px-2 py-1 text-sm text-[hsl(var(--muted-foreground))] hover:text-[hsl(var(--foreground))] disabled:opacity-50"
         >
           Cancel
         </button>
@@ -346,6 +356,8 @@ export interface TransformFailurePanelProps {
   readonly failure: TransformFailure;
   readonly onUploadOriginal: () => void;
   readonly onCancel: () => void;
+  /** As on {@link TransformReviewPanelProps.busy}. */
+  readonly busy?: boolean | undefined;
 }
 
 /**
@@ -362,6 +374,7 @@ export function TransformFailurePanel({
   failure,
   onUploadOriginal,
   onCancel,
+  busy = false,
 }: TransformFailurePanelProps) {
   const position =
     failure.line === null
@@ -400,11 +413,17 @@ export function TransformFailurePanel({
         <button
           type="button"
           onClick={onUploadOriginal}
-          className="rounded-md border border-[hsl(var(--border))] bg-[hsl(var(--background))] px-3 py-2 text-sm text-[hsl(var(--foreground))] hover:bg-[hsl(var(--accent))]"
+          disabled={busy}
+          className="rounded-md border border-[hsl(var(--border))] bg-[hsl(var(--background))] px-3 py-2 text-sm text-[hsl(var(--foreground))] hover:bg-[hsl(var(--accent))] disabled:opacity-50"
         >
           Upload the original unchanged
         </button>
-        <button type="button" onClick={onCancel} className="rounded px-2 py-1 text-sm underline">
+        <button
+          type="button"
+          onClick={onCancel}
+          disabled={busy}
+          className="rounded px-2 py-1 text-sm underline disabled:opacity-50"
+        >
           Cancel
         </button>
       </div>

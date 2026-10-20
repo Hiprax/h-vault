@@ -56,6 +56,14 @@ describe('documentMatchesQuery', () => {
     expect(documentMatchesQuery(renamed, 'taxes')).toBe(true);
   });
 
+  it('matches the name the file had when it was added, after it was renamed', () => {
+    // Upper case in the stored value and lower case in the query (the caller
+    // lowercases it), so the original name is compared the way every field is.
+    const renamed = doc({ name: 'Taxes.pdf', originalName: 'SCAN_0042.PDF' });
+    expect(documentMatchesQuery(renamed, 'scan_0042')).toBe(true);
+    expect(documentMatchesQuery(renamed, 'scan_0043')).toBe(false);
+  });
+
   it('matches everything on an empty query and nothing on an unrelated one', () => {
     expect(documentMatchesQuery(doc(), '')).toBe(true);
     expect(documentMatchesQuery(doc(), 'passport')).toBe(false);

@@ -463,15 +463,21 @@ const waitMs = (ms: number): Promise<void> =>
  * is sent and again after every wait; once it has moved, the rest are rejected
  * with {@link BULK_ABANDONED_MESSAGE} without being sent. A locked vault must not
  * go on writing, and after a sign-out each would be a 401 into the refresh path.
+ *
+ * `currentGeneration` names WHICH store's generation that is: this one's by
+ * default, the documents store's for a document bulk action. They are not
+ * interchangeable, because a sign-out clears the documents store before its
+ * request and this one only after it.
  */
 export async function sendPaced<R>(
   requests: readonly (() => Promise<R>)[],
   wait: (ms: number) => Promise<void> = waitMs,
+  currentGeneration: () => number = () => mutationGeneration,
 ): Promise<PromiseSettledResult<R>[]> {
-  const generation = mutationGeneration;
+  const generation = currentGeneration();
   return mapWithConcurrency(requests, BULK_REQUEST_CONCURRENCY, async (send) => {
     for (let retries = 0; ; retries++) {
-      if (generation !== mutationGeneration) throw new Error(BULK_ABANDONED_MESSAGE);
+      if (generation !== currentGeneration()) throw new Error(BULK_ABANDONED_MESSAGE);
       try {
         return await send();
       } catch (error: unknown) {

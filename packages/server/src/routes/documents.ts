@@ -7,6 +7,7 @@ import {
   documentPartLimiter,
   documentReadLimiter,
   documentUploadLimiter,
+  documentWriteLimiter,
   generalAuthLimiter,
   heavyOpLimiter,
 } from '../middleware/rateLimiter.js';
@@ -173,13 +174,15 @@ router.get('/:id', generalAuthLimiter, validateObjectId(), getDocument);
 // `updateDocumentSchema` strips them on the wire and
 // `ALLOWED_DOCUMENT_UPDATE_FIELDS` drops them again in the handler.
 //
-// `generalAuthLimiter`, because a rename or a favorite toggle is an ordinary
-// authenticated write, and it is deliberately NOT rotation-fenced: the sealed
+// `documentWriteLimiter`, like the three trash routes below: the documents page
+// sends one of these per selected document for a bulk tag or move, so it needs a
+// per-user budget sized for a whole-collection pass, NOT the `general:` bucket of
+// 60 a minute that logout shares. Deliberately NOT rotation-fenced: the sealed
 // blob is under a DEK-derived subkey, which a vault-key rotation does not touch.
 // The reasoning is written out in full above the handler.
 router.put(
   '/:id',
-  generalAuthLimiter,
+  documentWriteLimiter,
   validateObjectId(),
   validate(updateDocumentSchema, 'body'),
   updateDocument,
@@ -187,15 +190,16 @@ router.put(
 
 // The trash lifecycle: in, out, and gone.
 //
-// All three carry `generalAuthLimiter` rather than `heavyOpLimiter`, including
-// the permanent delete. That limiter allows a user 10 per 15 minutes and is
-// shared with export, backup download and every bulk vault operation, so on a
-// per-row route it would 429 a user who purged eleven documents and then lock
-// them out of emptying their vault trash. It stays on `/trash/empty` above,
-// which is the one genuinely unbounded operation here.
-router.delete('/:id', generalAuthLimiter, validateObjectId(), deleteDocument);
-router.post('/:id/restore', generalAuthLimiter, validateObjectId(), restoreDocument);
-router.delete('/:id/permanent', generalAuthLimiter, validateObjectId(), purgeDocument);
+// All three carry `documentWriteLimiter`, including the permanent delete: the
+// documents page's bulk Delete, Restore and Delete forever send one of these per
+// selected document. Not `heavyOpLimiter` (10 per 15 minutes, shared with export,
+// backup download and every bulk vault operation), which would 429 a user who
+// purged eleven documents and then lock them out of emptying their vault trash;
+// it stays on `/trash/empty` above, the one genuinely unbounded operation here.
+// And no longer `generalAuthLimiter`, whose one 60-a-minute bucket logout shares.
+router.delete('/:id', documentWriteLimiter, validateObjectId(), deleteDocument);
+router.post('/:id/restore', documentWriteLimiter, validateObjectId(), restoreDocument);
+router.delete('/:id/permanent', documentWriteLimiter, validateObjectId(), purgeDocument);
 
 // One sealed segment.
 //

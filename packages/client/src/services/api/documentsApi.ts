@@ -179,10 +179,15 @@ export function initDocumentUploadApi(
   return api.post('/documents/uploads', data);
 }
 
+/**
+ * `signal` lets a resume's ledger read be ended the moment the browser goes
+ * offline, like every other step of a transfer.
+ */
 export function getDocumentUploadApi(
   id: string,
+  signal?: AbortSignal,
 ): Promise<AxiosResponse<ApiResponse<DocumentUploadResponse>>> {
-  return api.get(`/documents/uploads/${id}`);
+  return api.get(`/documents/uploads/${id}`, signal ? { signal } : {});
 }
 
 /**
@@ -220,8 +225,9 @@ export function uploadDocumentPartApi(
 export function completeDocumentUploadApi(
   id: string,
   data: CompleteDocumentUploadInput,
+  signal?: AbortSignal,
 ): Promise<AxiosResponse<ApiResponse<DocumentResponse>>> {
-  return api.post(`/documents/uploads/${id}/complete`, data);
+  return api.post(`/documents/uploads/${id}/complete`, data, signal ? { signal } : {});
 }
 
 /**
@@ -247,8 +253,11 @@ export function abortDocumentUploadApi(
 // One document
 // ---------------------------------------------------------------------------
 
-export function getDocumentApi(id: string): Promise<AxiosResponse<ApiResponse<DocumentResponse>>> {
-  return api.get(`/documents/${id}`);
+export function getDocumentApi(
+  id: string,
+  signal?: AbortSignal,
+): Promise<AxiosResponse<ApiResponse<DocumentResponse>>> {
+  return api.get(`/documents/${id}`, signal ? { signal } : {});
 }
 
 /**

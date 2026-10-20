@@ -315,9 +315,17 @@ describe('authApi wire contract', () => {
 // ===========================================================================
 
 describe('userApi wire contract', () => {
-  it('GETs the profile', async () => {
+  it('GETs the profile, with no options unless a caller hands it a signal', async () => {
     await userApi.getProfileApi();
-    expectCall(mockGet, 'GET', '/user/profile');
+    expectCall(mockGet, 'GET', '/user/profile', {});
+
+    // A document upload re-reads the profile after a vault-key rotation, and the
+    // read must end when the upload's attempt does (the browser went offline).
+    mockGet.mockClear();
+    const controller = new AbortController();
+    await userApi.getProfileApi(controller.signal);
+    expectCall(mockGet, 'GET', '/user/profile', { signal: controller.signal });
+    expect((mockGet.mock.calls[0] as unknown[])[1]).toHaveProperty('signal', controller.signal);
   });
 
   it('PUTs settings and change-password to their distinct routes', async () => {

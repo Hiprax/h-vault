@@ -69,6 +69,12 @@ interface DocumentBulkDownloadProps {
    * they have everything needs to know that a number was subtracted.
    */
   invalidCount: number;
+  /**
+   * `documents` is the rows the reader SELECTED rather than the whole list, so
+   * the panel says so and its button reads "Download selected". Ticking three
+   * rows and then being offered everything listed would be the wrong export.
+   */
+  selected?: boolean;
 }
 
 /** Where the panel is. */
@@ -128,7 +134,11 @@ function summarize(result: DocumentDownloadAllResult): string {
   return `${STOP_LEAD[result.stopped]}${sent}${refused}${missed}${detail}`;
 }
 
-export function DocumentBulkDownload({ documents, invalidCount }: DocumentBulkDownloadProps) {
+export function DocumentBulkDownload({
+  documents,
+  invalidCount,
+  selected = false,
+}: DocumentBulkDownloadProps) {
   const [confirming, setConfirming] = useState(false);
   const [run, setRun] = useState<RunState>({ kind: 'idle' });
   const controllerRef = useRef<AbortController | null>(null);
@@ -247,9 +257,11 @@ export function DocumentBulkDownload({ documents, invalidCount }: DocumentBulkDo
           </h2>
           <p className="text-xs text-[hsl(var(--muted-foreground))]">
             Documents are deliberately not part of the encrypted backup, so this is how a copy of
-            them leaves the server. Saves the {documents.length} document(s) listed below to this
-            device, one at a time.
-            {invalidCount > 0 &&
+            them leaves the server. Saves the {documents.length}{' '}
+            {selected ? 'selected document(s)' : 'document(s) listed below'} to this device, one at
+            a time.
+            {!selected &&
+              invalidCount > 0 &&
               ` ${String(invalidCount)} row(s) in this view could not be read at all and are not included.`}
           </p>
         </div>
@@ -294,7 +306,7 @@ export function DocumentBulkDownload({ documents, invalidCount }: DocumentBulkDo
             className="inline-flex shrink-0 items-center gap-2 rounded-md bg-[hsl(var(--primary))] px-3 py-2 text-sm font-medium text-[hsl(var(--primary-foreground))] transition-opacity hover:opacity-90"
           >
             <Download className="h-4 w-4" />
-            Download all
+            {selected ? 'Download selected' : 'Download all'}
           </button>
         )}
       </div>
