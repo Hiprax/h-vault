@@ -2,6 +2,79 @@ import type { ReleaseNote } from '@hvault/shared';
 
 export const RELEASE_NOTES: readonly ReleaseNote[] = [
   {
+    version: '0.19.0',
+    date: '2026-10-20',
+    title: 'Work on many documents at once, better document tags and sturdier uploads',
+    summary:
+      'You can now select several documents and delete, move, tag or restore them together, document tags work like the tags on your vault items, uploads pause and carry on by themselves when the connection drops, and confirming your master password a few times in a row no longer locks you out.',
+    highlights: [
+      {
+        icon: 'folder',
+        title: 'Select several documents and act on them at once',
+        body: 'Tick the documents you want and delete, move or tag them together, or restore them or delete them for good from the trash. Anything that could not be changed stays selected, with the reason, so trying again is one click. Download selected saves just the ones you ticked.',
+      },
+      {
+        icon: 'note',
+        title: 'Name, tags and a note before you upload',
+        body: 'Give a file its name, tags and a note before it is sent. Tags now work exactly like on your vault items: add each one with Enter, remove it with its own button, and a tag you typed but did not add is saved too. The name the file had when you added it is kept on the document.',
+      },
+      {
+        icon: 'upload',
+        title: 'Uploads that wait out a lost connection',
+        body: 'An upload that goes offline, or cannot reach the server, pauses and carries on by itself when the connection returns, as long as the tab stays open and your vault unlocked. The upload says why it is waiting, and Retry now tries again at once.',
+      },
+      {
+        icon: 'lock',
+        title: 'Fewer interruptions when confirming your password',
+        body: 'You can now confirm your master password ten times in fifteen minutes instead of five, and a mistyped password counts once instead of twice. Setting up or turning off two-factor sign-in, new backup codes and the encrypted export now say how long to wait instead of asking you to check your password.',
+      },
+    ],
+    changes: [
+      {
+        kind: 'changed',
+        text: 'A document keeps the file type it was added with: renaming it changes only the part of the name before the extension.',
+      },
+      {
+        kind: 'changed',
+        text: 'A comma is now part of a document tag rather than a separator between tags, as on your vault items.',
+      },
+      {
+        kind: 'changed',
+        text: 'A tag you typed in the vault item editor but did not add is now saved when you press Save, instead of being dropped.',
+      },
+      {
+        kind: 'improved',
+        text: 'Upload problems are explained in plain words, an upload no longer starts over from zero when it is retried, and Retry while still offline no longer throws the upload away.',
+      },
+      {
+        kind: 'improved',
+        text: 'Pressing Enter in the Tag box of the vault list applies the tag, and the selection boxes in both lists show where the keyboard is.',
+      },
+      {
+        kind: 'fixed',
+        text: 'The Import from Authenticator guide now names the menu the way Google Authenticator shows it: Transfer codes and Export codes on Android, Transfer accounts and Export accounts on iPhone.',
+      },
+      {
+        kind: 'fixed',
+        text: 'Typing a tag with an input method, for example in Japanese or Chinese, no longer adds it before it is finished.',
+      },
+      {
+        kind: 'fixed',
+        text: 'Saving your authenticator codes to Documents stores them once, even if you press the button twice.',
+      },
+      {
+        kind: 'changed',
+        text: 'Each account may now make up to 10,006 changes to single documents every 15 minutes, a budget of its own, so a large bulk action is never stopped part-way and never blocks signing out.',
+        audience: 'administrators',
+      },
+      {
+        kind: 'changed',
+        text: 'Actions that ask for the master password now share a budget of 10 per account every 15 minutes (it was 5), successful ones included.',
+        audience: 'administrators',
+      },
+    ],
+  },
+  {
     version: '0.18.0',
     date: '2026-10-19',
     title: 'Card expiry warnings, a clearer item editor and custom fields everywhere',
