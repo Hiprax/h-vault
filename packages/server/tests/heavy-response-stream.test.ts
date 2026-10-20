@@ -153,9 +153,17 @@ describe('an early exit closes the database cursor', () => {
 
     const client = rawGet('/api/v1/vault/items?limit=200', user.accessToken, { read: false });
     // The server blocks on backpressure with a cursor open, then the client leaves.
-    await vi.waitFor(async () => {
-      expect(await openCursors()).toBeGreaterThan(baseline);
-    });
+    // The same budget as the release below: once blocked, the cursor STAYS open
+    // until the client leaves, so a longer wait cannot hide a server that never
+    // opened one (it still fails, later). Vitest's default second was too short
+    // for the server to reach that point while the whole pre-push pipeline and
+    // another project's run shared the machine (2026-10-20).
+    await vi.waitFor(
+      async () => {
+        expect(await openCursors()).toBeGreaterThan(baseline);
+      },
+      { timeout: 10_000, interval: 50 },
+    );
     client.socket.destroy();
 
     await vi.waitFor(
