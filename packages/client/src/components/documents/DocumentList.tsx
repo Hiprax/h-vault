@@ -14,7 +14,7 @@ import {
 } from 'lucide-react';
 import { TRASH_AUTO_PURGE_DAYS, formatBytes } from '@hvault/shared';
 import { cn } from '../../lib/utils';
-import { UNOPENABLE_DOCUMENT_NAME } from '../../services/documents/downloadAll';
+import { UNOPENABLE_DOCUMENT_NAME } from '../../services/documents/documentNames';
 import type { DecryptedDocument } from '../../stores/documentsStore';
 import type { DocumentListMode } from '../../hooks/useDocumentsFilterView';
 import { SelectionCheckbox } from '../ui/SelectionCheckbox';

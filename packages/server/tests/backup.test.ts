@@ -539,6 +539,49 @@ describe('Backup routes', () => {
       expect(res.text).not.toContain('searchHash');
     });
 
+    it('never puts the account id or the document version counter into the backup rows', async () => {
+      await setupBackupForUser(agent, user.accessToken);
+      // Written through the model, so the row really carries `userId` and `__v`
+      // (a raw insert would have no `__v` and could not show it being dropped).
+      const item = await VaultItem.create({
+        userId: new Types.ObjectId(user.id),
+        itemType: 'login',
+        encryptedData: 'backup-row-data',
+        dataIv: 'iv',
+        dataTag: 'tag',
+        encryptedName: 'backup-row-name',
+        nameIv: 'name-iv',
+        nameTag: 'name-tag',
+      });
+      const { Folder } = await import('../src/models/Folder.js');
+      const folder = await Folder.create({
+        userId: new Types.ObjectId(user.id),
+        encryptedName: 'backup-folder-name',
+        nameIv: 'iv',
+        nameTag: 'tag',
+      });
+
+      const res = await agent
+        .get('/api/v1/backup/download')
+        .set('Authorization', authHeader(user.accessToken));
+
+      expect(res.status).toBe(200);
+      const backup = JSON.parse(res.text) as {
+        items: Record<string, unknown>[];
+        folders: Record<string, unknown>[];
+      };
+      // Positive control: both rows are there, still under the id a restore
+      // matches on, and with the timestamps the file has always carried.
+      expect(backup.items.map((row) => row._id)).toEqual([item._id.toString()]);
+      expect(backup.folders.map((row) => row._id)).toEqual([folder._id.toString()]);
+      for (const row of [...backup.items, ...backup.folders]) {
+        expect(row).not.toHaveProperty('userId');
+        expect(row).not.toHaveProperty('__v');
+        expect(typeof row.createdAt).toBe('string');
+      }
+      expect(res.text).not.toContain(user.id);
+    });
+
     it('should return 400 when downloading without encryption setup', async () => {
       const res = await agent
         .get('/api/v1/backup/download')
@@ -1447,7 +1490,7 @@ describe('Backup routes', () => {
       });
 
       // Create an item for user2
-      await VaultItem.create({
+      const user2Item = await VaultItem.create({
         userId: user2.id,
         itemType: 'login',
         encryptedData: 'user2-encrypted-data',
@@ -1467,16 +1510,16 @@ describe('Backup routes', () => {
 
       expect(res.status).toBe(200);
       const backup = JSON.parse(res.text) as {
-        items: { encryptedData: string; userId: string }[];
+        items: { _id: string; encryptedData: string }[];
       };
 
-      // Should only contain user2's items
-      expect(backup.items.length).toBe(1);
+      // Should only contain user2's items: exactly user2's row, by its id. Rows
+      // no longer carry the owner's id, so ownership is asserted by identity.
+      expect(backup.items.map((item) => item._id)).toEqual([user2Item._id.toString()]);
       expect(backup.items[0]!.encryptedData).toBe('user2-encrypted-data');
       // None of user1's items should be present
-      for (const item of backup.items) {
-        expect(item.userId.toString()).toBe(user2.id);
-      }
+      expect(res.text).not.toContain('user1-encrypted-data');
+      expect(res.text).not.toContain('user1-item');
     });
 
     it('should restore items only to the authenticated user', async () => {

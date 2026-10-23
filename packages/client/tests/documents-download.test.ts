@@ -1,7 +1,7 @@
 /**
  * Tests for `services/documents/download.ts` — reading a stored document back —
- * and for `services/documents/downloadAll.ts`, the sequential bulk export
- * written on top of it.
+ * and for `services/documents/downloadAll.ts`, the one-archive bulk export
+ * written on top of it, with the archive's save targets and its wait.
  *
  * The two share a suite because the bulk export's whole claim is that it is the
  * SAME read: a run over three documents has to perform the same four checks, in
@@ -97,9 +97,22 @@ import {
   streamDocumentPlaintext,
 } from '../src/services/documents/download.js';
 import {
-  UNOPENABLE_DOCUMENT_NAME,
-  saveAllDocuments,
+  archiveDocuments,
+  waitAbortably,
+  type ArchiveDocumentsOptions,
+  type BulkDownloadCandidate,
 } from '../src/services/documents/downloadAll.js';
+import { UNOPENABLE_DOCUMENT_NAME } from '../src/services/documents/documentNames.js';
+import { ArchivePathAllocator } from '../src/services/documents/archiveNames.js';
+import {
+  IN_MEMORY_ARCHIVE_LIMIT_BYTES,
+  archiveFileName,
+  openArchiveTarget,
+  type ArchiveTarget,
+} from '../src/services/documents/archiveTarget.js';
+import { ZIP32_MAX_ARCHIVE_BYTES } from '../src/services/documents/zipArchive.js';
+import { useDocumentsStore } from '../src/stores/documentsStore.js';
+import { readArchive } from './support/zipOracle';
 
 // ---------------------------------------------------------------------------
 // The stub server
@@ -132,6 +145,10 @@ let onRequest: ((request: RecordedRequest) => void) | null = null;
 interface SegmentRefusal {
   status: number;
   message: string;
+  /** Response headers to send with it (a 429's `Retry-After`). */
+  headers?: Record<string, string>;
+  /** How many times it is served before the segment is answered normally; every time when absent. */
+  remaining?: number;
 }
 
 /**
@@ -151,7 +168,12 @@ function ok(data: unknown, config: AxiosResponse['config']): AxiosResponse {
   return { data, status: 200, statusText: 'OK', headers: {}, config } as AxiosResponse;
 }
 
-function fail(status: number, config: AxiosResponse['config'], message = 'nope'): Promise<never> {
+function fail(
+  status: number,
+  config: AxiosResponse['config'],
+  message = 'nope',
+  headers: Record<string, string> = {},
+): Promise<never> {
   return Promise.reject(
     new AxiosError(
       `Request failed with status code ${String(status)}`,
@@ -162,7 +184,7 @@ function fail(status: number, config: AxiosResponse['config'], message = 'nope')
         status,
         statusText: 'Error',
         data: { success: false, message, statusCode: status },
-        headers: {},
+        headers,
         config: config as InternalAxiosRequestConfig,
       },
     ),
@@ -182,7 +204,13 @@ const adapter: AxiosAdapter = (config) => {
     const entry = library.get(segment[1] ?? '');
     if (entry) {
       const refusal = entry.refusals[index] ?? null;
-      if (refusal !== null) return fail(refusal.status, config, refusal.message);
+      if (refusal !== null) {
+        if (refusal.remaining !== undefined) {
+          refusal.remaining -= 1;
+          if (refusal.remaining === 0) entry.refusals[index] = null;
+        }
+        return fail(refusal.status, config, refusal.message, refusal.headers);
+      }
       const held = entry.document.segments[index];
       if (!held) return fail(404, config);
       return Promise.resolve(ok(held.slice().buffer, config));
@@ -1034,14 +1062,255 @@ describe('saveDocument — the save-dialog path', () => {
 // Saving all of them
 // ===========================================================================
 
-describe('saveAllDocuments — taking a whole library out, one document at a time', () => {
-  /**
-   * Three documents, each with its own id, name and contents.
-   *
-   * Different byte patterns per document on purpose: a run that saved the same
-   * document three times, or that paired one document's bytes with another's
-   * name, would pass any assertion written against a single shared fixture.
-   */
+describe('streamDocumentPlaintext — a row the caller already holds', () => {
+  /** A sink that keeps the verified segments. */
+  function keeping(): { kept: number[]; sink: Parameters<typeof streamDocumentPlaintext>[1] } {
+    const kept: number[] = [];
+    return {
+      kept,
+      sink: {
+        write: (segment) => {
+          kept.push(...segment);
+          return Promise.resolve();
+        },
+        discard: () => Promise.resolve(),
+      },
+    };
+  }
+
+  it('reads with the supplied row, asking the server only for the segments', async () => {
+    const built = await buildDocument({ plaintext: ramp(20), chunkPlaintextBytes: 8 });
+    serveMany([built]);
+    const { kept, sink } = keeping();
+
+    const meta = await streamDocumentPlaintext(ID_A, sink, { row: built.row });
+
+    expect(meta).toEqual(built.meta);
+    expect(kept).toEqual([...ramp(20)]);
+    // NEGATIVE: the row was never fetched again.
+    expect(requests.map((request) => request.url)).toEqual([
+      `/documents/${ID_A}/segments/0`,
+      `/documents/${ID_A}/segments/1`,
+      `/documents/${ID_A}/segments/2`,
+    ]);
+  });
+
+  it('refuses a supplied row that belongs to a different document, asking for nothing', async () => {
+    const other = await buildDocument({ id: ID_B, name: 'someone-elses.txt' });
+    serveMany([other]);
+    const { kept, sink } = keeping();
+
+    const error = await streamDocumentPlaintext(ID_A, sink, { row: other.row }).catch(
+      (raised: unknown) => raised,
+    );
+
+    expect(error).toBeInstanceOf(DocumentIntegrityError);
+    expect((error as DocumentIntegrityError).failure).toBe('identity');
+    expect(requests).toEqual([]);
+    expect(kept).toEqual([]);
+  });
+
+  it('refuses a supplied row whose framing disagrees with its sealed copy, before any segment', async () => {
+    const built = await buildDocument({
+      plaintext: ramp(6),
+      chunkPlaintextBytes: 6,
+      metaOverrides: { plaintextBytes: 6, chunkPlaintextBytes: 2, chunkCount: 3 },
+    });
+    serveMany([built]);
+    const { sink } = keeping();
+
+    const error = await streamDocumentPlaintext(ID_A, sink, { row: built.row }).catch(
+      (raised: unknown) => raised,
+    );
+
+    expect(error).toBeInstanceOf(DocumentIntegrityError);
+    expect((error as DocumentIntegrityError).failure).toBe('framing');
+    expect(requests).toEqual([]);
+  });
+});
+
+// ===========================================================================
+// Where an archive goes
+// ===========================================================================
+
+/** A writable stream double that keeps the Blobs it is handed. */
+function blobWritable(options: { failAbort?: boolean } = {}) {
+  const calls: string[] = [];
+  const parts: Blob[] = [];
+  return {
+    calls,
+    parts,
+    writable: {
+      write: (chunk: Blob) => {
+        calls.push('write');
+        parts.push(chunk);
+        return Promise.resolve();
+      },
+      close: () => {
+        calls.push('close');
+        return Promise.resolve();
+      },
+      abort: () => {
+        calls.push('abort');
+        return options.failAbort === true
+          ? Promise.reject(new Error('the stream is already broken'))
+          : Promise.resolve();
+      },
+    },
+  };
+}
+
+describe('archiveFileName', () => {
+  it('names the first archive by the UTC day, and each continuation by its part', () => {
+    const moment = new Date('2026-10-23T23:30:00.000Z');
+    expect(archiveFileName(moment, 1)).toBe('hvault-documents-2026-10-23.zip');
+    expect(archiveFileName(moment, 2)).toBe('hvault-documents-2026-10-23-part-2.zip');
+  });
+});
+
+describe('openArchiveTarget', () => {
+  it('builds the archive in memory where there is no save dialog, and hands it over as ONE download', async () => {
+    const target = await openArchiveTarget('archive.zip');
+
+    expect(target).toMatchObject({
+      kind: 'download',
+      name: 'archive.zip',
+      limitBytes: IN_MEMORY_ARCHIVE_LIMIT_BYTES,
+    });
+    await target!.write(new Blob([new Uint8Array([1, 2])]));
+    await target!.write(new Blob([new Uint8Array([3])]));
+    // Nothing reaches the browser until the archive is finished.
+    expect(savedFiles).toEqual([]);
+
+    await target!.commit();
+
+    expect(savedFiles).toHaveLength(1);
+    expect(savedFiles[0]!.filename).toBe('archive.zip');
+    expect(savedFiles[0]!.blob.type).toBe('application/zip');
+    expect([...new Uint8Array(await savedFiles[0]!.blob.arrayBuffer())]).toEqual([1, 2, 3]);
+  });
+
+  it('drops an abandoned in-memory archive without handing anything to the browser', async () => {
+    const target = await openArchiveTarget('archive.zip');
+    await target!.write(new Blob([new Uint8Array([1])]));
+
+    await target!.discard();
+
+    expect(savedFiles).toEqual([]);
+  });
+
+  it('opens the save dialog synchronously, before the first await, and writes into the chosen file', async () => {
+    const double = blobWritable();
+    const handle = { name: 'chosen.zip', createWritable: () => Promise.resolve(double.writable) };
+    const picker = vi.fn(() => Promise.resolve(handle));
+    vi.stubGlobal('showSaveFilePicker', picker);
+
+    const opening = openArchiveTarget('hvault-documents-2026-10-23.zip');
+    // Called inside the call itself, where the click's activation still holds.
+    expect(picker).toHaveBeenCalledTimes(1);
+    expect(picker).toHaveBeenCalledWith({
+      suggestedName: 'hvault-documents-2026-10-23.zip',
+      startIn: 'downloads',
+      types: [{ description: 'ZIP archive', accept: { 'application/zip': ['.zip'] } }],
+    });
+    const target = await opening;
+
+    expect(target).toMatchObject({
+      kind: 'file',
+      name: 'chosen.zip',
+      limitBytes: ZIP32_MAX_ARCHIVE_BYTES,
+    });
+    const chunk = new Blob([new Uint8Array([9])]);
+    await target!.write(chunk);
+    await target!.commit();
+    expect(double.parts).toEqual([chunk]);
+    expect(double.calls).toEqual(['write', 'close']);
+    // Nothing went through the in-memory download.
+    expect(savedFiles).toEqual([]);
+  });
+
+  it('drops an abandoned file archive by aborting the stream, and never rejects doing so', async () => {
+    for (const failAbort of [false, true]) {
+      const double = blobWritable({ failAbort });
+      vi.stubGlobal(
+        'showSaveFilePicker',
+        vi.fn(() =>
+          Promise.resolve({
+            name: 'x.zip',
+            createWritable: () => Promise.resolve(double.writable),
+          }),
+        ),
+      );
+      const target = await openArchiveTarget('x.zip');
+
+      await expect(target!.discard()).resolves.toBeUndefined();
+      expect(double.calls).toEqual(['abort']);
+    }
+  });
+
+  it('answers a dismissed dialog with null, and lets any other refusal through', async () => {
+    const dismissal = new Error('The user aborted a request.');
+    dismissal.name = 'AbortError';
+    vi.stubGlobal(
+      'showSaveFilePicker',
+      vi.fn(() => Promise.reject(dismissal)),
+    );
+    await expect(openArchiveTarget('x.zip')).resolves.toBeNull();
+
+    const refusal = new Error('Must be handling a user gesture to show a file picker.');
+    refusal.name = 'SecurityError';
+    vi.stubGlobal(
+      'showSaveFilePicker',
+      vi.fn(() => Promise.reject(refusal)),
+    );
+    await expect(openArchiveTarget('x.zip')).rejects.toBe(refusal);
+  });
+});
+
+describe('waitAbortably', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('settles after the wait, and not a moment before', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const signal = new AbortController().signal;
+    const removeListener = vi.spyOn(signal, 'removeEventListener');
+    let settled = false;
+    void waitAbortably(5_000, signal).then(() => {
+      settled = true;
+    });
+
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(settled).toBe(true);
+    // It does not leave its listener behind on a signal that outlives it.
+    expect(removeListener).toHaveBeenCalledWith('abort', expect.any(Function));
+  });
+
+  it('settles at once when the signal aborts, and leaves no timer behind', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const controller = new AbortController();
+    let settled = false;
+    void waitAbortably(5_000, controller.signal).then(() => {
+      settled = true;
+    });
+
+    controller.abort();
+    await Promise.resolve();
+
+    expect(settled).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+// ===========================================================================
+// Archiving a library
+// ===========================================================================
+
+describe('archiveDocuments — every verified document an entry of one ZIP', () => {
+  /** Three documents, each its own id, name and bytes, multi-segment on purpose. */
   async function threeDocuments(): Promise<BuiltDocument[]> {
     const built = [
       await buildDocument({ id: ID_A, name: 'alpha.txt', plaintext: ramp(20) }),
@@ -1052,101 +1321,185 @@ describe('saveAllDocuments — taking a whole library out, one document at a tim
     return built;
   }
 
-  /** The candidate shape the store hands in, for a document that opened. */
-  function candidate(built: BuiltDocument) {
-    return { id: built.id, meta: built.meta };
+  /** The candidate the store hands in, for a document that opened. */
+  function candidate(built: BuiltDocument, folderId?: string): BulkDownloadCandidate {
+    return { id: built.id, meta: built.meta, _raw: built.row, ...(folderId ? { folderId } : {}) };
   }
 
-  /** Every request this run made, in the order it made them. */
   function urls(): string[] {
     return requests.map((request) => request.url);
   }
 
-  it('saves every document, in order, one strictly after the last', async () => {
+  /** The run's options, with a fresh signal and allocator unless given. */
+  function options(overrides: Partial<ArchiveDocumentsOptions> = {}): ArchiveDocumentsOptions {
+    return {
+      signal: new AbortController().signal,
+      allocator: new ArchivePathAllocator([]),
+      ...overrides,
+    };
+  }
+
+  /** The in-memory target, exactly as a browser without a save dialog gets it. */
+  async function downloadTarget(): Promise<ArchiveTarget> {
+    return (await openArchiveTarget('archive.zip'))!;
+  }
+
+  /** The one archive the run handed to the browser, read by the independent reader. */
+  async function savedArchive() {
+    expect(savedFiles).toHaveLength(1);
+    return readArchive(new Uint8Array(await savedFiles[0]!.blob.arrayBuffer()));
+  }
+
+  /** A target that records what happens to it, and can be made to fail. */
+  function recordingTarget(
+    overrides: {
+      limitBytes?: number;
+      failWrite?: number;
+      failCommit?: boolean;
+      onWrite?: () => void;
+    } = {},
+  ) {
+    const calls: string[] = [];
+    const parts: Blob[] = [];
+    let writes = 0;
+    const target: ArchiveTarget = {
+      kind: 'file',
+      name: 'chosen.zip',
+      limitBytes: overrides.limitBytes ?? ZIP32_MAX_ARCHIVE_BYTES,
+      write: (chunk) => {
+        writes += 1;
+        calls.push('write');
+        if (writes === overrides.failWrite) {
+          return Promise.reject(new Error('There is not enough space on the disk.'));
+        }
+        parts.push(chunk);
+        overrides.onWrite?.();
+        return Promise.resolve();
+      },
+      commit: () => {
+        calls.push('commit');
+        return overrides.failCommit === true
+          ? Promise.reject(new Error('The file could not be saved.'))
+          : Promise.resolve();
+      },
+      discard: () => {
+        calls.push('discard');
+        return Promise.resolve();
+      },
+    };
+    return { target, calls, parts };
+  }
+
+  it('archives every document in order, reading only segments, into ONE download read back byte for byte', async () => {
     const built = await threeDocuments();
 
-    const result = await saveAllDocuments(built.map(candidate));
+    const result = await archiveDocuments(
+      built.map((b) => candidate(b)),
+      await downloadTarget(),
+      options(),
+    );
 
-    expect(result).toMatchObject({ total: 3, savedCount: 3, stopped: 'complete' });
-    expect(result.failures).toEqual([]);
-    // THE sequencing assertion, and the fixtures are deliberately multi-segment
-    // so it says something: each document's segments run consecutively, and the
-    // next document's row is not asked for until the last of them has landed.
-    // Interleaved reads would put `/documents/B` in the middle of A's segments —
-    // and a run holding two plaintexts at once is the one thing the "one at a
-    // time" promise exists to rule out.
+    expect(result).toEqual({
+      total: 3,
+      savedCount: 3,
+      failures: [],
+      stopped: 'complete',
+      archive: { name: 'archive.zip', kind: 'download' },
+    });
+    // One document strictly after the other, and no row request at all: the
+    // list's own row is what each read used.
     expect(urls()).toEqual([
-      `/documents/${ID_A}`,
       `/documents/${ID_A}/segments/0`,
       `/documents/${ID_A}/segments/1`,
       `/documents/${ID_A}/segments/2`,
-      `/documents/${ID_B}`,
       `/documents/${ID_B}/segments/0`,
       `/documents/${ID_B}/segments/1`,
-      `/documents/${ID_C}`,
       `/documents/${ID_C}/segments/0`,
     ]);
-    // And the files themselves: the right bytes under the right names, not three
-    // copies of one document.
-    expect(savedFiles.map((file) => file.filename)).toEqual(['alpha.txt', 'beta.txt', 'gamma.txt']);
-    expect([...new Uint8Array(await savedFiles[0]!.blob.arrayBuffer())]).toEqual([...ramp(20)]);
-    expect([...new Uint8Array(await savedFiles[1]!.blob.arrayBuffer())]).toEqual([...ramp(12)]);
-    expect([...new Uint8Array(await savedFiles[2]!.blob.arrayBuffer())]).toEqual([...ramp(8)]);
-  });
-
-  it('never opens a save dialog, even where the browser has one', async () => {
-    const picker = installPicker();
-    const built = await threeDocuments();
-
-    const result = await saveAllDocuments(built.map(candidate));
-
-    // `showSaveFilePicker` needs transient activation, and the click that
-    // started this run cannot supply it to a document read after two others.
-    // Opening it per document would refuse most of the run in a real browser and
-    // ask for a save path N times in the rest.
-    expect(picker.picker).not.toHaveBeenCalled();
-    expect(result.savedCount).toBe(3);
-    expect(savedFiles).toHaveLength(3);
+    const entries = await savedArchive();
+    expect(entries.map((entry) => entry.name)).toEqual(['alpha.txt', 'beta.txt', 'gamma.txt']);
+    expect([...entries[0]!.bytes]).toEqual([...ramp(20)]);
+    expect([...entries[1]!.bytes]).toEqual([...ramp(12)]);
+    expect([...entries[2]!.bytes]).toEqual([...ramp(8)]);
+    // Each entry carries the time sealed into the document's metadata.
+    expect(
+      entries[0]!.entry.getLastModDate({ timezone: 'local', forceDosFormat: true }).toISOString(),
+    ).toBe('2026-01-01T00:00:00.000Z');
+    expect(savedFiles[0]!.blob.type).toBe('application/zip');
   });
 
   it('leaves the vault unlocked and every document key zeroed', async () => {
     const built = await threeDocuments();
 
-    await saveAllDocuments(built.map(candidate));
+    await archiveDocuments(
+      built.map((b) => candidate(b)),
+      await downloadTarget(),
+      options(),
+    );
 
     expect(useAuthStore.getState().vaultKey).not.toBeNull();
-    // One key per document, and not one of them survives the read that needed it.
     expect(unwrappedKeys).toHaveLength(3);
     expect(unwrappedKeys.every(isAllZero)).toBe(true);
   });
 
-  it('keeps going when one document’s stored file is missing, and names it', async () => {
+  it('files each document under its folders, and the rest at the archive root', async () => {
+    const built = await threeDocuments();
+    const folders = [
+      {
+        id: '66c0f1a2b3c4d5e6f7a8b901',
+        name: 'Work',
+        sortOrder: 0,
+        createdAt: '',
+        updatedAt: '',
+        _raw: {},
+      },
+      {
+        id: '66c0f1a2b3c4d5e6f7a8b902',
+        name: 'Contracts',
+        parentId: '66c0f1a2b3c4d5e6f7a8b901',
+        sortOrder: 0,
+        createdAt: '',
+        updatedAt: '',
+        _raw: {},
+      },
+    ] as unknown as ConstructorParameters<typeof ArchivePathAllocator>[0];
+
+    await archiveDocuments(
+      [
+        candidate(built[0]!, '66c0f1a2b3c4d5e6f7a8b902'),
+        candidate(built[1]!, '66c0f1a2b3c4d5e6f7a8b901'),
+        candidate(built[2]!),
+      ],
+      await downloadTarget(),
+      options({ allocator: new ArchivePathAllocator(folders) }),
+    );
+
+    expect((await savedArchive()).map((entry) => entry.name)).toEqual([
+      'Work/Contracts/alpha.txt',
+      'Work/beta.txt',
+      'gamma.txt',
+    ]);
+  });
+
+  it('keeps going when one stored file is missing, names it, and leaves it out of the archive', async () => {
     const built = await threeDocuments();
     refuseSegment(ID_B, 0, { status: 404, message: 'The stored file is no longer available.' });
 
-    const result = await saveAllDocuments(built.map(candidate));
+    const result = await archiveDocuments(
+      built.map((b) => candidate(b)),
+      await downloadTarget(),
+      options(),
+    );
 
     expect(result).toMatchObject({ total: 3, savedCount: 2, stopped: 'complete' });
     expect(result.failures).toEqual([
-      {
-        id: ID_B,
-        name: 'beta.txt',
-        // The SERVER'S own sentence, carried through rather than replaced with a
-        // status code or a house string. It is the only part of the summary the
-        // reader can act on.
-        reason: 'The stored file is no longer available.',
-      },
+      { id: ID_B, name: 'beta.txt', reason: 'The stored file is no longer available.' },
     ]);
-    // The negative that matters: the failure did not abort the rest, AND nothing
-    // was written for it. Two files exist, and neither is the one that failed.
-    expect(savedFiles.map((file) => file.filename)).toEqual(['alpha.txt', 'gamma.txt']);
-    expect(urls()).toContain(`/documents/${ID_C}/segments/0`);
+    expect((await savedArchive()).map((entry) => entry.name)).toEqual(['alpha.txt', 'gamma.txt']);
   });
 
-  it('never presents a document that failed its checksum as a saved file', async () => {
+  it('never puts a document that failed its checksum into the archive', async () => {
     const good = await buildDocument({ id: ID_A, name: 'alpha.txt', plaintext: ramp(20) });
-    // A document sealed with the digest of DIFFERENT bytes: exactly what a
-    // corrupt upload or an older buggy client would have stored.
     const tampered = await buildDocument({
       id: ID_B,
       name: 'beta.txt',
@@ -1155,50 +1508,49 @@ describe('saveAllDocuments — taking a whole library out, one document at a tim
     });
     serveMany([good, tampered]);
 
-    const result = await saveAllDocuments([candidate(good), candidate(tampered)]);
+    const result = await archiveDocuments(
+      [candidate(good), candidate(tampered)],
+      await downloadTarget(),
+      options(),
+    );
 
     expect(result).toMatchObject({ total: 2, savedCount: 1, stopped: 'complete' });
     expect(result.failures[0]).toMatchObject({ id: ID_B, name: 'beta.txt' });
     expect(result.failures[0]?.reason).toMatch(/did not match the checksum/);
-    // The whole point. The bytes were decrypted, every segment authenticated, and
-    // the file was still refused — so there is no half-written `beta.txt` for
-    // anyone to mistake for their document.
-    expect(savedFiles.map((file) => file.filename)).toEqual(['alpha.txt']);
+    // Every segment of it authenticated, and still not a byte of it is in the file.
+    const entries = await savedArchive();
+    expect(entries.map((entry) => entry.name)).toEqual(['alpha.txt']);
   });
 
-  it('refuses a degraded row up front, without spending a request on it', async () => {
+  it('refuses a degraded row up front, by the name the list gives it, without a request', async () => {
     const built = await threeDocuments();
 
-    const result = await saveAllDocuments([
-      candidate(built[0]!),
-      { id: ID_B, meta: null },
-      candidate(built[2]!),
-    ]);
+    const result = await archiveDocuments(
+      [candidate(built[0]!), { id: ID_B, meta: null, _raw: built[1]!.row }, candidate(built[2]!)],
+      await downloadTarget(),
+      options(),
+    );
 
     expect(result).toMatchObject({ total: 3, savedCount: 2, stopped: 'complete' });
     expect(result.failures).toEqual([
       {
         id: ID_B,
-        // Named as the LIST names it, through the one constant both read, because
-        // a row whose metadata will not open has no other name to be identified by.
         name: UNOPENABLE_DOCUMENT_NAME,
         reason:
           'Its details could not be opened with this vault key, so there was nothing to download.',
       },
     ]);
-    // Not one byte was asked for on its behalf: the reason was already known, and
-    // an attempt would have failed several layers down with a crypto error that
-    // named the wrong problem.
     expect(urls().some((url) => url.includes(ID_B))).toBe(false);
   });
 
-  it('refuses a row already claimed for permanent deletion, without spending a request', async () => {
+  it('refuses a row already claimed for permanent deletion, without a request', async () => {
     const built = await threeDocuments();
 
-    const result = await saveAllDocuments([
-      { ...candidate(built[0]!), purgePending: true },
-      candidate(built[1]!),
-    ]);
+    const result = await archiveDocuments(
+      [{ ...candidate(built[0]!), purgePending: true }, candidate(built[1]!)],
+      await downloadTarget(),
+      options(),
+    );
 
     expect(result).toMatchObject({ total: 2, savedCount: 1, stopped: 'complete' });
     expect(result.failures[0]).toMatchObject({ id: ID_A, name: 'alpha.txt' });
@@ -1206,202 +1558,444 @@ describe('saveAllDocuments — taking a whole library out, one document at a tim
     expect(urls().some((url) => url.includes(ID_A))).toBe(false);
   });
 
-  it('stops when cancelled part-way, counting the cancelled document as neither', async () => {
+  it('waits out a short rate limit and reads the document again from its first segment, byte for byte', async () => {
     const built = await threeDocuments();
-    const controller = new AbortController();
-    // Aborted as the SECOND document's row is asked for, so the run is stopped
-    // inside a document rather than tidily between two.
-    onRequest = (request) => {
-      if (request.url === `/documents/${ID_B}`) controller.abort();
-    };
+    refuseSegment(ID_A, 1, {
+      status: 429,
+      message: 'Too many requests',
+      headers: { 'retry-after': '5' },
+      remaining: 1,
+    });
+    const waits: number[] = [];
 
-    const result = await saveAllDocuments(built.map(candidate), { signal: controller.signal });
+    const result = await archiveDocuments(
+      built.map((b) => candidate(b)),
+      await downloadTarget(),
+      options({
+        wait: (ms) => {
+          waits.push(ms);
+          return Promise.resolve();
+        },
+      }),
+    );
 
-    expect(result).toMatchObject({ total: 3, savedCount: 1, stopped: 'cancelled' });
-    // A cancellation is not a failure and is never listed as one — the same rule
-    // a dismissed save dialog and a cancelled upload follow.
-    expect(result.failures).toEqual([]);
-    expect(savedFiles.map((file) => file.filename)).toEqual(['alpha.txt']);
-    // And the third document was never touched.
+    expect(waits).toEqual([5_000]);
+    expect(result).toMatchObject({ total: 3, savedCount: 3, failures: [], stopped: 'complete' });
+    expect(urls().slice(0, 5)).toEqual([
+      `/documents/${ID_A}/segments/0`,
+      `/documents/${ID_A}/segments/1`,
+      `/documents/${ID_A}/segments/0`,
+      `/documents/${ID_A}/segments/1`,
+      `/documents/${ID_A}/segments/2`,
+    ]);
+    // The refused attempt's first segment is NOT in front of the retried one's.
+    const entries = await savedArchive();
+    expect([...entries[0]!.bytes]).toEqual([...ramp(20)]);
+  });
+
+  it('stops as rate-limited after three short waits for one document, finishing the archive', async () => {
+    const built = await threeDocuments();
+    refuseSegment(ID_B, 0, {
+      status: 429,
+      message: 'Too many requests',
+      headers: { 'retry-after': '5' },
+    });
+    const waits: number[] = [];
+
+    const result = await archiveDocuments(
+      built.map((b) => candidate(b)),
+      await downloadTarget(),
+      options({
+        wait: (ms) => {
+          waits.push(ms);
+          return Promise.resolve();
+        },
+      }),
+    );
+
+    expect(waits).toEqual([5_000, 5_000, 5_000]);
+    expect(result).toMatchObject({
+      total: 3,
+      savedCount: 1,
+      failures: [],
+      stopped: 'rate-limited',
+    });
+    expect(result.stoppedDetail).toBe('Too many attempts. Please try again in 5 seconds.');
+    expect((await savedArchive()).map((entry) => entry.name)).toEqual(['alpha.txt']);
     expect(urls().some((url) => url.includes(ID_C))).toBe(false);
   });
 
-  it('stops BETWEEN documents when the abort lands after one has been saved', async () => {
+  it.each([
+    [
+      'a wait longer than it sits through',
+      { 'retry-after': '900' },
+      'Too many attempts. Please try again in 15 minutes.',
+    ],
+    ['no wait at all', {}, 'Too many attempts. Please wait a moment and try again.'],
+  ])(
+    'stops as rate-limited at once when the server asks for %s',
+    async (_case, headers, detail) => {
+      const built = await threeDocuments();
+      refuseSegment(ID_B, 0, { status: 429, message: 'Too many requests', headers });
+      const wait = vi.fn(() => Promise.resolve());
+
+      const result = await archiveDocuments(
+        built.map((b) => candidate(b)),
+        await downloadTarget(),
+        options({ wait }),
+      );
+
+      expect(wait).not.toHaveBeenCalled();
+      expect(result).toMatchObject({
+        savedCount: 1,
+        failures: [],
+        stopped: 'rate-limited',
+        stoppedDetail: detail,
+      });
+      expect(result.archive).toEqual({ name: 'archive.zip', kind: 'download' });
+    },
+  );
+
+  it('stops without reading again when Stop is pressed during a wait', async () => {
+    const built = await threeDocuments();
+    refuseSegment(ID_B, 0, {
+      status: 429,
+      message: 'Too many requests',
+      headers: { 'retry-after': '5' },
+    });
+    const controller = new AbortController();
+
+    const result = await archiveDocuments(
+      built.map((b) => candidate(b)),
+      await downloadTarget(),
+      options({
+        signal: controller.signal,
+        wait: () => {
+          controller.abort();
+          return Promise.resolve();
+        },
+      }),
+    );
+
+    expect(result).toMatchObject({ savedCount: 1, failures: [], stopped: 'stopped' });
+    expect(urls().filter((url) => url.includes(ID_B))).toHaveLength(1);
+    expect((await savedArchive()).map((entry) => entry.name)).toEqual(['alpha.txt']);
+  });
+
+  it('stops without reading again when the vault locks during a wait', async () => {
+    const built = await threeDocuments();
+    refuseSegment(ID_B, 0, {
+      status: 429,
+      message: 'Too many requests',
+      headers: { 'retry-after': '5' },
+    });
+
+    const result = await archiveDocuments(
+      built.map((b) => candidate(b)),
+      await downloadTarget(),
+      options({
+        wait: () => {
+          useAuthStore.setState({ vaultKey: null });
+          return Promise.resolve();
+        },
+      }),
+    );
+
+    expect(result).toMatchObject({ savedCount: 1, failures: [], stopped: 'vault-locked' });
+    expect(urls().filter((url) => url.includes(ID_B))).toHaveLength(1);
+  });
+
+  it.each([
+    [
+      'a sign-out (the store cleared, the key not yet)',
+      () => useDocumentsStore.getState().clearStore(),
+    ],
+    ['a lock', () => useAuthStore.setState({ vaultKey: null })],
+  ])(
+    'drops the document a %s lands in, and finishes the archive with the rest',
+    async (_case, interrupt) => {
+      const built = await threeDocuments();
+      // Lands while beta's first segment is on the wire: the segment still
+      // decrypts, and is refused at the write.
+      onRequest = (request) => {
+        if (request.url === `/documents/${ID_B}/segments/0`) interrupt();
+      };
+
+      const result = await archiveDocuments(
+        built.map((b) => candidate(b)),
+        await downloadTarget(),
+        options(),
+      );
+
+      expect(result).toMatchObject({
+        total: 3,
+        savedCount: 1,
+        failures: [],
+        stopped: 'vault-locked',
+      });
+      expect((await savedArchive()).map((entry) => entry.name)).toEqual(['alpha.txt']);
+      expect(urls().some((url) => url.includes(ID_C))).toBe(false);
+      // Only the first segment of the interrupted document was ever asked for.
+      expect(urls().filter((url) => url.includes(ID_B))).toEqual([`/documents/${ID_B}/segments/0`]);
+    },
+  );
+
+  it.each([
+    ['a sign-out', () => useDocumentsStore.getState().clearStore()],
+    ['a lock', () => useAuthStore.setState({ vaultKey: null })],
+  ])(
+    'finishes the archive when %s lands between two documents, reading nothing more',
+    async (_case, interrupt) => {
+      const built = await threeDocuments();
+      // Lands while alpha's entry is being written, after its read has finished,
+      // so the check that catches it is the one at the top of the loop.
+      const { target, parts, calls } = recordingTarget({ onWrite: interrupt });
+
+      const result = await archiveDocuments(
+        built.map((b) => candidate(b)),
+        target,
+        options(),
+      );
+
+      expect(result).toMatchObject({
+        total: 3,
+        savedCount: 1,
+        failures: [],
+        stopped: 'vault-locked',
+      });
+      expect(urls().some((url) => url.includes(ID_B))).toBe(false);
+      expect(calls[calls.length - 1]).toBe('commit');
+      const entries = await readArchive(new Uint8Array(await new Blob(parts).arrayBuffer()));
+      expect(entries.map((entry) => entry.name)).toEqual(['alpha.txt']);
+    },
+  );
+
+  it('finishes the archive when Stop lands between two documents, without asking for the rest', async () => {
     const built = await threeDocuments();
     const controller = new AbortController();
-    // Aborted once `alpha.txt` has been handed to the browser, so the run is stopped
-    // tidily between two documents rather than inside one. That is the ONLY path to
-    // the guard at the top of the loop: an abort raised while a document is being
-    // read is answered by the read itself, several layers down, and never reaches
-    // the next iteration's check. It is also the shape a real Cancel click takes,
-    // because the click almost never lands inside the millisecond a read occupies.
-    onSaved = (file) => {
-      if (file.filename === 'alpha.txt') controller.abort();
-    };
+    // Pressed while alpha's entry is being written, so the stop lands between
+    // documents: the ONLY path to the check at the top of the loop.
+    const { target, parts, calls } = recordingTarget({
+      onWrite: () => {
+        controller.abort();
+      },
+    });
 
-    const result = await saveAllDocuments(built.map(candidate), { signal: controller.signal });
+    const result = await archiveDocuments(
+      built.map((b) => candidate(b)),
+      target,
+      options({ signal: controller.signal }),
+    );
 
-    expect(result).toMatchObject({ total: 3, savedCount: 1, stopped: 'cancelled' });
-    // A cancellation is never a failure, and the document that finished before it
-    // landed is still counted as saved rather than lost to the stop.
-    expect(result.failures).toEqual([]);
-    expect(savedFiles.map((file) => file.filename)).toEqual(['alpha.txt']);
-    // The negative the guard exists for: neither remaining document was ASKED FOR.
-    // Without it both are read under an already-aborted signal, which costs the
-    // server two requests and the reader two spurious rows in the summary.
+    expect(result).toMatchObject({
+      total: 3,
+      savedCount: 1,
+      failures: [],
+      stopped: 'stopped',
+      archive: { name: 'chosen.zip', kind: 'file' },
+    });
     expect(urls().some((url) => url.includes(ID_B))).toBe(false);
+    expect(calls[calls.length - 1]).toBe('commit');
+    const entries = await readArchive(new Uint8Array(await new Blob(parts).arrayBuffer()));
+    expect(entries.map((entry) => entry.name)).toEqual(['alpha.txt']);
+  });
+
+  it('stops at once, reading nothing more, when Stop lands inside a document', async () => {
+    const built = await threeDocuments();
+    const controller = new AbortController();
+    onRequest = (request) => {
+      if (request.url === `/documents/${ID_B}/segments/0`) controller.abort();
+    };
+
+    const result = await archiveDocuments(
+      built.map((b) => candidate(b)),
+      await downloadTarget(),
+      options({ signal: controller.signal }),
+    );
+
+    expect(result).toMatchObject({ savedCount: 1, failures: [], stopped: 'stopped' });
+    expect((await savedArchive()).map((entry) => entry.name)).toEqual(['alpha.txt']);
     expect(urls().some((url) => url.includes(ID_C))).toBe(false);
   });
 
-  it('stops on a rate limit WITHOUT consuming the document it stopped on', async () => {
-    // THIS TEST WAS REWRITTEN, and the reason belongs here rather than in a
-    // commit message. It used to assert `failures` had length 1 with a
-    // "Too many attempts" reason — that is, it pinned the rate-limited document
-    // as a FAILED one. That was the defect, not the specification.
-    //
-    // The panel resumes from `savedCount + failures.length`
-    // (`DocumentBulkDownload.tsx`), which every other stop path leaves pointing
-    // AT the document that was not saved: the loop-head abort, the vault-lock
-    // check and a cancellation raised mid-read all break WITHOUT recording. A
-    // rate limit recorded a failure and then broke, so it consumed the row and
-    // Continue offered only the documents after it — and `README.md` promises
-    // Continue "resumes from where it stopped rather than downloading everything
-    // again". A 429 is the ONE refusal in the whole classifier that is purely
-    // transient by definition (`isRateLimited` is exactly 429), and
-    // `GET /documents/:id` is user-keyed at 60 a minute, so an export of a large
-    // library reaches it by construction: the single document a resume could not
-    // reach was the single document nothing was wrong with.
-    //
-    // So the row is now left UNREACHED, exactly as a cancellation leaves it, and
-    // the wait the reader needs moves to `stoppedDetail`.
+  it('stops as archive-full when the next document would pass the size limit, leaving it unread', async () => {
     const built = await threeDocuments();
-    refuseSegment(ID_B, 0, { status: 429, message: 'Too many document read requests' });
+    // Room for alpha's entry and the archive's tail, and not one byte more.
+    const { target, parts } = recordingTarget({ limitBytes: 30 + 9 + 20 + 46 + 9 + 22 });
 
-    const result = await saveAllDocuments(built.map(candidate));
+    const result = await archiveDocuments(
+      built.map((b) => candidate(b)),
+      target,
+      options(),
+    );
 
-    expect(result).toMatchObject({ total: 3, savedCount: 1, stopped: 'rate-limited' });
-    // Not a failure. A rate limit is something the SERVER did to the run, not
-    // something wrong with this document, and listing it as a refusal is what
-    // took it out of the resume.
-    expect(result.failures).toEqual([]);
-    // The transient-failure vocabulary, not the raw message: a reader needs to
-    // be told to wait, not told a number. It is on the RESULT now, so it
-    // survives a document that is going to be retried.
-    expect(result.stoppedDetail).toMatch(/Too many attempts/);
-    // Carrying on would have turned one closed window into three identical
-    // refusals and kept the window open by asking again.
-    expect(urls().some((url) => url.includes(ID_C))).toBe(false);
+    expect(result).toMatchObject({
+      total: 3,
+      savedCount: 1,
+      failures: [],
+      stopped: 'archive-full',
+    });
+    expect(urls().some((url) => url.includes(ID_B))).toBe(false);
+    const archive = new Uint8Array(await new Blob(parts).arrayBuffer());
+    expect(archive).toHaveLength(30 + 9 + 20 + 46 + 9 + 22);
+    expect((await readArchive(archive)).map((entry) => entry.name)).toEqual(['alpha.txt']);
   });
 
-  it('leaves the resume point on the rate-limited row even when an earlier one failed', async () => {
-    // The shape nobody covered, and the one where the arithmetic could go wrong
-    // in the other direction: a NON-transient failure earlier in the run, so
-    // `failures` is not empty when the 429 arrives. `savedCount + failures.length`
-    // must still land exactly on the rate-limited row.
+  it.each([
+    ['a write', { failWrite: 3 }, 'There is not enough space on the disk.'],
+    ['the save', { failCommit: true }, 'The file could not be saved.'],
+  ] as const)(
+    'drops the archive, gives its names back, and counts nothing saved when %s fails',
+    async (_case, failure, detail) => {
+      const built = await threeDocuments();
+      refuseSegment(ID_C, 0, { status: 404, message: 'The stored file is no longer available.' });
+      const allocator = new ArchivePathAllocator([]);
+      const { target, calls } = recordingTarget(failure);
+
+      const result = await archiveDocuments(
+        built.map((b) => candidate(b)),
+        target,
+        options({ allocator }),
+      );
+
+      expect(result).toEqual({
+        total: 3,
+        savedCount: 0,
+        failures: [],
+        stopped: 'save-failed',
+        stoppedDetail: detail,
+        archive: null,
+      });
+      expect(calls[calls.length - 1]).toBe('discard');
+      // The names this archive had taken are free again for a retry.
+      expect(allocator.place('alpha.txt', undefined).path).toBe('alpha.txt');
+    },
+  );
+
+  it('keeps the names of a saved archive when a later archive of the run is thrown away', async () => {
     const built = await threeDocuments();
-    refuseSegment(ID_B, 0, { status: 404, message: 'The stored file is no longer available.' });
-    refuseSegment(ID_C, 0, { status: 429, message: 'Too many document read requests' });
+    const allocator = new ArchivePathAllocator([]);
+    await archiveDocuments([candidate(built[0]!)], await downloadTarget(), options({ allocator }));
 
-    const result = await saveAllDocuments(built.map(candidate));
+    const second = await archiveDocuments(
+      [candidate(built[1]!)],
+      recordingTarget({ failWrite: 1 }).target,
+      options({ allocator }),
+    );
 
-    // A saved, B failed for good, C rate-limited and therefore unreached.
-    expect(result).toMatchObject({ total: 3, savedCount: 1, stopped: 'rate-limited' });
-    expect(result.failures).toHaveLength(1);
-    expect(result.failures[0]).toMatchObject({ id: ID_B, name: 'beta.txt' });
-    expect(result.savedCount + result.failures.length).toBe(2);
-    expect(result.stoppedDetail).toMatch(/Too many attempts/);
+    expect(second.stopped).toBe('save-failed');
+    // alpha.txt went out in the saved archive and stays taken for the rest of the
+    // run; beta.txt, from the archive that was dropped, is free again.
+    expect(allocator.place('alpha.txt', undefined).path).toBe('alpha (2).txt');
+    expect(allocator.place('beta.txt', undefined).path).toBe('beta.txt');
+  });
+
+  it('saves no archive at all when nothing verified, and still names every refusal', async () => {
+    const built = await threeDocuments();
+    for (const id of [ID_A, ID_B, ID_C]) {
+      refuseSegment(id, 0, { status: 404, message: 'The stored file is no longer available.' });
+    }
+    const { target, calls } = recordingTarget();
+    const finishing = vi.fn();
+
+    const result = await archiveDocuments(
+      built.map((b) => candidate(b)),
+      target,
+      options({ onFinishing: finishing }),
+    );
+
+    expect(result).toMatchObject({ total: 3, savedCount: 0, stopped: 'complete', archive: null });
+    expect(result.failures.map((failure) => failure.id)).toEqual([ID_A, ID_B, ID_C]);
+    expect(calls).toEqual(['discard']);
+    expect(finishing).not.toHaveBeenCalled();
+  });
+
+  it('reports an empty list as a finished run that saved nothing and asked for nothing', async () => {
+    const { target, calls } = recordingTarget();
+
+    const result = await archiveDocuments([], target, options());
+
+    expect(result).toEqual({
+      total: 0,
+      savedCount: 0,
+      failures: [],
+      stopped: 'complete',
+      archive: null,
+    });
+    expect(requests).toEqual([]);
+    expect(calls).toEqual(['discard']);
+  });
+
+  it('reports each document before it is read, and the finishing once before the save', async () => {
+    const built = await threeDocuments();
+    const seen: string[] = [];
+    const { target, calls } = recordingTarget();
+
+    await archiveDocuments(
+      built.map((b) => candidate(b)),
+      target,
+      options({
+        onProgress: (progress) => {
+          seen.push(
+            `${String(progress.index)}/${String(progress.total)} ${progress.name} after ${String(requests.length)}`,
+          );
+        },
+        onFinishing: () => {
+          seen.push(`finishing after ${String(calls.length)} writes`);
+        },
+      }),
+    );
+
+    expect(seen).toEqual([
+      '1/3 alpha.txt after 0',
+      '2/3 beta.txt after 3',
+      '3/3 gamma.txt after 5',
+      // Header plus one chunk per segment, per document: 4 + 3 + 2.
+      'finishing after 9 writes',
+    ]);
+    expect(calls.slice(-2)).toEqual(['write', 'commit']);
   });
 
   it.each([
     ['complete', 3],
-    ['cancelled', 1],
-    ['rate-limited', 1],
+    ['stopped', 1],
     ['vault-locked', 1],
+    ['rate-limited', 1],
+    ['archive-full', 1],
+    ['save-failed', 0],
   ] as const)(
-    'consumes exactly savedCount + failures.length rows when it stops as %s',
-    async (stopped, expectedConsumed) => {
-      // THE cross-module identity, stated once. `DocumentBulkDownload.tsx`
-      // computes its resume point as `targets.slice(savedCount + failures.length)`
-      // and nothing said that number is the count of rows the loop actually
-      // consumed. It is what makes Continue resume from the right place on every
-      // one of the four ways a run can end, and it is one line of arithmetic away
-      // from being wrong — which is exactly what a rate limit made it.
+    'consumes exactly savedCount + failures.length rows when it ends as %s',
+    async (stopped, consumed) => {
+      // THE identity the panel's Continue depends on: it resumes at
+      // `targets.slice(savedCount + failures.length)`.
       const built = await threeDocuments();
       const controller = new AbortController();
-
-      if (stopped === 'cancelled') {
+      let target = await downloadTarget();
+      if (stopped === 'stopped') {
         onRequest = (request) => {
-          if (request.url === `/documents/${ID_B}`) controller.abort();
+          if (request.url === `/documents/${ID_B}/segments/0`) controller.abort();
         };
-      }
-      if (stopped === 'rate-limited') {
-        refuseSegment(ID_B, 0, { status: 429, message: 'Too many document read requests' });
       }
       if (stopped === 'vault-locked') {
         onRequest = (request) => {
-          if (request.url === `/documents/${ID_A}/segments/0`) {
+          if (request.url === `/documents/${ID_B}/segments/0`)
             useAuthStore.setState({ vaultKey: null });
-          }
         };
       }
+      if (stopped === 'rate-limited')
+        refuseSegment(ID_B, 0, { status: 429, message: 'Too many requests' });
+      if (stopped === 'archive-full')
+        target = recordingTarget({ limitBytes: 30 + 9 + 20 + 46 + 9 + 22 }).target;
+      if (stopped === 'save-failed') target = recordingTarget({ failWrite: 3 }).target;
 
-      const result = await saveAllDocuments(built.map(candidate), {
-        signal: controller.signal,
-      });
+      const result = await archiveDocuments(
+        built.map((b) => candidate(b)),
+        target,
+        options({ signal: controller.signal }),
+      );
 
       expect(result.stopped).toBe(stopped);
-      expect(result.savedCount + result.failures.length).toBe(expectedConsumed);
-      // And the row the resume point lands on is never one that was saved: the
-      // documents behind it are exactly the ones already dealt with.
-      expect(savedFiles).toHaveLength(result.savedCount);
+      expect(result.savedCount + result.failures.length).toBe(consumed);
     },
   );
-
-  it('stops when the vault locks, rather than blaming every remaining document', async () => {
-    const built = await threeDocuments();
-    // The lock lands while the first document is being read. It already holds the
-    // key it started with, so it finishes; the second never starts.
-    onRequest = (request) => {
-      if (request.url === `/documents/${ID_A}/segments/0`) {
-        useAuthStore.setState({ vaultKey: null });
-      }
-    };
-
-    const result = await saveAllDocuments(built.map(candidate));
-
-    expect(result).toMatchObject({ total: 3, savedCount: 1, stopped: 'vault-locked' });
-    // Without the guard, `requireVaultKey` would have thrown a plain `Error` for
-    // the second document and the third, and the summary would have listed two
-    // documents as broken when nothing was wrong with either.
-    expect(result.failures).toEqual([]);
-    expect(urls().some((url) => url.includes(ID_B))).toBe(false);
-  });
-
-  it('reports the progress of each document before it is read', async () => {
-    const built = await threeDocuments();
-    const seen: { index: number; total: number; name: string; requests: number }[] = [];
-
-    await saveAllDocuments(built.map(candidate), {
-      onProgress: (progress) => {
-        seen.push({ ...progress, requests: requests.length });
-      },
-    });
-
-    // `requests` is the count taken AT the callback, so each line also says the
-    // report arrived BEFORE its document was read: nothing had been asked for
-    // when the first fired, and alpha's four requests (a row and three segments)
-    // had all landed when the second did.
-    expect(seen).toEqual([
-      { index: 1, total: 3, name: 'alpha.txt', requests: 0 },
-      { index: 2, total: 3, name: 'beta.txt', requests: 4 },
-      { index: 3, total: 3, name: 'gamma.txt', requests: 7 },
-    ]);
-  });
-
-  it('reports an empty list as a finished run rather than asking the server anything', async () => {
-    const result = await saveAllDocuments([]);
-
-    expect(result).toEqual({ total: 0, savedCount: 0, failures: [], stopped: 'complete' });
-    expect(requests).toEqual([]);
-  });
 });

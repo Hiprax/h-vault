@@ -57,7 +57,7 @@ import {
   readDocumentPlaintext,
   saveDocument,
 } from '../../services/documents/download';
-import { UNOPENABLE_DOCUMENT_NAME } from '../../services/documents/downloadAll';
+import { UNOPENABLE_DOCUMENT_NAME } from '../../services/documents/documentNames';
 import {
   ORIGINAL_NAME_NOT_RECORDED,
   documentMetaRefusal,
@@ -73,7 +73,7 @@ import { DocumentDetailsFields, type DocumentDetailsValues } from './DocumentDet
 // {@link UNOPENABLE_DOCUMENT_NAME} belongs to this group and is imported rather
 // than declared, because it is shared with `DocumentList` and with the bulk
 // export's failure summary. Its definition, and the reason all three must agree,
-// are in `services/documents/downloadAll.ts`.
+// are in `services/documents/documentNames.ts`.
 
 /**
  * The id of {@link UndecodableDocumentNotice}'s body, so the unavailable Edit

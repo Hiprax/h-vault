@@ -1,11 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Download, Loader2, X } from 'lucide-react';
+import { Download, Loader2, Square } from 'lucide-react';
+import { useBeforeUnloadWarning } from '../../hooks/useBeforeUnloadWarning';
+import { ArchivePathAllocator } from '../../services/documents/archiveNames';
+import { archiveFileName, openArchiveTarget } from '../../services/documents/archiveTarget';
 import {
-  saveAllDocuments,
+  archiveDocuments,
   type BulkDownloadCandidate,
-  type DocumentDownloadAllResult,
+  type DocumentArchiveResult,
   type DocumentDownloadStop,
 } from '../../services/documents/downloadAll';
+import { getApiErrorMessage } from '../../lib/utils';
+import { useVaultStore } from '../../stores/vaultStore';
 import {
   Dialog,
   DialogContent,
@@ -16,122 +21,162 @@ import {
 } from '../ui/Dialog';
 
 /**
- * The one control that takes a whole document library out of this instance, and
- * the report of what happened to it.
+ * The one control that takes a whole document library out of this instance, as
+ * ONE ZIP archive, and the report of what happened to it.
  *
  * A document is the only thing in this vault the encrypted backup does not
  * carry, so before this existed the only way out was one download at a time. The
  * work itself is `services/documents/downloadAll.ts`; this is its surface.
  *
- * ## Four things about it are load-bearing
+ * ## Five things about it are load-bearing
  *
+ *   * **The save dialog opens on the click itself.** `openArchiveTarget` is
+ *     called synchronously from the Start (or Continue) click, before any await,
+ *     because the browser opens `showSaveFilePicker` only on a click's transient
+ *     activation. The run's controller exists from that same click, so a page
+ *     left while the dialog is still open aborts it, and the target it then
+ *     resolves to is dropped unused.
  *   * **The live region is mounted unconditionally** and only its CONTENT
- *     changes, exactly as `AppLayout`'s offline-cache notice is. A `role="status"`
- *     region inserted into the document already holding its message is
- *     frequently never announced at all: the special handling that survives that
- *     shape is defined for `role="alert"`, which is the wrong politeness for a
- *     progress line. So the region is here from the panel's first render and
- *     empty (`sr-only`, occupying no layout) until there is something to say.
- *   * **What it says is COARSE, and the per-document line is outside it.** The
- *     region carries one sentence when a run starts and one when it ends. A
- *     region announcing every document would queue five thousand polite
- *     announcements on an account holding five thousand documents, which is not
- *     a progress report — it is a denial of service delivered politely. The
- *     document being read is a plain paragraph beside the bar, and the bar's
- *     `aria-valuetext` carries the count for anyone who asks for it.
- *   * **The failure list is outside the region too**, for the same reason: it is
- *     read on demand, not announced over the sentence that says how the run
- *     ended.
- *   * **Unmounting ends the run.** A bulk export is page-scoped exactly as a
- *     single download is — the state lives here rather than in `documentsStore`,
- *     which is where an UPLOAD lives precisely because an upload must survive
- *     navigation. Navigating away, or locking the vault (which swaps this whole
- *     route out), ends it rather than letting it decrypt on into a closed vault.
+ *     changes, exactly as `AppLayout`'s offline-cache notice is: a `role="status"`
+ *     region inserted already holding its message is frequently never announced.
+ *   * **What it says is COARSE**: one sentence when a run starts and one when it
+ *     ends. The document being read is a plain paragraph beside the bar, and the
+ *     bar's `aria-valuetext` carries the count; the failure list is outside the
+ *     region too, read on demand rather than announced.
+ *   * **Leaving ends the run, and keeps what is verified.** Unmounting (navigating
+ *     away, or a lock, which swaps this route out) aborts the run, and the
+ *     service finishes and saves the archive with the documents already in it,
+ *     as the separate files of the earlier design stayed saved. While a run is
+ *     active, closing the tab asks first.
+ *   * **A continuation is one more archive, never a reopened one.** Continue
+ *     starts a new archive for the rows the last one did not settle, with the
+ *     same path allocator, so every archive of one run extracts into one folder
+ *     without a name colliding.
  */
 
 interface DocumentBulkDownloadProps {
   /**
-   * The rows to save: whatever the list below is showing.
+   * The rows to archive: whatever the list below is showing.
    *
    * Deliberately what is LISTED rather than "every document that exists". The
    * panel sits above a list, so a reader's expectation is set by the rows they
    * can see — and it makes the folder, favorites, trash and search filters part
-   * of the export without a second control to explain. It is also the only way
-   * to break an export too large for one run into pieces.
+   * of the export without a second control to explain.
    */
   documents: readonly BulkDownloadCandidate[];
   /**
-   * Rows the current view's fetch dropped for not matching the expected shape.
-   *
-   * Named here rather than left to the page's own banner, because this panel is
-   * the one place that makes a claim about completeness: "the 12 document(s)
-   * listed below" counts what survived validation, and a reader deciding whether
-   * they have everything needs to know that a number was subtracted.
+   * Rows the current view's fetch dropped for not matching the expected shape,
+   * named here because this panel is the one place that makes a claim about
+   * completeness.
    */
   invalidCount: number;
   /**
    * `documents` is the rows the reader SELECTED rather than the whole list, so
-   * the panel says so and its button reads "Download selected". Ticking three
-   * rows and then being offered everything listed would be the wrong export.
+   * the panel says so and its button reads "Download selected".
    */
   selected?: boolean;
+}
+
+/** Everything one run has done, across every archive its continuations added. */
+interface RunSummary {
+  total: number;
+  savedCount: number;
+  failures: DocumentArchiveResult['failures'];
+  stopped: DocumentDownloadStop;
+  stoppedDetail?: string;
+  /** Every archive the run has saved, in order. */
+  archives: NonNullable<DocumentArchiveResult['archive']>[];
+  /** Whether the latest archive was saved, which decides how a further leg is offered. */
+  latestSaved: boolean;
+  /** The run's path allocator, which every continuation reuses. */
+  allocator: ArchivePathAllocator;
 }
 
 /** Where the panel is. */
 type RunState =
   | { kind: 'idle' }
-  | { kind: 'running'; total: number; completed: number; current: string }
+  | { kind: 'running'; total: number; completed: number; current: string; finishing: boolean }
   | {
       kind: 'done';
-      result: DocumentDownloadAllResult;
-      /** What a run that stopped early never reached, so it can be resumed. */
+      summary: RunSummary;
+      /** What the run has not settled yet, so it can be continued. */
       remaining: readonly BulkDownloadCandidate[];
     };
 
 /**
- * How each ending introduces itself.
- *
- * A lookup rather than a chain of ternaries: the type makes it exhaustive, so a
- * fifth way for a run to stop is a compile error here instead of a summary that
- * silently reads as though the export had finished.
+ * How each ending introduces itself. A lookup rather than a chain of ternaries,
+ * so a new way for a run to stop is a compile error here instead of a summary
+ * that silently reads as though the export had finished.
  */
 const STOP_LEAD: Record<DocumentDownloadStop, string> = {
   complete: '',
-  cancelled: 'Download cancelled. ',
+  stopped: 'Stopped. ',
+  'vault-locked': 'The vault locked, so the archive was finished early. ',
   'rate-limited':
-    'The server limited how quickly documents could be read, so the download stopped. ',
-  'vault-locked': 'The vault locked, so the download stopped. ',
+    'The server limited how quickly documents could be read, so the archive was finished early. ',
+  'archive-full': 'The archive reached its size limit. ',
+  'save-failed': 'Your browser could not save the archive. ',
 };
 
 /**
- * The one sentence that says how a finished run ended.
- *
- * It says "sent to your browser's downloads", never "saved", and the distinction
- * is the honest one: a bulk save hands each file to the browser through an
- * anchor and an object URL, which reports nothing back — Chromium in particular
- * queues or refuses the second and later downloads of a single action until the
- * reader allows them, and no API tells a page that it did. What this code can
- * observe is that the document was fetched, every segment authenticated and the
- * whole-file digest matched. Where the file landed is between the reader and
- * their browser, so the note below the summary points them at the one thing that
- * is authoritative — the same rule the empty-trash toast on this page follows.
+ * How a leg that archived NOTHING introduces itself. The usual lead would say an
+ * archive was finished early, which reads as false when this leg's archive was
+ * never begun; "nothing more" stays true after earlier legs saved archives too.
  */
-function summarize(result: DocumentDownloadAllResult): string {
-  // Not a field on the result. It is exactly `total - saved - failed`, and a
-  // second field carrying a fact already on the object is a second field that
-  // can disagree with it.
-  const notReached = result.total - result.savedCount - result.failures.length;
-  const sent = `${String(result.savedCount)} of ${String(result.total)} document(s) verified and sent to your browser's downloads.`;
+const NOTHING_ARCHIVED_LEAD: Record<DocumentDownloadStop, string> = {
+  complete: '',
+  stopped: 'Stopped. ',
+  'vault-locked': 'The vault locked, so nothing more was archived. ',
+  'rate-limited':
+    'The server limited how quickly documents could be read, so nothing more was archived. ',
+  'archive-full': 'The archive reached its size limit. ',
+  'save-failed': 'Your browser could not save the archive. ',
+};
+
+/** The one sentence that says how a finished run ended. */
+function summarize(summary: RunSummary): string {
+  // Not a field. It is exactly `total - saved - failed`, and a second field
+  // carrying a fact already on the object is a second field that can disagree.
+  const notReached = summary.total - summary.savedCount - summary.failures.length;
+  const names = summary.archives.map((archive) => archive.name).join(', ');
+  const [first] = summary.archives;
+  const saved =
+    first === undefined
+      ? 'Nothing was saved.'
+      : `${String(summary.savedCount)} of ${String(summary.total)} document(s) verified and ${
+          first.kind === 'file'
+            ? `saved as ${names}`
+            : `handed to your browser's downloads as ${names}`
+        }.`;
   const refused =
-    result.failures.length === 0 ? '' : ` ${String(result.failures.length)} could not be saved.`;
+    summary.failures.length === 0 ? '' : ` ${String(summary.failures.length)} could not be saved.`;
   const missed = notReached === 0 ? '' : ` ${String(notReached)} not reached.`;
-  // What the STOP itself had to say, when it had anything. Only a rate limit does
-  // today, and it is the wait quoted from `Retry-After` — the one actionable part
-  // of that answer. It used to reach the reader as the offending document's
-  // failure line; that is what took the document out of the resume, so the
-  // sentence moved onto the result and is appended here instead.
-  const detail = result.stoppedDetail === undefined ? '' : ` ${result.stoppedDetail}`;
-  return `${STOP_LEAD[result.stopped]}${sent}${refused}${missed}${detail}`;
+  const detail = summary.stoppedDetail === undefined ? '' : ` ${summary.stoppedDetail}`;
+  const lead = summary.latestSaved
+    ? STOP_LEAD[summary.stopped]
+    : NOTHING_ARCHIVED_LEAD[summary.stopped];
+  return `${lead}${saved}${refused}${missed}${detail}`;
+}
+
+/** One leg's result folded into the run so far. */
+function merge(
+  carried: RunSummary | null,
+  result: DocumentArchiveResult,
+  allocator: ArchivePathAllocator,
+): RunSummary {
+  return {
+    total: carried === null ? result.total : carried.total,
+    savedCount: (carried?.savedCount ?? 0) + result.savedCount,
+    failures: [...(carried?.failures ?? []), ...result.failures],
+    stopped: result.stopped,
+    // THIS leg's detail, never a carried one: it describes how the leg in front
+    // of the reader ended. Spread, because `exactOptionalPropertyTypes`
+    // distinguishes an absent key from an explicit `undefined`.
+    ...(result.stoppedDetail === undefined ? {} : { stoppedDetail: result.stoppedDetail }),
+    archives: [...(carried?.archives ?? []), ...(result.archive === null ? [] : [result.archive])],
+    latestSaved: result.archive !== null,
+    allocator,
+  };
 }
 
 export function DocumentBulkDownload({
@@ -142,15 +187,13 @@ export function DocumentBulkDownload({
   const [confirming, setConfirming] = useState(false);
   const [run, setRun] = useState<RunState>({ kind: 'idle' });
   const controllerRef = useRef<AbortController | null>(null);
+  // Set from the click that starts a leg until that leg has settled, so a second
+  // click (a double press, or Continue pressed again) cannot start a second one.
+  const busyRef = useRef(false);
 
   /**
-   * End the run, wherever the end came from.
-   *
-   * ONE function for the Cancel button and for unmounting, rather than two
-   * copies of the same optional call: the button can only be pressed while a
-   * controller exists and an unmount can happen before one ever does, so a
-   * single definition is the only arrangement in which both halves of that
-   * optional chain are ever exercised.
+   * End the run, wherever the end came from: the Stop button, or unmounting.
+   * The service then finishes the archive with what it holds.
    */
   const abortRun = useCallback(() => {
     controllerRef.current?.abort();
@@ -158,64 +201,86 @@ export function DocumentBulkDownload({
 
   useEffect(() => abortRun, [abortRun]);
 
+  useBeforeUnloadWarning(run.kind === 'running');
+
   /**
-   * Run over `targets`, adding to `carried` when this is a continuation.
-   *
-   * The counts a continuation reports are the counts of the WHOLE export, not of
-   * the leg: a reader who resumed after a rate limit wants to know how much of
-   * their library is out, and "3 of 4" from a second leg over four documents
-   * would tell them nothing about the ninety before it.
+   * Start one leg over `targets`, adding to `carried` when this is a
+   * continuation. Called from a click, and everything up to `openArchiveTarget`
+   * is synchronous on purpose (see this module's header).
    */
   const begin = useCallback(
-    (targets: readonly BulkDownloadCandidate[], carried: DocumentDownloadAllResult | null) => {
+    (targets: readonly BulkDownloadCandidate[], carried: RunSummary | null) => {
+      if (busyRef.current) return;
+      busyRef.current = true;
       setConfirming(false);
       const controller = new AbortController();
       controllerRef.current = controller;
+      // A fresh run names its paths against the folders as they are now; a
+      // continuation keeps the run's allocator, so its names never collide.
+      const allocator =
+        carried?.allocator ?? new ArchivePathAllocator(useVaultStore.getState().folders);
       const total = carried === null ? targets.length : carried.total;
       const already = carried === null ? 0 : carried.savedCount + carried.failures.length;
-      // `current` is empty for no rendered frame: `saveAllDocuments` reports its
-      // first document before it reaches its first await, so both writes land in
-      // this click's own tick and React commits the second of them.
-      setRun({ kind: 'running', total, completed: already, current: '' });
+      const part = (carried?.archives.length ?? 0) + 1;
 
-      void saveAllDocuments(targets, {
-        signal: controller.signal,
-        onProgress: (progress) => {
-          setRun({
-            kind: 'running',
-            total,
-            // The document being read is not yet saved, so the bar shows the
-            // ones behind it. A bar that filled on the way in would read 100 %
-            // while the last document was still being decrypted.
-            completed: already + progress.index - 1,
-            current: progress.name,
-          });
-        },
-      }).then((result) => {
-        const merged: DocumentDownloadAllResult =
-          carried === null
-            ? result
-            : {
-                total,
-                savedCount: carried.savedCount + result.savedCount,
-                failures: [...carried.failures, ...result.failures],
-                stopped: result.stopped,
-                // THIS leg's detail, never the carried one: it describes how the
-                // run in front of the reader ended. Dropping it would make a
-                // second rate limit silently quieter than the first, which is
-                // the leg where the wait matters most. Spread rather than
-                // assigned, because `exactOptionalPropertyTypes` distinguishes an
-                // absent key from an explicit `undefined`.
-                ...(result.stoppedDetail === undefined
-                  ? {}
-                  : { stoppedDetail: result.stoppedDetail }),
-              };
+      const settle = (result: DocumentArchiveResult): void => {
+        busyRef.current = false;
         setRun({
           kind: 'done',
-          result: merged,
+          summary: merge(carried, result, allocator),
           remaining: targets.slice(result.savedCount + result.failures.length),
         });
-      });
+      };
+
+      void openArchiveTarget(archiveFileName(new Date(), part)).then(
+        async (target) => {
+          if (target === null) {
+            // The save dialog was dismissed: nothing started, nothing changes.
+            busyRef.current = false;
+            return;
+          }
+          if (controller.signal.aborted) {
+            // The page was left while the dialog was open. The guard is not
+            // reset: this panel is gone, and nothing will read it again.
+            await target.discard();
+            return;
+          }
+          setRun({ kind: 'running', total, completed: already, current: '', finishing: false });
+          settle(
+            await archiveDocuments(targets, target, {
+              signal: controller.signal,
+              allocator,
+              onProgress: (progress) => {
+                setRun({
+                  kind: 'running',
+                  total,
+                  // The document being read is not yet archived, so the bar
+                  // shows the ones behind it.
+                  completed: already + progress.index - 1,
+                  current: progress.name,
+                  finishing: false,
+                });
+              },
+              onFinishing: () => {
+                setRun((state) =>
+                  state.kind === 'running' ? { ...state, finishing: true } : state,
+                );
+              },
+            }),
+          );
+        },
+        (error: unknown) => {
+          // The browser refused the dialog or the file: no archive was begun.
+          settle({
+            total: targets.length,
+            savedCount: 0,
+            failures: [],
+            stopped: 'save-failed',
+            stoppedDetail: getApiErrorMessage(error, 'The save dialog could not be opened.'),
+            archive: null,
+          });
+        },
+      );
     },
     [],
   );
@@ -234,8 +299,8 @@ export function DocumentBulkDownload({
     run.kind === 'idle'
       ? ''
       : run.kind === 'running'
-        ? `Downloading ${String(run.total)} document(s). This page must stay open.`
-        : summarize(run.result);
+        ? `Archiving ${String(run.total)} document(s). Keep this page open: Stop, or leaving it, saves the documents already verified.`
+        : summarize(run.summary);
 
   // Nothing to offer and nothing to report. The panel disappears rather than
   // explaining a button it is not showing.
@@ -258,8 +323,8 @@ export function DocumentBulkDownload({
           <p className="text-xs text-[hsl(var(--muted-foreground))]">
             Documents are deliberately not part of the encrypted backup, so this is how a copy of
             them leaves the server. Saves the {documents.length}{' '}
-            {selected ? 'selected document(s)' : 'document(s) listed below'} to this device, one at
-            a time.
+            {selected ? 'selected document(s)' : 'document(s) listed below'} to this device as one
+            ZIP archive.
             {!selected &&
               invalidCount > 0 &&
               ` ${String(invalidCount)} row(s) in this view could not be read at all and are not included.`}
@@ -270,10 +335,11 @@ export function DocumentBulkDownload({
           <button
             type="button"
             onClick={abortRun}
-            className="inline-flex shrink-0 items-center gap-2 rounded-md border border-[hsl(var(--border))] px-3 py-2 text-sm font-medium text-[hsl(var(--foreground))] transition-colors hover:bg-[hsl(var(--accent))]"
+            disabled={run.finishing}
+            className="inline-flex shrink-0 items-center gap-2 rounded-md border border-[hsl(var(--border))] px-3 py-2 text-sm font-medium text-[hsl(var(--foreground))] transition-colors hover:bg-[hsl(var(--accent))] disabled:opacity-50"
           >
-            <X className="h-4 w-4" />
-            Cancel
+            <Square className="h-4 w-4" />
+            Stop
           </button>
         ) : run.kind === 'done' ? (
           <div className="flex shrink-0 items-center gap-2">
@@ -281,12 +347,12 @@ export function DocumentBulkDownload({
               <button
                 type="button"
                 onClick={() => {
-                  begin(run.remaining, run.result);
+                  begin(run.remaining, run.summary);
                 }}
                 className="inline-flex items-center gap-2 rounded-md bg-[hsl(var(--primary))] px-3 py-2 text-sm font-medium text-[hsl(var(--primary-foreground))] transition-opacity hover:opacity-90"
               >
                 <Download className="h-4 w-4" />
-                Continue
+                {run.summary.latestSaved ? 'Continue in a new archive' : 'Try again'}
               </button>
             )}
             <button
@@ -342,25 +408,26 @@ export function DocumentBulkDownload({
             className="flex items-center gap-2 text-xs text-[hsl(var(--muted-foreground))]"
           >
             <Loader2 className="h-3 w-3 shrink-0 animate-spin" />
-            Reading {run.completed + 1} of {run.total}: {run.current}
+            {run.finishing
+              ? 'Finishing the archive…'
+              : `Reading ${String(run.completed + 1)} of ${String(run.total)}: ${run.current}`}
           </p>
         </>
       )}
 
-      {run.kind === 'done' && run.result.savedCount > 0 && (
+      {run.kind === 'done' && run.summary.archives[0]?.kind === 'download' && (
         <p className="text-xs text-[hsl(var(--muted-foreground))]">
-          Your browser decides where these files land, and can refuse several downloads from one
-          action. If they stopped appearing, check its downloads list and allow them, then use
-          Continue or run this again.
+          Your browser saves the archive wherever it normally saves downloads; its downloads list
+          shows where it went.
         </p>
       )}
 
-      {run.kind === 'done' && run.result.failures.length > 0 && (
+      {run.kind === 'done' && run.summary.failures.length > 0 && (
         <ul
           data-testid="documents-download-all-failures"
           className="space-y-1 text-xs text-[hsl(var(--muted-foreground))]"
         >
-          {run.result.failures.map((failure) => (
+          {run.summary.failures.map((failure) => (
             <li key={failure.id}>
               <span className="font-medium text-[hsl(var(--foreground))]">{failure.name}</span>
               {' — '}
@@ -375,12 +442,15 @@ export function DocumentBulkDownload({
           <DialogHeader>
             <DialogTitle>Download {documents.length} document(s)</DialogTitle>
             <DialogDescription>
-              Each document is decrypted in this browser, checked against the checksum sealed inside
-              it, and handed to your browser as its own file. Nothing is combined into an archive
-              and nothing is sent anywhere. They go one at a time, so a large library takes a while
-              — keep this page open and your vault unlocked until it finishes. Your browser saves
-              them wherever it normally saves downloads, and may first ask permission to download
-              several files at once. Anything that could not be saved is listed at the end, with the
+              They are saved as one ZIP archive. Each document is decrypted in this browser and
+              checked against the checksum sealed inside it before it is added; nothing is
+              compressed and nothing is sent anywhere. Folders become folders in the archive, so
+              their names appear in it; a document whose folder cannot be read, or lies more than 50
+              levels deep, goes at the top level. A large library can reach the server&apos;s read
+              limit or the archive&apos;s size limit: the archive is then saved with what it holds,
+              and Continue saves the rest in another one. Keep this page open and your vault
+              unlocked until it finishes; Stop, a lock or leaving the page saves the documents
+              already verified. Anything that could not be saved is listed at the end, with the
               reason.
             </DialogDescription>
           </DialogHeader>
@@ -410,13 +480,9 @@ export function DocumentBulkDownload({
 }
 
 /**
- * How full the bar is drawn.
- *
- * The denominator is floored at one rather than branched on. A run always has at
- * least one document — the panel offers no button without one — so a zero would
- * be unreachable, and an unreachable ternary is a branch no honest test can
- * cover sitting in front of an `NaN%` width nobody would notice until it was in
- * front of a user. `Math.max` is neither.
+ * How full the bar is drawn. The denominator is floored at one rather than
+ * branched on: a run always has at least one document, so a zero would be
+ * unreachable, and an unreachable ternary is a branch no honest test can cover.
  */
 function percentOf(completed: number, total: number): number {
   return Math.round((completed / Math.max(total, 1)) * 100);

@@ -121,7 +121,11 @@ stack that publishes exactly one loopback port, and a test suite that gates ever
   ever reaches the server in the clear. Source folders/groups are
   carried over as tags — and tags, as always, are stored in plaintext so the server can index
   them, so your source folder names are visible to it. Export is encrypted JSON and requires
-  re-entering your master password.
+  re-entering your master password. The file carries each item's ciphertext, type, tags and favorite
+  flag, each folder's ciphertext, icon, color and order, the folder references, and every row's id
+  (kept because every encrypted field is sealed to it, so an edited id only makes that row refuse
+  to open), and none of the database's own bookkeeping (no account id, version counter or row
+  timestamps).
 - **Portable plaintext export ("Leave H-Vault").** A separate `/settings/export-data` page exports
   your whole vault to another password manager as an **unencrypted plaintext file** — Bitwarden JSON,
   Bitwarden CSV, or Chrome/Edge CSV. It is deliberately kept apart from the encrypted `.enc` export
@@ -222,21 +226,30 @@ the sidebar and nothing to switch off.
   every file. If the engine refuses several files in a row it stops there rather than spending hours
   on a service that is plainly down, reports what it actually attempted, and reloads the trash so
   what you see is what is really still in it. Nothing is destroyed on that path and nothing is lost.
-- **Take them all with you, in one action.** "Download all" on the Documents page saves every
-  document the list is showing — which makes the folder, favorites, trash and search filters part
-  of the export, and is how a library too large for one run is broken into pieces. While documents
-  are selected it becomes "Download selected" and saves just those. They go **one
-  at a time and through exactly the same verified read a single download uses**, so every file is
-  checked against the digest sealed with it before a byte reaches your disk; nothing is combined
-  into an archive, because building one would mean assembling attacker-supplied bytes in the page
-  that holds your unlocked vault key. You get a progress line as it goes, **one failure never
-  stops the rest**, and it ends by naming every document it could not save and why — a missing
-  stored file, a document whose key will not unwrap, a checksum that did not match. If the server's
-  per-user read budget runs out, or your vault auto-locks part way, it says so and offers
-  **Continue**, which resumes from where it stopped rather than downloading everything again —
-  and "where it stopped" includes the document the rate limit interrupted, which is retried rather
-  than listed as a failure, because a rate limit is something the server did to the run and not
-  something wrong with that file. The wait the server asked for is quoted in the summary.
+- **Take them all with you, as one ZIP archive.** "Download all" on the Documents page saves every
+  document the list is showing as **one ZIP file**, which makes the folder, favorites, trash and
+  search filters part of the export. While documents are selected it becomes "Download selected"
+  and archives just those. Each document goes through **the same four integrity checks a single
+  download makes** and is added only after it has matched the digest sealed with it, so the archive
+  never holds a partial or altered file. Your folders become folders in the archive (so their names
+  appear in it; a document whose folder cannot be read, or lies more than 50 levels deep, goes at
+  the top level), names are cleaned of
+  separators, control characters and the names and characters Windows refuses, and made unique,
+  and nothing is compressed: the archive is written by a small stored-only writer in this codebase
+  that copies each verified file as it is and never interprets its contents, in the page that holds
+  your vault key. A very deep folder tree can still exceed Windows' default 260-character path
+  limit, so extract such an archive near the top of a drive. In desktop Chrome and Edge the save
+  dialog opens on your click and the archive is written straight into the file you choose, document
+  by document; other browsers build it in memory and hand it to their downloads, in archives of
+  about 512 MiB (a larger single document gets one of its own). You get a progress line as it goes,
+  **one failure never stops the rest**, and it ends by naming every document it could not save and
+  why: a missing stored file, a document whose key will not unwrap, a checksum that did not match. A
+  short wait from a rate-limiting proxy is sat out; if the server's per-user read budget runs out,
+  the archive reaches its size limit or you press **Stop**, the archive is finished with the
+  documents already verified and **Continue** saves the rest in a new archive (named
+  `…-part-2.zip` and so on), starting with the document that was interrupted, and quoting the wait
+  the server asked for. If the vault locks or you leave the page, the archive is finished the same
+  way; run Download all again, narrowed with a filter or a selection, for the rest.
 - **Rotating your vault key does not re-upload anything.** A rotation rewraps **32 bytes per
   document** instead of rewriting every file, which is the only way rotation stays possible once
   an account holds gigabytes. The request must name every item, folder and document the account
@@ -320,10 +333,12 @@ running storage engine is not a backup are in
 [Back up the database AND the document storage](#back-up-the-database-and-the-document-storage).
 
 That is the operator's answer, and it is not available to somebody who merely _uses_ an instance
-someone else runs. Theirs is **Download all** (or **Download selected**) on the Documents page: plain decrypted files on their
-own device, verified on the way out, owing nothing to the server afterwards. It is not a substitute
+someone else runs. Theirs is **Download all** (or **Download selected**) on the Documents page: one
+ZIP archive of plain decrypted files on their own device, verified on the way out, owing nothing to
+the server afterwards. It is not a substitute
 for the operator's backup — it is a copy of what one account can see at one moment, and it lands
-wherever that browser puts downloads rather than anywhere the account controls — but it does mean
+where that browser puts downloads (or where its save dialog was pointed) rather than anywhere the
+account controls — but it does mean
 no user of a shared deployment is stuck inside it.
 
 ### Experience
@@ -2386,7 +2401,7 @@ image builds and the harnesses, and a fifth only when `trivy` is not on `PATH`:
 | `aquasec/trivy:0.75.0` (digest-pinned)                          | 260 MB  | only when `trivy` is absent from `PATH`                  |
 | `node:24-alpine3.23` (digest-pinned)                            | 235 MB  | the `base` stage every image built here is built through |
 | `dxflrs/garage:v2.3.0` (digest-pinned)                          | 100 MB  | `storage`, `e2e`, `a11y`, `sandbox`, `flake`, `deploy`   |
-| `nginxinc/nginx-unprivileged:1.30.5-alpine3.24` (digest-pinned) | 81 MB   | the `web` stage                                          |
+| `nginxinc/nginx-unprivileged:1.30.6-alpine3.24` (digest-pinned) | 81 MB   | the `web` stage                                          |
 
 Trivy's vulnerability database is a further download on its first scan, into the named
 cache volume the container gate keeps for it. Note what a warm cache does to one number

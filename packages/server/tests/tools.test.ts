@@ -7,6 +7,7 @@ import {
   MAX_IMPORT_ITEMS,
   PASSWORD_HISTORY_MAX,
   HIBP_BATCH_MAX_PREFIXES,
+  deriveRowId,
 } from '@hvault/shared';
 import app from '../src/app.js';
 import { VaultItem } from '../src/models/VaultItem.js';
@@ -1617,6 +1618,61 @@ describe('Tools routes', () => {
       expect(savedRecord['deletedAt']).toBeUndefined();
       // …and the smuggled provenance id was dropped, not persisted verbatim.
       expect(savedRecord['sourceRefId']).toBeUndefined();
+    });
+  });
+
+  // ── Row bookkeeping carried by a file is never trusted ──────────────
+  // An export file is the owner's to edit, and an old one still carries every
+  // database field a row had. Whatever such a file says about a row's id, owner,
+  // timestamps or version, an insert built from it is stored under the id its
+  // nonce derives, for the signed-in account, with the server's own clock and a
+  // fresh version counter.
+
+  describe('POST /api/v1/tools/import - row bookkeeping in the payload is ignored', () => {
+    it('stores an insert under the derived id, for the session account, with server timestamps and a fresh version', async () => {
+      const other = await createTestUser();
+      const idNonce = '66f1c2a0aabbccddeeff00112233445566778899';
+      const smuggledId = '0123456789abcdef01234567';
+      const past = '2001-02-03T04:05:06.000Z';
+      const before = Date.now();
+      const { csrfToken, csrfCookie } = await getCsrf(agent);
+
+      const res = await agent
+        .post('/api/v1/tools/import')
+        .set('Authorization', authHeader(user.accessToken))
+        .set('x-csrf-token', csrfToken)
+        .set('Cookie', csrfCookie)
+        .send({
+          format: 'json',
+          operations: {
+            inserts: [
+              insertRow(1, {
+                encryptedName: 'bookkeeping-test',
+                idNonce,
+                _id: smuggledId,
+                userId: other.id,
+                createdAt: past,
+                updatedAt: past,
+                __v: 99,
+              }),
+            ],
+          },
+        });
+
+      expect(res.status).toBe(201);
+      const derived = await deriveRowId(user.id, idNonce);
+      expect(res.body.data.insertedIds).toEqual([derived]);
+
+      const stored = await VaultItem.findById(derived).lean();
+      expect(stored).not.toBeNull();
+      expect(stored!.userId.toString()).toBe(user.id);
+      expect(stored!.encryptedName).toBe('bookkeeping-test');
+      expect(stored!.__v).toBe(0);
+      expect(stored!.createdAt.getTime()).toBeGreaterThanOrEqual(before);
+      expect(stored!.updatedAt.getTime()).toBeGreaterThanOrEqual(before);
+      // Nothing landed under the smuggled id, and nothing for the other account.
+      expect(await VaultItem.exists({ _id: smuggledId })).toBeNull();
+      expect(await VaultItem.countDocuments({ userId: other.id })).toBe(0);
     });
   });
 

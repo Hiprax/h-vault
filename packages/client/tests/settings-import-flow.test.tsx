@@ -794,6 +794,44 @@ describe('SettingsPage import flow', () => {
     );
   });
 
+  it('leaves the Export panel open when an import finishes after the user switched to it', async () => {
+    // The import's request is held open, so the panel switch lands mid-import.
+    let releaseImport!: () => void;
+    mockImportVaultApi.mockImplementation(
+      (body: { operations: { inserts: Record<string, unknown>[] } }) =>
+        new Promise((resolve) => {
+          releaseImport = () => {
+            resolve(acceptImport({ insertedCount: 1, updatedCount: 0 })(body));
+          };
+        }),
+    );
+    await renderSettings();
+    startFirefoxImport(FIREFOX_CSV, 'skip');
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Import' }));
+    });
+    await waitFor(() => expect(mockImportVaultApi).toHaveBeenCalledTimes(1));
+
+    // Switching panels mid-import closes the import panel and opens Export.
+    fireEvent.click(screen.getByText('Export Vault'));
+    expect(screen.getByText('Important: Export Limitations')).toBeInTheDocument();
+    expect(screen.queryByPlaceholderText('Paste exported data here...')).not.toBeInTheDocument();
+
+    await act(async () => {
+      releaseImport();
+    });
+    const summary = await importSummary();
+    expect(summary?.title).toMatch(/^Imported 1 items/);
+
+    // The import finishing closed only ITS panel: the one the user opened stays.
+    expect(screen.getByText('Important: Export Limitations')).toBeInTheDocument();
+    expect(screen.getByText('Export Vault').closest('button')).toHaveAttribute(
+      'aria-expanded',
+      'true',
+    );
+    expect(screen.queryByPlaceholderText('Paste exported data here...')).not.toBeInTheDocument();
+  });
+
   /**
    * Whether the vault list was read again AFTER the import's summary was raised:
    * the refresh that makes the imported rows appear. Judged by the global call

@@ -20,7 +20,10 @@
  *    for all three of this document's keys, so a response describing a different
  *    document would derive three different keys and fail in a way that reads as
  *    corruption. Comparing the id costs one string comparison and names the real
- *    problem.
+ *    problem. A caller may hand in a row it already holds (the list's, which was
+ *    validated by the same schema and whose metadata opened under keys bound to
+ *    its own id) instead of having it fetched; the comparison then guards that
+ *    caller against pairing one document's id with another's row.
  * 2. **The row's framing agrees with the authenticated copy inside the sealed
  *    metadata.** This is Core Design Rule 5 and it is MANDATORY rather than
  *    advisory: the server holds `chunkPlaintextBytes`, `chunkCount` and
@@ -47,11 +50,12 @@
  *
  * {@link streamDocumentPlaintext} is the implementation and
  * {@link readDocumentPlaintext} is its accumulating specialisation. Every
- * consumer — the save-dialog path, the in-memory path, and later the preview —
- * goes through one of those two, and the second is written in terms of the
- * first. That is deliberate: a second reader that skipped one of the four checks
- * above would be a document rendered from bytes this module would have refused,
- * and the difference would be invisible until it mattered.
+ * consumer — the save-dialog path, the in-memory path, the preview, and the
+ * bulk archive (`downloadAll.ts`, through a sink of its own) — goes through one
+ * of those two, and the second is written in terms of the first. That is
+ * deliberate: a second reader that skipped one of the four checks above would
+ * be a document rendered from bytes this module would have refused, and the
+ * difference would be invisible until it mattered.
  */
 
 import { documentResponseSchema, type DocumentMeta, type DocumentResponse } from '@hvault/shared';
@@ -122,11 +126,21 @@ const UNSAFE_FILENAME_CHARACTERS =
  * traverse anything once the separators are gone.
  */
 export function sanitizeDownloadFilename(name: string): string {
+  const trimmed = stripUnsafeFilenameCharacters(name);
+  return trimmed === '' ? FALLBACK_DOWNLOAD_FILENAME : trimmed;
+}
+
+/**
+ * {@link sanitizeDownloadFilename} without its fallback: the same replacements
+ * and the same trims, answering `''` when nothing is left, so a caller with a
+ * fallback of its own (an archive's folder names) can tell "nothing left" from a
+ * name that really was `document`.
+ */
+export function stripUnsafeFilenameCharacters(name: string): string {
   const replaced = name.replace(UNSAFE_FILENAME_CHARACTERS, '_');
   // `.replace` before `.trim` on the trailing side, because a name of `. . .`
   // must not survive as `. .`.
-  const trimmed = replaced.trim().replace(/[. ]+$/, '');
-  return trimmed === '' ? FALLBACK_DOWNLOAD_FILENAME : trimmed;
+  return replaced.trim().replace(/[. ]+$/, '');
 }
 
 // ---------------------------------------------------------------------------
@@ -202,6 +216,16 @@ export interface ReadDocumentOptions {
    * vault has closed.
    */
   signal?: AbortSignal;
+  /**
+   * The document's row, when the caller already holds it validated (the list's
+   * copy), so the read spends no request on fetching it again.
+   *
+   * Every check below still runs against it. A bulk export passes it for the
+   * reason the request budget gives: `GET /documents/:id` is counted on the
+   * per-account bucket that also admits lock and sign-out, and a library read
+   * one row request at a time keeps that bucket empty for as long as it runs.
+   */
+  row?: DocumentResponse;
 }
 
 /**
@@ -253,6 +277,13 @@ function base64ToBytes(value: string): DocumentBytes {
   return new Uint8Array(cryptoService.base64ToArrayBuffer(value));
 }
 
+/** The row for `documentId`, fetched and checked against the shared schema. */
+async function fetchDocumentRow(documentId: string): Promise<DocumentResponse> {
+  const body = (await getDocumentApi(documentId)).data;
+  if (!body.success) throw new Error('Failed to read the document');
+  return documentResponseSchema.parse(body.data);
+}
+
 /**
  * The three framing values that exist on the row AND inside the sealed metadata.
  *
@@ -290,9 +321,7 @@ export async function streamDocumentPlaintext(
   const vaultKey = requireVaultKey();
   const signal = options.signal ?? NEVER_ABORTED;
 
-  const body = (await getDocumentApi(documentId)).data;
-  if (!body.success) throw new Error('Failed to read the document');
-  const row = documentResponseSchema.parse(body.data);
+  const row = options.row ?? (await fetchDocumentRow(documentId));
   if (row._id !== documentId) {
     throw new DocumentIntegrityError(
       'identity',
@@ -429,7 +458,11 @@ export async function readDocumentPlaintext(
  * feature detection honest without a global augmentation that would claim the
  * method exists everywhere.
  */
-type SaveFilePicker = (options: { suggestedName: string }) => Promise<FileSystemFileHandle>;
+export type SaveFilePicker = (options: {
+  suggestedName: string;
+  startIn?: 'downloads';
+  types?: { description: string; accept: Record<string, string[]> }[];
+}) => Promise<FileSystemFileHandle>;
 
 /**
  * The save-dialog API, or `null` where it does not exist (Firefox, Safari,
@@ -440,7 +473,7 @@ type SaveFilePicker = (options: { suggestedName: string }) => Promise<FileSystem
  * property is absent from the DOM types, so an optional chain would not compile
  * and a `typeof` on an undeclared property would not narrow.
  */
-function getSaveFilePicker(): SaveFilePicker | null {
+export function getSaveFilePicker(): SaveFilePicker | null {
   if ('showSaveFilePicker' in window && typeof window.showSaveFilePicker === 'function') {
     return window.showSaveFilePicker as SaveFilePicker;
   }
@@ -448,7 +481,7 @@ function getSaveFilePicker(): SaveFilePicker | null {
 }
 
 /** Whether a rejection is the user closing the save dialog rather than a fault. */
-function isPickerDismissal(error: unknown): boolean {
+export function isPickerDismissal(error: unknown): boolean {
   return error instanceof Error && error.name === 'AbortError';
 }
 
@@ -464,34 +497,6 @@ function isPickerDismissal(error: unknown): boolean {
 export interface SaveableDocument {
   id: string;
   meta: DocumentMeta;
-}
-
-/** What {@link saveDocument} accepts beyond the options every read shares. */
-export interface SaveDocumentOptions extends ReadDocumentOptions {
-  /**
-   * Whether the save dialog may be used where the browser has one. Defaults to
-   * `true`; only a caller saving SEVERAL documents in one gesture passes
-   * `false`.
-   *
-   * It is a caller's choice rather than a detail of this module because the
-   * constraint that decides it belongs to the caller: `showSaveFilePicker`
-   * requires TRANSIENT ACTIVATION, and transient activation does not survive an
-   * await on the network. A single download opens its dialog on the click's own
-   * activation, before the first request, and is fine. The second document of a
-   * sequential run reaches the dialog after a full read of the first, by which
-   * time the activation is long gone, and the browser refuses with a
-   * `SecurityError` — not the `AbortError` that means "the user closed it", so
-   * it would be reported to that user as a failed download of a document
-   * nothing was wrong with.
-   *
-   * Turning the dialog off costs the streaming write ({@link saveThroughPicker}
-   * keeps memory flat; {@link saveThroughBlob} holds one document at a time) and
-   * buys the two things a bulk run needs: no per-file gesture, and no partial
-   * file anywhere — the blob path writes nothing at all until the digest has
-   * been checked, so a document that fails verification produces no file to
-   * mistake for it rather than an emptied one.
-   */
-  useSaveDialog?: boolean;
 }
 
 /**
@@ -515,11 +520,9 @@ export interface SaveDocumentOptions extends ReadDocumentOptions {
  */
 export async function saveDocument(
   doc: SaveableDocument,
-  options: SaveDocumentOptions = {},
+  options: ReadDocumentOptions = {},
 ): Promise<string> {
-  // `=== false` rather than a falsy test, so an omitted option keeps the dialog:
-  // the single download is the common case and it must not have to opt in.
-  const picker = options.useSaveDialog === false ? null : getSaveFilePicker();
+  const picker = getSaveFilePicker();
   if (picker === null) return saveThroughBlob(doc.id, options);
 
   let handle: FileSystemFileHandle;

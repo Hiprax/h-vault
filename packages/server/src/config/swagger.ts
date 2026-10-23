@@ -4133,7 +4133,7 @@ export const swaggerSpec: JsonObject = {
         operationId: 'exportVault',
         tags: ['Tools'],
         summary: 'Export vault',
-        description: `Exports every live vault item (not the trash) and every folder, still encrypted, as a JSON file attachment (\`Content-Disposition: attachment\`), streamed as it is read from the database (chunked; no \`Content-Length\`), under the same send deadline as the backup download. Refused with 413, before the first byte, when the export would exceed EXPORT_MAX_SIZE_MB. Rate limited: 10 req/user per 15 min + ${PASSWORD_VERIFY_LIMIT}, one budget per account shared by every request that re-checks the master password.${HEAVY_RESPONSE_ADMISSION}`,
+        description: `Exports every live vault item (not the trash) and every folder, still encrypted, as a JSON file attachment (\`Content-Disposition: attachment\`). Rows never carry the account id (\`userId\`) or the version counter (\`__v\`); each keeps its \`_id\`, which every format-v2 field is sealed to. Streamed as it is read from the database (chunked; no \`Content-Length\`), under the same send deadline as the backup download. Refused with 413, before the first byte, when the export would exceed EXPORT_MAX_SIZE_MB. Rate limited: 10 req/user per 15 min + ${PASSWORD_VERIFY_LIMIT}, one budget per account shared by every request that re-checks the master password.${HEAVY_RESPONSE_ADMISSION}`,
         security: [{ bearerAuth: [], csrfToken: [] }],
         requestBody: {
           required: true,
@@ -4384,7 +4384,7 @@ export const swaggerSpec: JsonObject = {
         operationId: 'downloadBackup',
         tags: ['Backup'],
         summary: 'Download backup',
-        description: `Downloads the account's encrypted backup, streamed as it is read from the database (chunked; no \`Content-Length\`). The size is decided before the first byte, so an oversized backup is a whole 413. A client that has not taken the file by an absolute deadline (its estimated size at 128 KiB/s, plus 30 s) is cut off, and a failure after the first byte ends the connection rather than appending an error, so a truncated file is never mistaken for a whole one. The download is recorded (\`backup_download\` with \`completed\`) whether or not it finished. Rate limited: 10 req/user per 15 min.${HEAVY_RESPONSE_ADMISSION}`,
+        description: `Downloads the account's encrypted backup. Its rows never carry the account id (\`userId\`) or the version counter (\`__v\`); each keeps the \`_id\` a restore matches on. Streamed as it is read from the database (chunked; no \`Content-Length\`). The size is decided before the first byte, so an oversized backup is a whole 413. A client that has not taken the file by an absolute deadline (its estimated size at 128 KiB/s, plus 30 s) is cut off, and a failure after the first byte ends the connection rather than appending an error, so a truncated file is never mistaken for a whole one. The download is recorded (\`backup_download\` with \`completed\`) whether or not it finished. Rate limited: 10 req/user per 15 min.${HEAVY_RESPONSE_ADMISSION}`,
         security: [{ bearerAuth: [] }],
         responses: {
           400: errorResponse('Backup encryption has not been set up yet.'),

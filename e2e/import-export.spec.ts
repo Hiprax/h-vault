@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
-import { registerAndSignInViaUI } from './helpers';
+import { readFileSync } from 'node:fs';
+import { createNoteViaUI, registerAndSignInViaUI } from './helpers';
 
 /**
  * End-to-end proof of the zero-knowledge import pipeline: a real browser parses
@@ -367,5 +368,68 @@ test.describe('Vault import — identity, idempotency and safe overwrite', () =>
     expect(wire).not.toContain(OLD_PASSWORD);
     expect(wire).not.toContain(NEW_PASSWORD);
     expect(wire).not.toContain('octocat');
+  });
+});
+
+test.describe('Vault export — the encrypted .enc file (end-to-end)', () => {
+  test('writes no database bookkeeping into the file, and the file imports back into the vault it came from', async ({
+    page,
+  }) => {
+    const { password } = await registerAndSignInViaUI(page);
+    await createNoteViaUI(page, 'Export note one');
+    await createNoteViaUI(page, 'Export note two');
+    await expect(itemNames(page)).toHaveCount(2);
+
+    // ── Export through the UI ───────────────────────────────────────────
+    await page.getByRole('link', { name: 'Settings', exact: true }).click();
+    await expect(page).toHaveURL(/\/settings/);
+    await page.getByRole('button', { name: 'Export Vault' }).click();
+    await page.getByLabel('Confirm Master Password').fill(password);
+    const download = page.waitForEvent('download');
+    await page.getByRole('button', { name: 'I Understand, Export' }).click();
+    const saved = await download;
+    expect(saved.suggestedFilename()).toMatch(/^hvault-export-\d{4}-\d{2}-\d{2}\.enc$/);
+    const fileText = readFileSync(await saved.path(), 'utf8');
+
+    // The file carries each row's id (every field is sealed to it) and nothing
+    // a database added: no owner id, no version counter, no timestamps.
+    const file = JSON.parse(fileText) as { items: Record<string, unknown>[] };
+    expect(file.items).toHaveLength(2);
+    for (const item of file.items) {
+      expect(item._id).toMatch(/^[0-9a-f]{24}$/);
+      for (const key of ['userId', '__v', 'createdAt', 'updatedAt']) {
+        expect(item).not.toHaveProperty(key);
+      }
+    }
+    // Still ciphertext: neither note's name is readable in it.
+    expect(fileText).not.toContain('Export note one');
+    expect(fileText).not.toContain('Export note two');
+
+    // ── Import it back: every row opens with the id the file kept ──────
+    const asPicked = {
+      name: 'hvault-export.enc',
+      mimeType: 'application/json',
+      buffer: Buffer.from(fileText),
+    };
+    await page.getByRole('button', { name: 'Import Vault' }).click();
+    await expect(page.getByPlaceholder(IMPORT_PANEL_PLACEHOLDER)).toBeVisible();
+    await page.locator('input[type="file"]').setInputFiles(asPicked);
+    await selectStrategy(page, 'skip');
+    await runImport(page);
+    // Both rows decrypted and matched the notes they came from. A row whose id
+    // no longer opened it would have been dropped and reported instead.
+    await expectImportToast(page, 'Imported 0 items, 2 duplicates skipped (2 rows)');
+
+    await openImportPanel(page);
+    await page.locator('input[type="file"]').setInputFiles(asPicked);
+    await selectStrategy(page, 'keep_both');
+    await runImport(page);
+    await expect(page.getByText(/^Imported 2 items/)).toBeVisible({ timeout: 20_000 });
+
+    // Re-sealed to new rows and readable there: two copies of each note.
+    await goToVault(page);
+    await expect(itemNames(page)).toHaveCount(4);
+    await expect(itemNames(page).filter({ hasText: 'Export note one' })).toHaveCount(2);
+    await expect(itemNames(page).filter({ hasText: 'Export note two' })).toHaveCount(2);
   });
 });

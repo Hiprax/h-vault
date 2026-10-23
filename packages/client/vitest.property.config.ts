@@ -36,6 +36,8 @@ export const CLIENT_PROPERTY_SUITE = [
   'tests/property/address.property.test.ts',
   'tests/property/text-diff.property.test.ts',
   'tests/property/card-expiry.property.test.ts',
+  'tests/property/documents-zip-archive.property.test.ts',
+  'tests/property/documents-archive-names.property.test.ts',
 ];
 
 /**

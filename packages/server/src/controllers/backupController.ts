@@ -38,6 +38,7 @@ import {
 import { estimateItemJsonSize, estimateFolderJsonSize } from '../utils/sizeEstimator.js';
 import { collectDocumentSummary, type DocumentSummary } from '../utils/documentSummary.js';
 import {
+  EXPORTED_ROW_PROJECTION,
   ROW_CURSOR_BATCH_SIZE,
   closingMembers,
   forEachRow,
@@ -182,13 +183,13 @@ async function countNetNewRestoreRows(
 /** The rows a backup carries: every folder, and every live (untrashed) item. */
 const backupFolderRows = (userId: string) =>
   Folder.find({ userId })
-    .select('-sourceRefId -searchHash')
+    .select(EXPORTED_ROW_PROJECTION)
     .batchSize(ROW_CURSOR_BATCH_SIZE)
     .lean()
     .cursor();
 const backupItemRows = (userId: string) =>
   VaultItem.find({ userId, deletedAt: { $exists: false } })
-    .select('-sourceRefId -searchHash')
+    .select(EXPORTED_ROW_PROJECTION)
     .batchSize(ROW_CURSOR_BATCH_SIZE)
     .lean()
     .cursor();

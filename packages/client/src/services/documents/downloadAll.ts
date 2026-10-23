@@ -1,5 +1,5 @@
 /**
- * Taking every stored document out of the vault, one at a time.
+ * Taking every stored document out of the vault as one ZIP archive.
  *
  * Documents are deliberately absent from the encrypted backup — that file
  * carries a `documentSummary` breadcrumb and not a byte of any document — so the
@@ -7,62 +7,73 @@
  * way a whole document store could leave the server. That is a fine answer for
  * whoever runs the instance and no answer at all for whoever uses one they do
  * not run. This is the user-level half: the same verified read the detail view
- * performs, run over a list.
+ * performs, run over a list, into one archive.
  *
- * ## Why it is a loop and not an archive
+ * ## Why an archive is acceptable here
  *
- * The obvious shape is one ZIP. It is refused on the constraint that governs
- * everything about documents in this application: **no untrusted document byte
- * is ever parsed, or assembled, in the app origin**. A ZIP writer is a format
- * implementation fed entirely by attacker-chosen bytes and names, running in the
- * one origin that holds the unlocked vault key, and it would arrive as a
- * dependency nobody in this project has read. A sequential loop over
- * {@link saveDocument} adds no library, no parser and no format: every document
- * goes through the same four integrity checks, in the same order, as a download
- * of one.
+ * The constraint that governs everything about documents in this application is
+ * that **no untrusted document byte is ever parsed in the app origin**, the one
+ * holding the unlocked vault key. An earlier version refused to build an archive
+ * on that ground, reading a ZIP writer as a format implementation fed
+ * attacker-chosen bytes. A STORED-only writer is not one: `zipArchive.ts` copies
+ * each verified file verbatim, frames it with headers built from numbers it was
+ * handed, and computes a CRC-32, which branches on no byte value, exactly like
+ * the AES-GCM and SHA-256 that already run over the same bytes here. It is a few
+ * hundred lines in this repository, with no dependency, no compressor and no
+ * parser. Names, the one part a document's author controls that becomes
+ * structure, are made safe segment by segment first (`archiveNames.ts`).
  *
  * ## What "honest" means here, precisely
  *
- * Three rules, and each of them is the difference between a summary a user can
- * act on and one they cannot:
+ *   1. **A document enters the archive only after it has verified.** Each read
+ *      runs the four checks in `download.ts`, and its bytes are written only
+ *      once the whole-file digest has matched, so the archive never holds a
+ *      partial or altered file. A document refused at any check is named in the
+ *      summary with its reason, and the run goes on.
+ *   2. **Nothing read after a lock or a sign-out enters the archive.** The run
+ *      records the documents store's mutation generation when it starts, which
+ *      `clearStore()` moves on lock and on sign-out, and re-checks it before each
+ *      document, inside each segment write and after each rate-limit wait: the
+ *      moment it moves, the document in flight is dropped and nothing more is
+ *      read.
+ *   3. **An early end keeps what is verified.** Stop, a lock or sign-out,
+ *      leaving the page, the server's read limit, a full archive: each one
+ *      FINISHES the archive with the documents already in it and saves it, as
+ *      the separate files of the earlier design stayed saved, and the summary
+ *      offers to continue the rest in a new archive. Only a failure of the save
+ *      target itself throws the archive away, since it can no longer be
+ *      finished; nothing in that archive is then counted as saved.
+ *   4. **`savedCount + failures.length` is exactly the rows consumed**, for
+ *      every way a run ends, so a continuation starts at the first row this run
+ *      did not settle. A row interrupted mid-read, or refused by the rate
+ *      limit, is left unconsumed rather than recorded as a failure, because the
+ *      one answer for it is to try it again.
  *
- *   1. **One failure never ends the run.** A document whose object the storage
- *      engine has lost stops that document and nothing else. The alternative —
- *      abandoning the export on the first refusal — is what makes a user of a
- *      shared instance unable to leave it.
- *   2. **Nothing that failed is presented as saved.** The bulk path takes
- *      {@link saveDocument}'s blob branch, which writes nothing anywhere until
- *      the whole-file digest has been compared, so a document that fails
- *      verification produces NO file rather than a truncated one. The count of
- *      saved documents is therefore a count of files that exist and verified.
- *   3. **Every refusal is named, with its own reason.** A summary saying "3
- *      failed" tells a user to try the whole thing again; one naming three
- *      documents and saying which lost its object, which would not open under
- *      this vault key and which the network dropped tells them what to do about
- *      each.
+ * ## The request budget
+ *
+ * The run reads each document with the row the list already holds, so it spends
+ * no request on `GET /documents/:id`, which shares a per-account bucket with lock
+ * and sign-out. Segment reads have a budget of their own; a short `Retry-After`
+ * (a rate-limiting proxy's seconds) is waited out, as every paced bulk action in
+ * this application does, and a long one (the account's own window, up to fifteen
+ * minutes) ends the run as `rate-limited`, quoting the wait.
  */
 
-import type { DocumentMeta } from '@hvault/shared';
+import type { DocumentMeta, DocumentResponse } from '@hvault/shared';
 import { getApiErrorMessage } from '../../lib/utils.js';
 import { useAuthStore } from '../../stores/authStore.js';
-import { describeTransientFailure, isRateLimited } from '../auth/sessionFailure.js';
+import { documentsMutationGeneration } from '../../stores/documentsStore.js';
+import { MAX_BULK_RETRIES, MAX_BULK_RETRY_AFTER_SECONDS } from '../../stores/vaultStore.js';
 import {
-  DocumentDownloadCancelledError,
-  saveDocument,
-  type SaveDocumentOptions,
-} from './download.js';
-
-/**
- * What the list calls a row whose sealed metadata would not open.
- *
- * THE definition, and `components/documents/DocumentList.tsx` reads it from
- * here rather than repeating the words. A failure summary has to name a document
- * exactly as the list beside it does, or the reader cannot tell which of the
- * rows in front of them the reason belongs to — and a degraded row has no other
- * name to be identified by, because the only copy of its name is inside the blob
- * that would not open.
- */
-export const UNOPENABLE_DOCUMENT_NAME = 'Unopenable document';
+  describeTransientFailure,
+  isRateLimited,
+  retryAfterSeconds,
+} from '../auth/sessionFailure.js';
+import type { ArchivePathAllocator } from './archiveNames.js';
+import type { ArchiveTarget } from './archiveTarget.js';
+import { UNOPENABLE_DOCUMENT_NAME } from './documentNames.js';
+import { DocumentDownloadCancelledError, streamDocumentPlaintext } from './download.js';
+import { StoredZipWriter, crc32 } from './zipArchive.js';
 
 /** What a degraded row's summary line says, since no read of it was attempted. */
 const DEGRADED_REASON =
@@ -75,8 +86,11 @@ const PURGE_PENDING_REASON =
 /** The reason used when a rejection carries no message of its own. */
 const UNKNOWN_REASON = 'It could not be downloaded.';
 
+/** The reason used when the save target refused without saying why. */
+const UNKNOWN_SAVE_REASON = 'Your browser could not write the archive.';
+
 /**
- * One row the run was asked to save.
+ * One row the run was asked to archive.
  *
  * A structural minimum rather than `DecryptedDocument`, so this module does not
  * import a store to describe its own input; every field of it is one the store's
@@ -86,6 +100,8 @@ export interface BulkDownloadCandidate {
   id: string;
   /** The opened metadata, or `null` when the row is degraded. */
   meta: DocumentMeta | null;
+  /** The folder the row is filed in, which becomes its directory in the archive. */
+  folderId?: string | undefined;
   /**
    * Whether the row is already claimed for permanent deletion.
    *
@@ -96,15 +112,16 @@ export interface BulkDownloadCandidate {
    * really happening instead of relaying a status code.
    */
   purgePending?: boolean | undefined;
+  /** The validated row as the list received it: the read uses it instead of fetching it. */
+  _raw: DocumentResponse;
 }
 
 /**
- * One document the run could not save, and why.
+ * One document the run could not archive, and why.
  *
  * Not exported, because nothing outside this module names it: a caller reaches
- * it through {@link DocumentDownloadAllResult.failures}, which is exported and
- * carries the shape with it. The dead-code gate is answered by removing an
- * `export` keyword, never by an entry in an ignore list.
+ * it through {@link DocumentArchiveResult.failures}, which is exported and
+ * carries the shape with it.
  */
 interface DocumentDownloadFailure {
   id: string;
@@ -117,111 +134,88 @@ interface DocumentDownloadFailure {
 /**
  * Why a run ended.
  *
- * Four states rather than a `cancelled` boolean, because a run that stopped
- * early has to say WHICH early: "cancelled" is something the reader did and
- * needs no advice, a rate limit is something the server did whose only answer is
- * to wait, and a locked vault is neither — it is the auto-lock timer, which a
- * long run cannot avoid because a loop generates none of the input events that
- * postpone it. Collapsing them would leave the last two reported as the first,
- * which reads as "your export finished" for a library that is mostly still on
- * the server.
+ * `complete` read every row. `stopped` is the reader's own Stop, or the page
+ * going away; `vault-locked` is a lock or sign-out (usually the auto-lock, which
+ * a long run cannot postpone because a loop generates no input); `rate-limited`
+ * is the server asking for a wait too long to sit through; `archive-full` is
+ * this archive reaching its size limit. Each of those still saves the archive.
+ * `save-failed` is the one that does not: the browser refused to write or save
+ * it.
  */
-export type DocumentDownloadStop = 'complete' | 'cancelled' | 'rate-limited' | 'vault-locked';
+export type DocumentDownloadStop =
+  'complete' | 'stopped' | 'vault-locked' | 'rate-limited' | 'archive-full' | 'save-failed';
 
-/**
- * Where a run got to.
- *
- * There is deliberately no "not reached" field. It is `total - savedCount -
- * failures.length` and nothing else, and a second field carrying a fact already
- * on the object is a second field that can disagree with it — the same rule the
- * upload rows apply to their part numbers.
- */
-export interface DocumentDownloadAllResult {
-  /** How many documents the run set out to save. */
+/** Where a run got to. */
+export interface DocumentArchiveResult {
+  /** How many documents the run set out to archive. */
   total: number;
-  /**
-   * How many were decrypted, verified and handed to the browser as a file.
-   *
-   * "Handed to", never "written to disk", and the distinction is real on this
-   * path: the bulk save goes through the anchor-and-object-URL helper, which the
-   * browser answers asynchronously and silently — Chromium in particular will
-   * queue or refuse the second and later downloads of one gesture until the
-   * reader allows them, and no API tells a page that it did. What this number
-   * promises is exactly what this code can observe: the document was fetched,
-   * every segment authenticated, the whole-file digest matched, and the bytes
-   * were handed to the browser as a download. Where they landed is between the
-   * reader and their browser, and the summary says so.
-   */
+  /** How many were decrypted, verified and written into the archive that was saved. */
   savedCount: number;
   /** Every document that was refused, in the order it was reached. */
   failures: DocumentDownloadFailure[];
   /** Why the run ended. */
   stopped: DocumentDownloadStop;
   /**
-   * One sentence about the STOP, when the stop has something to say that
-   * {@link DocumentDownloadStop} does not carry on its own.
-   *
-   * Set only for a rate limit today, and it is not decoration: a 429 can quote a
-   * wait from `Retry-After`, and that is the only actionable part of the answer.
-   * It used to reach the reader as the offending document's failure line, which
-   * is precisely what took that document out of the resume (see the rate-limit
-   * branch below), so the sentence had to move somewhere that survives the row
-   * being retried.
-   *
-   * NOT a restatement of anything already on this object — the "no second field
-   * that can disagree" rule above is about `total - savedCount -
-   * failures.length`, which is derivable. This is what the server said.
+   * One sentence about the STOP, when it has something to say that
+   * {@link DocumentDownloadStop} does not carry: the wait a rate limit quoted
+   * from `Retry-After`, or what the browser said when it refused the archive.
    */
   stoppedDetail?: string;
+  /** The archive that was saved, or `null` when none was (nothing verified, or `save-failed`). */
+  archive: { name: string; kind: ArchiveTarget['kind'] } | null;
 }
 
 /** The document a run is working on, for a progress line. */
 export interface DocumentDownloadProgress {
   /** 1-based position of the document now being read. */
   index: number;
-  /** How many documents the run set out to save. */
+  /** How many documents the run set out to archive. */
   total: number;
   /** What the list calls the document now being read. */
   name: string;
 }
 
-export interface SaveAllDocumentsOptions {
+export interface ArchiveDocumentsOptions {
   /**
-   * Ends the run between documents and cancels the segment request in flight.
-   *
-   * The same page scoping a single download has: a bulk export exists to put
-   * files in front of the person watching it, so navigating away, locking the
-   * vault or pressing Cancel ends it rather than letting it run on.
+   * Ends the run between documents and cancels the segment request in flight;
+   * the archive is then finished with what it holds.
    */
-  signal?: AbortSignal;
+  signal: AbortSignal;
+  /** Names the paths of every archive of one run, across continuations. */
+  allocator: ArchivePathAllocator;
   /** Called once per document, BEFORE it is read, so a reader sees what is next. */
   onProgress?: (progress: DocumentDownloadProgress) => void;
+  /** Called once, when the reading is over and the archive is being finished and saved. */
+  onFinishing?: () => void;
+  /** How a short rate-limit wait is waited out. A seam for tests; the default is a timer. */
+  wait?: (ms: number, signal: AbortSignal) => Promise<void>;
 }
 
 /**
- * Whether the run has been cancelled, read through a CALL.
- *
- * The same two words, and the same reason, as `download.ts`'s own predicate: a
- * bare `signal.aborted` is narrowed by the type checker after the first read in
- * a function, so every later re-check looks redundant to
- * `no-unnecessary-condition` — while the value changes underneath the reader,
- * which is the entire point of re-reading it.
+ * Wait `ms`, or less if `signal` aborts first: a Stop pressed during a
+ * rate-limit wait ends it at once.
  */
-function isAborted(signal: AbortSignal | undefined): boolean {
-  return signal?.aborted === true;
+export function waitAbortably(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const finish = (): void => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, ms);
+    signal.addEventListener('abort', finish, { once: true });
+  });
 }
 
 /**
  * The sentence one refusal is reported with.
  *
- * `describeTransientFailure` FIRST, because it owns the three failures whose raw
+ * `describeTransientFailure` FIRST, because it owns the failures whose raw
  * message is useless to a reader — a rate limit (which it can even quote a wait
- * from), an unreachable server, and a 5xx, which this deployment redacts to
- * "Internal Server Error" in production anyway. Everything else falls through to
- * the error's own message, which for an integrity refusal is the sentence
- * written for exactly that situation and for a 404 is what the server said. A
- * generic string in either place would throw away the only part of the summary a
- * reader can act on.
+ * from), an unreachable server, and a 5xx, which this deployment redacts in
+ * production anyway. Everything else falls through to the error's own message,
+ * which for an integrity refusal is the sentence written for exactly that
+ * situation and for a 404 is what the server said.
  */
 function describeFailure(error: unknown): string {
   return describeTransientFailure(error) ?? getApiErrorMessage(error, UNKNOWN_REASON);
@@ -232,18 +226,86 @@ function displayName(candidate: BulkDownloadCandidate): string {
   return candidate.meta === null ? UNOPENABLE_DOCUMENT_NAME : candidate.meta.name;
 }
 
+/** How one document's read ended. */
+type ReadOutcome =
+  | { kind: 'read'; meta: DocumentMeta; chunks: Blob[]; crc: number }
+  | { kind: 'failed'; reason: string }
+  | { kind: 'stop'; stop: 'stopped' | 'vault-locked' | 'rate-limited'; detail?: string };
+
 /**
- * Save every candidate, in order, and report what happened to each.
+ * Read one document, verified, collecting its bytes for the archive.
+ *
+ * Each attempt gets its OWN collector, so a retry after a short rate-limit wait
+ * starts from nothing: the segments a refused attempt had already collected can
+ * never be written in front of the ones a later attempt reads. Each segment's
+ * CRC-32 is taken as it arrives and the segment is moved into a `Blob` at once,
+ * so the script heap holds about one segment, whatever the document's size.
+ */
+async function readForArchive(
+  candidate: BulkDownloadCandidate,
+  options: ArchiveDocumentsOptions,
+  interrupted: () => boolean,
+): Promise<ReadOutcome> {
+  const wait = options.wait ?? waitAbortably;
+  for (let retries = 0; ; retries += 1) {
+    const chunks: Blob[] = [];
+    const checksum = { crc: 0 };
+    try {
+      const meta = await streamDocumentPlaintext(
+        candidate.id,
+        {
+          write: (segment) => {
+            // A lock or sign-out landing while this document was being read:
+            // nothing of it is kept, and the read stops here.
+            if (interrupted()) return Promise.reject(new DocumentDownloadCancelledError());
+            checksum.crc = crc32(segment, checksum.crc);
+            chunks.push(new Blob([segment]));
+            return Promise.resolve();
+          },
+          discard: () => {
+            chunks.length = 0;
+            return Promise.resolve();
+          },
+        },
+        { signal: options.signal, row: candidate._raw },
+      );
+      // No second check is needed here. The last segment's write above is the
+      // last point a lock could have reached: what follows it (the whole-file
+      // digest, the key zeroed, this function resuming) runs without yielding to
+      // the event loop, and a lock is an event.
+      return { kind: 'read', meta, chunks, crc: checksum.crc };
+    } catch (error) {
+      if (error instanceof DocumentDownloadCancelledError) {
+        return { kind: 'stop', stop: interrupted() ? 'vault-locked' : 'stopped' };
+      }
+      if (!isRateLimited(error)) return { kind: 'failed', reason: describeFailure(error) };
+      const seconds = retryAfterSeconds(error);
+      if (
+        seconds === null ||
+        seconds > MAX_BULK_RETRY_AFTER_SECONDS ||
+        retries >= MAX_BULK_RETRIES
+      ) {
+        return { kind: 'stop', stop: 'rate-limited', detail: describeFailure(error) };
+      }
+      await wait(seconds * 1000, options.signal);
+      if (options.signal.aborted) return { kind: 'stop', stop: 'stopped' };
+      if (interrupted()) return { kind: 'stop', stop: 'vault-locked' };
+    }
+  }
+}
+
+/**
+ * Archive every candidate, in order, into `target`, and report what happened to
+ * each.
  *
  * Resolves — always. A rejection would be a run whose partial outcome the caller
- * could not render, and the outcome is the entire product: this function's
- * contract is that it comes back with an answer for every document it reached
- * and an honest count of the ones it did not.
+ * could not render, and the outcome is the entire product.
  */
-export async function saveAllDocuments(
+export async function archiveDocuments(
   documents: readonly BulkDownloadCandidate[],
-  options: SaveAllDocumentsOptions = {},
-): Promise<DocumentDownloadAllResult> {
+  target: ArchiveTarget,
+  options: ArchiveDocumentsOptions,
+): Promise<DocumentArchiveResult> {
   const total = documents.length;
   const failures: DocumentDownloadFailure[] = [];
   let savedCount = 0;
@@ -253,108 +315,99 @@ export async function saveAllDocuments(
   // type from an absent key, and an empty string would render as a blank line.
   let stoppedDetail: string | undefined;
 
-  // Built once, and the branch is `exactOptionalPropertyTypes` rather than
-  // style: `{ signal: undefined }` is not a `{ signal?: AbortSignal }` under this
-  // project's compiler settings.
-  //
-  // The dialog is off for the reason `SaveDocumentOptions.useSaveDialog`
-  // records: it needs transient activation, and the one click that started this
-  // run cannot supply it to a document read minutes later.
-  const readOptions: SaveDocumentOptions = options.signal
-    ? { signal: options.signal, useSaveDialog: false }
-    : { useSaveDialog: false };
+  const generation = documentsMutationGeneration();
+  const interrupted = (): boolean =>
+    generation !== documentsMutationGeneration() || useAuthStore.getState().vaultKey === null;
+  const writer = new StoredZipWriter(target, target.limitBytes);
+  const { allocator } = options;
 
-  for (const [position, candidate] of documents.entries()) {
-    if (isAborted(options.signal)) {
-      stopped = 'cancelled';
-      break;
-    }
+  try {
+    for (const [position, candidate] of documents.entries()) {
+      if (options.signal.aborted) {
+        stopped = 'stopped';
+        break;
+      }
+      if (interrupted()) {
+        stopped = 'vault-locked';
+        break;
+      }
 
-    // The vault, re-read every time round. `requireVaultKey` throws a PLAIN
-    // `Error` on a locked vault, so without this check a lock landing mid-run
-    // would be recorded as an ordinary failure — once for the document in
-    // flight and once more for every document after it, producing a summary
-    // that blamed the documents for the reader's own auto-lock. The route
-    // unmounting is what usually stops a run first, but it is a UI lifetime and
-    // this is a service: the guarantee belongs here.
-    if (useAuthStore.getState().vaultKey === null) {
-      stopped = 'vault-locked';
-      break;
-    }
+      const name = displayName(candidate);
+      options.onProgress?.({ index: position + 1, total, name });
 
-    const name = displayName(candidate);
-    options.onProgress?.({ index: position + 1, total, name });
+      // Refused rather than attempted: the row's real problem is already known
+      // here, and it is the one worth telling the reader.
+      if (candidate.meta === null) {
+        failures.push({ id: candidate.id, name, reason: DEGRADED_REASON });
+        continue;
+      }
+      if (candidate.purgePending === true) {
+        failures.push({ id: candidate.id, name, reason: PURGE_PENDING_REASON });
+        continue;
+      }
 
-    // Refused rather than attempted, and the difference is not pedantry: the
-    // read needs a `DocumentMeta` to suggest a name from and this row has none,
-    // so an attempt would fail on a technicality several layers below and report
-    // whatever that layer happened to say. The row's real problem is already
-    // known here, and it is the one worth telling the user.
-    if (candidate.meta === null) {
-      failures.push({ id: candidate.id, name, reason: DEGRADED_REASON });
-      continue;
-    }
+      // Planned from the listed metadata, which is authenticated, and whose size
+      // the read's framing check ties to the bytes it will produce.
+      const placement = allocator.place(candidate.meta.name, candidate.folderId);
+      if (!writer.fits(placement.pathBytes, candidate.meta.plaintextBytes)) {
+        stopped = 'archive-full';
+        break;
+      }
 
-    // Refused for the same reason and one step later: the row is real and its
-    // metadata opened, but the object behind it has been handed to the garbage
-    // collector. Reading it would spend a request to be told 404, which names
-    // the wrong problem.
-    if (candidate.purgePending === true) {
-      failures.push({ id: candidate.id, name, reason: PURGE_PENDING_REASON });
-      continue;
-    }
+      const outcome = await readForArchive(candidate, options, interrupted);
+      if (outcome.kind === 'stop') {
+        stopped = outcome.stop;
+        stoppedDetail = outcome.detail;
+        break;
+      }
+      if (outcome.kind === 'failed') {
+        failures.push({ id: candidate.id, name, reason: outcome.reason });
+        continue;
+      }
 
-    try {
-      await saveDocument({ id: candidate.id, meta: candidate.meta }, readOptions);
+      allocator.reserve(placement);
+      await writer.addFile({
+        path: placement.path,
+        modified: new Date(outcome.meta.capturedAt),
+        chunks: outcome.chunks,
+        crc: outcome.crc,
+      });
       savedCount += 1;
-    } catch (error) {
-      // A cancellation is not a failure and is never listed as one. It can only
-      // arrive from the signal on this path — the blob branch opens no dialog to
-      // be dismissed — so it ends the run rather than skipping one document.
-      if (error instanceof DocumentDownloadCancelledError) {
-        stopped = 'cancelled';
-        break;
-      }
-      // A rate limit ENDS the run, and it is the one refusal that does. It is
-      // also checked BEFORE the failure is recorded, and that order is the whole
-      // point rather than a tidy-up.
-      //
-      // Reading a document costs a request for the row and one per segment, and
-      // both routes are user-keyed and bounded — the row read against 60 a
-      // minute, the segments against a budget derived from the operator's size
-      // cap. An export of a large library is the one legitimate thing in this
-      // application that reaches either. Carrying on would spend the whole list
-      // against a closed window, turn a hundred documents into a hundred
-      // identical refusals, and keep the window open by attempting more; and the
-      // reader's answer is the same for all of them, which is to wait.
-      //
-      // WHY IT IS NOT RECORDED AS A FAILURE. The caller's resume point is
-      // `savedCount + failures.length` rows in, and every other way this loop
-      // stops leaves the current row UNCONSUMED — the abort guard above, the
-      // vault-lock check above, and a cancellation raised mid-read, which breaks
-      // without recording. Recording here consumed the row, so the panel's
-      // Continue offered only the documents AFTER it: the one refusal that is
-      // purely transient by definition was the one refusal a resume could not
-      // reach, and the only way to get that document was to run the whole export
-      // again. Nothing is lost by leaving it unreached — it is counted in
-      // `total - savedCount - failures.length`, the summary says so, and the
-      // sentence the reader needs (the wait, quoted from `Retry-After`) goes on
-      // {@link DocumentDownloadAllResult.stoppedDetail} instead of on a row that
-      // is about to be retried.
-      if (isRateLimited(error)) {
-        stopped = 'rate-limited';
-        stoppedDetail = describeFailure(error);
-        break;
-      }
-      failures.push({ id: candidate.id, name, reason: describeFailure(error) });
     }
-  }
 
-  return {
-    total,
-    savedCount,
-    failures,
-    stopped,
-    ...(stoppedDetail === undefined ? {} : { stoppedDetail }),
-  };
+    const detail = stoppedDetail === undefined ? {} : { stoppedDetail };
+    if (writer.entryCount === 0) {
+      // Nothing verified: no archive at all, rather than an empty one. The
+      // refusals still stand, and the rows they consumed stay consumed.
+      await target.discard();
+      return { total, savedCount, failures, stopped, ...detail, archive: null };
+    }
+    options.onFinishing?.();
+    await writer.finish();
+    await target.commit();
+    allocator.keepArchive();
+    return {
+      total,
+      savedCount,
+      failures,
+      stopped,
+      ...detail,
+      archive: { name: target.name, kind: target.kind },
+    };
+  } catch (error) {
+    // Every read failure is classified inside `readForArchive`, so what reaches
+    // here is the target refusing a write or the save. The archive cannot be
+    // finished: it is dropped, its names are given back, and the whole leg counts
+    // as unconsumed so a retry covers it again.
+    await target.discard();
+    allocator.dropArchive();
+    return {
+      total,
+      savedCount: 0,
+      failures: [],
+      stopped: 'save-failed',
+      stoppedDetail: getApiErrorMessage(error, UNKNOWN_SAVE_REASON),
+      archive: null,
+    };
+  }
 }

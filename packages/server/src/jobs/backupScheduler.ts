@@ -10,7 +10,7 @@ import { APP_VERSION, maskEmail } from '@hvault/shared';
 import { acquireJobLock, releaseJobLock } from '../utils/jobLock.js';
 import { trackJob } from '../utils/jobTracker.js';
 import { estimateItemJsonSize, estimateFolderJsonSize } from '../utils/sizeEstimator.js';
-import { ROW_CURSOR_BATCH_SIZE, forEachRow } from '../utils/jsonStream.js';
+import { EXPORTED_ROW_PROJECTION, ROW_CURSOR_BATCH_SIZE, forEachRow } from '../utils/jsonStream.js';
 import { collectDocumentSummary, type DocumentSummary } from '../utils/documentSummary.js';
 import { acquireWithin, heavyResponseSemaphore } from '../utils/heavyResponseBudget.js';
 import { claimOutboundMail } from '../utils/outboundMailBudget.js';
@@ -178,7 +178,7 @@ async function buildAndMailBackup(user: {
     try {
       await forEachRow(
         Folder.find({ userId })
-          .select('-sourceRefId -searchHash')
+          .select(EXPORTED_ROW_PROJECTION)
           .batchSize(ROW_CURSOR_BATCH_SIZE)
           .lean()
           .cursor(),
@@ -191,7 +191,7 @@ async function buildAndMailBackup(user: {
       walking = 'item';
       await forEachRow(
         VaultItem.find({ userId, deletedAt: { $exists: false } })
-          .select('-sourceRefId -searchHash')
+          .select(EXPORTED_ROW_PROJECTION)
           .batchSize(ROW_CURSOR_BATCH_SIZE)
           .lean()
           .cursor(),

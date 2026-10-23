@@ -32,8 +32,8 @@
   },
   "devDependencies": {
     "@types/node": "^24.13.6",
-    "@vitest/coverage-v8": "^4.1.11",
+    "@vitest/coverage-v8": "^4.1.12",
     "fast-check": "^4.10.2",
-    "vitest": "^4.1.11"
+    "vitest": "^4.1.12"
   }
 }

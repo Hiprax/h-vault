@@ -1,4 +1,4 @@
-import { Suspense, lazy, useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { Suspense, lazy, useState, useEffect, useCallback, useId, useMemo, useRef } from 'react';
 import { InfoTip } from '../components/ui/InfoTip';
 import {
   SETTINGS_HELP_TOPICS,
@@ -128,6 +128,7 @@ import { decryptVaultField, encryptVaultField } from '../services/crypto/vaultFi
 import { parseCsv } from '../services/import/csv';
 import type { LimitSummary } from '../services/import/customFieldsLimit';
 import { loadCustomFieldsLimit } from '../services/import/loadCustomFieldsLimit';
+import { loadNativeExport } from '../services/export/loadNativeExport';
 import {
   IMPORT_FORMATS,
   ImportParseError,
@@ -457,6 +458,10 @@ const LIMIT_SUMMARY_MAX_NAMES = 10;
 /** How long the result toast stays when the limit cut something (the report stays). */
 const LIMIT_CUT_TOAST_MS = 15_000;
 
+/** What an export says when the code that builds its file did not load. */
+const EXPORT_BUILDER_UNAVAILABLE_MESSAGE =
+  'Part of H-Vault needed to export did not load, so nothing was exported. Try again; if it keeps failing, reload the page.';
+
 // ---------------------------------------------------------------------------
 // Vault key rotation helpers
 // ---------------------------------------------------------------------------
@@ -720,13 +725,16 @@ export default function SettingsPage() {
   const [regenerateCode, setRegenerateCode] = useState('');
   const [regeneratingCodes, setRegeneratingCodes] = useState(false);
 
+  // The Data card's two panels. ONE value rather than a flag each, so at most one
+  // of them is ever open: opening either closes the other by construction.
+  const [openDataPanel, setOpenDataPanel] = useState<'export' | 'import' | null>(null);
+  const dataPanelsId = useId();
+
   // Export state
-  const [showExportWarning, setShowExportWarning] = useState(false);
   const [exportPassword, setExportPassword] = useState('');
   const [exporting, setExporting] = useState(false);
 
   // Import state
-  const [showImport, setShowImport] = useState(false);
   // What the custom-field limit cut from the last import, kept on screen after the
   // import panel closes. Page state ONLY: it names decrypted entries and fields,
   // so it goes when a lock unmounts this page, and is never stored anywhere.
@@ -1268,6 +1276,10 @@ export default function SettingsPage() {
   }, [regeneratePassword, regenerateCode, profile?.twoFactorEnabled, toast]);
 
   // Export
+  //
+  // The click that starts an export also clears the password field, in the same
+  // batch: this callback's closure is what keeps the typed value for the
+  // derivation below, and nothing else holds it once the export has begun.
   const handleExport = useCallback(async () => {
     if (!exportPassword || !user?.email) {
       toast({ title: 'Password is required to export', type: 'error' });
@@ -1275,6 +1287,14 @@ export default function SettingsPage() {
     }
     setExporting(true);
     try {
+      // The file builder is fetched FIRST, before the derivation and the request
+      // (see `loadNativeExport`): a chunk that will not load must stop the export
+      // before the server has sent, and recorded, anything.
+      const nativeExport = await loadNativeExport().catch(() => null);
+      if (nativeExport === null) {
+        toast({ title: EXPORT_BUILDER_UNAVAILABLE_MESSAGE, type: 'error' });
+        return;
+      }
       const { authKey } = await cryptoService.deriveKeys(exportPassword, user.email);
       const authHash = cryptoService.getAuthHash(authKey);
       cryptoService.clearKey(authKey);
@@ -1282,12 +1302,12 @@ export default function SettingsPage() {
       const res = await exportVaultApi({ format: 'json', authHash });
       const exportResult = res.data;
       if (!exportResult.success) throw new Error('Failed to export vault');
+      // The allowlisted file, never the response as received: see `nativeExport.ts`.
       downloadText(
-        JSON.stringify(exportResult.data, null, 2),
+        JSON.stringify(nativeExport.buildNativeExportFile(exportResult.data), null, 2),
         `hvault-export-${new Date().toISOString().split('T')[0]}.enc`,
         'application/json',
       );
-      setExportPassword('');
       toast({ title: 'Vault exported', type: 'success' });
     } catch (err) {
       toast({
@@ -1738,7 +1758,8 @@ export default function SettingsPage() {
       if (inserted > 0 || updated > 0) refreshInBackground(useVaultStore.getState().fetchItems());
       // In the same batch as closing the panel, and only when something was cut.
       if (limitCuts !== null) setImportLimitReport(limitCuts);
-      setShowImport(false);
+      // Only the IMPORT panel: an export panel opened while this import ran stays.
+      setOpenDataPanel((panel) => (panel === 'import' ? null : panel));
       setImportData('');
       // In the same batch as the line above, so the render that drops the
       // Importing label is the import's last one, whatever the format.
@@ -3712,23 +3733,39 @@ export default function SettingsPage() {
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="flex flex-wrap gap-3">
+            {/* Each button opens its panel and closes the other one, and a second
+                press closes it again. The typed master password goes whenever the
+                export panel does, whichever way it closes. */}
             <button
               type="button"
-              onClick={() => setShowExportWarning(true)}
+              aria-expanded={openDataPanel === 'export'}
+              aria-controls={openDataPanel === 'export' ? `${dataPanelsId}-export` : undefined}
+              onClick={() => {
+                setOpenDataPanel((panel) => (panel === 'export' ? null : 'export'));
+                setExportPassword('');
+              }}
               className="inline-flex items-center gap-2 rounded-md border border-[hsl(var(--input))] px-4 py-2 text-sm font-medium text-[hsl(var(--foreground))] hover:bg-[hsl(var(--accent))] transition-colors"
             >
               <Download className="h-4 w-4" /> Export Vault
             </button>
             <button
               type="button"
-              onClick={() => setShowImport((p) => !p)}
+              aria-expanded={openDataPanel === 'import'}
+              aria-controls={openDataPanel === 'import' ? `${dataPanelsId}-import` : undefined}
+              onClick={() => {
+                setOpenDataPanel((panel) => (panel === 'import' ? null : 'import'));
+                setExportPassword('');
+              }}
               className="inline-flex items-center gap-2 rounded-md border border-[hsl(var(--input))] px-4 py-2 text-sm font-medium text-[hsl(var(--foreground))] hover:bg-[hsl(var(--accent))] transition-colors"
             >
               <Upload className="h-4 w-4" /> Import Vault
             </button>
           </div>
-          {showExportWarning && (
-            <div className="space-y-3 rounded-lg border border-[hsl(var(--warning,45_93%_47%))/0.5] bg-[hsl(var(--warning,45_93%_47%))/0.05] p-4">
+          {openDataPanel === 'export' && (
+            <div
+              id={`${dataPanelsId}-export`}
+              className="space-y-3 rounded-lg border border-[hsl(var(--warning,45_93%_47%))/0.5] bg-[hsl(var(--warning,45_93%_47%))/0.05] p-4"
+            >
               <div className="flex items-start gap-2">
                 <AlertTriangle className="h-5 w-5 shrink-0 text-amber-500 mt-0.5" />
                 <div className="space-y-2 text-sm text-[hsl(var(--foreground))]">
@@ -3748,10 +3785,14 @@ export default function SettingsPage() {
                 </div>
               </div>
               <div className="space-y-2 pt-1">
-                <label className="block text-sm font-medium text-[hsl(var(--foreground))]">
+                <label
+                  htmlFor={`${dataPanelsId}-export-password`}
+                  className="block text-sm font-medium text-[hsl(var(--foreground))]"
+                >
                   Confirm Master Password
                 </label>
                 <input
+                  id={`${dataPanelsId}-export-password`}
                   type="password"
                   value={exportPassword}
                   onChange={(e) => setExportPassword(e.target.value)}
@@ -3764,7 +3805,7 @@ export default function SettingsPage() {
                 <button
                   type="button"
                   onClick={() => {
-                    setShowExportWarning(false);
+                    setOpenDataPanel(null);
                     setExportPassword('');
                   }}
                   className="rounded-md px-3 py-2 text-sm text-[hsl(var(--foreground))] hover:bg-[hsl(var(--accent))]"
@@ -3775,8 +3816,9 @@ export default function SettingsPage() {
                   type="button"
                   disabled={exporting || !exportPassword}
                   onClick={() => {
-                    setShowExportWarning(false);
                     void handleExport();
+                    setOpenDataPanel(null);
+                    setExportPassword('');
                   }}
                   className="rounded-md bg-[hsl(var(--primary))] px-3 py-2 text-sm font-medium text-[hsl(var(--primary-foreground))] hover:opacity-90 disabled:opacity-50"
                 >
@@ -3785,8 +3827,11 @@ export default function SettingsPage() {
               </div>
             </div>
           )}
-          {showImport && (
-            <div className="space-y-3 rounded-lg border border-[hsl(var(--border))] p-4">
+          {openDataPanel === 'import' && (
+            <div
+              id={`${dataPanelsId}-import`}
+              className="space-y-3 rounded-lg border border-[hsl(var(--border))] p-4"
+            >
               <select
                 value={importFormat}
                 onChange={(e) => setImportFormat(e.target.value as ImportSourceFormat)}
@@ -3941,7 +3986,7 @@ export default function SettingsPage() {
               <div className="flex justify-end gap-2">
                 <button
                   type="button"
-                  onClick={() => setShowImport(false)}
+                  onClick={() => setOpenDataPanel(null)}
                   className="rounded-md px-3 py-2 text-sm text-[hsl(var(--foreground))] hover:bg-[hsl(var(--accent))]"
                 >
                   Cancel

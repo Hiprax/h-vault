@@ -1,5 +1,5 @@
-import { useEffect } from 'react';
 import { isLiveTransfer, useDocumentsStore } from '../stores/documentsStore';
+import { useBeforeUnloadWarning } from './useBeforeUnloadWarning';
 
 /**
  * Ask the browser to confirm before a tab holding a live upload is closed.
@@ -29,21 +29,10 @@ import { isLiveTransfer, useDocumentsStore } from '../stores/documentsStore';
  * here would re-render `App`, and therefore the router and every provider under
  * it, on each of those ticks. A boolean changes only when liveness itself flips.
  *
- * `preventDefault()` alone, deliberately: the legacy `returnValue` assignment is
- * marked deprecated by the DOM typings this project compiles against, and every
- * browser it targets honours the standard call on its own.
+ * The warning itself is `useBeforeUnloadWarning`, shared with the document
+ * archive, which arms it while an archive is being written.
  */
 export function useUploadUnloadGuard(): void {
   const anyLive = useDocumentsStore((state) => Object.values(state.uploads).some(isLiveTransfer));
-
-  useEffect(() => {
-    if (!anyLive) return;
-    const warn = (event: BeforeUnloadEvent): void => {
-      event.preventDefault();
-    };
-    window.addEventListener('beforeunload', warn);
-    return () => {
-      window.removeEventListener('beforeunload', warn);
-    };
-  }, [anyLive]);
+  useBeforeUnloadWarning(anyLive);
 }

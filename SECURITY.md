@@ -1047,6 +1047,23 @@ with open registration is anyone who registers. The one pre-existing exception i
 with `ENABLE_SWAGGER=true` in production, the unauthenticated OpenAPI document states the
 version, which is one more reason to leave it off.
 
+### What an encrypted export or backup file carries
+
+The encrypted vault export (`Settings → Data → Export Vault`, an `.enc` file) and the encrypted
+backup (downloaded, or mailed on a schedule) carry each row's ciphertext and the references an
+import or restore needs, and none of the database's own bookkeeping: no account id (`userId`) and
+no document version counter (`__v`). The export file additionally leaves out the row timestamps,
+which no import reads. Each row keeps its **`_id`**, and that is not bookkeeping: every encrypted
+field of a row is sealed with AES-GCM additional data that names the row's id, so the id is what
+opens it. Editing an id in the file does not redirect anything; it makes that one row fail its
+authentication check, and the import drops it and says so. Folder references (`folderId`,
+`parentId`) stay so items return to their folders; a reference to a folder the importing account
+does not own is discarded by the server. Nothing in such a file is trusted for identity: an import
+inserts under ids derived for the signed-in account, takes the owner from the session, lets the
+server set every timestamp, and updates only rows it matched in the live vault. Files written by
+earlier releases, which still carry `userId`, `__v` and the timestamps, import and restore exactly
+as before; those fields were never read.
+
 ### Portable plaintext export ("Leave H-Vault")
 
 The `/settings/export-data` page exports your whole vault to another password manager
@@ -1538,32 +1555,73 @@ procedure, including why a file-level copy of a running storage engine is not a 
 That answer is only available to the operator, and on a shared deployment the operator and the
 account holder are not the same person. **Download all**, on the Documents page, is the half that
 belongs to the account holder: it saves every document the list is showing (or, while some are
-selected, just those, as **Download selected**) to their own device,
-one at a time, through the identical verified read a single download uses — each file checked
-against the digest sealed inside it before a byte of it is written, and no file produced at all
-for a document that fails that check. Nothing is combined into an archive, deliberately: a ZIP
-writer is a format implementation fed entirely by attacker-chosen bytes and names, and it would
-run in the one origin holding the unlocked vault key. Three limits are worth being plain about,
-because an export that is trusted for more than it is is worse than none:
+selected, just those, as **Download selected**) to their own device as **one ZIP archive**, each
+document through the same four checks a single download makes: the row is the one asked for, the
+framing agrees with the sealed copy, every segment authenticates, and the whole-file digest matches
+BEFORE a byte of that
+document is written into the archive. A document that fails any check is not in the archive at
+all, and is named in the summary with its reason.
+
+The archive is built in the page that holds the unlocked vault key, and that is the one place this
+design refuses to PARSE a document's bytes. Building a ZIP does not parse them: the writer
+(`services/documents/zipArchive.ts`, a few hundred lines in this repository with no dependency)
+stores each file uncompressed, copies its bytes verbatim, and frames them with headers built from
+numbers it was handed; the only computation over the bytes is CRC-32, which branches on no byte
+value, exactly like the AES-GCM and SHA-256 that already run over the same bytes in the same page.
+There is no compressor and no format interpreter. The part a document's author does control and
+that becomes structure, its name and the names of the folders above it, is made safe segment by
+segment before it becomes a path: separators and their look-alikes, control and direction-changing
+characters, Windows-reserved characters and device names, dot-only names and over-long names are
+all neutralised, so no entry can climb out of the folder it is extracted into or use a name Windows
+reserves. Every path is unique, ignoring case. No entry name can outgrow the 16-bit field a ZIP
+header records it in: the writer refuses such a name outright, and a folder chain deeper than the
+50 levels the folder editor allows (which a restored, hand-edited backup or a server inventing
+folders can still produce) is treated as unreadable, its documents going to the top of the archive. What is NOT bounded is the length of a
+whole path, so a very deep folder tree can exceed Windows' default 260-character path limit; extract
+such an archive near the top of a drive, or with long paths enabled.
+
+The run reads each document with the row the list already validated, so it spends nothing from the
+per-account request budget that lock and sign-out also draw on; only the segment reads count, against
+their own budget. A short `Retry-After` from a rate-limiting proxy is waited out, as every paced bulk
+action here does; a long one ends the run and is quoted.
+
+Five limits are worth being plain about, because an export that is trusted for more than it is is
+worse than none:
 
 - **It is a copy, not a backup, and it is plaintext.** What lands on the device is the decrypted
-  file, protected by nothing this application controls — the same trade the plaintext vault export
-  makes, and it deserves the same handling.
+  files, protected by nothing this application controls: the same trade the plaintext vault export
+  makes, and it deserves the same handling. The archive also carries the account's **folder names**
+  in plaintext, as its directory names.
 - **It is one account's view at one moment.** It carries what that account can list: not another
   account's documents, not a row whose sealed metadata will not open (there is no key left to open
   it with, so there is nothing to hand back), and not a row already claimed for permanent deletion.
   Each of those is named in the summary rather than quietly omitted, and the panel says how many
   rows the view could not read at all.
-- **It cannot confirm where the files went.** Handing a file to the browser is the last thing the
-  page can observe; browsers refuse or queue several downloads from one action and report nothing
-  back. The summary therefore says documents were _verified and sent to your browser's downloads_
-  and never that they were saved, and it points at the browser's own download list, which is the
-  only authoritative record.
+- **An interrupted archive is still saved, with what it holds.** Stop, a vault lock (the idle
+  auto-lock included, which a long run cannot postpone), leaving the page, the server's read limit
+  and the archive's size limit all FINISH the archive with the documents already verified, as the
+  separate files of the earlier design stayed saved. After Stop or a limit, Continue saves the rest
+  in a further archive; after a lock or leaving the page the panel is gone, so the rest is taken by
+  running Download all again (its names are chosen afresh and can repeat the earlier archive's).
+  Nothing read after a lock or a sign-out is kept: the run checks the documents store's generation,
+  which both move, before each document and inside each segment write, and drops the document in
+  flight (a segment already on the wire may still arrive; it is discarded). What it does NOT do is
+  withhold what was already verified, so after a lock or a sign-out the archive appears in the
+  browser's downloads (or at the path chosen in the save dialog) just after it rather than before
+  it. Closing the tab while an interrupted archive is still being finished loses that archive;
+  while a run is active the page asks before it is closed.
+- **Without a save dialog the archive is held in memory until it is saved.** Desktop Chrome and Edge
+  write it straight into the file chosen in their save dialog, holding about one document at a time.
+  Other browsers keep the archive's parts as Blobs until it is finished, up to about 512 MiB (or one
+  larger document on its own), where the per-file design held one document at a time; a browser may
+  spill such Blobs to its profile directory.
+- **It cannot always confirm where the file went.** An archive handed to the browser's downloads is
+  the last thing the page can observe, so the summary says it was _handed to your browser's
+  downloads_ and points at the browser's own download list. An archive written through the save
+  dialog is reported as saved only once the browser has committed the file.
 
 The export changes nothing on the server: it is the same authenticated read of the same rows,
 under the same per-user rate limits, and it is not audited for the same reason no other read is.
-When those limits stop it, or the vault auto-locks part way through, it says which of the two
-happened, how much of the library is still on the server, and offers to resume from there.
 
 The hourly clean-up referred to above is the only thing in the system that deletes a stored
 file without a request having asked for it, so the rule it works to is stated in the negative:

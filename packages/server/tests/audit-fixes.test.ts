@@ -696,4 +696,46 @@ describe('Task 2.3: userId stripped from API responses', () => {
       expect(log.userId).toBeUndefined();
     }
   });
+
+  // The export streams LEAN rows, so the models' `toJSON` strip never runs on
+  // it: the projection is the only thing keeping the account's id and the
+  // document version counter out of a file the owner downloads and keeps.
+  // `_id` and the timestamps stay on purpose: `_id` is the binding every
+  // format-v2 field is sealed to, and the plaintext export's row schemas
+  // require both timestamps.
+  it('omits userId and __v from POST /tools/export rows, keeping the row id and timestamps', async () => {
+    const itemRes = await withCsrf(
+      agent.post(`${API}/vault/items`).send(sampleVaultItem()),
+      csrf,
+      user.accessToken,
+    );
+    expect(itemRes.status).toBe(201);
+    const folderRes = await withCsrf(
+      agent
+        .post(`${API}/folders`)
+        .send({ encryptedName: 'enc-name', nameIv: 'iv', nameTag: 'tag' }),
+      csrf,
+      user.accessToken,
+    );
+    expect(folderRes.status).toBe(201);
+
+    const res = await withCsrf(
+      agent.post(`${API}/tools/export`).send({ authHash: user.rawPassword }),
+      csrf,
+      user.accessToken,
+    );
+
+    expect(res.status).toBe(200);
+    const rows = [
+      ...(res.body.data.items as Record<string, unknown>[]),
+      ...(res.body.data.folders as Record<string, unknown>[]),
+    ];
+    expect(rows.map((row) => row._id)).toEqual([itemRes.body.data._id, folderRes.body.data._id]);
+    for (const row of rows) {
+      expect(row).not.toHaveProperty('userId');
+      expect(row).not.toHaveProperty('__v');
+      expect(typeof row.createdAt).toBe('string');
+      expect(typeof row.updatedAt).toBe('string');
+    }
+  });
 });

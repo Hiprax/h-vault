@@ -64,6 +64,7 @@ const {
   mockRegenerateBackupCodesApi,
   mockExportVaultApi,
   mockImportVaultApi,
+  mockLoadNativeExport,
   mockToast,
   mockSetTheme,
   mockApiGet,
@@ -79,6 +80,7 @@ const {
   mockRegenerateBackupCodesApi: vi.fn(),
   mockExportVaultApi: vi.fn(),
   mockImportVaultApi: vi.fn(),
+  mockLoadNativeExport: vi.fn(),
   mockToast: vi.fn(),
   mockSetTheme: vi.fn(),
   mockApiGet: vi.fn(),
@@ -213,6 +215,13 @@ vi.mock('../src/services/api/userApi', () => ({
   exportVaultApi: (...args: unknown[]) => mockExportVaultApi(...args),
   importVaultApi: (...args: unknown[]) => mockImportVaultApi(...args),
 }));
+
+// The REAL file builder, behind a stub only so one test can refuse the chunk.
+vi.mock('../src/services/export/loadNativeExport', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/services/export/loadNativeExport')>();
+  mockLoadNativeExport.mockImplementation(actual.loadNativeExport);
+  return { loadNativeExport: () => mockLoadNativeExport() };
+});
 
 vi.mock('../src/services/offlineCache', async (importOriginal) => ({
   // Spread the real module so exports it grows (the error class, the
@@ -1411,7 +1420,10 @@ describe('SettingsPage', () => {
 
   it('calls exportVaultApi after confirming export warning', async () => {
     mockExportVaultApi.mockResolvedValue({
-      data: { success: true, data: { items: [], folders: [] } },
+      data: {
+        success: true,
+        data: { items: [], folders: [], metadata: { exportDate: 'x', version: 'y', itemCount: 0 } },
+      },
     });
     await renderSettings();
     await waitFor(() => screen.getByText('Export Vault'));
@@ -1522,6 +1534,247 @@ describe('SettingsPage', () => {
     await waitFor(() => {
       expect(screen.getByText('Exporting...')).toBeInTheDocument();
     });
+  });
+
+  // ---- The Data card's two panels: toggles, one open at a time ----
+
+  /** Export Vault and Import Vault, by their exact visible text. */
+  function dataButton(label: 'Export Vault' | 'Import Vault'): HTMLElement {
+    return screen.getByText(label).closest('button')!;
+  }
+
+  const EXPORT_PANEL_TEXT = 'Important: Export Limitations';
+  const IMPORT_PANEL_PLACEHOLDER = 'Paste exported data here...';
+
+  it('closes the export panel when Export Vault is pressed a second time', async () => {
+    await renderSettings();
+    await waitFor(() => screen.getByText('Export Vault'));
+
+    fireEvent.click(dataButton('Export Vault'));
+    expect(screen.getByText(EXPORT_PANEL_TEXT)).toBeInTheDocument();
+
+    fireEvent.click(dataButton('Export Vault'));
+    expect(screen.queryByText(EXPORT_PANEL_TEXT)).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText(IMPORT_PANEL_PLACEHOLDER)).not.toBeInTheDocument();
+  });
+
+  it('keeps at most one Data panel open: each button closes the other panel', async () => {
+    await renderSettings();
+    await waitFor(() => screen.getByText('Export Vault'));
+
+    fireEvent.click(dataButton('Import Vault'));
+    expect(screen.getByPlaceholderText(IMPORT_PANEL_PLACEHOLDER)).toBeInTheDocument();
+
+    fireEvent.click(dataButton('Export Vault'));
+    expect(screen.getByText(EXPORT_PANEL_TEXT)).toBeInTheDocument();
+    expect(screen.queryByPlaceholderText(IMPORT_PANEL_PLACEHOLDER)).not.toBeInTheDocument();
+
+    fireEvent.click(dataButton('Import Vault'));
+    expect(screen.getByPlaceholderText(IMPORT_PANEL_PLACEHOLDER)).toBeInTheDocument();
+    expect(screen.queryByText(EXPORT_PANEL_TEXT)).not.toBeInTheDocument();
+  });
+
+  it('marks each Data button expanded only while its own panel is open, pointing at that panel', async () => {
+    await renderSettings();
+    await waitFor(() => screen.getByText('Export Vault'));
+    const exportButton = dataButton('Export Vault');
+    const importButton = dataButton('Import Vault');
+
+    expect(exportButton).toHaveAttribute('aria-expanded', 'false');
+    expect(exportButton).not.toHaveAttribute('aria-controls');
+    expect(importButton).toHaveAttribute('aria-expanded', 'false');
+    expect(importButton).not.toHaveAttribute('aria-controls');
+
+    fireEvent.click(exportButton);
+    expect(exportButton).toHaveAttribute('aria-expanded', 'true');
+    const exportPanel = document.getElementById(exportButton.getAttribute('aria-controls')!);
+    expect(exportPanel).not.toBeNull();
+    expect(exportPanel).toContainElement(screen.getByText(EXPORT_PANEL_TEXT));
+    expect(importButton).toHaveAttribute('aria-expanded', 'false');
+    expect(importButton).not.toHaveAttribute('aria-controls');
+
+    fireEvent.click(importButton);
+    expect(importButton).toHaveAttribute('aria-expanded', 'true');
+    const importPanel = document.getElementById(importButton.getAttribute('aria-controls')!);
+    expect(importPanel).toContainElement(screen.getByPlaceholderText(IMPORT_PANEL_PLACEHOLDER));
+    expect(exportButton).toHaveAttribute('aria-expanded', 'false');
+    expect(exportButton).not.toHaveAttribute('aria-controls');
+  });
+
+  it('labels the export master password field', async () => {
+    await renderSettings();
+    await waitFor(() => screen.getByText('Export Vault'));
+    fireEvent.click(dataButton('Export Vault'));
+
+    expect(screen.getByLabelText('Confirm Master Password')).toBe(
+      screen.getByPlaceholderText('Enter your master password'),
+    );
+  });
+
+  it('forgets the typed master password whenever the export panel closes, whichever way', async () => {
+    await renderSettings();
+    await waitFor(() => screen.getByText('Export Vault'));
+    const typePassword = () => {
+      fireEvent.change(screen.getByPlaceholderText('Enter your master password'), {
+        target: { value: 'typed-secret' },
+      });
+    };
+
+    // Closed by its own toggle.
+    fireEvent.click(dataButton('Export Vault'));
+    typePassword();
+    fireEvent.click(dataButton('Export Vault'));
+    fireEvent.click(dataButton('Export Vault'));
+    expect(screen.getByPlaceholderText('Enter your master password')).toHaveValue('');
+
+    // Closed by opening the import panel.
+    typePassword();
+    fireEvent.click(dataButton('Import Vault'));
+    fireEvent.click(dataButton('Export Vault'));
+    expect(screen.getByPlaceholderText('Enter your master password')).toHaveValue('');
+    expect(screen.queryByDisplayValue('typed-secret')).not.toBeInTheDocument();
+  });
+
+  it('forgets the master password once an export has started, even when that export fails', async () => {
+    mockExportVaultApi.mockRejectedValue(new Error('Export failed'));
+    await renderSettings();
+    await waitFor(() => screen.getByText('Export Vault'));
+
+    fireEvent.click(dataButton('Export Vault'));
+    fireEvent.change(screen.getByPlaceholderText('Enter your master password'), {
+      target: { value: 'typed-secret' },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText('I Understand, Export'));
+    });
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith(
+        expect.objectContaining({ title: 'Failed to export vault. Check your password.' }),
+      );
+    });
+    // The derivation still received the password the click captured...
+    expect(cryptoService.deriveKeys).toHaveBeenCalledWith('typed-secret', 'test@example.com');
+
+    // ...and reopening the panel shows an empty field, not the old value.
+    fireEvent.click(dataButton('Export Vault'));
+    expect(screen.getByPlaceholderText('Enter your master password')).toHaveValue('');
+  });
+
+  it('writes the export file without account id, version counter or timestamps, keeping each row id', async () => {
+    mockExportVaultApi.mockResolvedValue({
+      data: {
+        success: true,
+        data: {
+          items: [
+            {
+              _id: '66c0f1a2b3c4d5e6f7a8b9c0',
+              userId: '66c0f1a2b3c4d5e6f7a8b9ff',
+              __v: 2,
+              itemType: 'login',
+              tags: [],
+              favorite: false,
+              encryptedName: 'n',
+              nameIv: 'v2:i',
+              nameTag: 't',
+              encryptedData: 'd',
+              dataIv: 'v2:i',
+              dataTag: 't',
+              createdAt: '2026-01-01T00:00:00.000Z',
+              updatedAt: '2026-01-02T00:00:00.000Z',
+            },
+          ],
+          folders: [
+            {
+              _id: '66c0f1a2b3c4d5e6f7a8b9c1',
+              userId: '66c0f1a2b3c4d5e6f7a8b9ff',
+              __v: 0,
+              encryptedName: 'f',
+              nameIv: 'v2:i',
+              nameTag: 't',
+              sortOrder: 0,
+              createdAt: '2026-01-01T00:00:00.000Z',
+              updatedAt: '2026-01-02T00:00:00.000Z',
+            },
+          ],
+          metadata: { exportDate: '2026-10-23T00:00:00.000Z', version: '0.21.0', itemCount: 1 },
+        },
+      },
+    });
+    await renderSettings();
+    await waitFor(() => screen.getByText('Export Vault'));
+    const origCreateObjectURL = URL.createObjectURL;
+    const origRevokeObjectURL = URL.revokeObjectURL;
+    const createObjectURL = vi.fn().mockReturnValue('blob:mock');
+    URL.createObjectURL = createObjectURL;
+    URL.revokeObjectURL = vi.fn();
+    const anchorClick = vi
+      .spyOn(HTMLAnchorElement.prototype, 'click')
+      .mockImplementation(() => undefined);
+
+    try {
+      fireEvent.click(dataButton('Export Vault'));
+      fireEvent.change(screen.getByPlaceholderText('Enter your master password'), {
+        target: { value: 'test-password' },
+      });
+      await act(async () => {
+        fireEvent.click(screen.getByText('I Understand, Export'));
+      });
+      await waitFor(() => {
+        expect(mockToast).toHaveBeenCalledWith(
+          expect.objectContaining({ title: 'Vault exported', type: 'success' }),
+        );
+      });
+
+      expect(createObjectURL).toHaveBeenCalledTimes(1);
+      const blob = createObjectURL.mock.calls[0]![0] as Blob;
+      const file = JSON.parse(await blob.text()) as {
+        items: Record<string, unknown>[];
+        folders: Record<string, unknown>[];
+      };
+      expect(file.items.map((row) => row._id)).toEqual(['66c0f1a2b3c4d5e6f7a8b9c0']);
+      expect(file.folders.map((row) => row._id)).toEqual(['66c0f1a2b3c4d5e6f7a8b9c1']);
+      for (const row of [...file.items, ...file.folders]) {
+        for (const key of ['userId', '__v', 'createdAt', 'updatedAt']) {
+          expect(row).not.toHaveProperty(key);
+        }
+      }
+      expect(anchorClick).toHaveBeenCalledTimes(1);
+    } finally {
+      anchorClick.mockRestore();
+      URL.createObjectURL = origCreateObjectURL;
+      URL.revokeObjectURL = origRevokeObjectURL;
+    }
+  });
+
+  it('sends nothing when the code that builds the export file does not load', async () => {
+    mockLoadNativeExport.mockRejectedValueOnce(
+      new Error('Failed to fetch dynamically imported module'),
+    );
+    await renderSettings();
+    await waitFor(() => screen.getByText('Export Vault'));
+
+    fireEvent.click(dataButton('Export Vault'));
+    fireEvent.change(screen.getByPlaceholderText('Enter your master password'), {
+      target: { value: 'test-password' },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText('I Understand, Export'));
+    });
+
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith({
+        title:
+          'Part of H-Vault needed to export did not load, so nothing was exported. Try again; if it keeps failing, reload the page.',
+        type: 'error',
+      });
+    });
+    expect(mockLoadNativeExport).toHaveBeenCalledTimes(1);
+    // Refused before the derivation and before anything reached the server.
+    expect(cryptoService.deriveKeys).not.toHaveBeenCalled();
+    expect(mockExportVaultApi).not.toHaveBeenCalled();
+    expect(mockToast).not.toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Vault exported' }),
+    );
   });
 
   it('opens import panel when Import Vault is clicked', async () => {

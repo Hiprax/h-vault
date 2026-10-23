@@ -1125,11 +1125,14 @@ export function documentFixtureBytes(name: string): Buffer {
  *
  * Deleting the property makes the browser look like Firefox, Safari or any
  * non-secure context, which is a shipped, supported configuration rather than a
- * fiction: `saveDocument` then takes `saveThroughBlob`, which is the path those
- * users get. The picker branch is covered where it CAN be driven honestly, in
+ * fiction: `saveDocument` then takes `saveThroughBlob`, and the bulk export
+ * builds its archive in memory, which are the paths those users get. The picker
+ * branch is covered where it CAN be driven honestly: in
  * `packages/client/tests/documents-download.test.ts`, which stubs the API and
  * asserts the streaming writes, the truncate-on-integrity-failure and the
- * abort-on-anything-else.
+ * abort-on-anything-else, and in `documents.spec.ts`, whose archive test
+ * replaces the dialog with one answering from the browser's own private file
+ * system, so the archive is written through a real `FileSystemWritableFileStream`.
  *
  * Called before the first navigation, because an init script applies to
  * documents loaded afterwards and the app reads the property at click time.

@@ -1,5 +1,6 @@
-import { test, expect, type Page } from '@playwright/test';
+import { test, expect, type Download, type Page } from '@playwright/test';
 import { readFileSync } from 'node:fs';
+import { fromBufferPromise } from 'yauzl';
 import {
   disableSaveFilePicker,
   documentFixture,
@@ -104,6 +105,28 @@ function documentIdFromUrl(page: Page): string {
   const id = new URL(page.url()).pathname.split('/').pop() ?? '';
   expect(id, `no document id in ${page.url()}`).toMatch(/^[0-9a-f]{24}$/);
   return id;
+}
+
+/**
+ * Every entry of a ZIP archive, by name, read by an independent reader opened in
+ * its strictest mode (no backslashes, no absolute or climbing paths, sizes
+ * checked against the bytes). The archive under test was built by this
+ * application's own writer, so reading it with that writer's logic would prove
+ * nothing.
+ */
+async function zipEntries(archive: Buffer): Promise<Map<string, Buffer>> {
+  const zip = await fromBufferPromise(archive, {
+    lazyEntries: true,
+    strictFileNames: true,
+    validateEntrySizes: true,
+  });
+  const entries = new Map<string, Buffer>();
+  for await (const entry of zip.eachEntry()) {
+    const parts: Buffer[] = [];
+    for await (const part of await zip.openReadStreamPromise(entry)) parts.push(part as Buffer);
+    entries.set(entry.fileName, Buffer.concat(parts));
+  }
+  return entries;
 }
 
 test.describe('documents: the encrypted document store', () => {
@@ -695,3 +718,104 @@ async function digestOf(bytes: Buffer): Promise<string> {
   const { createHash } = await import('node:crypto');
   return createHash('sha256').update(bytes).digest('hex');
 }
+
+test.describe('documents: taking the library out as one ZIP archive', () => {
+  test('hands the browser ONE archive, with folders mirrored, that opens to the exact bytes uploaded', async ({
+    page,
+  }) => {
+    test.setTimeout(300_000);
+    await disableSaveFilePicker(page);
+    await registerAndSignInViaUI(page);
+    await gotoDocuments(page);
+
+    // One document filed in a folder, one at the root.
+    await page.getByRole('button', { name: 'Create folder' }).click();
+    await page.getByPlaceholder('Folder name').fill('Taxes');
+    await page.getByRole('button', { name: 'Create', exact: true }).click();
+    await page.getByRole('button', { name: /^Taxes/ }).click();
+    await expect(page.getByTestId('upload-target-folder')).toContainText('Taxes');
+    await uploadDocument(page, CSV);
+    await page.getByRole('button', { name: /^All Documents/ }).click();
+    await uploadDocument(page, README);
+
+    // Every download this page starts, from before the run begins.
+    const downloads: Download[] = [];
+    page.on('download', (started) => {
+      downloads.push(started);
+    });
+    const first = page.waitForEvent('download');
+    await page.getByRole('button', { name: 'Download all' }).click();
+    await page.getByRole('button', { name: 'Start download' }).click();
+    const archive = await first;
+    const archivePath = await archive.path();
+
+    expect(archive.suggestedFilename()).toMatch(/^hvault-documents-\d{4}-\d{2}-\d{2}\.zip$/);
+    await expect(page.getByTestId('documents-download-all-status')).toContainText(
+      `2 of 2 document(s) verified and handed to your browser's downloads as ${archive.suggestedFilename()}.`,
+      { timeout: 120_000 },
+    );
+    // ONE download for the whole library, however many documents it holds.
+    expect(downloads).toHaveLength(1);
+
+    const entries = await zipEntries(readFileSync(archivePath));
+    expect([...entries.keys()].sort()).toEqual([README, `Taxes/${CSV}`]);
+    expect(entries.get(README)!.equals(documentFixtureBytes(README))).toBe(true);
+    expect(entries.get(`Taxes/${CSV}`)!.equals(documentFixtureBytes(CSV))).toBe(true);
+  });
+
+  test('writes the archive into the file chosen in the save dialog, opened on the click itself', async ({
+    page,
+  }) => {
+    test.setTimeout(300_000);
+    // A save dialog that answers with a file in the browser's own private file
+    // system, so the archive is written through a REAL FileSystemWritableFileStream.
+    // It records, before its first await, whether the click's transient
+    // activation was still live: a dialog opened after an await would be
+    // refused by a real browser, and this is how the test can tell.
+    await page.addInitScript(() => {
+      const record = { activation: [] as boolean[], names: [] as string[] };
+      Object.assign(window, {
+        __archivePicker: record,
+        showSaveFilePicker: async (options: { suggestedName: string }) => {
+          record.activation.push(navigator.userActivation.isActive);
+          record.names.push(options.suggestedName);
+          const root = await navigator.storage.getDirectory();
+          return root.getFileHandle(options.suggestedName, { create: true });
+        },
+      });
+    });
+    await registerAndSignInViaUI(page);
+    await gotoDocuments(page);
+    await uploadDocument(page, README);
+
+    const downloads: Download[] = [];
+    page.on('download', (started) => {
+      downloads.push(started);
+    });
+    await page.getByRole('button', { name: 'Download all' }).click();
+    await page.getByRole('button', { name: 'Start download' }).click();
+    await expect(page.getByTestId('documents-download-all-status')).toContainText(
+      /^1 of 1 document\(s\) verified and saved as hvault-documents-\d{4}-\d{2}-\d{2}\.zip\.$/,
+      { timeout: 120_000 },
+    );
+
+    const picked = await page.evaluate(
+      () =>
+        (window as unknown as { __archivePicker: { activation: boolean[]; names: string[] } })
+          .__archivePicker,
+    );
+    expect(picked.activation).toEqual([true]);
+    expect(picked.names).toHaveLength(1);
+    const written = await page.evaluate(async (name) => {
+      const root = await navigator.storage.getDirectory();
+      const file = await (await root.getFileHandle(name)).getFile();
+      return Array.from(new Uint8Array(await file.arrayBuffer()));
+    }, picked.names[0]!);
+
+    const entries = await zipEntries(Buffer.from(written));
+    expect([...entries.keys()]).toEqual([README]);
+    expect(entries.get(README)!.equals(documentFixtureBytes(README))).toBe(true);
+    // Nothing went through the browser's downloads.
+    expect(downloads).toHaveLength(0);
+  });
+});

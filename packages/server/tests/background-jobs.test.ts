@@ -335,6 +335,35 @@ describe('backupScheduler', () => {
     expect((backupData['folders'] as { _id: string }[])[0]!._id).toBe(folder._id.toString());
   });
 
+  it('mails backup rows without the account id or the document version counter', async () => {
+    startBackupScheduler();
+    const callback = getScheduledCallback();
+
+    const user = await createBackupUser();
+    const item = await createVaultItem(user._id);
+    const folder = await createFolder(user._id);
+
+    await callback();
+
+    expect(mockedSendEmail).toHaveBeenCalledTimes(1);
+    const attachments = mockedSendEmail.mock.calls[0]![3];
+    const content = attachments![0]!.content.toString('utf-8');
+    const backupData = JSON.parse(content) as {
+      items: Record<string, unknown>[];
+      folders: Record<string, unknown>[];
+    };
+    // Positive control: the rows are there under the ids a restore matches on,
+    // with the timestamps the file has always carried.
+    expect(backupData.items.map((row) => row._id)).toEqual([item._id.toString()]);
+    expect(backupData.folders.map((row) => row._id)).toEqual([folder._id.toString()]);
+    for (const row of [...backupData.items, ...backupData.folders]) {
+      expect(row).not.toHaveProperty('userId');
+      expect(row).not.toHaveProperty('__v');
+      expect(typeof row.createdAt).toBe('string');
+    }
+    expect(content).not.toContain(user._id.toString());
+  });
+
   it('carries the documentSummary breadcrumb in the SCHEDULED payload, not only in the download', async () => {
     // The scheduled email is the backup most operators actually have. A
     // breadcrumb present only on the manual download would leave it silently

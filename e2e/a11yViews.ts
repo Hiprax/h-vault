@@ -223,12 +223,12 @@ export const A11Y_VIEWS = [
     // live region carrying a real sentence, and a list naming each document that
     // could not be saved with its reason.
     //
-    // It is driven OFFLINE, and that is what makes it deterministic. The panel
-    // never opens a save dialog, so the run's only variable is the network; with
-    // the context offline every document is refused for the same stated reason,
-    // the failure list is populated, and — the part that matters for a gate — not
-    // one browser download is started, so nothing here depends on how Chromium
-    // answers several downloads from one action.
+    // It is driven OFFLINE, and that is what makes it deterministic. The walk
+    // removes the save dialog (`disableSaveFilePicker`), so the run's only
+    // variable is the network; with the context offline every document is refused
+    // for the same stated reason, the failure list is populated, the summary says
+    // "Nothing was saved.", and — the part that matters for a gate — no archive is
+    // built and no browser download is started.
     id: 'documents-download-all',
     description:
       'the documents page after a bulk export run offline, settled on its summary with the failure list showing',

@@ -46,6 +46,22 @@ type Rows<T> = AsyncIterable<T> & { close?: () => unknown };
 export const ROW_CURSOR_BATCH_SIZE = 16;
 
 /**
+ * The projection every vault row leaves the server under when it is written
+ * into a FILE the owner keeps: the encrypted export and both backup paths.
+ *
+ * Those cursors are lean, so the models' `toJSON` strip never runs on them and
+ * this is the only thing between a row's database bookkeeping and the file.
+ * `userId` (the account's own id) and `__v` (the document version counter) are
+ * read by nothing that consumes such a file: import and restore take the owner
+ * from the session and pin writes on the STORED row's version. `sourceRefId`
+ * is a foreign provenance id and `searchHash` is gone (F-12). The row `_id` and
+ * the timestamps stay: every format-v2 field is sealed to its row's `_id`, a
+ * restore matches on it, and the plaintext export's row schemas require both
+ * timestamps.
+ */
+export const EXPORTED_ROW_PROJECTION = '-userId -__v -sourceRefId -searchHash';
+
+/**
  * Closes `rows` if it is a database cursor, and never throws.
  *
  * Load-bearing: a Mongoose `QueryCursor` is its own async iterator and has no

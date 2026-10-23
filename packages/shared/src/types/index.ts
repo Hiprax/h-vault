@@ -293,11 +293,11 @@ export interface IFolderResponse {
 }
 
 // Vault export payload (the `data` field of the `POST /tools/export` envelope).
-// The server streams encrypted items/folders verbatim — the encrypted blobs are
-// opaque to the client, which serializes the whole payload back to a download
-// file. `items`/`folders` carry at least the encrypted response fields below;
-// the server's `.lean()` query also includes internal fields (e.g. `userId`)
-// that are not part of the consumed contract.
+// The server streams encrypted items/folders under `EXPORTED_ROW_PROJECTION`
+// (no `userId`, `__v`, `sourceRefId` or `searchHash`); the encrypted blobs are
+// opaque to the client. The Settings export writes only the allowlisted subset
+// built by `client/src/services/export/nativeExport.ts`, and the plaintext
+// export decrypts these rows, which is why both timestamps stay on the wire.
 export interface IExportMetadata {
   exportDate: string;
   version: string;

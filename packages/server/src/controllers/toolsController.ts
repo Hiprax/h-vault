@@ -42,6 +42,7 @@ import { acquireJobLock, releaseJobLock } from '../utils/jobLock.js';
 import { supportsTransactions } from '../utils/transactionSupport.js';
 import { estimateItemJsonSize, estimateFolderJsonSize } from '../utils/sizeEstimator.js';
 import {
+  EXPORTED_ROW_PROJECTION,
   ROW_CURSOR_BATCH_SIZE,
   closingMembers,
   forEachRow,
@@ -721,13 +722,13 @@ export const exportVault = catchAsync(async (req: Request, res: Response): Promi
   };
   const liveItems = () =>
     VaultItem.find({ userId, deletedAt: { $exists: false } })
-      .select('-sourceRefId -searchHash')
+      .select(EXPORTED_ROW_PROJECTION)
       .batchSize(ROW_CURSOR_BATCH_SIZE)
       .lean()
       .cursor();
   const allFolders = () =>
     Folder.find({ userId })
-      .select('-sourceRefId -searchHash')
+      .select(EXPORTED_ROW_PROJECTION)
       .batchSize(ROW_CURSOR_BATCH_SIZE)
       .lean()
       .cursor();

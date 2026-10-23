@@ -36,6 +36,47 @@ function escapeSegment(name: string): string {
 }
 
 /**
+ * Each folder's chain of folders from its root down to itself, cycle-safe and
+ * treating any unresolvable `parentId` as a root.
+ *
+ * The ONE walk of the pointer graph: {@link buildFolderPaths} joins it into the
+ * portable formats' path strings, and the document archive turns it into
+ * directory names (`services/documents/archiveNames.ts`).
+ *
+ * @param folders the decrypted folders to resolve chains for
+ * @returns a `Map` keyed by folder id; every input folder has exactly one entry,
+ *   ending with that folder
+ */
+export function folderAncestry(
+  folders: readonly DecryptedFolder[],
+): Map<string, readonly DecryptedFolder[]> {
+  const byId = new Map<string, DecryptedFolder>();
+  for (const folder of folders) {
+    byId.set(folder.id, folder);
+  }
+
+  const chains = new Map<string, readonly DecryptedFolder[]>();
+  for (const folder of folders) {
+    const chain: DecryptedFolder[] = [];
+    const visited = new Set<string>();
+    let current: DecryptedFolder | undefined = folder;
+
+    // Walk up the parent chain, prepending each ancestor. `visited` breaks any
+    // cycle (self-parent or longer); an unresolved parent ends the walk.
+    while (current && !visited.has(current.id)) {
+      visited.add(current.id);
+      chain.unshift(current);
+      const parentId: string | undefined = current.parentId;
+      current = parentId !== undefined && byId.has(parentId) ? byId.get(parentId) : undefined;
+    }
+
+    chains.set(folder.id, chain);
+  }
+
+  return chains;
+}
+
+/**
  * Build a map of folder id → full slash-joined path, cycle-safe and treating any
  * unresolvable `parentId` as a root.
  *
@@ -43,28 +84,9 @@ function escapeSegment(name: string): string {
  * @returns a `Map` keyed by folder id; every input folder has exactly one entry
  */
 export function buildFolderPaths(folders: readonly DecryptedFolder[]): Map<string, string> {
-  const byId = new Map<string, DecryptedFolder>();
-  for (const folder of folders) {
-    byId.set(folder.id, folder);
-  }
-
   const paths = new Map<string, string>();
-  for (const folder of folders) {
-    const segments: string[] = [];
-    const visited = new Set<string>();
-    let current: DecryptedFolder | undefined = folder;
-
-    // Walk up the parent chain, prepending each ancestor's name. `visited` breaks
-    // any cycle (self-parent or longer); an unresolved parent ends the walk.
-    while (current && !visited.has(current.id)) {
-      visited.add(current.id);
-      segments.unshift(escapeSegment(current.name));
-      const parentId: string | undefined = current.parentId;
-      current = parentId !== undefined && byId.has(parentId) ? byId.get(parentId) : undefined;
-    }
-
-    paths.set(folder.id, segments.join(PATH_SEPARATOR));
+  for (const [id, chain] of folderAncestry(folders)) {
+    paths.set(id, chain.map((folder) => escapeSegment(folder.name)).join(PATH_SEPARATOR));
   }
-
   return paths;
 }

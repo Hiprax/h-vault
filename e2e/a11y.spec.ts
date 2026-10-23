@@ -1,6 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import {
   describeA11y,
+  disableSaveFilePicker,
   documentFixture,
   documentFixtureBytes,
   gotoDocuments,
@@ -171,6 +172,14 @@ test.describe('accessibility: every primary view and modal', () => {
     // asking for reduced motion removes the animation rather than working around
     // it — and it is a supported way to use the application, not a fiction.
     await page.emulateMedia({ reducedMotion: 'reduce' });
+
+    // The bulk export's Start opens the browser's NATIVE save dialog where one
+    // exists, and headless Chromium has one: a window outside the page that no
+    // automation can answer, so the walk would hang at the documents step. Without
+    // it the export takes the in-memory path, which is the supported shape for
+    // every browser that lacks the dialog. Installed before the first navigation,
+    // because an init script applies to documents loaded afterwards.
+    await disableSaveFilePicker(page);
 
     const scans: A11yScan[] = [];
 
@@ -667,10 +676,10 @@ test.describe('accessibility: every primary view and modal', () => {
         // refused for one stated reason, so the failure list — the only DOM in
         // this panel the walk does not already cover through `documents-list` —
         // is populated deterministically rather than depending on how many
-        // documents happen to be listed. And no browser download is started at
-        // all, so this step never touches Chromium's handling of several
-        // downloads from one action, which is the one part of the feature a
-        // headless run has no business asserting anything about.
+        // documents happen to be listed. And nothing is archived, so no archive
+        // is handed to the browser and no download is started at all; the save
+        // dialog is removed for the whole walk (see `disableSaveFilePicker`
+        // above), so the run never waits on a native window either.
         await page.context().setOffline(true);
         await page.getByRole('button', { name: 'Download all' }).click();
         await page.getByRole('button', { name: 'Start download' }).click();

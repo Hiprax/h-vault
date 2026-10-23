@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+### Added
+
+- **Download all saves one ZIP archive.** On the Documents page, Download all (and Download selected) now saves every document the list is showing as a single `hvault-documents-YYYY-MM-DD.zip`, with the vault's folders mirrored as folders inside it. Each document goes through the same verified read as a single download and is added only after its sealed digest has matched, so the archive never holds a partial or altered file. The archive is written by a stored-only (uncompressed) ZIP writer in this codebase (`services/documents/zipArchive.ts`), with real sizes and checksums in every header, UTF-8 names and no data descriptors, the layout extractors read most widely (checked with Info-ZIP `unzip` and Python's `zipfile`); entry names are cleaned of separators and their look-alikes, control and direction characters, and the names and characters Windows refuses, and made unique ignoring case. No entry name can outgrow its ZIP header field: such a name is refused, and a folder chain deeper than the 50 levels the folder editor allows (as only a hand-edited backup or a tampering server can produce) is treated as unreadable, its documents going to the top of the archive. A very deep folder tree can still exceed Windows' default 260-character path limit.
+- **The archive streams into the file chosen in the save dialog** in desktop Chrome and Edge: the dialog opens on the Start click and the archive is written there document by document, holding about one document in memory. Other browsers build it in memory and hand it to their downloads.
+
+### Changed
+
+- **Behaviour change: Download all no longer saves each document as a separate download.** One archive replaces the per-file downloads that Chromium blocked or asked about after the first. Browsers without a save dialog get archives of about 512 MiB each (a larger single document gets one of its own), and **Continue in a new archive** saves the rest as `…-part-2.zip` and so on, with names that never collide across parts.
+- **Behaviour change: an interrupted archive is saved with what it holds.** Stop, a vault lock (the idle auto-lock included), leaving the Documents page, the server's per-user read budget and the archive's size limit all finish the archive with the documents already verified; nothing read after a lock or sign-out is kept. After Stop or a limit, Continue saves the rest; after a lock or leaving the page, Download all is run again for the rest. A `Retry-After` of 10 seconds or less (a rate-limiting proxy) is waited out, as other bulk actions do; a longer one ends the run and is quoted, and Continue resumes from the interrupted document. While a run is active, closing the tab asks first.
+- **Behaviour change: the encrypted vault export (`.enc`) no longer carries database bookkeeping.** `userId`, `__v`, `createdAt` and `updatedAt` are gone from its items and folders; it is built from an allowlist of the vault's content fields. Each row keeps its `_id` (every encrypted field is sealed to it, so it is required to open the row), and `folderId`/`parentId` stay for folder placement. Files exported by earlier versions import exactly as before.
+- **Encrypted backups (downloaded and mailed) no longer carry `userId` or `__v`** on their rows (`EXPORTED_ROW_PROJECTION`); restore never read either. Older backups restore exactly as before.
+- **Settings → Data: Export Vault and Import Vault now toggle, and only one of their panels is open at a time.** Opening either closes the other, and pressing a button again closes its own panel. Both buttons report their state to assistive technology (`aria-expanded`/`aria-controls`), and the export master password field is labelled.
+
+### Security
+
+- The encrypted export and both backup paths no longer include the account's id or the document version counter, completing the earlier removal of `userId` from every API response; the export file also drops the row timestamps. Server-side, nothing in an import or restore file was ever trusted for identity, ownership or timestamps, and new tests pin that.
+- The export master password is cleared from the page as soon as an export starts, and whenever the export panel closes; it previously stayed in memory, hidden, after a failed export.
+- Download all no longer reads each document's row from the server: it uses the row the list already validated (all four integrity checks still run), so a large export no longer draws on the per-account request budget that lock and sign-out share.
+- **The web image is built on nginx 1.30.6** (`nginxinc/nginx-unprivileged:1.30.6-alpine3.24`, digest-pinned), nginx's security release for CVE-2026-15176, CVE-2026-93479 and CVE-2026-97205, which the image scan reported as fixable HIGH in 1.30.5.
+- Dependency updates for advisories published after 0.20.0: `follow-redirects` 1.16.1 (GHSA-8r9p-f939-6h3c, GHSA-q3jh-wrc6-jgq8; reached through axios, whose outbound server calls follow no redirect) and `ip-address` 10.7.4 (GHSA-rxp7-6hxx-x8q5; reached through the rate limiter) in the server's runtime tree; `vite` 8.3.4 (GHSA-9jrq-w75r-8gcw, GHSA-rq7h-c2jc-7f22, GHSA-vfpm-58rq-9qcg, GHSA-587h-7wmj-h5pm, GHSA-698v-4r3x-3vcv, GHSA-r825-w8mm-5pxw) and `vitest` 4.1.12 (GHSA-qxg6-89mg-rqv8, GHSA-xp26-3454-mjgp) in the build and test toolchain only. Root `overrides` now set floors for `vite` and `vitest` (still on the 4.1 line) so one copy of each serves the whole workspace.
+
 ## [0.20.0] - 2026-10-20
 
 ### Added
