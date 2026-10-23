@@ -186,7 +186,7 @@ services:
     # `docker compose pull && docker compose up -d --wait`: the previous release's
     # images are still in the registry (and usually on the host) under their own
     # tags, and the tag names themselves say which release is running.
-    image: ghcr.io/hiprax/hvault-web:${HVAULT_VERSION:-0.20.0}
+    image: ghcr.io/hiprax/hvault-web:${HVAULT_VERSION:-0.21.0}
     container_name: ${HVAULT_STACK_NAME:-hvault}-nginx
     restart: unless-stopped
     # No `init:` here, deliberately (it is set on the two Node services, which need
@@ -263,7 +263,7 @@ services:
     build:
       <<: *hvault-build
       target: app
-    image: ghcr.io/hiprax/hvault-app:${HVAULT_VERSION:-0.20.0}
+    image: ghcr.io/hiprax/hvault-app:${HVAULT_VERSION:-0.21.0}
     container_name: ${HVAULT_STACK_NAME:-hvault}-app
     restart: unless-stopped
     # tini as PID 1: reaps zombies and forwards SIGTERM to node, which drains
@@ -433,7 +433,7 @@ services:
     build:
       <<: *hvault-build
       target: bootstrap
-    image: ghcr.io/hiprax/hvault-bootstrap:${HVAULT_VERSION:-0.20.0}
+    image: ghcr.io/hiprax/hvault-bootstrap:${HVAULT_VERSION:-0.21.0}
     container_name: ${HVAULT_STACK_NAME:-hvault}-bootstrap
     # A one-shot job: run once to completion and stay exited. Never restart — a
     # restart policy here would make `service_completed_successfully` unreachable.
@@ -519,7 +519,7 @@ services:
     build:
       context: .
       dockerfile: docker/mongo.Dockerfile
-    image: hvault-db:8.0-${HVAULT_VERSION:-0.20.0}
+    image: hvault-db:8.0-${HVAULT_VERSION:-0.21.0}
     pull_policy: never
     container_name: ${HVAULT_STACK_NAME:-hvault}-db-init
     # One-shot: a restart policy would make `service_completed_successfully`
@@ -583,7 +583,7 @@ services:
     # rather than rebuilt, so a plain `up` never restarts the database for
     # nothing. Every release is a new tag, so a change to docker/mongo.Dockerfile
     # reaches every update.
-    image: hvault-db:8.0-${HVAULT_VERSION:-0.20.0}
+    image: hvault-db:8.0-${HVAULT_VERSION:-0.21.0}
     pull_policy: never
     container_name: ${HVAULT_STACK_NAME:-hvault}-db
     restart: unless-stopped
@@ -859,7 +859,7 @@ services:
   #     build:
   #       context: .
   #       dockerfile: docker/garage.Dockerfile
-  #     image: hvault-s3:${HVAULT_VERSION:-0.20.0}
+  #     image: hvault-s3:${HVAULT_VERSION:-0.21.0}
   #     pull_policy: never
   #     # The tmpfs now belongs to the engine's user, like the app's and Nginx's.
   #     # `!override` replaces the list above rather than appending to it.

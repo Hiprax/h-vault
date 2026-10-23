@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-10-23
+
 ### Added
 
 - **Download all saves one ZIP archive.** On the Documents page, Download all (and Download selected) now saves every document the list is showing as a single `hvault-documents-YYYY-MM-DD.zip`, with the vault's folders mirrored as folders inside it. Each document goes through the same verified read as a single download and is added only after its sealed digest has matched, so the archive never holds a partial or altered file. The archive is written by a stored-only (uncompressed) ZIP writer in this codebase (`services/documents/zipArchive.ts`), with real sizes and checksums in every header, UTF-8 names and no data descriptors, the layout extractors read most widely (checked with Info-ZIP `unzip` and Python's `zipfile`); entry names are cleaned of separators and their look-alikes, control and direction characters, and the names and characters Windows refuses, and made unique ignoring case. No entry name can outgrow its ZIP header field: such a name is refused, and a folder chain deeper than the 50 levels the folder editor allows (as only a hand-edited backup or a tampering server can produce) is treated as unreadable, its documents going to the top of the archive. A very deep folder tree can still exceed Windows' default 260-character path limit.
@@ -1115,7 +1117,8 @@ First public release.
 - Progressive Web App with offline read access via IndexedDB, dark/light/system themes, keyboard shortcuts, virtualized lists and WAI-ARIA-conformant components.
 - Local CI pipeline (`npm run ci`) running eleven gates — including container builds with Trivy scanning and CodeQL — from the `pre-push` hook.
 
-[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.20.0...HEAD
+[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.21.0...HEAD
+[0.21.0]: https://github.com/Hiprax/h-vault/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/Hiprax/h-vault/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/Hiprax/h-vault/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/Hiprax/h-vault/compare/v0.17.0...v0.18.0

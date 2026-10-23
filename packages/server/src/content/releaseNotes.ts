@@ -2,6 +2,62 @@ import type { ReleaseNote } from '@hvault/shared';
 
 export const RELEASE_NOTES: readonly ReleaseNote[] = [
   {
+    version: '0.21.0',
+    date: '2026-10-23',
+    title: 'One ZIP file for all your documents, and a leaner export',
+    summary:
+      'Download all now saves your documents as a single ZIP file with your folders kept as folders, the encrypted export file no longer carries internal database details, and the Export and Import panels in Settings open one at a time.',
+    highlights: [
+      {
+        icon: 'download',
+        title: 'Download all saves one ZIP file',
+        body: 'Download all on the Documents page now saves the documents in the list as one ZIP file, with your folders kept as folders, instead of one download per document. Each document is checked against its sealed checksum before it is added. In Chrome and Edge on a computer you choose where the file is saved.',
+      },
+      {
+        icon: 'shield',
+        title: 'A leaner encrypted export',
+        body: 'The encrypted export file now carries your encrypted items and folders without internal database details. Exports made with earlier versions still import as before.',
+      },
+      {
+        icon: 'wrench',
+        title: 'Export and Import open one at a time',
+        body: 'In Settings, under Data, Export Vault and Import Vault now each open and close their own panel, and opening one closes the other.',
+      },
+    ],
+    changes: [
+      {
+        kind: 'changed',
+        text: 'If you press Stop or the server limits how fast documents can be read, the ZIP file is saved with the documents already checked, and Continue saves the rest in a new file.',
+      },
+      {
+        kind: 'changed',
+        text: 'If your vault locks or you leave the page during a download, the documents already checked are saved too. Start Download all again for the rest.',
+      },
+      {
+        kind: 'changed',
+        text: 'Browsers without a save dialog save a large library as several ZIP files of about 512 MB each.',
+      },
+      {
+        kind: 'improved',
+        text: 'Locking your vault and signing out keep working while a large download of your documents is running.',
+      },
+      {
+        kind: 'security',
+        text: 'The master password you type to export is cleared as soon as the export starts or the panel closes.',
+      },
+      {
+        kind: 'changed',
+        text: 'Encrypted backups no longer include the account id or the version number of each entry. Existing backups restore as before.',
+        audience: 'administrators',
+      },
+      {
+        kind: 'security',
+        text: 'The web server in the web image is updated to nginx 1.30.6, which fixes several security issues.',
+        audience: 'administrators',
+      },
+    ],
+  },
+  {
     version: '0.20.0',
     date: '2026-10-20',
     title: 'Ready-made server images and lighter source builds',
