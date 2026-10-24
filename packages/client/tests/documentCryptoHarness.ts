@@ -304,6 +304,8 @@ export function worstCaseMetaFixture(): Required<DocumentMeta> {
   return {
     name: wide.repeat(MAX_DOCUMENT_NAME_LENGTH),
     originalName: wide.repeat(MAX_DOCUMENT_NAME_LENGTH),
+    // A document id: 24 hex characters, the fixed length the schema takes.
+    restoredFrom: 'f'.repeat(24),
     mime: wide.repeat(MAX_DOCUMENT_MIME_LENGTH),
     ext: wide.repeat(MAX_DOCUMENT_EXT_LENGTH),
     plaintextBytes: 6,

@@ -950,7 +950,12 @@ describe('DocumentDetail — a document in the trash', () => {
     renderDetail(makeDocument(), true);
 
     fireEvent.click(screen.getByRole('button', { name: /delete forever/i }));
-    expect(screen.getByRole('dialog')).toHaveTextContent(/only copy of the key/i);
+    // Since 0.22.0 a full backup saved earlier can still hold it, so the sentence
+    // names the SERVER's copy, and the backup, rather than "the only copy".
+    expect(screen.getByRole('dialog')).toHaveTextContent(/the server's copy of the key/i);
+    expect(screen.getByRole('dialog')).toHaveTextContent(
+      'only a full backup saved before it went to the trash still holds it',
+    );
     fireEvent.click(screen.getByRole('button', { name: 'Delete forever' }));
 
     await waitFor(() => {

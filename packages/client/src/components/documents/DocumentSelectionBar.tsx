@@ -248,7 +248,7 @@ export function DocumentSelectionBar({
         onOpenChange={closeConfirmation}
         holdWhileBusy
         title={`Delete ${String(confirmCount)} ${confirmWord} for good`}
-        description={`Each stored file is removed from object storage and the only copy of the key that decrypts it is destroyed with it. Nothing can bring ${one ? 'it' : 'them'} back. The storage ${one ? 'it occupies' : 'they occupy'} is released.`}
+        description={`Each stored file is removed from object storage and the server's copy of the key that decrypts it is destroyed with it. Nothing on the server can bring ${one ? 'it' : 'them'} back; only a full backup saved before ${one ? 'it' : 'they'} went to the trash still holds ${one ? 'it' : 'them'}. The storage ${one ? 'it occupies' : 'they occupy'} is released.`}
         confirmLabel="Delete forever"
         onConfirm={confirmPurge}
         busy={run.busy}

@@ -378,6 +378,13 @@ export const MAX_IDENTITY_NAME_LENGTH = 200;
 // plus a 253-char domain cannot all be maximal at once).
 export const MAX_IDENTITY_EMAIL_LENGTH = 254;
 export const MAX_IDENTITY_PHONE_LENGTH = 30;
+// An identity's phone numbers beyond the first, as rows of an optional label and a
+// number. Ten rows in all, the first of which is mirrored into the single `phone`
+// field every older reader and every import understands. The label bound is the one
+// the editor's input enforces too, so the form can never write a value the stored
+// schema refuses on the next decrypt.
+export const MAX_IDENTITY_PHONES = 10;
+export const MAX_IDENTITY_PHONE_LABEL_LENGTH = 50;
 export const MAX_IDENTITY_COMPANY_LENGTH = 300;
 // A national identification number and a passport number. Both are SECRETS: the
 // item form masks them behind a reveal control and `getItemSubtitle` must never

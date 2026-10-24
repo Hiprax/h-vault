@@ -381,6 +381,29 @@ test.describe('documents: the encrypted document store', () => {
     await expect(page.getByRole('button', { name: 'Upload the original unchanged' })).toBeVisible();
   });
 
+  test('hides "Download your documents" while a file is picked, and Cancel lets the file go', async ({
+    page,
+  }) => {
+    test.setTimeout(300_000);
+    await registerAndSignInViaUI(page);
+    await gotoDocuments(page);
+    await uploadDocument(page, README);
+    const downloadSection = page.getByTestId('documents-download-all');
+    await expect(downloadSection).toBeVisible();
+
+    // A file picked opens the upload form, and the download section steps aside.
+    await page.locator('#document-upload-input').setInputFiles(documentFixture(CSV));
+    await expect(page.getByRole('button', { name: 'Upload', exact: true })).toBeVisible();
+    await expect(downloadSection).toBeHidden();
+
+    // Cancel lets the file go, gives the focus back to the picker, and uploads nothing.
+    await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'Upload', exact: true })).toHaveCount(0);
+    await expect(page.locator('#document-upload-input')).toBeFocused();
+    await expect(downloadSection).toBeVisible();
+    await expect(page.getByTestId('document-name')).toHaveCount(1);
+  });
+
   test('files a document in a folder and favorites it, and both lead somewhere', async ({
     page,
   }) => {
@@ -489,9 +512,9 @@ test.describe('documents: the encrypted document store', () => {
     const purgeDialog = page.getByRole('dialog', { name: 'Delete this document for good' });
     await expect(purgeDialog).toBeVisible();
     // The copy says what is actually destroyed, and it is the sentence a reader
-    // has to be given before an irreversible action: the object AND the only
-    // copy of the key that opens it.
-    await expect(purgeDialog).toContainText('Nothing can bring it back');
+    // has to be given before an irreversible action: the object AND the server's
+    // copy of the key that opens it (a full backup saved earlier still holds both).
+    await expect(purgeDialog).toContainText('Nothing on the server can bring it back');
     await purgeDialog.getByRole('button', { name: 'Delete forever' }).click();
 
     await expect(page).toHaveURL(/\/documents$/);
@@ -596,7 +619,7 @@ test.describe('documents: the encrypted document store', () => {
     await tick(UGLY_JSON);
     await bar.getByRole('button', { name: 'Delete forever' }).click();
     const purgeDialog = page.getByRole('dialog', { name: 'Delete 1 document for good' });
-    await expect(purgeDialog).toContainText('Nothing can bring it back');
+    await expect(purgeDialog).toContainText('Nothing on the server can bring it back');
     await purgeDialog.getByRole('button', { name: 'Delete forever' }).click();
     await expect(page.getByText('1 document permanently deleted')).toBeVisible({ timeout: 60_000 });
     await expect(page.getByText('The trash is empty')).toBeVisible();

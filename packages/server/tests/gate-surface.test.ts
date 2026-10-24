@@ -1902,6 +1902,7 @@ describe('machine-readable reports', () => {
       'audit-log',
       'sessions',
       'backup-settings',
+      'backup-full-backup',
       'export-data',
       'vault-health',
       'file-encryption',
@@ -1963,12 +1964,19 @@ describe('machine-readable reports', () => {
     ]) {
       expect(A11Y_VIEW_IDS.indexOf(view), view).toBeLessThan(A11Y_VIEW_IDS.indexOf('vault-list'));
     }
-    // And the five views added on the authenticated side belong with the rest of
+    // And the six views added on the authenticated side belong with the rest of
     // it, for the same reason the document views do: each needs an unlocked
     // vault, and the unlock step is what ends that. Listed rather than derived
     // because "everything between `vault-list` and `unlock-screen`" is what the
     // assertion would then be, which is true by construction and proves nothing.
-    for (const view of ['generator', 'audit-log', 'sessions', 'backup-settings', 'export-data']) {
+    for (const view of [
+      'generator',
+      'audit-log',
+      'sessions',
+      'backup-settings',
+      'backup-full-backup',
+      'export-data',
+    ]) {
       expect(A11Y_VIEW_IDS.indexOf(view), view).toBeGreaterThan(
         A11Y_VIEW_IDS.indexOf('vault-list'),
       );

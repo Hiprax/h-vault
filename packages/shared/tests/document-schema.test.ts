@@ -303,6 +303,28 @@ describe('documentMetaSchema — the encrypted blob', () => {
     expect(paths(result)).toEqual(['originalName']);
   });
 
+  it('keeps the id a document was restored from, and invents none', () => {
+    // Sealed provenance: a second restore of the same full backup matches on it.
+    const restored = documentMetaSchema.safeParse({
+      ...validMeta,
+      restoredFrom: '0123456789abcdef01234567',
+    });
+    expect(restored.success ? restored.data.restoredFrom : null).toBe('0123456789abcdef01234567');
+    const plain = documentMetaSchema.safeParse(validMeta);
+    expect(plain.success ? 'restoredFrom' in plain.data : true).toBe(false);
+  });
+
+  it.each([
+    ['upper-case hex', '0123456789ABCDEF01234567'],
+    ['23 characters', '0123456789abcdef0123456'],
+    ['25 characters', '0123456789abcdef012345678'],
+    ['a non-hex character', '0123456789abcdef0123456g'],
+  ])('refuses a restoredFrom that is %s', (_label, value) => {
+    const result = documentMetaSchema.safeParse({ ...validMeta, restoredFrom: value });
+    expect(result.success).toBe(false);
+    expect(paths(result)).toEqual(['restoredFrom']);
+  });
+
   it('accepts a blob carrying the note and the transform provenance', () => {
     const withBoth = {
       ...validMeta,
@@ -613,6 +635,7 @@ describe('documentMetaSchema — the encrypted blob', () => {
     const worstCase: Required<DocumentMeta> = {
       name: chars(MAX_DOCUMENT_NAME_LENGTH, '漢'),
       originalName: chars(MAX_DOCUMENT_NAME_LENGTH, '漢'),
+      restoredFrom: 'f'.repeat(24),
       mime: chars(MAX_DOCUMENT_MIME_LENGTH, '漢'),
       ext: chars(MAX_DOCUMENT_EXT_LENGTH, '漢'),
       plaintextBytes: MAX_DOCUMENT_CHUNK_COUNT * DOCUMENT_PLAINTEXT_CHUNK_BYTES,

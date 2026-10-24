@@ -1023,6 +1023,35 @@ describe('VaultItemDetail', () => {
       expect(screen.getByText('Ring twice')).toBeInTheDocument();
     });
 
+    it('renders every phone number, each named by its label or its place', () => {
+      const item = makeDecryptedItem({
+        name: 'Many Phones',
+        itemType: 'identity',
+        data: {
+          firstName: 'Bob',
+          lastName: 'Builder',
+          phone: '111',
+          phones: [{ number: '111' }, { label: 'Work', number: '222' }, { number: '333' }],
+          customFields: [],
+        },
+      });
+
+      // Each number is its own row with its own key: React warns about duplicates.
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+      renderWithRouter(<VaultItemDetail item={item as never} onEdit={onEdit} />);
+      expect(consoleError).not.toHaveBeenCalled();
+      consoleError.mockRestore();
+
+      expect(screen.getByText('Phone')).toBeInTheDocument();
+      expect(screen.getByText('111')).toBeInTheDocument();
+      expect(screen.getByText('Phone (Work)')).toBeInTheDocument();
+      expect(screen.getByText('222')).toBeInTheDocument();
+      expect(screen.getByText('Phone 3')).toBeInTheDocument();
+      expect(screen.getByText('333')).toBeInTheDocument();
+      // The first number is shown once, though it is stored in both keys.
+      expect(screen.getAllByText('111')).toHaveLength(1);
+    });
+
     it('renders identity without optional fields', () => {
       const item = makeDecryptedItem({
         name: 'Minimal Identity',

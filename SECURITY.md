@@ -256,8 +256,9 @@ security posture, not a disclaimer.
   ceiling sized for the app's own one-request-per-row bulk actions. That sizing is a trade, stated
   here: a session can trash and then permanently delete every document an account holds within
   one fifteen-minute window (as it already could every vault item), and documents are not in the
-  encrypted backup, so a stolen session is enough to destroy them, whether or not the vault is
-  unlocked: deleting a document needs no key. A smaller budget would
+  backups the server makes, so a stolen session is enough to destroy the server's copy, whether or
+  not the vault is unlocked: deleting a document needs no key. Only a full backup the owner saved
+  earlier still holds them. A smaller budget would
   only make the app's own bulk Delete forever stop part-way through for a legitimate user. That bounds how fast one account can
   grow the log; how large it can grow is bounded separately (see **The audit log's size** below).
   Getting the key wrong on any of these tiers turns a limiter into a lockout of the legitimate
@@ -345,6 +346,9 @@ security posture, not a disclaimer.
   not: it is assembled on the server, which has neither the backup password nor the key
   derived from it, so there is nothing there to sign with. That is why restoring an emailed
   backup asks for confirmation; see the next bullet for what the confirmation means.
+  A **full backup**, saved from the browser, carries the account's documents in the same form
+  (each still sealed under its own key, wrapped under the vault key) and is signed the same way;
+  see **Full backup**.
 - **A stolen session redirecting your backups.** Where mailed backups go changes only with your
   master password, and no address other than your own receives one before it has confirmed; see
   [Where mailed backups go](#where-mailed-backups-go).
@@ -1064,6 +1068,11 @@ server set every timestamp, and updates only rows it matched in the live vault. 
 earlier releases, which still carry `userId`, `__v` and the timestamps, import and restore exactly
 as before; those fields were never read.
 
+A **full backup** (`.hvbackup`) carries that same vault backup, plus each document's row as the
+document list returns it (its wrapped key, its sealed details, its sizes and its folder and
+favorite, again without `userId` or `__v`) and the document's stored ciphertext; see **Full
+backup**.
+
 ### Portable plaintext export ("Leave H-Vault")
 
 The `/settings/export-data` page exports your whole vault to another password manager
@@ -1483,13 +1492,17 @@ because a reset discards that key.
 ### Deleting a document, and why it cannot be undone
 
 A stored document is two things: an entry in the database and a file of ciphertext in object
-storage. The entry holds the only wrapped copy of the key that decrypts that file — the key
-exists nowhere else, not on the server, not in the browser once the vault is locked, and not
-in a backup, because **documents are deliberately not part of a backup** (their bytes cannot
-fit a backup file, and metadata without bytes would restore entries pointing at files that do
-not exist; a backup therefore carries only a count, so a restored account cannot quietly look
-complete). Deleting the entry is therefore the act that destroys the document. Any file that
-somehow survives it is ciphertext under a key that no longer exists anywhere.
+storage. The entry holds the server's only wrapped copy of the key that decrypts that file — on
+the server the key exists nowhere else, and it is not in the browser once the vault is locked. It
+is not in a vault backup either, because **documents are not part of the backups the server
+makes** (their bytes cannot fit a backup file, and metadata without bytes would restore entries
+pointing at files that do not exist; such a backup therefore carries only a count, so a restored
+account cannot quietly look complete). The one other place a document can exist is a **full
+backup** the owner saved in their browser before deleting it (see **Full backup** below): that
+file holds the document's ciphertext and wrapped key exactly as the server did, and restoring it
+uploads the document again under a new id. Deleting the entry is therefore the act that destroys
+the server's copy. Any file that somehow survives it on the server is ciphertext under a key the
+server no longer holds.
 
 That shapes the order every deletion path uses, and it is worth stating because the two
 orders look interchangeable and are not:
@@ -1544,10 +1557,11 @@ document upload that completes while its own account is being erased (the owner 
 account in another tab) is taken back, its row and its stored file, rather than left behind (a file
 the storage service refuses to delete at that moment is left to the hourly storage clean-up).
 
-Neither deletion is recoverable, and neither is undone by restoring a backup. The same fact
+On the server neither deletion is recoverable, and restoring a vault backup undoes neither; a
+full backup saved before it brings back the documents it holds, as new uploads. The same fact
 has an operational consequence that belongs to whoever runs the server rather than to whoever
-uses it: because documents are not in a backup, the **storage volume is the only copy of every
-uploaded file**, and it must be captured alongside the database and the deployment's `.env` —
+uses it: because documents are not in the backups the server makes, the **storage volume is the
+server's only copy of every uploaded file**, and it must be captured alongside the database and the deployment's `.env` —
 the wrapped keys live in the database, the ciphertext lives in the storage service, and neither
 half is usable without the other. The README's backup section gives the volumes and the
 procedure, including why a file-level copy of a running storage engine is not a backup.
@@ -1623,6 +1637,65 @@ worse than none:
 The export changes nothing on the server: it is the same authenticated read of the same rows,
 under the same per-user rate limits, and it is not audited for the same reason no other read is.
 
+### Full backup
+
+**Full Backup**, on the Backup Settings page, saves the account's vault backup AND every document
+outside the trash, with its name, note, tags, folder and favorite, to the owner's device as one
+file (`.hvbackup`). It is built in the browser and never emailed. What it is, and what it is not:
+
+- **The file is ciphertext.** Each document travels as the stored object, verbatim, with its row:
+  the document key is still wrapped under the vault key, and the vault key is in the file only
+  wrapped under the master encryption key and under the backup wrapping key, exactly as in a vault
+  backup. The file is therefore exactly as zero-knowledge as the server. Its plain structure is
+  what the server already holds: sizes, counts, folder ids, favorite flags and timestamps. It
+  carries no document name, tag or note in the clear.
+- **Its confidentiality rests on two passwords.** Whoever holds the file can try to guess the
+  master password (against the PBKDF2 copy of the vault key, 600,000 iterations) or the backup
+  password (against the backup wrapping key, the same work factor; setup requires a strong one).
+  Treat the file like a vault backup.
+- **It is checked while it is written.** Every document is decrypted and verified (the row is the
+  one asked for, its framing agrees with the sealed copy, every segment authenticates, the
+  whole-file digest matches) before it is written, and one that fails is left out and named rather
+  than saved broken. Before the file is finished the account's vault key is checked again: a key
+  changed by a rotation or a master password change during the run refuses the file. An
+  interrupted run (Stop, a lock, sign-out, leaving the page, or a server that stopped answering)
+  saves nothing, because a backup that might pass for complete is the one thing this must not
+  write.
+- **Its integrity is signed.** The table of contents is signed with HMAC-SHA256 under a key derived
+  from the backup wrapping key with HKDF and a label of its own (`hvault-full-backup-hmac-v1`), so
+  a vault backup's signature can never verify it, and every document segment is AES-GCM bound to
+  its document, its position and whether it is the last. A restore judges the signature with the
+  rule a downloaded vault backup gets: verified by the account's own backup key, restored;
+  verified only by the key the file carries, restored only once you confirm; verified by no key,
+  refused. Unlike an emailed vault backup, a full backup is never unsigned: the reader refuses a
+  file without a signature before anything is restored.
+- **A restore never adopts the file's key, and reads it with fixed rules.** The reader parses only
+  the container (a fixed header and footer and a bounded table of contents, every entry
+  contiguous and of the size its row states), never a document's bytes, which are only
+  decrypted. The vault part is restored exactly like a vault backup; each document is then
+  decrypted with the backup's vault key, verified, and uploaded again through the ordinary upload
+  path, so it is sealed afresh under this account's key and a new id. Which document it came from
+  is sealed inside its own encrypted details (`restoredFrom`), so the server learns nothing new,
+  and a repeated restore with Skip finds it there instead of uploading it twice.
+
+Residuals, stated so the feature is not trusted for more than it does:
+
+- **The idle auto-lock waits for it** while it runs in a visible tab (see **Auto-lock** below).
+- **Pace.** A restore re-uploads every document, so it spends the account's upload and part
+  budgets: roughly sixty documents per fifteen minutes. A large restore waits these out; it can
+  stop, and running it again with Skip finishes it.
+- **A favorite is set after its upload,** so a restore that stops between the two leaves that
+  document restored without its favorite.
+- **Leaving the page through the app stops a running job,** because the router has no navigation
+  guard; the page says so before the start, and closing or reloading the tab asks first.
+- **A browser tab still on an older version** that edits a restored document's details drops the
+  sealed `restoredFrom`, so a later repeated restore uploads that document again.
+- **A server that answers with rate limits** can keep a visible job, and so the auto-lock pause,
+  going for up to six waits of fifteen minutes per request. That server already serves the code
+  this page runs, so it gains nothing it did not have.
+- **A full backup made before a permanent delete or an account erasure still holds that
+  document,** encrypted, for as long as the file is kept.
+
 The hourly clean-up referred to above is the only thing in the system that deletes a stored
 file without a request having asked for it, so the rule it works to is stated in the negative:
 it deletes a file only when it can prove nothing refers to it. A file is left where it is
@@ -1630,8 +1703,8 @@ whenever its name is not one this system wrote, whenever the storage service doe
 how old it is, whenever it is less than a day old, whenever any entry at all names it —
 active, in the trash, or part-way through being purged — and whenever the transfer that
 created it could still be completed. Every one of those is a reason to do nothing, because an
-unreclaimed file costs storage while a file deleted in error costs a document that no backup
-and no key can bring back. The clean-up also stops early once the storage service has refused
+unreclaimed file costs storage while a file deleted in error costs a document the server cannot
+bring back. The clean-up also stops early once the storage service has refused
 several operations in a row, so a failing service produces one short run an hour rather than a
 run that never ends.
 
@@ -1741,8 +1814,8 @@ overwriting the key: a browser-held key does not live in memory page script can 
 app lets go of it rather than claiming to zero it. The session itself stays alive, so unlocking
 needs only the master password, not a full sign-in.
 
-Two properties of that timer are worth stating plainly, because the obvious implementation
-gets both wrong:
+Three properties of that timer are worth stating plainly, because the obvious implementation
+gets them wrong:
 
 - **The deadline is wall-clock, not elapsed timer time.** A `setTimeout` measures how long the
   page has been _running_, and browsers do not run a hidden tab on schedule: they throttle its
@@ -1759,6 +1832,16 @@ gets both wrong:
   its own delay in minutes), off by default. Earlier versions did this unconditionally after 30
   seconds regardless of the configured timeout, which meant switching tabs to look something up
   locked the vault; if you want that behaviour, turn it on and choose the delay.
+- **A full backup or a full restore holds the idle deadline while it makes progress.** Both are
+  long jobs the owner starts and watches, so each records its own progress (a verified segment, a
+  stored part, a finished document, a wait the server asked for), and the deadline counts from the
+  later of the last interaction and the last progress. Only while the tab is visible: progress in a
+  hidden tab is not recorded, and a gap between two checks longer than a minute (a machine that
+  slept, a frozen tab) credits nothing. There is nothing to release, so a job that stops making
+  progress (finished, stopped, offline, waiting on a server it cannot reach, stuck on a request
+  that never answers) lets the normal deadline run again one timeout after its last progress.
+  `lockOnHidden`, a manual lock and signing out are unchanged, and an ordinary upload is still not
+  activity.
 
 The lock is a client-side control over key material in one browser. It is not an
 authentication boundary: the server-side session, its refresh token and its absolute deadline

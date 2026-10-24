@@ -67,6 +67,9 @@ import {
   BACKUP_HISTORY_MAX_LIMIT,
   MAX_ENCRYPTED_PASSWORD_HISTORY_LENGTH,
   MAX_BACKUP_EMAILS,
+  MAX_IDENTITY_PHONES,
+  MAX_IDENTITY_PHONE_LABEL_LENGTH,
+  MAX_IDENTITY_PHONE_LENGTH,
 } from '../src/constants/index.js';
 
 const VALID_OBJECT_ID = 'a'.repeat(24);
@@ -1721,6 +1724,96 @@ describe('identityDataSchema', () => {
     const longPhone = '1'.repeat(31);
     const result = identityDataSchema.safeParse({ phone: longPhone });
     expect(result.success).toBe(false);
+  });
+});
+
+// The list of phone numbers. Every bound is pinned by PARSING at bound-1, bound and
+// bound+1, so a widened or narrowed cap turns these red rather than a constant
+// comparison that would move with it.
+describe('identityDataSchema — phones', () => {
+  const row = (number: string, label?: string) =>
+    label === undefined ? { number } : { label, number };
+  const rows = (count: number) =>
+    Array.from({ length: count }, (_, i) => row(`+1 555 010${String(i % 10)}`));
+  const issuePaths = (value: unknown): string[] => {
+    const result = identityDataSchema.safeParse(value);
+    return result.success ? [] : result.error.issues.map((issue) => issue.path.join('.'));
+  };
+
+  it('adds no phones key to an identity stored before the list existed', () => {
+    // The previous-release fixture and every import content hash depend on this:
+    // a default here would put `phones: []` on every stored identity on decrypt.
+    const result = identityDataSchema.safeParse({ phone: '+1 (555) 010-9999' });
+    expect(result.success).toBe(true);
+    expect(result.success ? 'phones' in result.data : true).toBe(false);
+    expect(result.success ? result.data.phone : null).toBe('+1 (555) 010-9999');
+  });
+
+  it.each([MAX_IDENTITY_PHONES - 1, MAX_IDENTITY_PHONES])('accepts %i rows', (count) => {
+    const result = identityDataSchema.safeParse({ phones: rows(count) });
+    expect(result.success).toBe(true);
+    expect(result.success ? result.data.phones : null).toHaveLength(count);
+  });
+
+  it('refuses one row more than the limit, on the list itself', () => {
+    expect(issuePaths({ phones: rows(MAX_IDENTITY_PHONES + 1) })).toEqual(['phones']);
+  });
+
+  it('keeps a row exactly as written: label and number, no trimming', () => {
+    const result = identityDataSchema.safeParse({ phones: [row(' 020 7946 0958', ' Work ')] });
+    expect(result.success ? result.data.phones : null).toEqual([
+      { label: ' Work ', number: ' 020 7946 0958' },
+    ]);
+  });
+
+  it('accepts a row without a label and adds none', () => {
+    const result = identityDataSchema.safeParse({ phones: [row('5')] });
+    expect(result.success ? result.data.phones : null).toEqual([{ number: '5' }]);
+  });
+
+  it.each([MAX_IDENTITY_PHONE_LABEL_LENGTH - 1, MAX_IDENTITY_PHONE_LABEL_LENGTH])(
+    'accepts a label of %i characters',
+    (length) => {
+      expect(identityDataSchema.safeParse({ phones: [row('5', 'L'.repeat(length))] }).success).toBe(
+        true,
+      );
+    },
+  );
+
+  it('refuses a number that is not a phone number, on that row, in a sentence of its own', () => {
+    const result = identityDataSchema.safeParse({ phones: [row('5'), row('call me')] });
+    expect(result.success).toBe(false);
+    expect(result.error?.issues).toEqual([
+      expect.objectContaining({ path: ['phones', 1, 'number'], message: 'Invalid phone number' }),
+    ]);
+  });
+
+  it('refuses a label one character over its bound, naming the row and field', () => {
+    expect(
+      issuePaths({ phones: [row('5'), row('6', 'L'.repeat(MAX_IDENTITY_PHONE_LABEL_LENGTH + 1))] }),
+    ).toEqual(['phones.1.label']);
+  });
+
+  it.each([MAX_IDENTITY_PHONE_LENGTH - 1, MAX_IDENTITY_PHONE_LENGTH])(
+    'accepts a number of %i characters',
+    (length) => {
+      expect(identityDataSchema.safeParse({ phones: [row('1'.repeat(length))] }).success).toBe(
+        true,
+      );
+    },
+  );
+
+  it.each([
+    ['one character over its bound', '1'.repeat(MAX_IDENTITY_PHONE_LENGTH + 1)],
+    ['empty (the editor strips blank rows, so none is ever written)', ''],
+    ['not a phone number', 'call me'],
+    ['a plus sign that is not leading', '12+34'],
+  ])('refuses a number that is %s', (_label, number) => {
+    expect(issuePaths({ phones: [row(number)] })).toEqual(['phones.0.number']);
+  });
+
+  it('refuses a row with no number at all', () => {
+    expect(issuePaths({ phones: [{ label: 'Work' }] })).toEqual(['phones.0.number']);
   });
 });
 

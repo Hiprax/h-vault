@@ -941,6 +941,54 @@ describe('DocumentUploadPanel — starting a transfer', () => {
   });
 });
 
+describe('DocumentUploadPanel — Cancel, and the form it closes', () => {
+  it('lets the picked file go beside Upload, uploading nothing, and gives the focus back to the picker', () => {
+    const startUpload = vi.fn();
+    useDocumentsStore.setState({ startUpload });
+    renderPanel();
+    pick('report.pdf', 4096);
+    expect(screen.getByText(/report\.pdf \(4 KB\)/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+
+    expect(screen.queryByText(/report\.pdf \(4 KB\)/)).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Upload$/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Cancel' })).toBeNull();
+    expect(screen.getByLabelText('File to upload')).toHaveFocus();
+    expect(startUpload).not.toHaveBeenCalled();
+  });
+
+  it('holds Cancel while the upload is being started', () => {
+    useDocumentsStore.setState({ startUpload: vi.fn(() => new Promise<string>(() => {})) });
+    renderPanel();
+    pick('report.pdf', 4096);
+    fireEvent.click(screen.getByRole('button', { name: /^Upload$/ }));
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeDisabled();
+  });
+
+  it('tells the page when the form opens and closes, and that it closed when the panel goes away', () => {
+    const onFormOpenChange = vi.fn();
+    const { unmount } = render(
+      <MemoryRouter>
+        <DocumentUploadPanel config={ENABLED_CONFIG} onFormOpenChange={onFormOpenChange} />
+      </MemoryRouter>,
+    );
+    pick('report.pdf', 4096);
+    expect(onFormOpenChange).toHaveBeenLastCalledWith(true);
+    // A file this server refuses opens no form.
+    pick('huge.pdf', 200 * 1024 * 1024);
+    expect(onFormOpenChange).toHaveBeenLastCalledWith(false);
+    pick('report.pdf', 4096);
+    expect(onFormOpenChange).toHaveBeenLastCalledWith(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(onFormOpenChange).toHaveBeenLastCalledWith(false);
+    pick('report.pdf', 4096);
+    onFormOpenChange.mockClear();
+    unmount();
+    expect(onFormOpenChange).toHaveBeenCalledWith(false);
+  });
+});
+
 describe('DocumentUploadPanel — a transfer in progress', () => {
   it('names the part that is moving and advances as the parts land', () => {
     const totalBytes = DOCUMENT_PLAINTEXT_CHUNK_BYTES * 2 + 100;
@@ -2225,6 +2273,20 @@ describe('DocumentsPage — the surface the folder, the favorite and the trash l
 
   const names = () => screen.queryAllByTestId('document-name').map((n) => n.textContent);
 
+  it('hides "Download your documents" while the upload form is open, and shows it again after Cancel', async () => {
+    await renderWith({ documents: [loose()] });
+    const section = screen.getByTestId('documents-download-all');
+    expect(section).toBeVisible();
+
+    pick('report.pdf', 4096);
+    expect(section).not.toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Download all' })).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(section).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Download all' })).toBeVisible();
+  });
+
   it('counts every entry in the rail, and counts a folder by ACTIVE rows only', async () => {
     await renderWith({
       documents: [filed(), starred(), loose()],
@@ -2457,7 +2519,7 @@ describe('DocumentsPage — the surface the folder, the favorite and the trash l
 
     fireEvent.click(screen.getByRole('button', { name: 'Empty trash' }));
     const dialog = await screen.findByRole('dialog');
-    expect(dialog).toHaveTextContent('Nothing can bring them back');
+    expect(dialog).toHaveTextContent('Nothing on the server can bring them back');
     fireEvent.click(within(dialog).getByRole('button', { name: 'Delete all forever' }));
 
     await waitFor(() => {

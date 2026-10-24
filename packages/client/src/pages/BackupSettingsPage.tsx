@@ -17,6 +17,7 @@ import {
   Key,
   Plus,
   X,
+  Database,
 } from 'lucide-react';
 import { cn, getApiErrorMessage } from '../lib/utils';
 import { downloadText } from '../lib/download';
@@ -30,6 +31,7 @@ import {
   DialogTitle,
 } from '../components/ui/Dialog';
 import { useToast } from '../components/ui/Toast';
+import { useBeforeUnloadWarning } from '../hooks/useBeforeUnloadWarning';
 import { getProfileApi } from '../services/api/userApi';
 import { api } from '../services/api/client';
 import { getBackupHistoryApi, updateBackupRecipientsApi } from '../services/api/backupApi';
@@ -47,7 +49,27 @@ import {
   type BwkWrapper,
 } from '../services/crypto/backupKeyCopy';
 import { MAX_BACKUP_EMAILS } from '@hvault/shared';
-import type { IBackupLogEntry, IBackupRecipient, ItemType } from '@hvault/shared';
+import type {
+  IBackupLogEntry,
+  IBackupRecipient,
+  IRestoreBackupResponse,
+  ItemType,
+} from '@hvault/shared';
+import { BackupOptionsGuide } from '../components/backup/BackupOptionsGuide';
+import { BackupPasswordPrompt } from '../components/backup/BackupPasswordPrompt';
+import {
+  DocumentRestoreStatus,
+  FULL_RESTORE_PAUSE_STATEMENT,
+  documentRestoreSummary,
+  type DocumentRestoreState,
+} from '../components/backup/DocumentRestoreStatus';
+import { FullBackupPanel } from '../components/backup/FullBackupPanel';
+import { useDocumentsConfig } from '../hooks/useDocumentsConfig';
+import { refreshInBackground } from '../lib/backgroundRefresh';
+import { isFullBackupFile } from '../services/backup/fullBackupMagic';
+import { loadFullBackupJob } from '../services/backup/loadFullBackupJob';
+import type { OpenedFullBackup } from '../services/backup/fullBackupFormat';
+import { useVaultStore } from '../stores/vaultStore';
 
 /**
  * Whether a backup row's retained previous passwords include a format-v2 entry.
@@ -154,6 +176,12 @@ export default function BackupSettingsPage() {
   const [downloading, setDownloading] = useState(false);
   const [showDownloadPassword, setShowDownloadPassword] = useState(false);
   const [downloadBackupPassword, setDownloadBackupPassword] = useState('');
+  // The Full Backup panel, which is never open beside the download prompt.
+  const [showFullBackup, setShowFullBackup] = useState(false);
+  const [fullBackupRunning, setFullBackupRunning] = useState(false);
+  const fullBackupButtonRef = useRef<HTMLButtonElement>(null);
+  // Display only: whether this server stores documents at all.
+  const documentsConfig = useDocumentsConfig();
   const [changingBackupPassword, setChangingBackupPassword] = useState(false);
 
   // Change backup password state
@@ -183,6 +211,15 @@ export default function BackupSettingsPage() {
   const [restoreConflictStrategy, setRestoreConflictStrategy] = useState<
     'skip' | 'overwrite' | 'keep_both'
   >('skip');
+  // Claimed synchronously by the Restore click, before its first await, so a
+  // double click cannot start two restores.
+  const restoreBusyRef = useRef(false);
+  const restoreOpenerRef = useRef<HTMLButtonElement>(null);
+  // A full backup's documents phase: its progress and Stop, then what it did.
+  const [documentRestore, setDocumentRestore] = useState<DocumentRestoreState | null>(null);
+  const documentRestoreControllerRef = useRef<AbortController | null>(null);
+  // Whether the restore asking to be confirmed is a full backup's, for the dialog's words.
+  const [confirmingFullBackup, setConfirmingFullBackup] = useState(false);
 
   // Restoring a file this client could not authenticate is gated on an explicit
   // answer, driven by a promise the restore flow awaits — the same shape the
@@ -242,6 +279,9 @@ export default function BackupSettingsPage() {
       const resolve = unverifiedRestoreResolverRef.current;
       unverifiedRestoreResolverRef.current = null;
       resolve?.(false);
+      // Leaving the page stops restoring a full backup's documents; the toast,
+      // which outlives the route, then says how far it got.
+      documentRestoreControllerRef.current?.abort('left');
     };
   }, []);
 
@@ -521,6 +561,7 @@ export default function BackupSettingsPage() {
 
   const handleDownload = useCallback(async () => {
     if (!downloadBackupPassword) {
+      setShowFullBackup(false);
       setShowDownloadPassword(true);
       return;
     }
@@ -590,23 +631,49 @@ export default function BackupSettingsPage() {
 
   const handleRestore = useCallback(async () => {
     if (!restoreFile || !restorePassword) return;
-
-    // Client-side file size validation (25MB max, matching server BACKUP_MAX_SIZE_MB default)
-    const MAX_RESTORE_FILE_SIZE = 25 * 1024 * 1024;
-    if (restoreFile.size > MAX_RESTORE_FILE_SIZE) {
-      toast({
-        title: 'Backup file too large',
-        description: `Maximum file size is 25 MB. Selected file is ${String(Math.ceil(restoreFile.size / (1024 * 1024)))} MB.`,
-        type: 'error',
-      });
-      return;
-    }
+    if (restoreBusyRef.current) return;
+    restoreBusyRef.current = true;
 
     setRestoring(true);
     try {
+      // A full backup (`.hvbackup`) is told apart by its first eight bytes, BEFORE
+      // the size check: it is as large as the documents it carries, and only its
+      // vault part is bounded like a vault backup. Everything else takes the vault
+      // backup's path exactly as it always has, and never loads the full backup's
+      // code.
+      const full = await isFullBackupFile(restoreFile);
+      setConfirmingFullBackup(full);
+      // A full backup's documents phase has its controller from HERE, before the
+      // seconds of key derivation, re-encryption and the vault POST: leaving the
+      // page at any point after this aborts it ('left'), so it never starts on a
+      // page nobody is looking at.
+      const documentsController = full ? new AbortController() : null;
+      documentRestoreControllerRef.current = documentsController;
+
+      // Client-side file size validation (25MB max, matching server BACKUP_MAX_SIZE_MB default)
+      const MAX_RESTORE_FILE_SIZE = 25 * 1024 * 1024;
+      if (!full && restoreFile.size > MAX_RESTORE_FILE_SIZE) {
+        toast({
+          title: 'Backup file too large',
+          description: `Maximum file size is 25 MB. Selected file is ${String(Math.ceil(restoreFile.size / (1024 * 1024)))} MB.`,
+          type: 'error',
+        });
+        return;
+      }
+
+      // A full backup's container is read (slices only: its header, footer and
+      // table of contents, under the reader's rules) and its vault part is then
+      // restored by the code below, unchanged; its documents follow once the vault
+      // restore succeeded.
+      const job = full ? await loadFullBackupJob() : null;
+      const opened: OpenedFullBackup | null = job
+        ? await job.openFullBackupFile(restoreFile)
+        : null;
+
       // Parse the backup file first to check for embedded encryption metadata
-      const text = await restoreFile.text();
-      const backupData = JSON.parse(text) as {
+      const backupData = (
+        opened ? opened.manifest.vault : JSON.parse(await restoreFile.text())
+      ) as {
         items?: Record<string, unknown>[];
         folders?: Record<string, unknown>[];
         encryptedVaultKey?: string;
@@ -705,13 +772,24 @@ export default function BackupSettingsPage() {
         // unsigned file would otherwise allocate that whole string for nothing.
         // `resolveBackupSignature` returns on a null signature before it reads
         // this argument, so the empty string is never looked at.
-        const signature = typeof backupData.integrity === 'string' ? backupData.integrity : null;
-        let signedPayload = '';
-        if (signature !== null) {
+        //
+        // A full backup's signature is its table of contents', which the reader
+        // already split from the payload it covers; an unsigned full backup does
+        // not exist (the reader refuses one).
+        const signature = opened
+          ? opened.signature
+          : typeof backupData.integrity === 'string'
+            ? backupData.integrity
+            : null;
+        let signedPayload = opened ? opened.signedPayload : '';
+        if (!opened && signature !== null) {
           const dataForHmac = { ...backupData };
           delete dataForHmac.integrity;
           signedPayload = JSON.stringify(dataForHmac);
         }
+        // The typed password has done its job: both keys it opens are unwrapped.
+        // A full restore can run for a long time, so it is not kept that long.
+        if (opened) setRestorePassword('');
         const verdict = await resolveBackupSignature(
           signature,
           signedPayload,
@@ -725,7 +803,9 @@ export default function BackupSettingsPage() {
               ? [{ source: 'file' as const, bwk: fileBwk }]
               : []),
           ],
-          (data, hmac, bwk) => cryptoService.verifyBackupHmac(data, hmac, bwk),
+          job
+            ? (data, hmac, bwk) => job.verifyFullBackupManifest(data, hmac, bwk)
+            : (data, hmac, bwk) => cryptoService.verifyBackupHmac(data, hmac, bwk),
         );
 
         if (verdict.kind === 'refused') {
@@ -857,6 +937,14 @@ export default function BackupSettingsPage() {
 
         // Never needed by the server.
         delete backupData.backupEncryption;
+
+        // The wrapping keys have no job left: the signature is judged and the
+        // backup's vault key recovered. Zeroed now rather than in the `finally`,
+        // because a full backup's documents can take a long time to restore.
+        if (accountBwk) cryptoService.clearKey(accountBwk);
+        if (fileBwk && fileBwk !== accountBwk) cryptoService.clearKey(fileBwk);
+        accountBwk = null;
+        fileBwk = null;
 
         // Key used to DECRYPT the backup rows: the recovered backup key when we
         // have it, else the current key (same-account/no-rotation, where they are
@@ -1012,14 +1100,15 @@ export default function BackupSettingsPage() {
         // add of rows already under this account's key.
         const restoreResponse = await api.post<{
           success: boolean;
-          data: {
-            itemsRestored: number;
-            itemsSkipped: number;
-            foldersRestored: number;
-            foldersSkipped: number;
-            itemSkipReasons?: { itemId: string; reason: string }[];
-            folderSkipReasons?: { folderId: string; reason: string }[];
-          };
+          data: Partial<Pick<IRestoreBackupResponse, 'itemSkipReasons' | 'folderSkipReasons'>> &
+            Pick<
+              IRestoreBackupResponse,
+              | 'itemsRestored'
+              | 'itemsSkipped'
+              | 'foldersRestored'
+              | 'foldersSkipped'
+              | 'folderIdMap'
+            >;
         }>('/backup/restore', {
           conflictStrategy: restoreConflictStrategy,
           data: JSON.stringify(backupData),
@@ -1074,7 +1163,7 @@ export default function BackupSettingsPage() {
           });
         }
 
-        // Documents are not part of a backup, so a restored account can look
+        // Documents are not part of a vault backup, so a restored account can look
         // complete while every file the account held is missing. The breadcrumb
         // the server writes into the payload is the only way to say so, and it is
         // raised as its OWN notice rather than folded into the result toast above:
@@ -1084,12 +1173,46 @@ export default function BackupSettingsPage() {
         // written by a server that predates the document store, and zero on one
         // from an account that held none — neither says anything worth
         // interrupting for.
-        const documentsLeftBehind = backupData.documentSummary?.count ?? 0;
+        //
+        // A full backup carries its documents, so it says what happened to them
+        // instead, once they are restored below.
+        const documentsLeftBehind = opened ? 0 : (backupData.documentSummary?.count ?? 0);
         if (documentsLeftBehind > 0) {
           toast({
             title: `This backup was taken from an account holding ${String(documentsLeftBehind)} document(s); documents are not part of a backup.`,
             description: 'Re-upload them from the Documents page to restore them.',
             type: 'warning',
+          });
+        }
+
+        if (opened && documentsController && job && decryptKey) {
+          // The vault rows are in: the folders the documents are filed into exist
+          // now, and the Documents page's rail reads them from the vault store.
+          const vault = useVaultStore.getState();
+          refreshInBackground(vault.fetchFolders());
+          refreshInBackground(vault.fetchItems());
+
+          setDocumentRestore({ kind: 'running', progress: null });
+          const report = await job.restoreFullBackupDocuments({
+            backup: opened,
+            backupVaultKey: decryptKey,
+            folderIdMap: restoreResponse.data.data.folderIdMap,
+            conflictStrategy: restoreConflictStrategy,
+            signal: documentsController.signal,
+            onProgress: (progress) => {
+              setDocumentRestore({ kind: 'running', progress });
+            },
+          });
+          setDocumentRestore({ kind: 'done', report });
+          toast({
+            title: documentRestoreSummary(report),
+            type:
+              report.stopped ||
+              report.notRestored.length > 0 ||
+              report.leftOutOfBackup > 0 ||
+              report.missingFromBackup > 0
+                ? 'warning'
+                : 'success',
           });
         }
 
@@ -1122,6 +1245,8 @@ export default function BackupSettingsPage() {
       });
     } finally {
       setRestoring(false);
+      restoreBusyRef.current = false;
+      documentRestoreControllerRef.current = null;
     }
   }, [
     restoreFile,
@@ -1130,6 +1255,12 @@ export default function BackupSettingsPage() {
     requestUnverifiedRestoreConfirmation,
     toast,
   ]);
+
+  const stopDocumentRestore = useCallback(() => {
+    documentRestoreControllerRef.current?.abort('stopped');
+  }, []);
+
+  useBeforeUnloadWarning(documentRestore?.kind === 'running');
 
   const handleChangeBackupPassword = useCallback(async () => {
     if (!newBackupPassword || !changeBackupCurrentPassword) return;
@@ -1359,6 +1490,8 @@ export default function BackupSettingsPage() {
           <CardTitle>Backup Configuration</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
+          <BackupOptionsGuide />
+
           {/* Auto-backup toggle */}
           <div className="flex items-center justify-between">
             <div>
@@ -1552,7 +1685,7 @@ export default function BackupSettingsPage() {
             <button
               type="button"
               onClick={() => void handleDownload()}
-              disabled={downloading || !isConfigured}
+              disabled={downloading || !isConfigured || fullBackupRunning}
               title={!isConfigured ? 'Set up backup encryption first' : undefined}
               className="inline-flex items-center gap-2 rounded-md border border-[hsl(var(--input))] px-4 py-2 text-sm font-medium text-[hsl(var(--foreground))] hover:bg-[hsl(var(--accent))] disabled:opacity-50"
             >
@@ -1563,49 +1696,57 @@ export default function BackupSettingsPage() {
               )}
               {downloading ? 'Downloading...' : 'Download Latest'}
             </button>
+            <button
+              type="button"
+              ref={fullBackupButtonRef}
+              onClick={() => {
+                setShowDownloadPassword(false);
+                setDownloadBackupPassword('');
+                setShowFullBackup(true);
+              }}
+              disabled={!isConfigured || documentsConfig?.enabled !== true || fullBackupRunning}
+              title={!isConfigured ? 'Set up backup encryption first' : undefined}
+              className="inline-flex items-center gap-2 rounded-md border border-[hsl(var(--input))] px-4 py-2 text-sm font-medium text-[hsl(var(--foreground))] hover:bg-[hsl(var(--accent))] disabled:opacity-50"
+            >
+              <Database className="h-4 w-4" /> Full Backup
+            </button>
           </div>
+          {isConfigured && documentsConfig?.enabled === false && (
+            <p className="text-xs text-[hsl(var(--muted-foreground))]">
+              Full Backup needs a server that stores documents. This one does not, so Download
+              Latest already saves everything this account holds.
+            </p>
+          )}
 
           {/* Download backup password prompt */}
           {showDownloadPassword && (
-            <div className="mt-4 rounded-md border border-[hsl(var(--input))] p-4">
-              <p className="mb-2 text-sm text-[hsl(var(--foreground))]">
-                Enter your backup password to sign the download with an integrity signature.
-              </p>
-              <div className="flex gap-2">
-                <input
-                  type="password"
-                  value={downloadBackupPassword}
-                  onChange={(e) => setDownloadBackupPassword(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
-                      e.preventDefault();
-                      void handleDownload();
-                    }
-                  }}
-                  placeholder="Backup password"
-                  className={inputClass}
-                  autoFocus
-                />
-                <button
-                  type="button"
-                  onClick={() => void handleDownload()}
-                  disabled={downloading || !downloadBackupPassword}
-                  className="rounded-md bg-[hsl(var(--primary))] px-4 py-2 text-sm font-medium text-[hsl(var(--primary-foreground))] hover:opacity-90 disabled:opacity-50"
-                >
-                  {downloading ? 'Downloading...' : 'Download'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowDownloadPassword(false);
-                    setDownloadBackupPassword('');
-                  }}
-                  className="rounded-md border border-[hsl(var(--input))] px-3 py-2 text-sm text-[hsl(var(--foreground))] hover:bg-[hsl(var(--accent))]"
-                >
-                  Cancel
-                </button>
-              </div>
-            </div>
+            <BackupPasswordPrompt
+              description="Enter your backup password to sign the download with an integrity signature."
+              value={downloadBackupPassword}
+              onChange={setDownloadBackupPassword}
+              onSubmit={() => void handleDownload()}
+              onCancel={() => {
+                setShowDownloadPassword(false);
+                setDownloadBackupPassword('');
+              }}
+              submitLabel="Download"
+              busyLabel="Downloading..."
+              busy={downloading}
+              inputClass={inputClass}
+            />
+          )}
+
+          {showFullBackup && (
+            <FullBackupPanel
+              inputClass={inputClass}
+              onClose={() => {
+                setShowFullBackup(false);
+                // The panel's control that had the focus is gone; give it back here.
+                fullBackupButtonRef.current?.focus();
+              }}
+              onRunningChange={setFullBackupRunning}
+              onFinished={refreshHistory}
+            />
           )}
         </CardContent>
       </Card>
@@ -1635,7 +1776,7 @@ export default function BackupSettingsPage() {
                   type="file"
                   onChange={(e) => setRestoreFile(e.target.files?.[0] ?? null)}
                   className="block w-full text-sm text-[hsl(var(--foreground))] file:mr-4 file:rounded-md file:border-0 file:bg-[hsl(var(--primary))] file:px-4 file:py-2 file:text-sm file:font-medium file:text-[hsl(var(--primary-foreground))]"
-                  accept=".enc"
+                  accept=".enc,.hvbackup"
                 />
               </div>
               <div>
@@ -1661,9 +1802,17 @@ export default function BackupSettingsPage() {
                 <div className="flex flex-col gap-2">
                   {(
                     [
-                      ['skip', 'Skip', 'Keep existing items, skip duplicates'],
-                      ['overwrite', 'Overwrite', 'Replace existing items with backup data'],
-                      ['keep_both', 'Keep Both', 'Keep existing and create copies from backup'],
+                      ['skip', 'Skip', 'Keep existing items and documents, skip duplicates'],
+                      [
+                        'overwrite',
+                        'Overwrite',
+                        'Replace existing items, and the details of existing documents, with backup data',
+                      ],
+                      [
+                        'keep_both',
+                        'Keep Both',
+                        'Keep existing items and documents, and add copies from the backup',
+                      ],
                     ] as const
                   ).map(([value, label, description]) => (
                     <label key={value} className="flex items-start gap-2 cursor-pointer">
@@ -1685,11 +1834,15 @@ export default function BackupSettingsPage() {
                   ))}
                 </div>
               </div>
+              <p className="text-xs text-[hsl(var(--muted-foreground))]">
+                {FULL_RESTORE_PAUSE_STATEMENT}
+              </p>
               <div className="flex gap-2">
                 <button
                   type="button"
                   onClick={() => setShowRestore(false)}
-                  className="rounded-md px-3 py-2 text-sm text-[hsl(var(--foreground))] hover:bg-[hsl(var(--accent))]"
+                  disabled={restoring}
+                  className="rounded-md px-3 py-2 text-sm text-[hsl(var(--foreground))] hover:bg-[hsl(var(--accent))] disabled:opacity-50"
                 >
                   Cancel
                 </button>
@@ -1705,12 +1858,33 @@ export default function BackupSettingsPage() {
             </div>
           ) : (
             <button
+              ref={restoreOpenerRef}
               type="button"
               onClick={() => setShowRestore(true)}
               className="inline-flex items-center gap-2 rounded-md border border-[hsl(var(--input))] px-4 py-2 text-sm font-medium text-[hsl(var(--foreground))] hover:bg-[hsl(var(--accent))]"
             >
               <Upload className="h-4 w-4" /> Restore from File
             </button>
+          )}
+          {/* Mounted from the first render and only its words change, so the start and
+              the end of a full restore's documents phase are announced. */}
+          <p role="status" data-testid="document-restore-announcement" className="sr-only">
+            {documentRestore === null
+              ? ''
+              : documentRestore.kind === 'running'
+                ? 'Restoring the documents of a full backup. Keep this page open until it finishes.'
+                : 'Restoring the documents of a full backup has ended.'}
+          </p>
+          {documentRestore && (
+            <DocumentRestoreStatus
+              state={documentRestore}
+              onStop={stopDocumentRestore}
+              onDismiss={() => {
+                setDocumentRestore(null);
+                // The summary that had the focus is gone; the form's opener takes it.
+                restoreOpenerRef.current?.focus();
+              }}
+            />
           )}
         </CardContent>
       </Card>
@@ -1744,6 +1918,7 @@ export default function BackupSettingsPage() {
             <li>
               Your existing entries are replaced only if you chose <strong>Overwrite</strong>.
             </li>
+            {confirmingFullBackup && <li>Its documents are added to your account the same way.</li>}
             <li>Continue only if you know where this file came from.</li>
           </ul>
           <DialogFooter>

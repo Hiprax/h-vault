@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+### Added
+
+- **Full Backup: the vault and every document in one encrypted, signed file.** A new **Full Backup** button in Settings, Backup Settings, Backup Configuration saves the account's vault backup together with every document outside the trash, with its name, note, tags, folder and favorite, as one `hvault-full-backup-YYYY-MM-DD.hvbackup` file on this device. It is built in the browser and never emailed. Each document travels as its stored ciphertext, verbatim, and is decrypted and checked (the row asked for, the framing, every segment's authentication tag, the whole-file digest) while the file is written; one that fails is left out and named in the summary rather than saved broken. The table of contents is signed with HMAC-SHA256 under a key derived from the backup wrapping key with its own HKDF label (`hvault-full-backup-hmac-v1`). Desktop Chrome and Edge write the file straight into the one chosen in their save dialog; other browsers build it in memory, up to 512 MB, and hand it to their downloads. A run that is stopped, locked, signed out of, left or cut off by the server saves nothing; the account's vault key is checked at the start and again before the file is finished.
+- **Restore from File takes a full backup, documents included.** The vault part restores exactly as a vault backup does; each document is then decrypted from the file, verified and uploaded again under the chosen strategy: a document still in the trash is taken out of it and given the backup's details, Skip leaves a live one alone, Overwrite replaces its name, tags, note, folder and favorite, and Keep Both uploads a copy. Documents are filed into the folders the vault restore matched or created. Which document a restored one came from is sealed inside its own encrypted details, so running the same restore again with Skip adds nothing and finishes one that stopped. The restore card shows the document being restored, the bytes sent, any pause the server asked for and a Stop button, then a summary of what was uploaded, updated, already there or not restored, and why.
+- **`POST /backup/restore` answers `folderIdMap`**, the account folder each backup folder became (matched, overwritten, kept as a copy or created); a backup folder that could not be stored is absent. Additive: older clients ignore it.
+- **Several phone numbers per identity.** An identity holds up to ten numbers, each with an optional label, added and removed like custom fields, and the detail view shows each one ("Phone (Work)", "Phone 2"). An identity with one unlabelled number is stored exactly as before.
+- **A Cancel button on the Documents upload form**, beside Upload: it lets the picked file go and returns to the file picker.
+- **"What each option does"** in Backup Configuration: one line per button saying what it saves, where it goes and what no backup holds.
+
+### Changed
+
+- **Behaviour change: the idle auto-lock waits while a full backup or a full restore runs in a visible tab.** Each job records its own progress, and the timeout counts from the later of the last interaction and the last progress, so the vault locks one timeout after the job stops making progress. A hidden tab, a machine that slept, a lost connection or a stalled transfer credits nothing; lock-on-hidden, a manual lock and signing out are unchanged, and an ordinary upload is still not activity.
+- **The "Download your documents" section is hidden while the upload form is open**, so Download all is never beside Upload. A running or finished export stays on screen.
+- **The restore form's conflict choices now describe documents too**, and its file picker offers both `.enc` and `.hvbackup` files.
+- **Permanently deleting a document now says what a full backup keeps**: the server's copy of its key is destroyed, and only a full backup saved before it went to the trash still holds it.
+- **Bitwarden (.json) export of identities**: numbers after the first travel as text custom fields named "Phone (label)" or "Phone N", after every other field, and stay custom fields when imported back.
+
+### Security
+
+- Restoring a backup now lets go of both unwrapped backup wrapping keys as soon as the backup's vault key is recovered rather than at the end of the restore, and a full restore also clears the typed backup password at that point.
+- Dependency updates for advisories published after 0.21.0. In the server's runtime tree: `nodemailer` 10.1.4 (GHSA-85x2-q946-cp5h, GHSA-8c8m-p3m8-cjg8, GHSA-m943-m63m-w62w, recipient address parsing), `body-parser` 2.4.0 (GHSA-27r3-jxmh-p828) with the `qs` 6.16.1 it requires, and `zod` 4.6.7 (GHSA-mrhx-c7xc-m3w5) in every workspace. In the build and test toolchain only: `fast-uri` 3.1.9 (GHSA-333x-w4r6-6crp, GHSA-w74x-v6f9-j3xg, GHSA-wjr9-j795-jxcr, GHSA-xhq7-xmqj-769h; reached through `ajv`, which no shipped code imports), `serialize-javascript` 7.1.3 (GHSA-m5mm-p8h7-m29v) and `undici` 8.12.2 and 6.29.1 (GHSA-4qv8-2p9j-2685, GHSA-xjj6-f33q-929c, GHSA-f72v-6w45-q472). `nodemailer`, `body-parser`, `fast-uri` and `serialize-javascript` were taken at their minimal fixing versions although still inside the 7-day cooldown, as security fixes.
+- A full backup's signature is judged by the same rule as a downloaded vault backup's: verified by the account's own backup key, restored; verified only by the key the file carries, restored once confirmed; verified by no key, refused. Unlike an emailed vault backup a full backup is never unsigned: a file without a signature is refused before anything is restored. Its signing key is derived with its own HKDF label and has no fallback to the raw key, so a vault backup's signature can never verify a full backup.
+
 ## [0.21.0] - 2026-10-23
 
 ### Added

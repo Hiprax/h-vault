@@ -2756,7 +2756,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Documents'],
         summary: 'Permanently delete a trashed document',
         description:
-          'Destroys a trashed document for good, in three ordered steps: the row is marked purgePending, the stored object is deleted, and only then is the row deleted. A crash after any of them leaves a marker the hourly collector finishes, and the order is what stops an object outliving the row that names it. Deleting the row destroys the only wrapped copy of the document key, so any object that somehow survived is ciphertext under a key that exists nowhere — documents are deliberately absent from the backup payload. Only a document already in the trash may be purged. ' +
+          "Destroys a trashed document for good, in three ordered steps: the row is marked purgePending, the stored object is deleted, and only then is the row deleted. A crash after any of them leaves a marker the hourly collector finishes, and the order is what stops an object outliving the row that names it. Deleting the row destroys the server's wrapped copy of the document key, so any object that somehow survived is ciphertext under a key the server no longer holds; documents are absent from the server-built backup payload, and only a full backup the owner's browser saved earlier can still hold one. Only a document already in the trash may be purged. " +
           DOCUMENT_WRITE_BUDGET,
         security: [{ bearerAuth: [], csrfToken: [] }],
         parameters: [DOCUMENT_ID_PARAM],
@@ -4384,7 +4384,7 @@ export const swaggerSpec: JsonObject = {
         operationId: 'downloadBackup',
         tags: ['Backup'],
         summary: 'Download backup',
-        description: `Downloads the account's encrypted backup. Its rows never carry the account id (\`userId\`) or the version counter (\`__v\`); each keeps the \`_id\` a restore matches on. Streamed as it is read from the database (chunked; no \`Content-Length\`). The size is decided before the first byte, so an oversized backup is a whole 413. A client that has not taken the file by an absolute deadline (its estimated size at 128 KiB/s, plus 30 s) is cut off, and a failure after the first byte ends the connection rather than appending an error, so a truncated file is never mistaken for a whole one. The download is recorded (\`backup_download\` with \`completed\`) whether or not it finished. Rate limited: 10 req/user per 15 min.${HEAVY_RESPONSE_ADMISSION}`,
+        description: `Downloads the account's encrypted backup. Its rows never carry the account id (\`userId\`) or the version counter (\`__v\`); each keeps the \`_id\` a restore matches on. Streamed as it is read from the database (chunked; no \`Content-Length\`). The size is decided before the first byte, so an oversized backup is a whole 413. A client that has not taken the file by an absolute deadline (its estimated size at 128 KiB/s, plus 30 s) is cut off, and a failure after the first byte ends the connection rather than appending an error, so a truncated file is never mistaken for a whole one. The download is recorded (\`backup_download\` with \`completed\`) whether or not it finished. It carries no document: a browser-built full backup reads this download first and adds every document's stored ciphertext to it. Rate limited: 10 req/user per 15 min.${HEAVY_RESPONSE_ADMISSION}`,
         security: [{ bearerAuth: [] }],
         responses: {
           400: errorResponse('Backup encryption has not been set up yet.'),
@@ -4452,7 +4452,7 @@ export const swaggerSpec: JsonObject = {
         tags: ['Backup'],
         summary: 'Restore from backup',
         description:
-          'Restores vault items and folders from an encrypted backup file. Supports skip, overwrite, and keep_both conflict strategies. ' +
+          'Restores vault items and folders from an encrypted backup file. Supports skip, overwrite, and keep_both conflict strategies. A browser-built full backup carries documents as well; the browser restores those through the document upload routes, filing them with the `folderIdMap` this answer returns. ' +
           PASSWORD_VERIFY_LARGE_BODY_BUDGET +
           ' Each server process admits at most one restore or key rotation per account at a time, and a few in total; a request past the process budget waits for a slot before its body is read.',
         security: [{ bearerAuth: [], csrfToken: [] }],
@@ -4492,6 +4492,18 @@ export const swaggerSpec: JsonObject = {
                             properties: {
                               folderId: { type: 'string' },
                               reason: { type: 'string' },
+                            },
+                          },
+                        },
+                        folderIdMap: {
+                          type: 'array',
+                          description:
+                            "Which of this account's folders each backup folder became: the folder it matched, the one it overwrote, or the one the restore created for it. A backup folder that could not be stored and matched nothing is absent. Added in 0.22.0.",
+                          items: {
+                            type: 'object',
+                            properties: {
+                              backupId: { type: 'string' },
+                              folderId: { type: 'string' },
                             },
                           },
                         },

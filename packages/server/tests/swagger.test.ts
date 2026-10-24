@@ -228,6 +228,13 @@ describe('API Documentation', () => {
       expect(offenders).toEqual([]);
     });
 
+    it('the permanent delete says the server’s key copy goes, and what a full backup still holds', () => {
+      const paths = swaggerSpec.paths as Record<string, Record<string, { description?: string }>>;
+      const description = paths['/documents/{id}/permanent']?.['delete']?.description ?? '';
+      expect(description).toContain("destroys the server's wrapped copy of the document key");
+      expect(description).toContain('only a full backup the owner');
+    });
+
     it('the export operation advertises JSON only (CSV is import-only)', () => {
       const paths = swaggerSpec.paths as Record<string, Record<string, unknown>>;
       const exportPost = paths['/tools/export']?.['post'];
@@ -1079,6 +1086,23 @@ describe('the answers the documentation names beyond the happy path', () => {
     // The older media type stays listed for compatibility and says it is never sent.
     expect(ok?.description).toContain('`application/octet-stream` is kept');
     expect(ok?.description).toContain('never sent');
+  });
+
+  it('documents the folder map a restore answers, which a full backup files its documents by', () => {
+    const ok = paths['/backup/restore']?.['post']?.responses?.['200'] as
+      | { content?: Record<string, { schema?: { properties?: Record<string, unknown> } }> }
+      | undefined;
+    const data = ok?.content?.['application/json']?.schema?.properties?.['data'] as
+      | { properties?: Record<string, { type?: string; items?: unknown; description?: string }> }
+      | undefined;
+    const map = data?.properties?.['folderIdMap'];
+    expect(map?.type).toBe('array');
+    expect(map?.items).toEqual({
+      type: 'object',
+      properties: { backupId: { type: 'string' }, folderId: { type: 'string' } },
+    });
+    // The refused-new-folder case is the one a client must not guess at.
+    expect(map?.description).toContain('is absent');
   });
 
   it('documents that a failed breach lookup is an error, never a "safe" answer', () => {

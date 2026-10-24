@@ -95,10 +95,10 @@ import {
   sanitizeDownloadFilename,
   saveDocument,
   streamDocumentPlaintext,
+  waitAbortably,
 } from '../src/services/documents/download.js';
 import {
   archiveDocuments,
-  waitAbortably,
   type ArchiveDocumentsOptions,
   type BulkDownloadCandidate,
 } from '../src/services/documents/downloadAll.js';
@@ -108,6 +108,7 @@ import {
   IN_MEMORY_ARCHIVE_LIMIT_BYTES,
   archiveFileName,
   openArchiveTarget,
+  openSaveTarget,
   type ArchiveTarget,
 } from '../src/services/documents/archiveTarget.js';
 import { ZIP32_MAX_ARCHIVE_BYTES } from '../src/services/documents/zipArchive.js';
@@ -1129,6 +1130,144 @@ describe('streamDocumentPlaintext — a row the caller already holds', () => {
   });
 });
 
+describe('streamDocumentPlaintext — another segment source', () => {
+  /** A sink that keeps the verified segments. */
+  function keeping(): { kept: number[]; sink: Parameters<typeof streamDocumentPlaintext>[1] } {
+    const kept: number[] = [];
+    return {
+      kept,
+      sink: {
+        write: (segment) => {
+          kept.push(...segment);
+          return Promise.resolve();
+        },
+        discard: () => Promise.resolve(),
+      },
+    };
+  }
+
+  /** A document sealed under a vault key OTHER than the one this session holds. */
+  async function buildUnderOtherKey(options: BuildOptions = {}): Promise<{
+    built: BuiltDocument;
+    otherKey: CryptoKey;
+  }> {
+    const held = vaultKey;
+    const otherKey = await cryptoService.importVaultKey(cryptoService.generateVaultKey());
+    vaultKey = otherKey;
+    try {
+      return { built: await buildDocument(options), otherKey };
+    } finally {
+      vaultKey = held;
+    }
+  }
+
+  it('reads every segment from the source under the source key, asking the server for nothing', async () => {
+    const { built, otherKey } = await buildUnderOtherKey({ plaintext: ramp(20) });
+    const asked: number[] = [];
+    const { kept, sink } = keeping();
+
+    const meta = await streamDocumentPlaintext(ID_A, sink, {
+      row: built.row,
+      source: {
+        vaultKey: otherKey,
+        readSegment: (index) => {
+          asked.push(index);
+          return Promise.resolve(built.segments[index]!.slice());
+        },
+      },
+    });
+
+    expect(meta).toEqual(built.meta);
+    expect(kept).toEqual([...ramp(20)]);
+    expect(asked).toEqual([0, 1, 2]);
+    // NEGATIVE: not one request reached the server, and the document key is zeroed.
+    expect(requests).toEqual([]);
+    expect(unwrappedKeys.length).toBeGreaterThan(0);
+    expect(unwrappedKeys.every(isAllZero)).toBe(true);
+  });
+
+  it('refuses a source without the row it was stored with, before reading anything', async () => {
+    const { built, otherKey } = await buildUnderOtherKey();
+    const readSegment = vi.fn(() => Promise.resolve(built.segments[0]!.slice()));
+
+    await expect(
+      streamDocumentPlaintext(ID_A, keeping().sink, {
+        source: { vaultKey: otherKey, readSegment },
+      }),
+    ).rejects.toThrow('A document read from another source needs the row it was stored with.');
+    expect(readSegment).not.toHaveBeenCalled();
+    expect(requests).toEqual([]);
+  });
+
+  it('still refuses a segment the source altered, with nothing kept', async () => {
+    const { built, otherKey } = await buildUnderOtherKey({ plaintext: ramp(20) });
+    const { kept, sink } = keeping();
+
+    const error = await streamDocumentPlaintext(ID_A, sink, {
+      row: built.row,
+      source: {
+        vaultKey: otherKey,
+        readSegment: (index) => {
+          const copy = built.segments[index]!.slice();
+          if (index === 1) copy[0] = (copy[0] ?? 0) ^ 1;
+          return Promise.resolve(copy);
+        },
+      },
+    }).catch((raised: unknown) => raised);
+
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(DocumentDownloadCancelledError);
+    // The first segment verified and was handed over; the altered one never was.
+    expect(kept).toEqual([...ramp(20).slice(0, 8)]);
+    expect(unwrappedKeys.every(isAllZero)).toBe(true);
+  });
+
+  it('cannot open the document under the session key when the source names a different one', async () => {
+    // The source's key is what the row's document key is unwrapped with: passing
+    // the session's own key for a document sealed under another one refuses it.
+    const { built } = await buildUnderOtherKey();
+    const error = await streamDocumentPlaintext(ID_A, keeping().sink, {
+      row: built.row,
+      source: { vaultKey, readSegment: () => Promise.resolve(built.segments[0]!.slice()) },
+    }).catch((raised: unknown) => raised);
+    expect(error).toBeInstanceOf(Error);
+    expect(requests).toEqual([]);
+  });
+
+  it('reports an abort that lands while the source is reading as a cancellation', async () => {
+    const { built, otherKey } = await buildUnderOtherKey({ plaintext: ramp(20) });
+    const controller = new AbortController();
+
+    const error = await streamDocumentPlaintext(ID_A, keeping().sink, {
+      row: built.row,
+      signal: controller.signal,
+      source: {
+        vaultKey: otherKey,
+        readSegment: (index) => {
+          if (index === 1) {
+            controller.abort();
+            return Promise.reject(new Error('the file read was cut short'));
+          }
+          return Promise.resolve(built.segments[index]!.slice());
+        },
+      },
+    }).catch((raised: unknown) => raised);
+
+    expect(error).toBeInstanceOf(DocumentDownloadCancelledError);
+    expect(unwrappedKeys.every(isAllZero)).toBe(true);
+  });
+
+  it('lets a source failure through unchanged when nothing was aborted', async () => {
+    const { built, otherKey } = await buildUnderOtherKey();
+    const failure = new Error('The backup file could not be read.');
+    const error = await streamDocumentPlaintext(ID_A, keeping().sink, {
+      row: built.row,
+      source: { vaultKey: otherKey, readSegment: () => Promise.reject(failure) },
+    }).catch((raised: unknown) => raised);
+    expect(error).toBe(failure);
+  });
+});
+
 // ===========================================================================
 // Where an archive goes
 // ===========================================================================
@@ -1264,6 +1403,47 @@ describe('openArchiveTarget', () => {
       vi.fn(() => Promise.reject(refusal)),
     );
     await expect(openArchiveTarget('x.zip')).rejects.toBe(refusal);
+  });
+});
+
+describe('openSaveTarget — a file kind other than the ZIP archive', () => {
+  const SPEC = {
+    description: 'Test file',
+    mime: 'application/octet-stream',
+    extension: '.bin',
+    fileLimitBytes: 123_456,
+    memoryLimitBytes: 789,
+  };
+
+  it("builds the file in memory under the spec's own type and memory limit", async () => {
+    const target = await openSaveTarget('thing.bin', SPEC);
+    expect(target).toMatchObject({ kind: 'download', name: 'thing.bin', limitBytes: 789 });
+    await target!.write(new Blob([new Uint8Array([4, 5])]));
+    await target!.commit();
+    expect(savedFiles).toHaveLength(1);
+    expect(savedFiles[0]!.blob.type).toBe('application/octet-stream');
+    expect([...new Uint8Array(await savedFiles[0]!.blob.arrayBuffer())]).toEqual([4, 5]);
+  });
+
+  it("offers the spec's description and extension in the dialog, and carries its file limit", async () => {
+    const double = blobWritable();
+    const picker = vi.fn(() =>
+      Promise.resolve({
+        name: 'chosen.bin',
+        createWritable: () => Promise.resolve(double.writable),
+      }),
+    );
+    vi.stubGlobal('showSaveFilePicker', picker);
+
+    const opening = openSaveTarget('thing.bin', SPEC);
+    expect(picker).toHaveBeenCalledWith({
+      suggestedName: 'thing.bin',
+      startIn: 'downloads',
+      types: [{ description: 'Test file', accept: { 'application/octet-stream': ['.bin'] } }],
+    });
+    const target = await opening;
+    expect(target).toMatchObject({ kind: 'file', name: 'chosen.bin', limitBytes: 123_456 });
+    expect(savedFiles).toEqual([]);
   });
 });
 

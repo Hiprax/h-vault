@@ -36,6 +36,8 @@ import {
   MAX_IDENTITY_NAME_LENGTH,
   MAX_IDENTITY_EMAIL_LENGTH,
   MAX_IDENTITY_PHONE_LENGTH,
+  MAX_IDENTITY_PHONES,
+  MAX_IDENTITY_PHONE_LABEL_LENGTH,
   MAX_IDENTITY_COMPANY_LENGTH,
   MAX_IDENTITY_SSN_LENGTH,
   MAX_IDENTITY_PASSPORT_LENGTH,
@@ -739,6 +741,28 @@ export const identityDataSchema = z.object({
     .string()
     .max(MAX_IDENTITY_PHONE_LENGTH)
     .refine(isValidIdentityPhone, { message: 'Invalid phone number' })
+    .optional(),
+  // Every phone number the identity holds, first one included, once there is more
+  // than one or any of them has a label. The first row's number is ALSO written to
+  // `phone` above, so a reader that knows only `phone` (an older tab, an export
+  // format with one phone slot, an import's content match) still sees it.
+  //
+  // `.optional()` with NO default, deliberately: a default would add a key to
+  // every stored identity on decrypt, which moves the import content hash and the
+  // previous-release fixture. A row's number is required (the editor strips blank
+  // rows before it writes), and both bounds are the editor's own input bounds.
+  phones: z
+    .array(
+      z.object({
+        label: z.string().max(MAX_IDENTITY_PHONE_LABEL_LENGTH).optional(),
+        number: z
+          .string()
+          .min(1)
+          .max(MAX_IDENTITY_PHONE_LENGTH)
+          .refine(isValidIdentityPhone, { message: 'Invalid phone number' }),
+      }),
+    )
+    .max(MAX_IDENTITY_PHONES)
     .optional(),
   address: identityAddressSchema.optional(),
   company: z.string().max(MAX_IDENTITY_COMPANY_LENGTH).optional(),

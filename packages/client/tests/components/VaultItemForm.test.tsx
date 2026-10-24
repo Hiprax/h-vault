@@ -443,8 +443,9 @@ describe('VaultItemForm', () => {
         'Enter a valid phone number: digits, spaces, ( ) . - and an optional leading +',
       );
       expect(errorEl).toBeInTheDocument();
-      expect(errorEl.getAttribute('id')).toBe('field-phone-error');
-      expect(phoneInput.getAttribute('aria-describedby')).toBe('field-phone-error');
+      // Each number is a row of its own since 0.22.0, so its message is the row's.
+      expect(errorEl.getAttribute('id')).toBe('field-phones-0-number-error');
+      expect(phoneInput.getAttribute('aria-describedby')).toBe('field-phones-0-number-error');
       expect(phoneInput.getAttribute('aria-invalid')).toBe('true');
     });
   });

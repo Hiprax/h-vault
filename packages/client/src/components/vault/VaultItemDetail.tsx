@@ -23,6 +23,7 @@ import {
 } from 'lucide-react';
 import { cn, getApiErrorMessage, isSafeUrl } from '../../lib/utils';
 import { hasAnyValue, isUndecodableData } from '../../lib/vaultData';
+import { phoneDisplayLabel, readIdentityPhones } from '../../lib/identityPhones';
 import { ErrorBoundary } from '../layout/ErrorBoundary';
 import { useVaultStore, type DecryptedVaultItem } from '../../stores/vaultStore';
 import { useAuthStore } from '../../stores/authStore';
@@ -534,7 +535,13 @@ function IdentityDetail({ data }: { data: IIdentityData }) {
         <CopyField label="Last Name" value={data.lastName} />
       </div>
       {data.email && <CopyField label="Email" value={data.email} />}
-      {data.phone && <CopyField label="Phone" value={data.phone} />}
+      {readIdentityPhones(data).map((phone, index) => (
+        <CopyField
+          key={`${String(index)}-${phone.number}`}
+          label={phoneDisplayLabel(phone, index)}
+          value={phone.number}
+        />
+      ))}
       {/* Every row is guarded and the whole block is omitted for an all-empty
           address, matching `CardDetail`. Street/City/State/ZIP/Country used to render
           UNCONDITIONALLY inside `{data.address && …}`, and `CopyField` shows an em

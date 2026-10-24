@@ -27,6 +27,7 @@ import {
 } from 'lucide-react';
 import { cn, getApiErrorMessage } from '../../lib/utils';
 import { hasAnyValue, isUndecodableData } from '../../lib/vaultData';
+import { identityPhoneRows, writeIdentityPhones, type PhoneRow } from '../../lib/identityPhones';
 import {
   BASE_ADDRESS_FIELDS,
   BILLING_ADDRESS_FIELD_NAMES,
@@ -99,6 +100,8 @@ import {
   MAX_SECRET_DESCRIPTION_LENGTH,
   MAX_TAGS_PER_ITEM,
   DEFAULT_CUSTOM_FIELDS_LIMIT,
+  MAX_IDENTITY_PHONES,
+  MAX_IDENTITY_PHONE_LABEL_LENGTH,
   URI_TOO_LONG_MESSAGE,
   isValidIdentityEmail,
   isValidIdentityPhone,
@@ -558,15 +561,38 @@ const identitySchema = (rules: FormRuleContext) =>
       .refine(isValidIdentityEmail, 'Enter a valid email address, like name@example.com')
       .optional()
       .default(''),
-    phone: z
-      .string()
-      .max(MAX_IDENTITY_PHONE_LENGTH, 'Phone number too long')
-      .refine(
-        isValidIdentityPhone,
-        'Enter a valid phone number: digits, spaces, ( ) . - and an optional leading +',
+    // Up to MAX_IDENTITY_PHONES numbers, each with an optional label. A row with
+    // neither is dropped on save; one with a label and no number is refused on the
+    // number, where the missing value is.
+    phones: z
+      .array(
+        z
+          .object({
+            label: z.string().max(MAX_IDENTITY_PHONE_LABEL_LENGTH, 'Label too long'),
+            number: z
+              .string()
+              .max(MAX_IDENTITY_PHONE_LENGTH, 'Phone number too long')
+              .refine(
+                isValidIdentityPhone,
+                'Enter a valid phone number: digits, spaces, ( ) . - and an optional leading +',
+              ),
+          })
+          .superRefine((row, ctx) => {
+            if (row.number === '' && row.label.trim() !== '') {
+              ctx.addIssue({
+                code: 'custom',
+                path: ['number'],
+                message: 'Enter the number, or remove this row',
+              });
+            }
+          }),
+      )
+      .max(
+        MAX_IDENTITY_PHONES,
+        `An identity can have up to ${String(MAX_IDENTITY_PHONES)} phone numbers`,
       )
       .optional()
-      .default(''),
+      .default([]),
     street: boundedField(MAX_ADDRESS_STREET_LENGTH, 'Street address'),
     street2: boundedField(MAX_ADDRESS_STREET_LENGTH, 'Street address line 2'),
     city: boundedField(MAX_ADDRESS_CITY_LENGTH, 'City'),
@@ -846,7 +872,7 @@ function getDefaultValues(itemType: ItemType, item?: DecryptedVaultItem): Record
         firstName: data.firstName ?? '',
         lastName: data.lastName ?? '',
         email: data.email ?? '',
-        phone: data.phone ?? '',
+        phones: identityPhoneRows(data),
         street: address.street ?? '',
         street2: address.street2 ?? '',
         city: address.city ?? '',
@@ -1115,7 +1141,8 @@ function buildModelledFields(
         firstName: values.firstName,
         lastName: values.lastName,
         email: emptyToUndefined(values.email),
-        phone: emptyToUndefined(values.phone),
+        // `phone` AND `phones`, always both: an `undefined` is what deletes a key.
+        ...writeIdentityPhones(values.phones as PhoneRow[]),
         // `undefined`, not an omitted key: clearing every address field on an
         // identity that HAD one must delete it rather than let the merge restore it.
         address: hasAddress
@@ -1192,8 +1219,12 @@ const IDENTITY_ADDRESS_FIELDS = [...BASE_ADDRESS_FIELDS, 'deliveryNotes'] as con
  * is not hypothetical: the `customFields` (100) and `uris` (100) caps are
  * deliberately not mirrored into the local schemas for exactly the same reason, so
  * the store's pre-flight is the only thing that reports them.
+ *
+ * `phones` is here and NOT in {@link RENDERED_INDEXED_LEAF}: the form drops empty
+ * rows before it saves, so a stored `phones.N` need not be the form's row N, and a
+ * message put on the wrong row is worse than the toast.
  */
-const ARRAY_FIELD_ROOTS = new Set(['uris', 'customFields', 'backupCodes']);
+const ARRAY_FIELD_ROOTS = new Set(['uris', 'customFields', 'backupCodes', 'phones']);
 
 /**
  * The indexed leaves that DO render a message: a custom-field row's name/value
@@ -1543,6 +1574,165 @@ function SensitiveTextField({
   );
 }
 
+interface RowListHeaderProps {
+  title: string;
+  count: number;
+  limit: number;
+  addLabel: string;
+  onAdd: () => void;
+  helpId: string;
+  /** Why no more can be added; shown at the limit. */
+  limitHelp: string;
+}
+
+/**
+ * The header of a list of rows the person adds to: its title, "(n of limit)", the
+ * add control and, at the limit, why it stops. The add control is `aria-disabled`
+ * rather than `disabled`, so it stays in the tab order and the reason stays
+ * discoverable.
+ */
+function RowListHeader({
+  title,
+  count,
+  limit,
+  addLabel,
+  onAdd,
+  helpId,
+  limitHelp,
+}: RowListHeaderProps) {
+  const atLimit = count >= limit;
+  return (
+    <>
+      <div className="mb-1.5 flex items-center justify-between">
+        <span className="text-sm font-medium text-[hsl(var(--foreground))]">
+          {title}{' '}
+          <span className="font-normal text-[hsl(var(--muted-foreground))]">
+            ({count} of {limit})
+          </span>
+        </span>
+        <button
+          type="button"
+          onClick={atLimit ? undefined : onAdd}
+          aria-disabled={atLimit ? true : undefined}
+          aria-describedby={atLimit ? helpId : undefined}
+          className={cn(
+            'text-xs text-[hsl(var(--primary))]',
+            atLimit ? 'cursor-not-allowed opacity-50' : 'hover:underline',
+          )}
+        >
+          {addLabel}
+        </button>
+      </div>
+      {atLimit && (
+        <p id={helpId} className="mb-2 text-xs text-[hsl(var(--muted-foreground))]">
+          {limitHelp}
+        </p>
+      )}
+    </>
+  );
+}
+
+interface PhoneNumbersSectionProps {
+  fields: readonly { id: string }[];
+  onAppend: () => void;
+  onRemove: (index: number) => void;
+  register: UseFormRegister<FieldValues>;
+  errors: FieldErrors;
+}
+
+/**
+ * An identity's phone numbers, edited like custom fields: a row per number, each
+ * with an optional label, added and removed, up to MAX_IDENTITY_PHONES.
+ * `lib/identityPhones.ts` decides how they are stored.
+ */
+function PhoneNumbersSection({
+  fields,
+  onAppend,
+  onRemove,
+  register,
+  errors,
+}: PhoneNumbersSectionProps) {
+  const rowErrors = errors.phones as
+    | Record<number, { label?: { message?: string }; number?: { message?: string } } | undefined>
+    | undefined;
+  return (
+    <div>
+      <RowListHeader
+        title="Phone Numbers"
+        count={fields.length}
+        limit={MAX_IDENTITY_PHONES}
+        addLabel="+ Add Phone"
+        onAdd={onAppend}
+        helpId="phone-numbers-limit-help"
+        limitHelp={`An identity can have up to ${String(MAX_IDENTITY_PHONES)} phone numbers.`}
+      />
+      <div className="space-y-2">
+        {fields.map((field, idx) => {
+          const row = String(idx);
+          const position = String(idx + 1);
+          const labelError = rowErrors?.[idx]?.label?.message;
+          const numberError = rowErrors?.[idx]?.number?.message;
+          const labelErrorId = `field-phones-${row}-label-error`;
+          const numberErrorId = `field-phones-${row}-number-error`;
+          return (
+            <div key={field.id}>
+              <div className="flex gap-2">
+                <input
+                  {...register(`phones.${row}.label`)}
+                  placeholder="Label (optional)"
+                  aria-label={`Phone ${position} label`}
+                  maxLength={MAX_IDENTITY_PHONE_LABEL_LENGTH}
+                  className={cn(inputClass, 'w-1/3')}
+                  autoComplete="off"
+                  aria-invalid={labelError ? true : undefined}
+                  aria-describedby={labelError ? labelErrorId : undefined}
+                />
+                <input
+                  {...register(`phones.${row}.number`)}
+                  type="tel"
+                  placeholder="Phone number"
+                  aria-label={`Phone ${position} number`}
+                  maxLength={MAX_IDENTITY_PHONE_LENGTH}
+                  className={cn(inputClass, 'flex-1')}
+                  autoComplete="off"
+                  aria-invalid={numberError ? true : undefined}
+                  aria-describedby={numberError ? numberErrorId : undefined}
+                />
+                <button
+                  type="button"
+                  onClick={() => onRemove(idx)}
+                  className="shrink-0 rounded p-2 text-[hsl(var(--destructive))] hover:bg-[hsl(var(--destructive)/0.1)]"
+                  aria-label={`Remove phone ${position}`}
+                >
+                  <Trash2 className="h-4 w-4" />
+                </button>
+              </div>
+              {labelError !== undefined && (
+                <p
+                  id={labelErrorId}
+                  role="alert"
+                  className="mt-1 text-xs text-[hsl(var(--destructive))]"
+                >
+                  {labelError}
+                </p>
+              )}
+              {numberError !== undefined && (
+                <p
+                  id={numberErrorId}
+                  role="alert"
+                  className="mt-1 text-xs text-[hsl(var(--destructive))]"
+                >
+                  {numberError}
+                </p>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 interface CustomFieldsSectionProps {
   fields: readonly { id: string }[];
   onAppend: () => void;
@@ -1600,37 +1790,21 @@ function CustomFieldsSection({
     | Record<number, { name?: { message?: string }; value?: { message?: string } } | undefined>
     | undefined;
   const count = fields.length;
-  const atLimit = count >= limit;
-  const helpId = 'custom-fields-limit-help';
   return (
     <div>
-      <div className="mb-1.5 flex items-center justify-between">
-        <span className="text-sm font-medium text-[hsl(var(--foreground))]">
-          Custom Fields{' '}
-          <span className="font-normal text-[hsl(var(--muted-foreground))]">
-            ({count} of {limit})
-          </span>
-        </span>
-        <button
-          type="button"
-          onClick={atLimit ? undefined : onAppend}
-          aria-disabled={atLimit ? true : undefined}
-          aria-describedby={atLimit ? helpId : undefined}
-          className={cn(
-            'text-xs text-[hsl(var(--primary))]',
-            atLimit ? 'cursor-not-allowed opacity-50' : 'hover:underline',
-          )}
-        >
-          + Add Field
-        </button>
-      </div>
-      {atLimit && (
-        <p id={helpId} className="mb-2 text-xs text-[hsl(var(--muted-foreground))]">
-          {initialCount > limit && count > limit
+      <RowListHeader
+        title="Custom Fields"
+        count={count}
+        limit={limit}
+        addLabel="+ Add Field"
+        onAdd={onAppend}
+        helpId="custom-fields-limit-help"
+        limitHelp={
+          initialCount > limit && count > limit
             ? `This entry has ${String(count)} custom fields, more than the limit of ${String(limit)}. It keeps all of them, but no more can be added until it has fewer than ${String(limit)}.`
-            : `An entry can have up to ${String(limit)} custom fields.`}
-        </p>
-      )}
+            : `An entry can have up to ${String(limit)} custom fields.`
+        }
+      />
       <div className="space-y-2">
         {fields.map((field, idx) => {
           const row = String(idx);
@@ -2053,6 +2227,12 @@ export function VaultItemForm({
     append: appendCustomField,
     remove: removeCustomField,
   } = useFieldArray({ control: typedControl, name: 'customFields' });
+
+  const {
+    fields: phoneFields,
+    append: appendPhone,
+    remove: removePhone,
+  } = useFieldArray({ control: typedControl, name: 'phones' });
   /* eslint-enable @typescript-eslint/no-unsafe-assignment */
 
   const handleAppendCustomField = useCallback(() => {
@@ -3108,19 +3288,13 @@ export function VaultItemForm({
               aria-invalid={errors.email ? true : undefined}
             />
           </FormField>
-          <FormField label="Phone" name="phone" error={errors.phone?.message}>
-            <input
-              id="field-phone"
-              {...register('phone')}
-              type="tel"
-              placeholder="Phone number"
-              maxLength={MAX_IDENTITY_PHONE_LENGTH}
-              className={inputClass}
-              autoComplete="off"
-              aria-describedby={errors.phone ? 'field-phone-error' : undefined}
-              aria-invalid={errors.phone ? true : undefined}
-            />
-          </FormField>
+          <PhoneNumbersSection
+            fields={phoneFields}
+            onAppend={() => appendPhone({ label: '', number: '' })}
+            onRemove={removePhone}
+            register={register}
+            errors={errors}
+          />
           <div className="space-y-3 rounded-lg border border-[hsl(var(--border))] p-4">
             <p className="text-sm font-medium text-[hsl(var(--foreground))]">Address</p>
             <BoundedTextField

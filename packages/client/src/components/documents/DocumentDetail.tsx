@@ -1173,7 +1173,7 @@ export function DocumentDetail({ document: doc, isTrashed }: DocumentDetailProps
             </DialogTitle>
             <DialogDescription>
               {isTrashed
-                ? 'The stored file is deleted from object storage and the only copy of the key that decrypts it is destroyed with it. Nothing can bring it back.'
+                ? "The stored file is deleted from object storage and the server's copy of the key that decrypts it is destroyed with it. Nothing on the server can bring it back; only a full backup saved before it went to the trash still holds it."
                 : 'The document is kept for thirty days and can be restored. It still occupies storage while it is in the trash.'}
             </DialogDescription>
           </DialogHeader>

@@ -165,6 +165,7 @@ const HELP: Record<SettingsHelpTopic, HelpTopic> = {
         heading: 'How it works with auto-lock',
         points: [
           'The auto-lock timeout above still applies, whether the tab is visible or hidden. Whichever runs out first locks the vault.',
+          'While a full backup or a full restore runs in a visible tab, the auto-lock timeout waits for it. This setting does not: a tab hidden long enough still locks the vault, and that stops the backup or restore.',
           'Browsers slow down timers in background tabs. If that delays the lock, it happens the moment you return to the tab.',
           'Each H-Vault tab you have open keeps its own countdown and locks by itself.',
         ],

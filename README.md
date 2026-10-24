@@ -99,6 +99,10 @@ stack that publishes exactly one loopback port, and a test suite that gates ever
   re-encrypts incoming rows to the key you already have — and previously-restored content is
   matched by provenance, so re-running the same backup doesn't accumulate duplicates. Any
   folder cycle a malicious file plants is detected and broken.
+- **Full backup, documents included.** **Full Backup** saves your vault and every document, with
+  its name, note, tags, folder and favorite, to your device as one encrypted, signed file. It is
+  made in your browser and never emailed, and **Restore from File** takes it like any backup,
+  documents included. See [Documents and your backups](#documents-and-your-backups).
 - **Backup recipients are proven.** Changing where mailed backups go requires your master
   password, and every address other than your own must confirm, through a single-use link
   emailed to it, before it receives a backup. A password reset, a password change or signing out
@@ -317,15 +321,32 @@ with, and the file's own bytes are sealed under a key derived from the same docu
 is nothing to hand back either. It stays movable, favoritable, trashable,
 restorable and deletable, and the app says so instead of failing quietly.
 
-#### Documents are not in your backups
+#### Documents and your backups
 
-This is the one thing to know before you rely on either. H-Vault's encrypted backup — scheduled,
-emailed, downloadable — carries your vault. It does **not** carry your documents, and it never
-will: a backup is a single JSON file of about 25 MiB and uploaded files do not fit in one. What it
-carries instead is a count, so a restored account says "this account had 43 documents" rather than
-looking complete when it is not.
+This is the one thing to know before you rely on either. The vault backup (scheduled, emailed, or
+saved with **Download Latest**) carries your vault and **not** your documents: it is a single JSON
+file of about 25 MiB, and uploaded files do not fit in one. What it carries instead is a count, so
+a restored account says "this account had 43 documents" rather than looking complete when it is
+not.
 
-For a self-hosted deployment that means the **object storage volume is the only copy of every
+**Full Backup**, on the Backup Settings page, is the backup that carries them. It is made in your
+browser and saved on your device, never emailed: one `.hvbackup` file holding the vault backup and
+every document the account has outside the trash, each with its name, note, tags, folder and
+favorite. Every document travels as the very ciphertext the server stores, and is decrypted and
+checked against the checksum sealed inside it while the file is written, so a document that cannot
+be read is listed as left out instead of being saved broken. The file is signed with your backup
+password, exactly like a download.
+
+**Restore from File** takes it: the vault comes back as from any backup, then each document is
+uploaded again under the same conflict choice (a document still in the trash is taken out of it).
+A restored document shows the restore as the day it was added, and keeps its original capture time.
+Running the same restore again with **Skip** adds nothing, and finishes one that stopped. While a
+full backup or a full restore runs in a visible tab, the idle auto-lock waits for it; locking the
+vault or leaving the page stops it, and a full backup that was stopped saves nothing. A browser
+without a save dialog builds the file in memory, up to 512 MB; desktop Chrome and Edge save
+straight to disk.
+
+For a self-hosted deployment, the **object storage volume is the server's only copy of every
 uploaded file**, and it has to be captured together with the database and the deployment's `.env`
 — the wrapped keys are in the database, the ciphertext is in the storage service, and neither half
 is usable without the other. The procedure, the volume names and why a file-level copy of a
@@ -333,9 +354,9 @@ running storage engine is not a backup are in
 [Back up the database AND the document storage](#back-up-the-database-and-the-document-storage).
 
 That is the operator's answer, and it is not available to somebody who merely _uses_ an instance
-someone else runs. Theirs is **Download all** (or **Download selected**) on the Documents page: one
-ZIP archive of plain decrypted files on their own device, verified on the way out, owing nothing to
-the server afterwards. It is not a substitute
+someone else runs. Theirs is **Full Backup**, above, and, for readable copies, **Download all** (or
+**Download selected**) on the Documents page: one ZIP archive of plain decrypted files on their own
+device, verified on the way out, owing nothing to the server afterwards. Neither is a substitute
 for the operator's backup — it is a copy of what one account can see at one moment, and it lands
 where that browser puts downloads (or where its save dialog was pointed) rather than anywhere the
 account controls — but it does mean
@@ -349,14 +370,17 @@ no user of a shared deployment is stuck inside it.
   live regions, and correct ARIA roles on virtualized lists (`react-window` above 50 items).
   Every page has one `main` landmark and one `h1` (a loading screen has only the `main`), headings
   never skip a level, and the `a11y` gate fails on any axe finding above minor (moderate, serious,
-  critical, or one axe gives no impact) in the forty views it scans.
+  critical, or one axe gives no impact) in the forty-one views it scans.
 - **Keyboard-first** — `Ctrl`+`L` lock, `Ctrl`+`N` new item, `Ctrl`+`K` search, `Ctrl`+`↑`/`↓`
   reorder folders (`Cmd` on macOS).
 - **Auto-lock on a wall-clock deadline** — the vault locks when your configured idle timeout has
   actually elapsed, measured against the clock rather than against a timer. Browsers throttle timers
   in background tabs and stop them entirely while a machine sleeps, so a timer alone can only fire
   late: come back from an hour's sleep and the vault re-checks the deadline immediately instead of
-  waiting out the remainder. Locking as soon as the tab is hidden is available as a separate,
+  waiting out the remainder. The one exception is a full backup or a full restore you started:
+  while it runs in a visible tab and keeps making progress, the idle timeout waits for it, and it
+  runs again one timeout after the job's last progress (a hidden tab, a lost connection or a
+  stalled transfer never holds the vault open). Locking as soon as the tab is hidden is available as a separate,
   opt-in setting with its own delay — off by default, because the timeout you configured should be
   the one that governs.
 - **Clipboard hygiene** — a single shared deadline erases copied secrets from the OS clipboard, on
@@ -698,7 +722,7 @@ running as a separate container — one static binary, about 6 MiB idle. `docker
 it up **already provisioned**: the bucket and the access key are created on first boot from the
 values you put in `.env`, so there is no storage step in this guide. Everything it holds is
 ciphertext sealed in the browser, so it never sees a filename, a MIME type, a tag, a note or any
-content. Its volume is also the **only** place your users' document bytes exist — read
+content. Its volume is also the **only** place on the server your users' document bytes exist — read
 [the backup boundary](#back-up-the-database-and-the-document-storage) before you rely on backups.
 
 ### 0. Host prerequisites
@@ -992,14 +1016,16 @@ back.
 
 #### Back up the database AND the document storage
 
-> **Read this before you trust a backup.** H-Vault's own backup feature — the encrypted archive it
-> emails and lets a user download — **does not contain documents**. It never has and it is not
-> meant to: a backup is a single JSON document capped at about 25 MiB, and uploaded files do not
-> fit in one. What a backup carries instead is a `documentSummary` breadcrumb saying how many
+> **Read this before you trust a backup.** The backups H-Vault's server makes — the encrypted
+> archive it emails and the one **Download Latest** saves — **do not contain documents**. They are
+> not meant to: such a backup is a single JSON document capped at about 25 MiB, and uploaded files
+> do not fit in one. What a backup carries instead is a `documentSummary` breadcrumb saying how many
 > documents and how many bytes the account held when it was taken, precisely so that a restore can
 > say "this account had 43 documents; documents are not part of a backup" rather than looking
-> complete. An operator who takes H-Vault's backups faithfully and never captures the storage
-> volume still has **nothing** after losing it. The volume is the only copy.
+> complete. A user can also save a **Full Backup** in their own browser, which does carry their
+> documents, but that file is theirs, on their device, and is no operator's backup. An operator who
+> takes H-Vault's backups faithfully and never captures the storage volume still has **nothing**
+> after losing it. The volume is the server's only copy.
 
 Your data lives in **three** places, and a backup that captures fewer than all three is not a
 backup:
@@ -1190,7 +1216,7 @@ any S3-compatible service, self-hosted or hosted. All four or none: a partial se
 error in production. Nothing else changes if you leave them empty; the API reports the feature as
 unavailable and the app hides it. (`S3_RPC_SECRET` belongs to the Docker stack's storage container
 and is not read here at all.) If you do configure storage under PM2, its data is yours to back up,
-and the boundary above still holds: documents are not in H-Vault's own backups.
+and the boundary above still holds: documents are not in the backups H-Vault's server makes.
 
 ---
 
@@ -1240,8 +1266,8 @@ confirmations, security notices and update notices
 - [ ] A replica set, if you want the transactional paths (the Docker stack gives you one)
 - [ ] Database backups scheduled independently of H-Vault's own backup feature
 - [ ] **The document storage volumes are backed up too, alongside the database and `.env`.**
-      Documents are not in H-Vault's own backups: `hvault-s3-data` is the only copy of every
-      uploaded file, and its wrapped keys live in MongoDB, so the two are only useful together.
+      Documents are not in the backups H-Vault's server makes: `hvault-s3-data` is the server's
+      only copy of every uploaded file, and its wrapped keys live in MongoDB, so the two are only useful together.
       Snapshot or stop-then-copy — a file-level copy of a running storage engine is not a backup
 
 ---
@@ -1784,16 +1810,16 @@ npm run test -w packages/server # one workspace
 npm run test:e2e                # Playwright
 ```
 
-| Suite      | Files | What it covers                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| ---------- | ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Server** | 263   | Supertest against an in-memory MongoDB: auth, refresh reuse detection, vault and folder CRUD, cycle and depth guards, 2FA, backup/restore atomicity and cross-account restore, import/export, cross-user isolation, concurrent operations, rate limiters, background jobs, CSRF, config validation, and the Docker/pipeline invariants                                                                                             |
-| **Client** | 208   | jsdom: crypto round-trips (IV uniqueness, tamper detection), stores, hooks, Axios interceptors, offline cache, accessibility, entropy metering, the import parsers + identity/conflict resolution + client-side import encryption, and the file-encryption tool against the **real** crypto library                                                                                                                                |
-| **Shared** | 21    | Schemas, constants, utilities, barrel exports                                                                                                                                                                                                                                                                                                                                                                                      |
-| **E2E**    | 26    | Playwright, Chromium over all of it plus a Firefox leg over the clipboard and auto-lock specs: full auth, vault, folder, 2FA, import/export, backup/restore, lock/unlock, a vault key changed in another browser, address-field and file-encryption journeys, plus the encrypted document store — upload, byte-exact download, the format-and-repair review, trash/restore/purge, a quota refusal — and the isolated preview frame |
+| Suite      | Files | What it covers                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| ---------- | ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Server** | 271   | Supertest against an in-memory MongoDB: auth, refresh reuse detection, vault and folder CRUD, cycle and depth guards, 2FA, backup/restore atomicity and cross-account restore, import/export, cross-user isolation, concurrent operations, rate limiters, background jobs, CSRF, config validation, and the Docker/pipeline invariants                                                                                                                                                                               |
+| **Client** | 251   | jsdom: crypto round-trips (IV uniqueness, tamper detection), stores, hooks, Axios interceptors, offline cache, accessibility, entropy metering, the import parsers + identity/conflict resolution + client-side import encryption, and the file-encryption tool against the **real** crypto library                                                                                                                                                                                                                  |
+| **Shared** | 23    | Schemas, constants, utilities, barrel exports                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| **E2E**    | 30    | Playwright, Chromium over all of it plus a Firefox leg over the clipboard and auto-lock specs: full auth, vault, folder, 2FA, import/export, backup/restore, lock/unlock, a vault key changed in another browser, address-field and file-encryption journeys, plus the encrypted document store — upload, byte-exact download, the format-and-repair review, trash/restore/purge, a quota refusal — the full backup and its restore after a permanent delete, identity phone numbers, and the isolated preview frame |
 
 **Files** counts every test file each suite owns on disk, which is not the same as the number the
 command above runs: the server's default Vitest config excludes `tests/resource/**` and
-`tests/storage/**`, so `npm run test -w packages/server` collects fewer than the 263 on disk and
+`tests/storage/**`, so `npm run test -w packages/server` collects fewer than the 271 on disk and
 those two directories run under their own gates (`test:resource`, `test:storage`). The number of
 test _cases_ is a third figure again, and it is ratcheted rather than written down here —
 `.testfortress/baseline.json`'s `tests.count` is a floor fed from the JUnit reports, and it only
@@ -1876,7 +1902,7 @@ measurement you can check rather than a claim from the day it was written. They 
 | `config`           | T1   | `actionlint` on the workflow, `hadolint` on the three Dockerfiles, `spectral` on the generated OpenAPI document                                                                                                                                                                                                                                                                                                                | _new_                      |
 | `openapi`          | T1   | `oasdiff` against the committed contract snapshot: a breaking API change fails unless the version's MAJOR component was raised in the same commit                                                                                                                                                                                                                                                                              | _new_                      |
 | `e2e`              | T1   | Playwright against an auto-started stack (dev server, in-memory MongoDB, the pinned storage engine in a container): Chromium over every spec, and a second Firefox project over the two whose answers depend on the engine — clipboard hygiene and auto-lock                                                                                                                                                                   | `e2e` job                  |
-| `a11y`             | T1   | axe-core over forty primary views and modals in the real authenticated DOM, plus the focus behaviours a scanner cannot infer                                                                                                                                                                                                                                                                                                   | _new_                      |
+| `a11y`             | T1   | axe-core over forty-one primary views and modals in the real authenticated DOM, plus the focus behaviours a scanner cannot infer                                                                                                                                                                                                                                                                                               | _new_                      |
 | `sandbox`          | T1   | A real browser renders every preview mode and the committed hostile corpus under the **built artifact's** own headers, and the engine refuses nothing but images named by address                                                                                                                                                                                                                                              | _new_                      |
 | `docker`           | T1   | Builds all 4 images, `nginx -t`, `docker compose config`, 3 × Trivy scans (fails on new fixable CRITICAL/HIGH; see the baseline below)                                                                                                                                                                                                                                                                                         | `docker-build` job         |
 | `bundle`           | T1   | The built client's initial payload and every chunk against a committed size budget, so a deliberately lazy library cannot become a static import                                                                                                                                                                                                                                                                               | _new_                      |
@@ -3231,7 +3257,7 @@ docker ps -aq --filter label=hvault-test=storage-harness | xargs -r docker rm -f
 The named volumes, `hvault-s3-meta` and `hvault-s3-data`, exist only under the deployment
 drill's own Compose project, which itself ends in `down -v --remove-orphans`; the
 label-scoped commands above are the fallback for a drill killed before it got there. On a
-real deployment those two volumes are the only copy of every uploaded document, so never
+real deployment those two volumes are the server's only copy of every uploaded document, so never
 point a cleanup command at them by name.
 
 Keep the run directories themselves; they are kilobytes, and `run.log` plus `exit-code`

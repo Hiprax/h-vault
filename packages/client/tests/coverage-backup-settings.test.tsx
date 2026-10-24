@@ -2704,6 +2704,7 @@ describe('BackupSettingsPage — every control has an accessible name', () => {
 
     const picker = screen.getByLabelText('Backup File');
     expect(picker).toHaveAttribute('type', 'file');
-    expect(picker).toHaveAttribute('accept', '.enc');
+    // Either kind of file restores here: a vault backup or a full backup (0.22.0).
+    expect(picker).toHaveAttribute('accept', '.enc,.hvbackup');
   });
 });

@@ -1176,6 +1176,13 @@ interface RestoreOutcome {
   foldersSkipped: number;
   itemSkipReasons: IItemSkipReason[];
   folderSkipReasons: IFolderSkipReason[];
+  /**
+   * Which of this account's folders each backup folder became, straight from the
+   * map the item loop files items through. A full backup's documents are filed with
+   * it by the client, which has no other way to learn a folder the restore created
+   * (a keep-both copy, or a folder this account never had).
+   */
+  folderIdMap: { backupId: string; folderId: string }[];
 }
 
 /**
@@ -1822,6 +1829,7 @@ async function restoreUnderRotationLock(
     foldersSkipped,
     itemSkipReasons,
     folderSkipReasons,
+    folderIdMap: Array.from(folderIdMap, ([backupId, folderId]) => ({ backupId, folderId })),
   };
 }
 
@@ -1922,6 +1930,7 @@ export const restoreBackup = catchAsync(async (req: Request, res: Response): Pro
       foldersSkipped: outcome.foldersSkipped,
       itemSkipReasons: outcome.itemSkipReasons,
       folderSkipReasons: outcome.folderSkipReasons,
+      folderIdMap: outcome.folderIdMap,
     },
   });
 });

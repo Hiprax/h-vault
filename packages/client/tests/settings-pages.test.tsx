@@ -3257,9 +3257,18 @@ describe('BackupSettingsPage', () => {
 
     fireEvent.click(screen.getByText('Restore from File'));
 
-    expect(screen.getByText('Keep existing items, skip duplicates')).toBeInTheDocument();
-    expect(screen.getByText('Replace existing items with backup data')).toBeInTheDocument();
-    expect(screen.getByText('Keep existing and create copies from backup')).toBeInTheDocument();
+    // Each strategy also decides what a full backup does with its documents (0.22.0).
+    expect(
+      screen.getByText('Keep existing items and documents, skip duplicates'),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        'Replace existing items, and the details of existing documents, with backup data',
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText('Keep existing items and documents, and add copies from the backup'),
+    ).toBeInTheDocument();
   });
 
   // ---- Restore: re-encrypt (never adopt) the backup's rows ----

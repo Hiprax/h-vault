@@ -312,9 +312,12 @@ describe('sendEmail over the real nodemailer transport', () => {
 
     const outcome = sendEmail('alice@example.test', 'Unreachable', '<p>x</p>');
 
+    // The library's own sentence follows the prefix. nodemailer 10.1 reworded a
+    // connection the relay closes before its greeting ("Unexpected socket close"
+    // before); what this module promises is the prefix and that it never throws.
     await expect(outcome).resolves.toEqual({
       success: false,
-      message: expect.stringMatching(/^smtp_send_failed: .*socket close/i) as unknown,
+      message: 'smtp_send_failed: Connection closed unexpectedly',
     });
   });
 

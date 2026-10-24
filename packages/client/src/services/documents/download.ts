@@ -226,6 +226,22 @@ export interface ReadDocumentOptions {
    * one row request at a time keeps that bucket empty for as long as it runs.
    */
   row?: DocumentResponse;
+  /**
+   * Where the sealed segments come from, and the vault key the row's document key
+   * is wrapped under, when that is not "this server, under the vault key held now".
+   *
+   * A full backup reads from the server under the held key but keeps every sealed
+   * segment it fetched; a full restore reads from the backup FILE under the backup's
+   * own vault key. Both go through this one function so neither can skip a check.
+   * `row` is required alongside it: there is no server to fetch a row from.
+   */
+  source?: VerifiedReadSource;
+}
+
+/** A segment source other than the server's segment route, with the key its row is wrapped under. */
+interface VerifiedReadSource {
+  vaultKey: CryptoKey;
+  readSegment: (index: number, signal: AbortSignal) => Promise<DocumentBytes>;
 }
 
 /**
@@ -318,7 +334,11 @@ export async function streamDocumentPlaintext(
   // hex, so a malformed argument cannot equal a well-formed row and the identity
   // check refuses it with a message about the document rather than about a regex.
   const documentId = id.toLowerCase();
-  const vaultKey = requireVaultKey();
+  const { source } = options;
+  if (source !== undefined && options.row === undefined) {
+    throw new Error('A document read from another source needs the row it was stored with.');
+  }
+  const vaultKey = source?.vaultKey ?? requireVaultKey();
   const signal = options.signal ?? NEVER_ABORTED;
 
   const row = options.row ?? (await fetchDocumentRow(documentId));
@@ -358,7 +378,10 @@ export async function streamDocumentPlaintext(
       // way to ask for one that straddles two segments.
       let sealed: DocumentBytes;
       try {
-        sealed = new Uint8Array((await getDocumentSegmentApi(documentId, index, signal)).data);
+        sealed =
+          source === undefined
+            ? new Uint8Array((await getDocumentSegmentApi(documentId, index, signal)).data)
+            : await source.readSegment(index, signal);
       } catch (error) {
         // An abort landing WHILE a request is in flight rejects it with the
         // transport's own cancellation, which carries no response and would
@@ -622,4 +645,22 @@ async function saveThroughBlob(id: string, options: ReadDocumentOptions): Promis
   // at — this application does not sniff a document's contents.
   downloadBlob(new Blob([bytes], { type: meta.mime }), filename);
   return filename;
+}
+
+/**
+ * Wait `ms`, or less if `signal` aborts first: a Stop pressed during a
+ * rate-limit wait ends it at once. Here rather than beside the bulk archive that
+ * first needed it, so the full backup's retries can share it without pulling the
+ * archive code into their chunk.
+ */
+export function waitAbortably(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const finish = (): void => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, ms);
+    signal.addEventListener('abort', finish, { once: true });
+  });
 }

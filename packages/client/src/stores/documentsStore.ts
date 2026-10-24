@@ -58,9 +58,11 @@
  *
  * ## Lock, logout and auto-lock
  *
- * An in-flight upload does NOT extend the auto-lock deadline, and `useAutoLock` is
- * untouched: auto-lock exists to protect an unattended unlocked vault, and a long
- * background transfer is exactly when an attacker benefits from it not firing. So
+ * An in-flight upload does NOT extend the auto-lock deadline: auto-lock exists to
+ * protect an unattended unlocked vault, and a long background transfer is exactly
+ * when an attacker benefits from it not firing. (The one exception is a full
+ * restore the person started and is watching: its engine records its own progress
+ * through `noteAutoLockProgress`, in a visible tab only. This store does not.) So
  * a lock DURING a long upload is the expected outcome, and {@link clearStore}
  * makes it clean — it aborts every controller, ZEROES every held DEK (a key that
  * decrypts user plaintext must not outlive the lock) and fires the abort endpoint
@@ -302,7 +304,10 @@ export interface UploadSession {
    */
   sliceDigests: DocumentBytes[];
   name: string;
-  originalName: string;
+  /** As the caller gave it; {@link metaShapeFor} is the one place it falls back. */
+  originalName?: string | undefined;
+  /** Present only for a document a full restore is putting back. */
+  restored?: RestoredDocument | undefined;
   mime: string;
   tags: string[];
   note?: string | undefined;
@@ -312,6 +317,14 @@ export interface UploadSession {
   noncePrefix: DocumentBytes;
   chunkCount: number;
   chunkPlaintextBytes: number;
+}
+
+/** Where a document a full restore re-uploads came from. */
+export interface RestoredDocument {
+  /** Its id in the backup. */
+  from: string;
+  /** When it was first added, from its sealed metadata. */
+  capturedAt: string;
 }
 
 /** What {@link DocumentsState.startUpload} needs to seal and store a file. */
@@ -339,6 +352,12 @@ export interface StartUploadInput {
   tags?: string[] | undefined;
   note?: string | undefined;
   transform?: DocumentMeta['transform'];
+  /**
+   * Set only by a full restore: the id the document had in the backup, sealed as
+   * `restoredFrom` so a later restore of the same backup recognises it, and the
+   * time it was first added, kept instead of now.
+   */
+  restored?: RestoredDocument | undefined;
   /**
    * Called, synchronously, the moment the transfer is registered and has a row
    * of its own. Until then nothing is on screen for it, which is why the upload
@@ -687,6 +706,7 @@ export function metaShapeFor(
   source: {
     name: string;
     originalName?: string | undefined;
+    restored?: RestoredDocument | undefined;
     mime: string;
     tags?: string[] | undefined;
     note?: string | undefined;
@@ -696,9 +716,15 @@ export function metaShapeFor(
   chunkCount: number,
   capturedAt: string,
 ): Omit<DocumentMeta, 'sha256'> {
+  // A restored document whose backup recorded no original name keeps none: it was
+  // uploaded before the name was recorded, and inventing one would assert a
+  // provenance nobody observed.
+  const originalName = source.originalName ?? (source.restored ? undefined : source.name);
   return {
     name: source.name,
-    originalName: source.originalName ?? source.name,
+    // `undefined` when there is none: the sealed blob is JSON, which drops it.
+    originalName,
+    ...(source.restored === undefined ? {} : { restoredFrom: source.restored.from }),
     mime: source.mime,
     ext: documentExtension(source.name),
     plaintextBytes,
@@ -726,6 +752,19 @@ export class UploadCancelledError extends Error {
   constructor(message = 'Upload cancelled') {
     super(message);
     this.name = 'UploadCancelledError';
+  }
+}
+
+/**
+ * A document's details that cannot be stored (the sealed metadata would break the
+ * schema's bounds), refused by {@link startUpload} before anything is sent. Its
+ * message is the first issue's own sentence. A class of its own so a caller can
+ * tell this refusal, which is about one document, from one about the session.
+ */
+export class DocumentDetailsRefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'DocumentDetailsRefusedError';
   }
 }
 
@@ -982,7 +1021,7 @@ export const useDocumentsStore = create<DocumentsState>((set, get) => ({
 
     const totalBytes = input.source.size;
     const chunkCount = documentChunkCountFor(totalBytes, DOCUMENT_PLAINTEXT_CHUNK_BYTES);
-    const capturedAt = new Date().toISOString();
+    const capturedAt = input.restored?.capturedAt ?? new Date().toISOString();
 
     // The metadata bounds are checked HERE, before a byte crosses the network,
     // rather than only inside `encryptMeta` at the very end. A name, a note or a
@@ -1002,7 +1041,7 @@ export const useDocumentsStore = create<DocumentsState>((set, get) => ({
       sha256: PLACEHOLDER_DIGEST,
     });
     if (!preflight.success) {
-      throw new Error(
+      throw new DocumentDetailsRefusedError(
         preflight.error.issues[0]?.message ?? 'These document details cannot be stored.',
       );
     }
@@ -1078,7 +1117,8 @@ export const useDocumentsStore = create<DocumentsState>((set, get) => ({
       sourceSize: totalBytes,
       sliceDigests: [],
       name: input.name,
-      originalName: input.originalName ?? input.name,
+      originalName: input.originalName,
+      restored: input.restored,
       mime: input.mime,
       tags: input.tags ?? [],
       ...(input.note === undefined ? {} : { note: input.note }),

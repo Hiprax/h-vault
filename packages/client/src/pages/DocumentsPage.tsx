@@ -149,6 +149,8 @@ function DocumentsView({ config }: DocumentsViewProps) {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [showEmptyTrash, setShowEmptyTrash] = useState(false);
   const [emptying, setEmptying] = useState(false);
+  // Whether the upload form is open, which hides "Download your documents".
+  const [uploadFormOpen, setUploadFormOpen] = useState(false);
 
   const inTrash = view.mode.kind === 'trash';
 
@@ -301,7 +303,11 @@ function DocumentsView({ config }: DocumentsViewProps) {
           {inTrash ? (
             <DocumentTransfers />
           ) : (
-            <DocumentUploadPanel config={config} folder={view.uploadFolder} />
+            <DocumentUploadPanel
+              config={config}
+              folder={view.uploadFolder}
+              onFormOpenChange={setUploadFormOpen}
+            />
           )}
 
           {(view.degradedCount > 0 || view.invalidCount > 0) && (
@@ -332,6 +338,7 @@ function DocumentsView({ config }: DocumentsViewProps) {
             documents={selection.active ? selection.rows : view.rows}
             invalidCount={view.invalidCount}
             selected={selection.active}
+            concealed={uploadFormOpen && !inTrash}
           />
 
           {/* Directly above the rows it acts on, and only while some of them are
@@ -365,7 +372,7 @@ function DocumentsView({ config }: DocumentsViewProps) {
         open={showEmptyTrash}
         onOpenChange={setShowEmptyTrash}
         title="Empty the document trash"
-        description={`This permanently deletes all ${String(trashCount)} document(s) in the trash. Each stored file is removed from object storage and the only copy of the key that decrypts it is destroyed with it. Nothing can bring them back. The storage they occupy is released.`}
+        description={`This permanently deletes all ${String(trashCount)} document(s) in the trash. Each stored file is removed from object storage and the server's copy of the key that decrypts it is destroyed with it. Nothing on the server can bring them back; only a full backup saved before they went to the trash still holds them. The storage they occupy is released.`}
         confirmLabel="Delete all forever"
         onConfirm={handleEmptyTrash}
         busy={emptying}

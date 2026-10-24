@@ -45,6 +45,9 @@ const DOCUMENT_UGLY_JSON = 'ugly.json';
  */
 const REJECTED_TOKEN = 'e2e-a11y-rejected-token';
 
+/** The backup password the Full Backup view is reached with: zxcvbn score 3 or more, as setup requires. */
+const A11Y_BACKUP_PASSWORD = 'A11y-Full-Backup!8Rq#Vw3';
+
 /**
  * One audit row per badge colour the log can draw, newest first.
  *
@@ -134,7 +137,7 @@ const AUDIT_PAGE_SIZE = 20;
  * there and reported here. And the interesting views are all BEHIND a sign-in
  * that involves a 600,000-iteration key derivation, a vault key held only in
  * memory, and ciphertext that has to make a round trip; a suite that scanned only
- * what a signed-out browser can reach would miss most of the forty views below.
+ * what a signed-out browser can reach would miss most of the forty-one views below.
  *
  * ## One test, one registration
  *
@@ -142,13 +145,13 @@ const AUDIT_PAGE_SIZE = 20;
  * wall clock and the suite runs single-worker, so the whole authenticated walk
  * shares one account. Each view is a `test.step`, and every scan asserts SOFTLY
  * (`expect.soft`) so one failing view does not hide the state of the other
- * thirty-nine — an accessibility report that stops at the first finding is a
- * report somebody has to run forty times.
+ * forty — an accessibility report that stops at the first finding is a
+ * report somebody has to run forty-one times.
  */
 
 test.describe('accessibility: every primary view and modal', () => {
   test('has no moderate, serious or critical axe violations', async ({ page }, testInfo) => {
-    // Two 600k-iteration derivations for the sign-in, forty axe runs over a
+    // Two 600k-iteration derivations for the sign-in, forty-one axe runs over a
     // fully rendered SPA, and three real documents uploaded through the browser's
     // own AES-GCM to the storage engine the harness starts.
     // `registerAndSignInViaUI` raises the timeout to its own floor; this raises it
@@ -186,7 +189,7 @@ test.describe('accessibility: every primary view and modal', () => {
     /**
      * Scans the current DOM and records it.
      *
-     * Soft, so the walk continues: thirty-nine more views are worth more than
+     * Soft, so the walk continues: forty more views are worth more than
      * failing fast on the first, and the run still fails at the end.
      */
     const scan = async (view: string): Promise<void> => {
@@ -508,6 +511,21 @@ test.describe('accessibility: every primary view and modal', () => {
         await page.getByRole('button', { name: 'Restore from File' }).click();
         await expect(page.locator('#restore-backup-file')).toBeVisible();
         await scan('backup-settings');
+      });
+
+      await test.step('full backup panel', async () => {
+        // Set up through the page's own form, as a person does: two 600k-iteration
+        // derivations, the same price `zero-knowledge.spec.ts` pays for it.
+        await page.locator('#backup-password').fill(A11Y_BACKUP_PASSWORD);
+        await page.locator('#confirm-backup-password').fill(A11Y_BACKUP_PASSWORD);
+        await page.locator('#setup-master-password').fill(account.password);
+        await page.getByRole('button', { name: 'Setup Encryption' }).click();
+        await expect(page.getByText('Backup encryption configured')).toBeVisible({
+          timeout: 180_000,
+        });
+        await page.getByRole('button', { name: 'Full Backup', exact: true }).click();
+        await expect(page.getByLabel('Backup password for the full backup')).toBeVisible();
+        await scan('backup-full-backup');
       });
 
       await test.step('export data', async () => {

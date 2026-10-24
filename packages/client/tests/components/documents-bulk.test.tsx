@@ -555,7 +555,7 @@ describe('the confirmations for one document', () => {
     const purge = await screen.findByRole('dialog');
     expect(purge).toHaveTextContent('Delete 1 document for good');
     expect(purge).toHaveTextContent(
-      'Nothing can bring it back. The storage it occupies is released.',
+      'Nothing on the server can bring it back; only a full backup saved before it went to the trash still holds it. The storage it occupies is released.',
     );
   });
 });
@@ -644,7 +644,9 @@ describe('in the trash', () => {
     fireEvent.click(within(bar()).getByRole('button', { name: 'Delete forever' }));
     const dialog = await screen.findByRole('dialog');
     expect(dialog).toHaveTextContent('Delete 5 documents for good');
-    expect(dialog).toHaveTextContent('Nothing can bring them back');
+    expect(dialog).toHaveTextContent(
+      'Nothing on the server can bring them back; only a full backup saved before they went to the trash still holds them.',
+    );
     await confirm('Delete forever');
 
     await waitFor(() =>

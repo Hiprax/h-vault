@@ -12,7 +12,9 @@ import { Document } from '../models/Document.js';
  * and expensive — a user restores into a fresh account, sees every item and every
  * folder come back, and concludes the restore was complete. This summary is what
  * makes the boundary visible, so the restore can say "this backup was taken from
- * an account holding N documents; documents are not part of a backup".
+ * an account holding N documents; documents are not part of a backup". A
+ * browser-built full backup (0.22.0) wraps this payload with the documents
+ * themselves, and checks its own document list against this count.
  *
  * ## One definition, because there are two payload builders
  *

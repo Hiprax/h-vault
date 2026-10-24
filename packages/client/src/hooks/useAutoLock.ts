@@ -47,6 +47,31 @@ const DEADLINE_POLL_MS = 20_000;
 const ACTIVITY_THROTTLE_MS = 1_000;
 
 /**
+ * The longest gap between two evaluations that still reads as one live, visible
+ * page. A visible tab evaluates at least every {@link DEADLINE_POLL_MS}, so a longer
+ * gap means the machine slept or the tab was frozen, and progress is not credited.
+ */
+const PROGRESS_CONTINUITY_MS = 60_000;
+
+/** When a full backup or full restore last made forward progress in a visible tab. */
+let autoLockProgressAt = 0;
+
+/**
+ * Record that a full backup or full restore the user started just made forward
+ * progress: a verified segment, a stored part, a finished document. Only those two
+ * jobs call it (the operator's decision, 0.22.0); an ordinary upload is still not
+ * activity.
+ *
+ * It is a timestamp and nothing else, so there is nothing to release: a job that
+ * stops calling it (finished, stopped, offline, stuck on a hung request) lets the
+ * normal deadline run again one timeout after its last progress. Ignored while the
+ * tab is hidden, so work done in a background tab never counts.
+ */
+export function noteAutoLockProgress(): void {
+  if (!document.hidden) autoLockProgressAt = Date.now();
+}
+
+/**
  * Locks the vault on a WALL-CLOCK deadline.
  *
  * ## Why a deadline and not a timer
@@ -112,6 +137,8 @@ export function useAutoLock() {
    * both rather than depending on one store's update timing.
    */
   const lockRequestedRef = useRef(false);
+  /** When `evaluate` last ran, for the continuity test {@link noteAutoLockProgress} relies on. */
+  const lastEvaluateAtRef = useRef(Date.now());
 
   /**
    * The instant the vault must be locked by, as epoch milliseconds.
@@ -150,7 +177,22 @@ export function useAutoLock() {
       return;
     }
 
-    const remaining = deadlineAt() - Date.now();
+    // A long job's progress counts as activity (it is only ever recorded while the
+    // tab is visible), but only when the previous evaluation was recent: a longer
+    // gap is a sleep or a frozen tab, and the deadline must then be judged on the
+    // evidence from before it. Progress stamped LATER than now (the clock was set
+    // back) is dropped, never merely deferred: kept, it would be merged as fresh
+    // activity the moment the clock caught up with it. The gap is measured BEFORE
+    // this evaluation is recorded, and the progress is merged BEFORE the deadline
+    // is computed.
+    const now = Date.now();
+    if (autoLockProgressAt > now) autoLockProgressAt = 0;
+    if (now - lastEvaluateAtRef.current < PROGRESS_CONTINUITY_MS) {
+      lastActivityRef.current = Math.max(lastActivityRef.current, autoLockProgressAt);
+    }
+    lastEvaluateAtRef.current = now;
+
+    const remaining = deadlineAt() - now;
     if (remaining <= 0) {
       clearTimer();
       lockRequestedRef.current = true;

@@ -38,6 +38,7 @@ export const CLIENT_PROPERTY_SUITE = [
   'tests/property/card-expiry.property.test.ts',
   'tests/property/documents-zip-archive.property.test.ts',
   'tests/property/documents-archive-names.property.test.ts',
+  'tests/property/full-backup-format.property.test.ts',
 ];
 
 /**

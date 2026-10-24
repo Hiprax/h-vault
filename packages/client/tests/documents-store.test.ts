@@ -92,6 +92,7 @@ import { api, clearCsrfToken } from '../src/services/api/client.js';
 import { useAuthStore } from '../src/stores/authStore.js';
 import {
   DOCUMENT_TYPE_LOCKED_MESSAGE,
+  DocumentDetailsRefusedError,
   UploadCancelledError,
   useDocumentsStore,
 } from '../src/stores/documentsStore.js';
@@ -1968,6 +1969,8 @@ describe('documentsStore — uploading', () => {
       mime: 'text/plain',
     });
     await expect(refused).rejects.toThrow(/at most 255 characters|<=255/i);
+    // Its own class, so a full restore records this one document and goes on.
+    await expect(refused).rejects.toBeInstanceOf(DocumentDetailsRefusedError);
     // A sentence, never a serialized issue list.
     await expect(refused).rejects.not.toThrow(/^\[/);
 
@@ -3673,6 +3676,88 @@ describe('documentsStore — the original name and the file type', () => {
       },
     );
     expect(meta.originalName).toBe('notes.txt');
+  });
+
+  /** The metadata the store sealed for the FIRST completed upload of this test. */
+  async function firstSealedMeta(): Promise<DocumentMeta> {
+    const complete = completeBodies[0] as unknown as Record<string, string>;
+    const init = JSON.parse(requestsFor('POST', '/documents/uploads')[0]?.data as string) as Record<
+      string,
+      string
+    >;
+    const dek = await unwrapDek(
+      {
+        encryptedDek: complete.encryptedDek ?? '',
+        dekIv: complete.dekIv ?? '',
+        dekTag: complete.dekTag ?? '',
+      },
+      await deriveWrapKey(vaultKey, ID_A),
+    );
+    return decryptMeta(
+      await deriveMetaKey(
+        dek as DocumentBytes,
+        new Uint8Array(cryptoService.base64ToArrayBuffer(init.streamSalt ?? '')),
+        ID_A,
+      ),
+      {
+        encryptedMeta: complete.encryptedMeta ?? '',
+        metaIv: complete.metaIv ?? '',
+        metaTag: complete.metaTag ?? '',
+      },
+    );
+  }
+
+  it('seals where a restored document came from and when it was first added, inventing no original name', async () => {
+    await primeCommittedRow();
+
+    await useDocumentsStore.getState().startUpload({
+      source: source(),
+      name: 'notes.txt',
+      mime: 'text/plain',
+      restored: { from: ID_B, capturedAt: '2025-03-04T05:06:07.000Z' },
+    });
+
+    const meta = await firstSealedMeta();
+    expect(meta.restoredFrom).toBe(ID_B);
+    expect(meta.capturedAt).toBe('2025-03-04T05:06:07.000Z');
+    // The backup recorded no original name, so the restored document has none:
+    // it must not read as "picked as notes.txt" when nobody ever saw that.
+    expect('originalName' in meta).toBe(false);
+    // NEGATIVE: the backup id never crosses the wire in the clear.
+    const wire = requests
+      .map((r) => `${r.url} ${typeof r.data === 'string' ? r.data : ''}`)
+      .join('\n');
+    expect(wire).not.toContain(ID_B);
+  });
+
+  it("keeps the original name a restored document's backup recorded", async () => {
+    await primeCommittedRow('scan.txt');
+
+    await useDocumentsStore.getState().startUpload({
+      source: source(),
+      name: 'scan.txt',
+      originalName: 'IMG_0042.txt',
+      mime: 'text/plain',
+      restored: { from: ID_B, capturedAt: '2025-03-04T05:06:07.000Z' },
+    });
+
+    const meta = await firstSealedMeta();
+    expect(meta.originalName).toBe('IMG_0042.txt');
+    expect(meta.restoredFrom).toBe(ID_B);
+  });
+
+  it('seals no provenance and the current time for an ordinary upload', async () => {
+    await primeCommittedRow();
+    const before = Date.now();
+
+    await useDocumentsStore
+      .getState()
+      .startUpload({ source: source(), name: 'notes.txt', mime: 'text/plain' });
+
+    const meta = await firstSealedMeta();
+    expect('restoredFrom' in meta).toBe(false);
+    expect(Date.parse(meta.capturedAt)).toBeGreaterThanOrEqual(before);
+    expect(Date.parse(meta.capturedAt)).toBeLessThanOrEqual(Date.now());
   });
 
   it('keeps the original name through a rename, which has no way to change it', async () => {

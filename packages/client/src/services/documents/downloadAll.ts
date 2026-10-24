@@ -1,13 +1,12 @@
 /**
  * Taking every stored document out of the vault as one ZIP archive.
  *
- * Documents are deliberately absent from the encrypted backup — that file
- * carries a `documentSummary` breadcrumb and not a byte of any document — so the
- * operator's copy of the storage volume was, until this module existed, the only
- * way a whole document store could leave the server. That is a fine answer for
- * whoever runs the instance and no answer at all for whoever uses one they do
- * not run. This is the user-level half: the same verified read the detail view
- * performs, run over a list, into one archive.
+ * Documents are absent from the server-built vault backup, which carries a
+ * `documentSummary` breadcrumb and not a byte of any document. Two user-level ways
+ * out exist: the full backup (`services/backup/`), which keeps every document
+ * ENCRYPTED for a later restore, and this module, which writes READABLE copies:
+ * the same verified read the detail view performs, run over a list, into one
+ * archive.
  *
  * ## Why an archive is acceptable here
  *
@@ -72,7 +71,11 @@ import {
 import type { ArchivePathAllocator } from './archiveNames.js';
 import type { ArchiveTarget } from './archiveTarget.js';
 import { UNOPENABLE_DOCUMENT_NAME } from './documentNames.js';
-import { DocumentDownloadCancelledError, streamDocumentPlaintext } from './download.js';
+import {
+  DocumentDownloadCancelledError,
+  streamDocumentPlaintext,
+  waitAbortably,
+} from './download.js';
 import { StoredZipWriter, crc32 } from './zipArchive.js';
 
 /** What a degraded row's summary line says, since no read of it was attempted. */
@@ -189,22 +192,6 @@ export interface ArchiveDocumentsOptions {
   onFinishing?: () => void;
   /** How a short rate-limit wait is waited out. A seam for tests; the default is a timer. */
   wait?: (ms: number, signal: AbortSignal) => Promise<void>;
-}
-
-/**
- * Wait `ms`, or less if `signal` aborts first: a Stop pressed during a
- * rate-limit wait ends it at once.
- */
-export function waitAbortably(ms: number, signal: AbortSignal): Promise<void> {
-  return new Promise((resolve) => {
-    const finish = (): void => {
-      clearTimeout(timer);
-      signal.removeEventListener('abort', finish);
-      resolve();
-    };
-    const timer = setTimeout(finish, ms);
-    signal.addEventListener('abort', finish, { once: true });
-  });
 }
 
 /**

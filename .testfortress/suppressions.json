@@ -236,7 +236,7 @@
       "file": "playwright.config.ts",
       "symbol": "B9 visual regression",
       "maxHits": 1,
-      "reason": "Testing-matrix row B9 (visual regression) is APPLICABLE in principle to any UI, so a 'not applicable' would not be earned by a fact. It is deferred because there is no protected design contract to regress against, and because function \u2014 the thing a screenshot diff is a proxy for \u2014 is already covered directly: `test:a11y` runs axe over forty views and asserts the keyboard invariants, the component suites assert rendered output, and the E2E suite drives the real journeys. A pixel baseline added now would mostly report intended CSS churn. Removal condition: a stable design system, or a recurrence of a defect that only a rendered diff would have caught.",
+      "reason": "Testing-matrix row B9 (visual regression) is APPLICABLE in principle to any UI, so a 'not applicable' would not be earned by a fact. It is deferred because there is no protected design contract to regress against, and because function \u2014 the thing a screenshot diff is a proxy for \u2014 is already covered directly: `test:a11y` runs axe over forty-one views and asserts the keyboard invariants, the component suites assert rendered output, and the E2E suite drives the real journeys. A pixel baseline added now would mostly report intended CSS churn. Removal condition: a stable design system, or a recurrence of a defect that only a rendered diff would have caught.",
       "owner": "maintainer",
       "created": "2026-08-14",
       "expires": "2026-11-11",
@@ -734,19 +734,6 @@
       "owner": "maintainer",
       "created": "2026-10-16",
       "expires": "2026-12-27",
-      "approvedBy": ["judge:readonly"]
-    },
-    {
-      "id": "SUP-0070",
-      "rule": "VULN-ACCEPT",
-      "kind": "vulnerability-acceptance",
-      "file": "package-lock.json",
-      "symbol": "GHSA-vfj7-8cjw-p6xm braces@3.0.3",
-      "maxHits": 1,
-      "reason": "osv-scanner 2.4.0 reports braces 3.0.3 under GHSA-vfj7-8cjw-p6xm (CVE-2026-93687, HIGH: a deeply nested brace pattern exhausts the call stack and the process dies with an uncaught RangeError; published 2026-09-18, GitHub-reviewed 2026-10-02, after the plan's clean baseline run). NO fixed release exists: the OSV range is introduced 0 / last_affected 3.0.3 and `npm view braces versions` ends at 3.0.3 (2024-05-21), so no upgrade or override can remove it. Its ONLY path in package-lock.json is the root devDependency @stoplight/spectral-cli 6.16.3 -> fast-glob 3.2.12 -> micromatch 4.0.8 -> braces 3.0.3, every link `dev: true` (spectral-cli 6.17.0, fast-glob 3.3.3 and micromatch 4.0.8, the newest of each, still depend on it). Nothing ships it: the runtime image installs with --omit=dev, and `audit:deps` (npm audit --omit=dev) does not report it. Nothing untrusted reaches it: spectral globs only its command-line arguments, and the one caller, scripts/ci/config-gate.mjs through the `audit:config:openapi` npm script, passes the fixed path of a file that gate writes itself; a crash there is caught by spectral and turned into a failed gate. Both Phase 16 reviewers, working independently, chose this acceptance over replacing spectral, which would change another gate's engine and ratcheted fields. The osv gate re-validates this entry on every run (exact advisory id and name@version, maxHits 1, reviewer, at most 30 days to expiry) and fails if it ever excuses nothing. REMOVAL CONDITION: a braces release past 3.0.3 reachable from this tree, the advisory withdrawn, or audit:config calling spectral-core directly so fast-glob leaves the tree; at expiry, re-check the registry and OSV before renewing.",
-      "owner": "maintainer",
-      "created": "2026-10-16",
-      "expires": "2026-11-15",
       "approvedBy": ["judge:readonly"]
     },
     {

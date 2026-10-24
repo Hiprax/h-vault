@@ -329,6 +329,16 @@ describe('the restore path routes its signature verdict through one module', () 
     expect(callers).toEqual(['pages/BackupSettingsPage.tsx']);
   });
 
+  it('lets only the page hand the full backup verifier to the same module', () => {
+    // The full backup's signature (0.22.0) is decided by the SAME verdict: its
+    // verifier is a member call on the lazily loaded module, made by the page
+    // alone, so a second verdict cannot appear beside it either.
+    const callers = sourceFiles(srcDir)
+      .filter((file) => /\.verifyFullBackupManifest\s*\(/.test(code(file)))
+      .map((file) => path.relative(srcDir, file).split(path.sep).join('/'));
+    expect(callers).toEqual(['pages/BackupSettingsPage.tsx']);
+  });
+
   it('routes the page through `resolveBackupSignature`, and nothing else does', () => {
     const page = code(path.join(srcDir, 'pages', 'BackupSettingsPage.tsx'));
 

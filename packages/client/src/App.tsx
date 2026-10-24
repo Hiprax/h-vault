@@ -6,13 +6,21 @@ import { AppLayout } from './components/layout/AppLayout';
 import { ErrorBoundary } from './components/layout/ErrorBoundary';
 import { StandalonePage } from './components/layout/StandalonePage';
 import { ToastProvider } from './components/ui/Toast';
-import { ReloadPrompt } from './components/layout/ReloadPrompt';
 import { useFavicon } from './hooks/useFavicon';
+import { lazyOptional } from './lib/lazyOptional';
 import { useClipboardGuard } from './hooks/useClipboardGuard';
 import { useUploadUnloadGuard } from './hooks/useUploadUnloadGuard';
 import { resumeSession, shouldAttemptResume } from './services/auth/sessionResume';
 
 // Lazy-loaded page components
+// The update prompt and its service-worker registration, after the first render:
+// nothing on the first screen depends on them, and the initial payload has no room
+// (0.22.0). Registration is unaffected: workbox registers at once when the page
+// has already finished loading, and waits for the load event otherwise. Optional:
+// a chunk that cannot be fetched costs the prompt, never the app.
+const ReloadPrompt = lazyOptional(() =>
+  import('./components/layout/ReloadPrompt').then((module) => ({ default: module.ReloadPrompt })),
+);
 const LoginPage = lazy(() => import('./pages/LoginPage'));
 const RegisterPage = lazy(() => import('./pages/RegisterPage'));
 const VaultPage = lazy(() => import('./pages/VaultPage'));
@@ -147,7 +155,9 @@ export function App() {
           </Suspense>
         </ToastProvider>
       </BrowserRouter>
-      <ReloadPrompt />
+      <Suspense fallback={null}>
+        <ReloadPrompt />
+      </Suspense>
     </ErrorBoundary>
   );
 }

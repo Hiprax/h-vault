@@ -150,6 +150,12 @@ interface DocumentUploadPanelProps {
    * so it has to SAY where the file is going or the destination is invisible.
    */
   folder?: { id: string; name: string } | undefined;
+  /**
+   * Told whenever the upload form opens or closes: open while a file is picked
+   * that this server would take. The Documents page hides its "Download your
+   * documents" section meanwhile, so the two actions are never side by side.
+   */
+  onFormOpenChange?: ((open: boolean) => void) | undefined;
 }
 
 /**
@@ -174,7 +180,11 @@ interface DocumentUploadPanelProps {
  * cancels it, and that is stated unconditionally before the user starts — ahead
  * of the estimate, which can be wrong, rather than inside it.
  */
-export function DocumentUploadPanel({ config, folder }: DocumentUploadPanelProps) {
+export function DocumentUploadPanel({
+  config,
+  folder,
+  onFormOpenChange,
+}: DocumentUploadPanelProps) {
   const startUpload = useDocumentsStore((s) => s.startUpload);
   const { toast } = useToast();
   const { autoLockTimeout, lockOnHidden, lockOnHiddenDelay } = useUserSettings();
@@ -226,6 +236,17 @@ export function DocumentUploadPanel({ config, folder }: DocumentUploadPanelProps
   // value has not moved. Remounting rather than writing `''` through a ref keeps
   // the component free of a ref whose null case cannot happen while it renders.
   const [pickerGeneration, setPickerGeneration] = useState(0);
+  // Set by Cancel, so the file input that remounts gets the focus Cancel had.
+  const focusPickerRef = useRef(false);
+  // The latest `onFormOpenChange`, read when the panel goes away.
+  const onFormOpenChangeRef = useRef(onFormOpenChange);
+  onFormOpenChangeRef.current = onFormOpenChange;
+  useEffect(
+    () => () => {
+      onFormOpenChangeRef.current?.(false);
+    },
+    [],
+  );
 
   const maxSizeBytes = config.maxSizeMB === undefined ? null : config.maxSizeMB * BYTES_PER_MB;
   const allowedExtensions = config.allowedExtensions ?? [];
@@ -299,8 +320,10 @@ export function DocumentUploadPanel({ config, folder }: DocumentUploadPanelProps
     // upload registers. The controls are disabled meanwhile; a drop is not a
     // control, so it is refused here.
     if (startingRef.current) return;
+    const refused = candidate === null ? null : refusalFor(candidate);
     setFile(candidate);
-    setRefusal(candidate === null ? null : refusalFor(candidate));
+    setRefusal(refused);
+    onFormOpenChange?.(candidate !== null && refused === null);
     setTransforms({ format: false, repair: false });
     setPhase(IDLE_PHASE);
     setDetails(
@@ -316,6 +339,7 @@ export function DocumentUploadPanel({ config, folder }: DocumentUploadPanelProps
   function clearSelection(): void {
     setFile(null);
     setRefusal(null);
+    onFormOpenChange?.(false);
     setTransforms({ format: false, repair: false });
     setPhase(IDLE_PHASE);
     setDetails(EMPTY_DETAILS);
@@ -576,6 +600,11 @@ export function DocumentUploadPanel({ config, folder }: DocumentUploadPanelProps
           <input
             id="document-upload-input"
             key={pickerGeneration}
+            ref={(node) => {
+              if (node === null || !focusPickerRef.current) return;
+              focusPickerRef.current = false;
+              node.focus();
+            }}
             type="file"
             disabled={starting}
             onChange={(event) => select(event.target.files?.[0] ?? null)}
@@ -659,7 +688,20 @@ export function DocumentUploadPanel({ config, folder }: DocumentUploadPanelProps
             which is what the review is for.
           */}
           {phase.status === 'idle' && (
-            <div className="flex justify-end">
+            <div className="flex justify-end gap-2">
+              {/* Only beside Upload, never beside a review: the review has its
+                  own Cancel, which keeps the file. This one lets the file go. */}
+              <button
+                type="button"
+                onClick={() => {
+                  focusPickerRef.current = true;
+                  clearSelection();
+                }}
+                disabled={starting}
+                className="rounded-md border border-[hsl(var(--border))] px-4 py-2 text-sm font-medium text-[hsl(var(--foreground))] hover:bg-[hsl(var(--accent))] disabled:opacity-50"
+              >
+                Cancel
+              </button>
               <button
                 type="button"
                 onClick={() => {

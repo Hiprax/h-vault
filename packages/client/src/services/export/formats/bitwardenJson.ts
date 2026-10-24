@@ -50,6 +50,7 @@ import type {
   PortablePasswordHistoryEntry,
 } from '../portableItem.js';
 import { BACKUP_CODES_FIELD_NAME, DELIVERY_NOTES_FIELD_NAME } from '../portableItem.js';
+import { phoneDisplayLabel } from '../../../lib/identityPhones.js';
 
 /** Numeric item-type codes, exactly as Bitwarden's importer expects. */
 function typeCode(type: ItemType): number {
@@ -232,6 +233,22 @@ function deliveryNotesField(p: PortableItem): BitwardenField | undefined {
   return { name: DELIVERY_NOTES_FIELD_NAME, value: notes, type: FIELD_TYPE_CODE.text };
 }
 
+/**
+ * An identity's numbers after the first, as plain TEXT custom fields named the way
+ * the detail view names them ("Phone (Work)", "Phone 3"). Bitwarden's identity has
+ * ONE `phone`, which carries the first number; the rest would otherwise be lost.
+ * They come back as custom fields when the file is imported again.
+ */
+function extraPhoneFields(p: PortableItem): BitwardenField[] {
+  const phones = p.identity?.phones;
+  if (phones === undefined) return [];
+  return phones.slice(1).map((phone, index) => ({
+    name: phoneDisplayLabel(phone, index + 1),
+    value: phone.number,
+    type: FIELD_TYPE_CODE.text,
+  }));
+}
+
 function mapPasswordHistory(
   history?: PortablePasswordHistoryEntry[],
 ): BitwardenPasswordHistoryEntry[] | undefined {
@@ -375,6 +392,8 @@ export function toBitwardenJson(portable: readonly PortableItem[]): {
       ...(codesField === undefined ? [] : [codesField]),
       ...(deliveryField === undefined ? [] : [deliveryField]),
       ...(mapFields(p.customFields) ?? []),
+      // LAST, so every field an entry already exported keeps its place.
+      ...extraPhoneFields(p),
     ];
     if (fields.length > 0) item.fields = fields;
     const passwordHistory = mapPasswordHistory(p.passwordHistory);

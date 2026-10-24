@@ -254,6 +254,12 @@ export const documentMetaSchema = z
     // was called, spaces included, and the same bound as `name` because it is the
     // same kind of value.
     originalName: z.string().min(1).max(MAX_DOCUMENT_NAME_LENGTH).optional(),
+    // The id this document had in the full backup it was restored from, sealed
+    // here so a second restore of the same backup recognises it instead of adding
+    // it again, and so the server never learns which documents came from where.
+    // Optional: only a restore writes it, and the rename path carries it forward
+    // with the rest of the blob.
+    restoredFrom: documentIdSchema.optional(),
     mime: z.string().max(MAX_DOCUMENT_MIME_LENGTH),
     // No charset rule and no `.toLowerCase()`: deriving the lookup key is the
     // caller's job (the lowercased segment after the last dot), and a regex here

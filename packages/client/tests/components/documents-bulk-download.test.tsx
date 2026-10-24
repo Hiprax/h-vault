@@ -310,6 +310,45 @@ describe('DocumentBulkDownload — at rest', () => {
 /*  Opening the archive                                                        */
 /* ========================================================================== */
 
+describe('DocumentBulkDownload — concealed while the upload form is open', () => {
+  it('is hidden while it would only offer its button, and comes back when the form closes', () => {
+    const { rerender } = render(
+      <DocumentBulkDownload documents={THREE} invalidCount={0} concealed />,
+    );
+    const section = screen.getByTestId('documents-download-all');
+    expect(section).not.toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Download all' })).toBeNull();
+
+    rerender(<DocumentBulkDownload documents={THREE} invalidCount={0} />);
+    expect(section).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Download all' })).toBeVisible();
+  });
+
+  it('keeps a running export and its summary on screen, and never aborts it', async () => {
+    const { rerender } = renderPanel();
+    await startRun();
+    rerender(<DocumentBulkDownload documents={THREE} invalidCount={0} concealed />);
+
+    expect(screen.getByTestId('documents-download-all')).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Stop' })).toBeVisible();
+    expect(currentRun().options.signal.aborted).toBe(false);
+
+    await finishWith(result());
+    expect(status()).toBeVisible();
+    expect(status()).toHaveTextContent('3 of 3 document(s) verified');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+    expect(screen.getByTestId('documents-download-all')).not.toBeVisible();
+  });
+
+  it('points to Full Backup for a copy a restore brings back', () => {
+    renderPanel();
+    expect(
+      screen.getByText(/for an encrypted copy that a restore brings back, use Full Backup/),
+    ).toBeInTheDocument();
+  });
+});
+
 describe('DocumentBulkDownload — opening the archive', () => {
   it('opens the save target inside the Start click itself, under the dated archive name', async () => {
     renderPanel();

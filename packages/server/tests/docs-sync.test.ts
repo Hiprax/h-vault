@@ -549,7 +549,7 @@ describe('README documentation sync', () => {
     /** The `#### What renders, and what is download-only` subsection. */
     const viewer = readme.slice(
       readme.indexOf('#### What renders, and what is download-only'),
-      readme.indexOf('#### Documents are not in your backups'),
+      readme.indexOf('#### Documents and your backups'),
     );
 
     /** `mode -> the extensions the README lists for it`, from the first table. */

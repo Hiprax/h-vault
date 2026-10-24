@@ -62,7 +62,7 @@ const FORMAT_META: Record<PortableExportFormat, Omit<PortableExportFormatMeta, '
     extension: 'json',
     mimeType: 'application/json',
     lossNote:
-      'Carries every item type. Folder paths re-import as tags, a login’s backup codes travel as a hidden custom field, an identity’s delivery notes travel as a plain custom field (H-Vault reads them back into the address), and some Bitwarden imports drop password history.',
+      'Carries every item type. Folder paths re-import as tags, a login’s backup codes travel as a hidden custom field, an identity’s delivery notes travel as a plain custom field (H-Vault reads them back into the address), extra phone numbers travel as custom fields and stay custom fields when this file is imported back (the first number’s label is not kept), and some Bitwarden imports drop password history.',
   },
   'bitwarden-csv': {
     label: 'Bitwarden (.csv)',

@@ -152,6 +152,16 @@ export const A11Y_VIEWS = [
       'the backup settings page on an account with no backup encryption configured, with the restore-from-file panel expanded',
   },
   {
+    // After the setup card above has done its job: backup encryption is set up
+    // through the page's own form (the walk's account has a real derived
+    // authHash, so the API is no shortcut), and the Full Backup panel is opened
+    // to its first step. Named so it does NOT start with `document`: it needs no
+    // storage engine to render.
+    id: 'backup-full-backup',
+    description:
+      'the backup settings page after backup encryption was set up through its own form, with the Full Backup panel open at its backup-password step',
+  },
+  {
     id: 'export-data',
     description:
       'the plaintext-export page at rest: its danger banner, the format radio group and the re-authentication field, with no export prepared',

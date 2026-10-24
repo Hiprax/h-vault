@@ -39,6 +39,36 @@ export const IN_MEMORY_ARCHIVE_LIMIT_BYTES = 512 * 1024 * 1024;
 /** The archive's MIME type. */
 const ZIP_MIME_TYPE = 'application/zip';
 
+/**
+ * What kind of file a target writes: how the save dialog describes it, the type the
+ * in-memory download carries, and the size limit of each of the two targets.
+ *
+ * The ZIP export and the full backup are the two kinds. They share the targets
+ * because the two hard parts are the same for both: the dialog has to be opened on
+ * the click's own activation, and a file abandoned part-way must leave nothing a
+ * person could mistake for the finished one.
+ */
+export interface SaveTargetSpec {
+  /** The file type's name in the save dialog. */
+  readonly description: string;
+  readonly mime: string;
+  /** The extension the dialog offers, dot included. */
+  readonly extension: string;
+  /** The SOFT size limit of a file written into the file the person chose. */
+  readonly fileLimitBytes: number;
+  /** The SOFT size limit of a file built in memory, then handed to the downloads. */
+  readonly memoryLimitBytes: number;
+}
+
+/** The ZIP archive the documents export writes. */
+const ZIP_ARCHIVE: SaveTargetSpec = {
+  description: 'ZIP archive',
+  mime: ZIP_MIME_TYPE,
+  extension: '.zip',
+  fileLimitBytes: ZIP32_MAX_ARCHIVE_BYTES,
+  memoryLimitBytes: IN_MEMORY_ARCHIVE_LIMIT_BYTES,
+};
+
 /** One archive being written. */
 export interface ArchiveTarget {
   /** `file` when written into the file the person chose; `download` when handed to the browser. */
@@ -70,11 +100,12 @@ export function archiveFileName(now: Date, part: number): string {
 function fileTarget(
   handle: FileSystemFileHandle,
   writable: FileSystemWritableFileStream,
+  spec: SaveTargetSpec,
 ): ArchiveTarget {
   return {
     kind: 'file',
     name: handle.name,
-    limitBytes: ZIP32_MAX_ARCHIVE_BYTES,
+    limitBytes: spec.fileLimitBytes,
     write: (chunk) => writable.write(chunk),
     commit: () => writable.close(),
     discard: async () => {
@@ -88,18 +119,18 @@ function fileTarget(
   };
 }
 
-function downloadTarget(name: string): ArchiveTarget {
+function downloadTarget(name: string, spec: SaveTargetSpec): ArchiveTarget {
   let parts: Blob[] = [];
   return {
     kind: 'download',
     name,
-    limitBytes: IN_MEMORY_ARCHIVE_LIMIT_BYTES,
+    limitBytes: spec.memoryLimitBytes,
     write: (chunk) => {
       parts.push(chunk);
       return Promise.resolve();
     },
     commit: () => {
-      downloadBlob(new Blob(parts, { type: ZIP_MIME_TYPE }), name);
+      downloadBlob(new Blob(parts, { type: spec.mime }), name);
       parts = [];
       return Promise.resolve();
     },
@@ -111,26 +142,39 @@ function downloadTarget(name: string): ArchiveTarget {
 }
 
 /**
- * Open a target for an archive offered as `suggestedName`.
+ * Open a target for a file of kind `spec`, offered as `suggestedName`.
  *
- * MUST be called synchronously from the click that asked for the archive: where
- * the save dialog exists it is opened before this function's first await.
- * Resolves `null` when the person dismisses the dialog; any other refusal (the
- * browser declining the dialog or the file) rejects.
+ * MUST be called synchronously from the click that asked for the file: where the
+ * save dialog exists it is opened before this function's first await. Resolves
+ * `null` when the person dismisses the dialog; any other refusal (the browser
+ * declining the dialog or the file) rejects.
  */
-export async function openArchiveTarget(suggestedName: string): Promise<ArchiveTarget | null> {
+export async function openSaveTarget(
+  suggestedName: string,
+  spec: SaveTargetSpec,
+): Promise<ArchiveTarget | null> {
   const picker = getSaveFilePicker();
-  if (picker === null) return downloadTarget(suggestedName);
+  if (picker === null) return downloadTarget(suggestedName, spec);
   let handle: FileSystemFileHandle;
   try {
     handle = await picker({
       suggestedName,
       startIn: 'downloads',
-      types: [{ description: 'ZIP archive', accept: { [ZIP_MIME_TYPE]: ['.zip'] } }],
+      types: [{ description: spec.description, accept: { [spec.mime]: [spec.extension] } }],
     });
   } catch (error) {
     if (isPickerDismissal(error)) return null;
     throw error;
   }
-  return fileTarget(handle, await handle.createWritable());
+  return fileTarget(handle, await handle.createWritable(), spec);
+}
+
+/**
+ * Open a target for an archive offered as `suggestedName`: {@link openSaveTarget}
+ * for the documents export's ZIP archive.
+ *
+ * MUST be called synchronously from the click that asked for the archive.
+ */
+export function openArchiveTarget(suggestedName: string): Promise<ArchiveTarget | null> {
+  return openSaveTarget(suggestedName, ZIP_ARCHIVE);
 }

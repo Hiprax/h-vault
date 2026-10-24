@@ -103,7 +103,10 @@ export interface PortableIdentity {
   firstName: string;
   lastName: string;
   email?: string | undefined;
+  /** The first number: an identity's only one, or `phones[0].number`. */
   phone?: string | undefined;
+  /** Every number, labelled or not, when the identity holds more than one or a label. */
+  phones?: { label?: string | undefined; number: string }[] | undefined;
   address?: PortableIdentityAddress | undefined;
   company?: string | undefined;
   ssn?: string | undefined;
@@ -346,6 +349,7 @@ function fillIdentity(record: PortableItem, data: IIdentityData): void {
     lastName: data.lastName,
     email: data.email,
     phone: data.phone,
+    phones: data.phones,
     address: data.address ? mapIdentityAddress(data.address) : undefined,
     company: data.company,
     ssn: data.ssn,

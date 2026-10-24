@@ -24,9 +24,10 @@ import {
  * The one control that takes a whole document library out of this instance, as
  * ONE ZIP archive, and the report of what happened to it.
  *
- * A document is the only thing in this vault the encrypted backup does not
- * carry, so before this existed the only way out was one download at a time. The
- * work itself is `services/documents/downloadAll.ts`; this is its surface.
+ * The readable way a document library leaves this instance: decrypted here,
+ * checked, and saved as plain files. The encrypted way, which a restore brings
+ * back, is Full Backup on the Backup page. The work itself is
+ * `services/documents/downloadAll.ts`; this is its surface.
  *
  * ## Five things about it are load-bearing
  *
@@ -75,6 +76,13 @@ interface DocumentBulkDownloadProps {
    * the panel says so and its button reads "Download selected".
    */
   selected?: boolean;
+  /**
+   * The upload form is open on the same page, so the section is hidden while it
+   * would only offer its button: "Download all" beside "Upload" is the pair a
+   * reader confuses. A running or finished export stays visible, and the section
+   * stays MOUNTED either way, because unmounting it would abort an export.
+   */
+  concealed?: boolean;
 }
 
 /** Everything one run has done, across every archive its continuations added. */
@@ -183,6 +191,7 @@ export function DocumentBulkDownload({
   documents,
   invalidCount,
   selected = false,
+  concealed = false,
 }: DocumentBulkDownloadProps) {
   const [confirming, setConfirming] = useState(false);
   const [run, setRun] = useState<RunState>({ kind: 'idle' });
@@ -310,6 +319,7 @@ export function DocumentBulkDownload({
     <section
       aria-labelledby="documents-download-all-heading"
       data-testid="documents-download-all"
+      hidden={concealed && run.kind === 'idle'}
       className="space-y-3 rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--card))] p-4"
     >
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -321,8 +331,8 @@ export function DocumentBulkDownload({
             Download your documents
           </h2>
           <p className="text-xs text-[hsl(var(--muted-foreground))]">
-            Documents are deliberately not part of the encrypted backup, so this is how a copy of
-            them leaves the server. Saves the {documents.length}{' '}
+            Readable copies, decrypted in this browser; for an encrypted copy that a restore brings
+            back, use Full Backup in Backup Settings. Saves the {documents.length}{' '}
             {selected ? 'selected document(s)' : 'document(s) listed below'} to this device as one
             ZIP archive.
             {!selected &&
