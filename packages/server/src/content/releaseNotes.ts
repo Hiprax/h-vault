@@ -2,6 +2,56 @@ import type { ReleaseNote } from '@hvault/shared';
 
 export const RELEASE_NOTES: readonly ReleaseNote[] = [
   {
+    version: '0.22.0',
+    date: '2026-10-24',
+    title: 'A full backup with your documents, and more phone numbers',
+    summary:
+      'Full Backup saves your vault and every document to this device as one encrypted file that Restore brings back, documents included. Identities can hold several phone numbers, and the upload form on the Documents page has a Cancel button.',
+    highlights: [
+      {
+        icon: 'database',
+        title: 'Full Backup, documents included',
+        body: 'Full Backup in Backup Settings saves your vault and every document, with its name, note, tags, folder and favorite, to this device as one encrypted file signed with your backup password. It is never emailed. Restore from File takes it like any backup and brings your documents back too.',
+      },
+      {
+        icon: 'smartphone',
+        title: 'Several phone numbers for an identity',
+        body: 'An identity can now hold up to ten phone numbers, each with an optional label such as Work or Home. Add and remove them the way you add custom fields.',
+      },
+      {
+        icon: 'upload',
+        title: 'Cancel an upload before it starts',
+        body: 'The upload form on the Documents page now has a Cancel button, and the Download your documents section steps aside while the form is open, so the two are never side by side.',
+      },
+    ],
+    changes: [
+      {
+        kind: 'changed',
+        text: 'While a full backup or a full restore runs in a tab you are looking at and keeps making progress, your vault does not lock by itself. Lock it yourself if you step away; that stops the backup or restore.',
+      },
+      {
+        kind: 'added',
+        text: 'Backup Settings now explains what each button does and what each kind of backup holds.',
+      },
+      {
+        kind: 'improved',
+        text: 'Restoring the same full backup again with Skip adds nothing new and finishes a restore that stopped.',
+      },
+      {
+        kind: 'changed',
+        text: 'Deleting a document for good now says that a full backup saved before it went to the trash still holds it.',
+      },
+      {
+        kind: 'changed',
+        text: 'Exporting to Bitwarden now keeps every phone number of an identity: the extra ones travel as custom fields.',
+      },
+      {
+        kind: 'security',
+        text: 'Restoring a backup lets go of your backup keys as soon as they are no longer needed, rather than at the end.',
+      },
+    ],
+  },
+  {
     version: '0.21.0',
     date: '2026-10-23',
     title: 'One ZIP file for all your documents, and a leaner export',

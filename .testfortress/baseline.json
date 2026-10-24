@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "recordedAt": "2026-10-17",
-  "commit": "67daba5",
+  "recordedAt": "2026-10-24",
+  "commit": "a59047b",
   "tests": {
-    "count": 13497
+    "count": 15104
   },
   "coverage": {
     "diff": 100
@@ -17,21 +17,21 @@
   "a11y": {
     "critical": 0,
     "serious": 0,
-    "viewsScanned": 38,
+    "viewsScanned": 41,
     "moderate": 0
   },
   "suppressions": {
-    "count": 32,
-    "totalHits": 42
+    "count": 30,
+    "totalHits": 39
   },
   "packages": {
     "packages/shared": {
       "coverage": {
         "line": 100,
-        "branch": 99.09,
+        "branch": 99.11,
         "function": 100,
-        "linesTotal": 821,
-        "branchesTotal": 439,
+        "linesTotal": 848,
+        "branchesTotal": 449,
         "filesMeasured": [
           "src/constants/index.ts",
           "src/index.ts",
@@ -47,20 +47,21 @@
           "src/utils/index.ts",
           "src/utils/releaseVersion.ts",
           "src/utils/rowId.ts",
+          "src/utils/updateSteps.ts",
           "src/zod.ts"
         ]
       },
       "tests": {
-        "count": 1532
+        "count": 1626
       }
     },
     "packages/server": {
       "coverage": {
-        "line": 99.4,
-        "branch": 94.83,
-        "function": 98.98,
-        "linesTotal": 6635,
-        "branchesTotal": 3677,
+        "line": 99.41,
+        "branch": 94.96,
+        "function": 99,
+        "linesTotal": 6770,
+        "branchesTotal": 3769,
         "filesMeasured": [
           "src/app.ts",
           "src/cli/invite.ts",
@@ -194,26 +195,33 @@
         ]
       },
       "tests": {
-        "count": 5953
+        "count": 6210
       }
     },
     "packages/client": {
       "coverage": {
-        "line": 99.32,
-        "branch": 94.18,
-        "function": 99.01,
-        "linesTotal": 11231,
-        "branchesTotal": 8037,
+        "line": 99.49,
+        "branch": 95.3,
+        "function": 99.19,
+        "linesTotal": 13895,
+        "branchesTotal": 10270,
         "filesMeasured": [
           "src/App.tsx",
           "src/components/auth/ForgotPasswordPage.tsx",
           "src/components/auth/LoginPage.tsx",
           "src/components/auth/RegisterPage.tsx",
           "src/components/auth/UnlockScreen.tsx",
+          "src/components/backup/BackupOptionsGuide.tsx",
+          "src/components/backup/BackupPasswordPrompt.tsx",
+          "src/components/backup/DocumentRestoreStatus.tsx",
+          "src/components/backup/FullBackupPanel.tsx",
+          "src/components/backup/WaitNotice.tsx",
           "src/components/documents/DocumentBulkDownload.tsx",
           "src/components/documents/DocumentDetail.tsx",
+          "src/components/documents/DocumentDetailsFields.tsx",
           "src/components/documents/DocumentList.tsx",
           "src/components/documents/DocumentSandbox.tsx",
+          "src/components/documents/DocumentSelectionBar.tsx",
           "src/components/documents/DocumentTransfers.tsx",
           "src/components/documents/DocumentTransformControls.tsx",
           "src/components/documents/DocumentUploadPanel.tsx",
@@ -236,8 +244,12 @@
           "src/components/releases/VersionBadge.tsx",
           "src/components/releases/WhatsNewDialog.tsx",
           "src/components/releases/releaseVisuals.ts",
+          "src/components/settings/ImportLimitSummary.tsx",
           "src/components/settings/InviteCard.tsx",
           "src/components/settings/SecurityNotificationsCard.tsx",
+          "src/components/settings/SettingsHelp.tsx",
+          "src/components/settings/UnreadableEntriesCard.tsx",
+          "src/components/settings/settingsHelpTopics.ts",
           "src/components/tools/FileDecryptPanel.tsx",
           "src/components/tools/FileEncryptPanel.tsx",
           "src/components/tools/TotpAttachDialog.tsx",
@@ -247,22 +259,30 @@
           "src/components/tools/TotpScanPanel.tsx",
           "src/components/ui/Badge.tsx",
           "src/components/ui/BrandLogo.tsx",
+          "src/components/ui/BulkTagPopover.tsx",
           "src/components/ui/Button.tsx",
           "src/components/ui/Card.tsx",
+          "src/components/ui/ConfirmDialog.tsx",
           "src/components/ui/Dialog.tsx",
           "src/components/ui/DropdownMenu.tsx",
           "src/components/ui/FormAlert.tsx",
+          "src/components/ui/InfoTip.tsx",
+          "src/components/ui/InfoTipPanel.tsx",
           "src/components/ui/Input.tsx",
           "src/components/ui/Label.tsx",
           "src/components/ui/OtpInput.tsx",
           "src/components/ui/Pagination.tsx",
+          "src/components/ui/SelectionCheckbox.tsx",
           "src/components/ui/Spinner.tsx",
           "src/components/ui/Tabs.tsx",
+          "src/components/ui/TagEditor.tsx",
           "src/components/ui/Toast.tsx",
           "src/components/vault/BackupCodeExcerpt.tsx",
           "src/components/vault/BackupCodeList.tsx",
           "src/components/vault/BackupCodesEditor.tsx",
           "src/components/vault/BackupCodesSection.tsx",
+          "src/components/vault/CardExpiry.tsx",
+          "src/components/vault/ExpiringCardsReminder.tsx",
           "src/components/vault/NoteContent.tsx",
           "src/components/vault/PasswordGenerator.tsx",
           "src/components/vault/SavedAddressPicker.tsx",
@@ -275,13 +295,17 @@
           "src/constants/passphraseWords.ts",
           "src/hooks/useAutoLock.ts",
           "src/hooks/useBackupCodeReveal.ts",
+          "src/hooks/useBeforeUnloadWarning.ts",
           "src/hooks/useClipboardCountdown.ts",
           "src/hooks/useClipboardGuard.ts",
           "src/hooks/useConnectionStatus.ts",
+          "src/hooks/useCustomFieldsLimit.ts",
+          "src/hooks/useDocumentSelection.ts",
           "src/hooks/useDocumentsConfig.ts",
           "src/hooks/useDocumentsFilterView.ts",
           "src/hooks/useFavicon.ts",
           "src/hooks/useKeyboardShortcuts.ts",
+          "src/hooks/useTagField.ts",
           "src/hooks/useUploadUnloadGuard.ts",
           "src/hooks/useUserSettings.ts",
           "src/hooks/useVaultFolderScope.ts",
@@ -291,15 +315,24 @@
           "src/lib/address.ts",
           "src/lib/backgroundRefresh.ts",
           "src/lib/backupSignature.ts",
+          "src/lib/cardExpiry.ts",
+          "src/lib/cardExpiryDismissal.ts",
+          "src/lib/documentBulk.ts",
+          "src/lib/documentDetails.ts",
           "src/lib/documentSearch.ts",
           "src/lib/download.ts",
+          "src/lib/identityPhones.ts",
+          "src/lib/itemFormRules.ts",
+          "src/lib/lazyOptional.ts",
           "src/lib/lazySha256.ts",
+          "src/lib/lazyUploadRecovery.ts",
           "src/lib/lazyZxcvbn.ts",
           "src/lib/linkToken.ts",
           "src/lib/logger.ts",
           "src/lib/markdownWhitespace.ts",
           "src/lib/masterPasswordProof.ts",
           "src/lib/passwordGenerator.ts",
+          "src/lib/popoverPlacement.ts",
           "src/lib/releaseFormat.ts",
           "src/lib/sandboxFrame.ts",
           "src/lib/sandboxHandshake.ts",
@@ -361,21 +394,39 @@
           "src/services/api/vaultApi.ts",
           "src/services/auth/sessionFailure.ts",
           "src/services/auth/sessionResume.ts",
+          "src/services/auth/unlockFailures.ts",
+          "src/services/backup/createFullBackup.ts",
+          "src/services/backup/fullBackupFormat.ts",
+          "src/services/backup/fullBackupJob.ts",
+          "src/services/backup/fullBackupMagic.ts",
+          "src/services/backup/jobRetry.ts",
+          "src/services/backup/loadFullBackupJob.ts",
+          "src/services/backup/restoreFullBackupDocuments.ts",
           "src/services/clipboard/clipboardService.ts",
+          "src/services/crypto/accountVaultKey.ts",
+          "src/services/crypto/backupKeyCopy.ts",
           "src/services/crypto/cryptoService.ts",
           "src/services/crypto/documentCryptoService.ts",
           "src/services/crypto/fileCryptoService.ts",
+          "src/services/crypto/fullBackupCrypto.ts",
           "src/services/crypto/passwordHistory.ts",
           "src/services/crypto/vaultField.ts",
+          "src/services/documents/archiveNames.ts",
+          "src/services/documents/archiveTarget.ts",
+          "src/services/documents/documentNames.ts",
           "src/services/documents/download.ts",
           "src/services/documents/downloadAll.ts",
           "src/services/documents/transform.ts",
+          "src/services/documents/uploadRecovery.ts",
+          "src/services/documents/zipArchive.ts",
           "src/services/export/csvWriter.ts",
           "src/services/export/folderPath.ts",
           "src/services/export/formats/bitwardenCsv.ts",
           "src/services/export/formats/bitwardenJson.ts",
           "src/services/export/formats/chromeCsv.ts",
           "src/services/export/index.ts",
+          "src/services/export/loadNativeExport.ts",
+          "src/services/export/nativeExport.ts",
           "src/services/export/portableItem.ts",
           "src/services/health/breachCheck.ts",
           "src/services/health/healthResultsStore.ts",
@@ -384,10 +435,12 @@
           "src/services/health/strengthCache.ts",
           "src/services/import/batch.ts",
           "src/services/import/csv.ts",
+          "src/services/import/customFieldsLimit.ts",
           "src/services/import/encrypt.ts",
           "src/services/import/identity.ts",
           "src/services/import/index.ts",
           "src/services/import/itemBuilders.ts",
+          "src/services/import/loadCustomFieldsLimit.ts",
           "src/services/import/operations.ts",
           "src/services/import/parsers/bitwarden.ts",
           "src/services/import/parsers/chrome.ts",
@@ -406,9 +459,12 @@
           "src/services/totpImport/migrationUri.ts",
           "src/services/totpImport/qrSandbox.ts",
           "src/services/totpImport/scanSession.ts",
+          "src/services/vault/unreadableEntries.ts",
+          "src/services/vault/vaultRows.ts",
           "src/stores/authStore.ts",
           "src/stores/documentsStore.ts",
           "src/stores/encryptedStorage.ts",
+          "src/stores/heldVaultKey.ts",
           "src/stores/releaseStore.ts",
           "src/stores/uiStore.ts",
           "src/stores/vaultStore.ts",
@@ -418,12 +474,12 @@
         ]
       },
       "tests": {
-        "count": 5776
+        "count": 7014
       }
     },
     "e2e": {
       "tests": {
-        "count": 236
+        "count": 254
       }
     }
   },
@@ -621,9 +677,9 @@
     ]
   },
   "duplication": {
-    "percentage": 0.98,
-    "clones": 93,
-    "duplicatedLines": 1047,
+    "percentage": 0.85,
+    "clones": 92,
+    "duplicatedLines": 1029,
     "totalLines": 52849,
     "ceiling": 2.89,
     "sources": 190
@@ -657,7 +713,7 @@
       "spectral": 1
     }
   },
-  "reason": "Validation pass over Phases 11-19: npm run ci green (33/33) on the fixed tree; banks the new server tests (reuse race, challenge cancellation, reaper index + migration v7, recovery routes on accounts being erased, completion vs erasure, notice key and wording) and the server coverage growth",
+  "reason": "0.22.0 release run (npm run ci, 33/33 green on 2026-10-24): full backup, document upload Cancel and identity phones add tests, a11y view backup-full-backup (41 views), coverage over the new files, fewer clones and suppressions, and the VULN-ACCEPT entry retired by the dependency updates",
   "bundle": {
     "budgetKb": {
       "VaultItemForm": 230,
@@ -772,7 +828,7 @@
     "unignored": 0
   },
   "osv": {
-    "accepted": 1,
+    "accepted": 0,
     "vulnerabilities": 0
   }
 }

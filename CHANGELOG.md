@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-10-24
+
 ### Added
 
 - **Full Backup: the vault and every document in one encrypted, signed file.** A new **Full Backup** button in Settings, Backup Settings, Backup Configuration saves the account's vault backup together with every document outside the trash, with its name, note, tags, folder and favorite, as one `hvault-full-backup-YYYY-MM-DD.hvbackup` file on this device. It is built in the browser and never emailed. Each document travels as its stored ciphertext, verbatim, and is decrypted and checked (the row asked for, the framing, every segment's authentication tag, the whole-file digest) while the file is written; one that fails is left out and named in the summary rather than saved broken. The table of contents is signed with HMAC-SHA256 under a key derived from the backup wrapping key with its own HKDF label (`hvault-full-backup-hmac-v1`). Desktop Chrome and Edge write the file straight into the one chosen in their save dialog; other browsers build it in memory, up to 512 MB, and hand it to their downloads. A run that is stopped, locked, signed out of, left or cut off by the server saves nothing; the account's vault key is checked at the start and again before the file is finished.
@@ -1140,7 +1142,8 @@ First public release.
 - Progressive Web App with offline read access via IndexedDB, dark/light/system themes, keyboard shortcuts, virtualized lists and WAI-ARIA-conformant components.
 - Local CI pipeline (`npm run ci`) running eleven gates — including container builds with Trivy scanning and CodeQL — from the `pre-push` hook.
 
-[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.21.0...HEAD
+[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.22.0...HEAD
+[0.22.0]: https://github.com/Hiprax/h-vault/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/Hiprax/h-vault/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/Hiprax/h-vault/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/Hiprax/h-vault/compare/v0.18.0...v0.19.0
