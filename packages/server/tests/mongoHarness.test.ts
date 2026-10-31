@@ -8,6 +8,7 @@
  * reintroduce the `Port "45543" already in use` race while looking fixed, and a
  * suite failing that way blames an unrelated test file.
  */
+import { existsSync, readFileSync } from 'node:fs';
 import mongoose from 'mongoose';
 import { afterAll, describe, expect, it } from 'vitest';
 import { supportsTransactions } from '../src/utils/transactionSupport.js';
@@ -16,10 +17,12 @@ import { sampleVaultItem } from './helpers.js';
 import {
   EPHEMERAL_PORT_FLOOR,
   MAX_WORKER_BANDS,
+  OWN_PORTS,
   PORTS_PER_WORKER,
   PORT_BAND_START,
   getStandaloneUri,
   isPortCollision,
+  portBandStart,
   preferredPort,
   useReplicaSetConnection,
   withPortRetry,
@@ -106,20 +109,43 @@ describe('mongoHarness — worker band selection', () => {
     expect(seen.size).toBeGreaterThan(1);
   });
 
-  it('keeps the band clear of the OS ephemeral range and of this project’s own ports', () => {
-    // Linux hands out 32768–60999 for client sockets and Windows 49152+, which is
+  it('keeps the band clear of the OS ephemeral range and of the dev stack’s own ports', () => {
+    // The kernel hands client sockets ports from the start of ip_local_port_range up
+    // (32768 by default, 20000 on a host that moved it) and Windows 49152+, which is
     // where the observed collision came from. 5000 (API), 5173 (Vite), 8080 (stack
     // ingress) and 27017 (the E2E mongod) are this repo's own.
-    // Derived from the real constants, never from literals: a test that hardcoded
-    // the band count or the floor would stay green if either moved, and the whole
-    // point of the band is that it sits BELOW the range the OS hands out.
+    // Derived from the real constants and the kernel's own value, never from
+    // literals: a test that hardcoded the band count or the floor would stay green
+    // if either moved, and the whole point of the band is that it sits BELOW the
+    // range the OS hands out (a floor pinned at 32768 here once let the pool sit
+    // inside a host's moved range unnoticed).
+    const rangeFile = '/proc/sys/net/ipv4/ip_local_port_range';
+    const kernelFloor = existsSync(rangeFile)
+      ? Number(readFileSync(rangeFile, 'utf8').trim().split(/\s+/)[0])
+      : 32_768;
     const highest = PORT_BAND_START + MAX_WORKER_BANDS * PORTS_PER_WORKER;
-    expect(PORT_BAND_START).toBeGreaterThan(27017);
+    expect(EPHEMERAL_PORT_FLOOR).toBe(kernelFloor);
     expect(highest).toBeLessThanOrEqual(EPHEMERAL_PORT_FLOOR);
-    expect(EPHEMERAL_PORT_FLOOR).toBe(32_768);
+    expect(OWN_PORTS).toEqual([5000, 5173, 8080, 27_017]);
+    for (const own of OWN_PORTS) {
+      expect(own >= PORT_BAND_START && own < highest, `port ${String(own)} in the pool`).toBe(
+        false,
+      );
+    }
     // And the pool is worth having: a single band would make every worker share
     // one range, which is the collision this arithmetic exists to remove.
     expect(MAX_WORKER_BANDS).toBeGreaterThan(1);
+  });
+
+  it('ends the pool right below the floor, wherever the host puts it, and refuses one that reaches this project’s ports', () => {
+    expect(portBandStart(32_768)).toBe(28_000);
+    expect(portBandStart(20_000)).toBe(15_232);
+    // Negative: a pool from 25232 would cover the E2E mongod's 27017, and one from
+    // 4232 would cover the API, Vite and the stack ingress.
+    expect(() => portBandStart(30_000)).toThrow('cover port 27017, which this project binds');
+    expect(() => portBandStart(9_000)).toThrow('cover port 5000, which this project binds');
+    // Negative: a floor that would put the pool into the privileged ports.
+    expect(() => portBandStart(5_000)).toThrow('reach the privileged ports');
   });
 });
 

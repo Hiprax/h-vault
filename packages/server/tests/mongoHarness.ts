@@ -46,6 +46,7 @@
  * lost. Nothing here pins the suite to one worker: single-worker mode hides
  * shared state rather than fixing it (Forbidden Action 7).
  */
+import { existsSync, readFileSync } from 'node:fs';
 import { MongoMemoryReplSet, MongoMemoryServer } from 'mongodb-memory-server';
 import mongoose from 'mongoose';
 import { afterAll, beforeAll } from 'vitest';
@@ -82,23 +83,84 @@ import { applyMongoKernelCompat } from './mongoKernelCompat.js';
 applyMongoKernelCompat();
 
 /**
- * First port of the band pool.
+ * The first port of the kernel's ephemeral range: the bottom of the ports the OS
+ * hands to client sockets, which the band pool must stay below.
  *
- * Chosen BELOW Linux's default ephemeral range (`32768`–`60999`) and far below
- * Windows' (`49152`+), so a harness mongod cannot collide with an OS-assigned
- * client socket — which is the collision class that produced the observed
- * failure. It is also clear of every port this project itself binds (5000 API,
- * 5173 Vite, 8080 stack ingress, 27017 the E2E mongod).
+ * READ from `/proc/sys/net/ipv4/ip_local_port_range`, never assumed: Linux's
+ * default starts at `32768`, and a host may move it (`20000`–`32767` since
+ * 2026-10-29), where a pool placed for the default lies entirely inside the range
+ * and the collision class it exists to remove is back. Where the file is absent
+ * (Windows, whose range starts at `49152`), Linux's default is used, which keeps
+ * the pool far below Windows' too.
  */
-export const PORT_BAND_START = 28_000;
+export function readEphemeralPortFloor(
+  rangeFile = '/proc/sys/net/ipv4/ip_local_port_range',
+): number {
+  if (!existsSync(rangeFile)) return 32_768;
+  const text = readFileSync(rangeFile, 'utf8');
+  const floor = Number(text.trim().split(/\s+/)[0]);
+  if (!Number.isInteger(floor) || floor <= 0) {
+    throw new Error(`${rangeFile} is not a port range: ${JSON.stringify(text)}`);
+  }
+  return floor;
+}
+
+/**
+ * The fixed ports this project's development and test stack binds: 5000 API, 5173 Vite, 8080 stack
+ * ingress, 27017 the E2E mongod. Two release-time scripts bind fixed ports too, the deploy drill
+ * (scripts/ci/deploy-drill.mjs, 18080) and the release image smoke (scripts/ci/release-images.mjs,
+ * 18090); on a host whose range starts at 20000 both fall inside the pool (15232-19999). A test
+ * mongod that meets one of them while a drill is running loses that bind, and {@link withPortRetry}
+ * moves on to another candidate; the other way round, a drill started while a test mongod holds its
+ * port fails to bind, so do not run a drill and the test suites at the same time on such a host.
+ */
+export const OWN_PORTS: readonly number[] = [5000, 5173, 8080, 27_017];
+
+/** How far below the ephemeral floor the band pool reaches: 28000 up to Linux's default floor. */
+const BAND_POOL_SPAN = 32_768 - 28_000;
+
+/**
+ * First port of the band pool for a kernel whose ephemeral range starts at
+ * `floor`: the pool ends right below the floor, so a harness mongod cannot
+ * collide with an OS-assigned client socket — which is the collision class that
+ * produced the observed failure. On Linux's default range that is 28000.
+ *
+ * A floor that would put the pool over one of {@link OWN_PORTS}, or down into the
+ * privileged ports, is refused by name rather than worked around.
+ */
+export function portBandStart(floor: number): number {
+  const start = floor - BAND_POOL_SPAN;
+  const clash = OWN_PORTS.find((port) => port >= start && port < floor);
+  if (start < 1024 || clash !== undefined) {
+    throw new Error(
+      `The kernel's ephemeral range starts at ${String(floor)}, so the mongod port pool below it ` +
+        `(${String(start)}-${String(floor - 1)}) would ` +
+        (clash === undefined
+          ? 'reach the privileged ports'
+          : `cover port ${String(clash)}, which this project binds`) +
+        '; move the range (net.ipv4.ip_local_port_range) or this pool.',
+    );
+  }
+  return start;
+}
+
+/**
+ * The kernel's floor, read once. Exported so `mongoHarness.test.ts` can assert the
+ * pool against the real value: a test that hardcoded a number would stay green if
+ * the floor moved, which is how the pool once sat inside a moved range unnoticed.
+ */
+export const EPHEMERAL_PORT_FLOOR = readEphemeralPortFloor();
+
+/** First port of the band pool on this host. */
+export const PORT_BAND_START = portBandStart(EPHEMERAL_PORT_FLOOR);
 
 /** Ports reserved per worker. Two mongods per file at once is the realistic peak. */
 export const PORTS_PER_WORKER = 64;
 
 /**
  * How many disjoint bands fit between {@link PORT_BAND_START} and the bottom of
- * Linux's ephemeral range (32768). Bands beyond this wrap around; retry then
- * covers the overlap.
+ * the kernel's ephemeral range. Bands beyond this wrap around; retry then covers
+ * the overlap.
  *
  * DERIVED rather than written down, because a hardcoded ceiling is wrong in both
  * directions: too high and a band runs into the ephemeral range, which is the
@@ -106,12 +168,7 @@ export const PORTS_PER_WORKER = 64;
  * than the ceiling apart share a band, silently reintroducing the intra-run race
  * on a host with many cores. The literal it replaces was 48 against a range that
  * fits 74.
- *
- * Exported so `mongoHarness.test.ts` can assert the ceiling against the real
- * constant: a test that hardcoded a number would stay green if the band start
- * moved.
  */
-export const EPHEMERAL_PORT_FLOOR = 32_768;
 export const MAX_WORKER_BANDS = Math.floor(
   (EPHEMERAL_PORT_FLOOR - PORT_BAND_START) / PORTS_PER_WORKER,
 );
