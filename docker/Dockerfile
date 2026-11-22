@@ -405,11 +405,13 @@ RUN rm -f /app/packages/client/dist/index.html /app/packages/client/dist/sandbox
 # neither root nor NET_BIND_SERVICE. The routing config is BAKED IN rather than
 # bind-mounted, which keeps the image self-contained and portable across host OSes
 # (no Windows/WSL bind-mount permission or line-ending surprises).
-FROM nginxinc/nginx-unprivileged:1.30.6-alpine3.24@sha256:f5116ed4606f3eb015dd4a8e28cb9b351476dc0ad4bc6e9f93b19cec130cdf03 AS web
+FROM nginx/nginx-unprivileged:1.30.7-alpine3.24@sha256:0c53a1f2890c3526bfd201440f0fd3970e5b78f80630f58284aad0d34b5ec7bd AS web
 # Digest-pinned: the tag alone is re-published in place, so two builds of one tag are two images.
-# The multi-platform index digest, read from the registry on 2026-10-23 (`docker buildx imagetools
-# inspect` and Docker Hub's tag record agreed). 1.30.6 is nginx's security release for CVE-2026-15176,
-# CVE-2026-93479 and CVE-2026-97205, which Trivy reported as fixable HIGH in 1.30.5.
+# The multi-platform index digest, read from the registry on 2026-11-22 (`docker buildx imagetools
+# inspect` and Docker Hub's tag record agreed). 1.30.7 is nginx's security release of 2026-11-18
+# (CVE-2026-113425, -118899, -121810, -123007, -123633, -123634 among others). The image is
+# published as nginx/nginx-unprivileged since 2026-10-20 (upstream PR #428): nginxinc/nginx-unprivileged
+# stopped at 1.30.6 and gets no further fixes.
 # The OS packages are still upgraded (Trivy gates fixable HIGH/CRITICAL in `audit:image`), as root,
 # because apk needs it; the runtime user is put back before anything else happens.
 USER 0

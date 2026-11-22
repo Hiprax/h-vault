@@ -2421,13 +2421,13 @@ daemon socket: under rootless Docker that is `$XDG_RUNTIME_DIR/docker.sock`, not
 away rather than discovering it inside the first container gate. Four are needed for the
 image builds and the harnesses, and a fifth only when `trivy` is not on `PATH`:
 
-| Image                                                           | Size    | Pulled for                                               |
-| --------------------------------------------------------------- | ------- | -------------------------------------------------------- |
-| `mongo:8.0` (digest-pinned)                                     | 1.29 GB | the `FROM` of `docker/mongo.Dockerfile`                  |
-| `aquasec/trivy:0.75.0` (digest-pinned)                          | 260 MB  | only when `trivy` is absent from `PATH`                  |
-| `node:24-alpine3.23` (digest-pinned)                            | 235 MB  | the `base` stage every image built here is built through |
-| `dxflrs/garage:v2.3.0` (digest-pinned)                          | 100 MB  | `storage`, `e2e`, `a11y`, `sandbox`, `flake`, `deploy`   |
-| `nginxinc/nginx-unprivileged:1.30.6-alpine3.24` (digest-pinned) | 81 MB   | the `web` stage                                          |
+| Image                                                        | Size    | Pulled for                                               |
+| ------------------------------------------------------------ | ------- | -------------------------------------------------------- |
+| `mongo:8.0` (digest-pinned)                                  | 1.29 GB | the `FROM` of `docker/mongo.Dockerfile`                  |
+| `aquasec/trivy:0.75.0` (digest-pinned)                       | 260 MB  | only when `trivy` is absent from `PATH`                  |
+| `node:24-alpine3.23` (digest-pinned)                         | 235 MB  | the `base` stage every image built here is built through |
+| `dxflrs/garage:v2.3.0` (digest-pinned)                       | 100 MB  | `storage`, `e2e`, `a11y`, `sandbox`, `flake`, `deploy`   |
+| `nginx/nginx-unprivileged:1.30.7-alpine3.24` (digest-pinned) | 82 MB   | the `web` stage                                          |
 
 Trivy's vulnerability database is a further download on its first scan, into the named
 cache volume the container gate keeps for it. Note what a warm cache does to one number

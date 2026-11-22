@@ -130,7 +130,7 @@ interface WebStageCopy {
 }
 
 const webStageCopyStatements: WebStageCopy[] = (() => {
-  const stage = dockerfile.slice(dockerfile.indexOf('FROM nginxinc/nginx-unprivileged'));
+  const stage = dockerfile.slice(dockerfile.indexOf('FROM nginx/nginx-unprivileged'));
   const lines = stage.split('\n');
   const firstUser = lines.findIndex((line) => /^USER\s/.test(line.trim()));
   if (firstUser === -1) return [];
@@ -1812,13 +1812,51 @@ describe('Docker deployment', () => {
       expect(references.map(({ reference }) => reference.split(':')[0]).sort()).toEqual([
         'dxflrs/garage',
         'mongo',
-        'nginxinc/nginx-unprivileged',
+        'nginx/nginx-unprivileged',
         'node',
       ]);
       const unpinned = references.filter(
         ({ reference }) => !/^[\w./-]+:[\w.-]+@sha256:[0-9a-f]{64}$/.test(reference),
       );
       expect(unpinned).toEqual([]);
+    });
+
+    it('builds the web stage on the maintained nginx/nginx-unprivileged at the 2026-11-18 floor', () => {
+      // The image's publisher moved it from nginxinc/nginx-unprivileged to nginx/nginx-unprivileged
+      // on 2026-10-20 (upstream PR #428); the old repository stopped at 1.30.6 / 1.31.7 and
+      // receives no further fixes. nginx.org's security release of 2026-11-18 (1.30.7 stable,
+      // 1.31.9 mainline) fixed CVE-2026-113425, -118899, -121810, -123007, -123633 and -123634
+      // among others, so a pin below it ships them.
+      const dockerfile = dockerfiles.find(({ name }) => name === 'Dockerfile')?.text ?? '';
+      const web =
+        /^FROM (\S+?):(\d+)\.(\d+)\.(\d+)-alpine\d+\.\d+@sha256:[0-9a-f]{64} AS web$/m.exec(
+          dockerfile,
+        );
+      expect(web, 'docker/Dockerfile has no digest-pinned web stage').not.toBeNull();
+      expect(web?.[1]).toBe('nginx/nginx-unprivileged');
+      expect(dockerfile).not.toMatch(/^FROM nginxinc\//m);
+      const belowFloor = (v: number[]): boolean => {
+        const floor = v[1]! % 2 === 0 ? [1, 30, 7] : [1, 31, 9];
+        for (let i = 0; i < 3; i += 1) {
+          if (v[i] !== floor[i]) return v[i]! < floor[i]!;
+        }
+        return false;
+      };
+      expect(belowFloor([Number(web?.[2]), Number(web?.[3]), Number(web?.[4])])).toBe(false);
+      for (const v of [
+        [1, 30, 5],
+        [1, 30, 6],
+        [1, 31, 8],
+        [1, 29, 9],
+      ])
+        expect(belowFloor(v)).toBe(true);
+      for (const v of [
+        [1, 30, 7],
+        [1, 31, 9],
+        [1, 30, 8],
+        [1, 32, 0],
+      ])
+        expect(belowFloor(v)).toBe(false);
     });
 
     it('pins the Dockerfile frontend a build fetches, by digest and identically everywhere', () => {
@@ -2037,7 +2075,7 @@ describe('Docker deployment', () => {
       // openssl (libcrypto3 / libssl3), libexpat and libxml2. The web stage runs
       // `apk upgrade` to pull the patched packages; dropping this reopens the
       // Docker/Trivy gate, so it is asserted rather than merely commented.
-      const webStage = dockerfile.slice(dockerfile.indexOf('FROM nginxinc/nginx-unprivileged'));
+      const webStage = dockerfile.slice(dockerfile.indexOf('FROM nginx/nginx-unprivileged'));
       expect(webStage).toMatch(/RUN apk upgrade --no-cache/);
       // The upgrade runs as root, but the image must still SERVE as the
       // unprivileged uid 101 — the root switch is only for the apk transaction.
@@ -2054,7 +2092,7 @@ describe('Docker deployment', () => {
       // after the upgrade, so the order is the layout's, and no sed may come
       // back: an in-place edit of a file a later upgrade rewrites is exactly the
       // silent regression the chained RUN existed to prevent.
-      const webStage = dockerfile.slice(dockerfile.indexOf('FROM nginxinc/nginx-unprivileged'));
+      const webStage = dockerfile.slice(dockerfile.indexOf('FROM nginx/nginx-unprivileged'));
       expect(webStage).not.toMatch(/sed -i/);
       const upgradeAt = webStage.indexOf('RUN apk upgrade --no-cache');
       const copyAt = webStage.indexOf('COPY --chmod=0444 docker/nginx/nginx.conf');
@@ -2175,7 +2213,7 @@ describe('Docker deployment', () => {
       // world-readable. Without the --chmod the parent is created 0755 and
       // nothing looks wrong, which is why removing this mkdir would break the
       // image only in combination with the fix above.
-      const webStage = dockerfile.slice(dockerfile.indexOf('FROM nginxinc/nginx-unprivileged'));
+      const webStage = dockerfile.slice(dockerfile.indexOf('FROM nginx/nginx-unprivileged'));
       expect(webStage).toMatch(
         /RUN mkdir -p \/etc\/nginx\/snippets[\s\S]*COPY --chmod=0444 \S*headers\.conf \S*proxy\.conf \/etc\/nginx\/snippets\//,
       );

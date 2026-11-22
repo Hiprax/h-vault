@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+### Changed
+
+- **The host nginx examples in `docker/nginx/` are re-rendered from the current policy.** Both site files also list WebAssembly and `.ico` among the compressible types (the sites keep `--gzip off`), and `00-newapp-http.conf` changes only in a comment. Re-install them on the host as before.
+
+### Security
+
+- **The web image is built on nginx 1.30.7 from the maintained `nginx/nginx-unprivileged` repository** (digest-pinned in `docker/Dockerfile`), nginx's security release of 2026-11-18 for CVE-2026-113425, CVE-2026-118899, CVE-2026-121810, CVE-2026-123007, CVE-2026-123633 and CVE-2026-123634 among others. The image's publisher moved it from `nginxinc/nginx-unprivileged` on 2026-10-20; that repository stopped at 1.30.6 and receives no further fixes. It reaches deployments with the next release image.
+
 ## [0.22.0] - 2026-10-24
 
 ### Added
