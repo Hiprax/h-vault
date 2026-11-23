@@ -3,7 +3,7 @@ import jwt from 'jsonwebtoken';
 import mongoose, { type ClientSession } from 'mongoose';
 import { httpErrors } from '@hiprax/errors';
 import { maskEmail, type IBackupRecipient } from '@hvault/shared';
-import { User, type IBackupRecipientDoc } from '../models/User.js';
+import { User, type IBackupRecipientDoc, type IUser } from '../models/User.js';
 import { BackupLog } from '../models/BackupLog.js';
 import { config } from '../config/index.js';
 import { derivePurposeKey } from './token.js';
@@ -358,7 +358,9 @@ export async function suspendThirdPartyRecipients(
       projection: { email: 1, [`${RECIPIENTS_PATH}.email`]: 1, [`${RECIPIENTS_PATH}.state`]: 1 },
       ...(session ? { session } : {}),
     },
-  ).lean();
+    // Typed explicitly: Mongoose narrows a lean result to its projection but does
+    // not follow dotted paths, so it would drop the `settings` this projection returns.
+  ).lean<Pick<IUser, '_id' | 'email' | 'settings'>>();
   if (!before) return 0;
   return recipientListOf(before).filter(
     (entry) => entry.email !== before.email && entry.state !== 'suspended',

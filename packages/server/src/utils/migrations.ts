@@ -112,7 +112,7 @@ const VAULT_QUOTA_BACKFILL_AGGREGATE_MAX_TIME_MS = 10_000;
 async function migrateVaultQuotaCounter(): Promise<void> {
   const users = mongoose.connection.collection('users');
   try {
-    await users.createIndex({ quotaRecountedAt: 1 });
+    await users.createIndex({ quotaRecountedAt: 1 }, undefined, undefined);
   } catch (error: unknown) {
     if (!hasCode(error, INDEX_OPTIONS_CONFLICT) && !hasCode(error, INDEX_KEY_SPECS_CONFLICT)) {
       throw error;
@@ -309,6 +309,7 @@ async function migrateUnverifiedReaperIndex(): Promise<void> {
     await users.createIndex(
       { emailVerified: 1, _id: 1 },
       { partialFilterExpression: { emailVerified: false } },
+      undefined,
     );
   } catch (error: unknown) {
     if (!hasCode(error, INDEX_OPTIONS_CONFLICT) && !hasCode(error, INDEX_KEY_SPECS_CONFLICT)) {
@@ -367,6 +368,7 @@ async function migrateBackupRecipients(): Promise<void> {
     await users.createIndex(
       { 'settings.backup.backupRecipients.confirmationDue': 1 },
       { partialFilterExpression: { 'settings.backup.backupRecipients.confirmationDue': true } },
+      undefined,
     );
   } catch (error: unknown) {
     if (!hasCode(error, INDEX_OPTIONS_CONFLICT) && !hasCode(error, INDEX_KEY_SPECS_CONFLICT)) {
@@ -636,7 +638,7 @@ async function migrateAuditLogIndexTiebreak(): Promise<void> {
     { userId: 1, action: 1, timestamp: -1, _id: -1 },
   ] as const) {
     try {
-      await auditLogs.createIndex(keys);
+      await auditLogs.createIndex(keys, undefined, undefined);
     } catch (error: unknown) {
       // An operator who built one by hand under another name or options already
       // has what the page needs; refusing the boot over it would help nobody.

@@ -145,7 +145,7 @@
     "knip": "^6.37.0",
     "license-checker-rseidelsohn": "^5.0.1",
     "lint-staged": "^17.5.1",
-    "mongodb": "^7.6.0",
+    "mongodb": "~7.8.0",
     "mongodb-memory-server": "^11.3.0",
     "otpauth": "^9.5.2",
     "prettier": "^3.9.8",

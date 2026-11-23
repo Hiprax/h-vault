@@ -113,7 +113,7 @@ export class MongoRateLimitStore implements Store {
     if (this.ttlIndexAttempts >= MAX_TTL_INDEX_ATTEMPTS) return;
 
     this.ttlIndexReady ??= this.collection()
-      .createIndex({ expirationDate: 1 }, { expireAfterSeconds: 0 })
+      .createIndex({ expirationDate: 1 }, { expireAfterSeconds: 0 }, undefined)
       .then(() => undefined)
       .catch((error: unknown) => {
         this.ttlIndexAttempts += 1;
