@@ -32,7 +32,7 @@
       "owner": "maintainer",
       "created": "2026-08-12",
       "expires": "2027-02-21",
-      "approvedBy": ["maintainer"]
+      "approvedBy": ["maintainer", "judge:readonly"]
     },
     {
       "id": "SUP-0005",
@@ -45,7 +45,7 @@
       "owner": "maintainer",
       "created": "2026-08-12",
       "expires": "2027-02-21",
-      "approvedBy": ["maintainer"]
+      "approvedBy": ["maintainer", "judge:readonly"]
     },
     {
       "id": "SUP-0007",
@@ -58,7 +58,7 @@
       "owner": "maintainer",
       "created": "2026-08-12",
       "expires": "2027-02-21",
-      "approvedBy": ["maintainer"]
+      "approvedBy": ["maintainer", "judge:readonly"]
     },
     {
       "id": "SUP-0008",
@@ -71,7 +71,7 @@
       "owner": "maintainer",
       "created": "2026-08-12",
       "expires": "2027-02-21",
-      "approvedBy": ["maintainer"]
+      "approvedBy": ["maintainer", "judge:readonly"]
     },
     {
       "id": "SUP-0009",
@@ -84,7 +84,7 @@
       "owner": "maintainer",
       "created": "2026-08-12",
       "expires": "2027-02-21",
-      "approvedBy": ["maintainer"]
+      "approvedBy": ["maintainer", "judge:readonly"]
     },
     {
       "id": "SUP-0011",
@@ -97,7 +97,7 @@
       "owner": "maintainer",
       "created": "2026-08-12",
       "expires": "2027-02-21",
-      "approvedBy": ["maintainer"]
+      "approvedBy": ["maintainer", "judge:readonly"]
     },
     {
       "id": "SUP-0016",
@@ -110,7 +110,7 @@
       "owner": "maintainer",
       "created": "2026-08-12",
       "expires": "2027-02-21",
-      "approvedBy": ["maintainer"]
+      "approvedBy": ["maintainer", "judge:readonly"]
     },
     {
       "id": "SUP-0017",
@@ -123,7 +123,7 @@
       "owner": "maintainer",
       "created": "2026-08-12",
       "expires": "2027-02-21",
-      "approvedBy": ["maintainer"]
+      "approvedBy": ["maintainer", "judge:readonly"]
     },
     {
       "id": "SUP-0020",
@@ -136,7 +136,7 @@
       "owner": "maintainer",
       "created": "2026-08-12",
       "expires": "2027-02-21",
-      "approvedBy": ["maintainer"]
+      "approvedBy": ["maintainer", "judge:readonly"]
     },
     {
       "id": "SUP-0025",
@@ -149,7 +149,7 @@
       "owner": "maintainer",
       "created": "2026-08-12",
       "expires": "2026-12-23",
-      "approvedBy": ["maintainer"]
+      "approvedBy": ["maintainer", "judge:readonly"]
     },
     {
       "id": "SUP-0027",
@@ -162,7 +162,7 @@
       "owner": "maintainer",
       "created": "2026-08-13",
       "expires": "2027-02-21",
-      "approvedBy": ["maintainer"]
+      "approvedBy": ["maintainer", "judge:readonly"]
     },
     {
       "id": "SUP-0028",
@@ -175,7 +175,7 @@
       "owner": "maintainer",
       "created": "2026-08-13",
       "expires": "2027-02-21",
-      "approvedBy": ["maintainer"]
+      "approvedBy": ["maintainer", "judge:readonly"]
     },
     {
       "id": "SUP-0029",
@@ -188,7 +188,7 @@
       "owner": "maintainer",
       "created": "2026-08-13",
       "expires": "2027-02-21",
-      "approvedBy": ["maintainer"]
+      "approvedBy": ["maintainer", "judge:readonly"]
     },
     {
       "id": "SUP-0030",
@@ -201,7 +201,7 @@
       "owner": "maintainer",
       "created": "2026-08-14",
       "expires": "2026-12-23",
-      "approvedBy": ["maintainer"]
+      "approvedBy": ["maintainer", "judge:readonly"]
     },
     {
       "id": "SUP-0031",
@@ -214,7 +214,7 @@
       "owner": "maintainer",
       "created": "2026-08-14",
       "expires": "2027-02-21",
-      "approvedBy": ["maintainer"]
+      "approvedBy": ["maintainer", "judge:readonly"]
     },
     {
       "id": "SUP-0032",
@@ -227,7 +227,7 @@
       "owner": "maintainer",
       "created": "2026-08-14",
       "expires": "2027-02-21",
-      "approvedBy": ["maintainer"]
+      "approvedBy": ["maintainer", "judge:readonly"]
     },
     {
       "id": "SUP-0033",
@@ -240,7 +240,7 @@
       "owner": "maintainer",
       "created": "2026-08-14",
       "expires": "2027-02-21",
-      "approvedBy": ["maintainer"]
+      "approvedBy": ["maintainer", "judge:readonly"]
     },
     {
       "id": "SUP-0034",
@@ -253,7 +253,7 @@
       "owner": "maintainer",
       "created": "2026-08-14",
       "expires": "2027-02-21",
-      "approvedBy": ["maintainer"]
+      "approvedBy": ["maintainer", "judge:readonly"]
     },
     {
       "id": "SUP-0035",
@@ -266,7 +266,7 @@
       "owner": "maintainer",
       "created": "2026-08-14",
       "expires": "2027-02-21",
-      "approvedBy": ["maintainer"]
+      "approvedBy": ["maintainer", "judge:readonly"]
     },
     {
       "id": "SUP-0036",
@@ -279,7 +279,7 @@
       "owner": "maintainer",
       "created": "2026-08-14",
       "expires": "2027-02-21",
-      "approvedBy": ["maintainer"]
+      "approvedBy": ["maintainer", "judge:readonly"]
     },
     {
       "id": "SUP-0037",
@@ -292,7 +292,7 @@
       "owner": "maintainer",
       "created": "2026-08-14",
       "expires": "2027-02-21",
-      "approvedBy": ["maintainer"]
+      "approvedBy": ["maintainer", "judge:readonly"]
     },
     {
       "id": "SUP-0038",
@@ -305,7 +305,7 @@
       "owner": "maintainer",
       "created": "2026-08-14",
       "expires": "2026-12-23",
-      "approvedBy": ["maintainer"]
+      "approvedBy": ["maintainer", "judge:readonly"]
     },
     {
       "id": "SUP-0039",
@@ -318,7 +318,7 @@
       "owner": "maintainer",
       "created": "2026-08-14",
       "expires": "2027-02-21",
-      "approvedBy": ["maintainer"]
+      "approvedBy": ["maintainer", "judge:readonly"]
     },
     {
       "id": "SUP-0040",
@@ -331,7 +331,7 @@
       "owner": "maintainer",
       "created": "2026-08-14",
       "expires": "2027-02-21",
-      "approvedBy": ["maintainer"]
+      "approvedBy": ["maintainer", "judge:readonly"]
     },
     {
       "id": "SUP-0041",
@@ -344,7 +344,7 @@
       "owner": "maintainer",
       "created": "2026-08-14",
       "expires": "2027-02-21",
-      "approvedBy": ["maintainer"]
+      "approvedBy": ["maintainer", "judge:readonly"]
     },
     {
       "id": "SUP-0042",
@@ -357,7 +357,7 @@
       "owner": "maintainer",
       "created": "2026-08-14",
       "expires": "2027-02-21",
-      "approvedBy": ["maintainer"]
+      "approvedBy": ["maintainer", "judge:readonly"]
     },
     {
       "id": "SUP-0043",
@@ -370,7 +370,7 @@
       "owner": "maintainer",
       "created": "2026-08-14",
       "expires": "2027-02-21",
-      "approvedBy": ["maintainer"]
+      "approvedBy": ["maintainer", "judge:readonly"]
     },
     {
       "id": "SUP-0044",
@@ -383,7 +383,7 @@
       "owner": "maintainer",
       "created": "2026-08-15",
       "expires": "2027-02-21",
-      "approvedBy": ["maintainer"]
+      "approvedBy": ["maintainer", "judge:readonly"]
     },
     {
       "id": "SUP-0045",
