@@ -2558,7 +2558,7 @@ the Docker base images. After those are cached the gauntlet is offline apart fro
 gates. The dependency audit asks the registry every time, and the two that build images
 (`ci:docker` and `test:deploy`) need Docker Hub on every run even with every layer cached:
 BuildKit asks the registry for image metadata before each build, the Dockerfiles'
-`# syntax=` frontend (`docker/dockerfile:1.27.1`, pinned by digest) first. `ci:docker` also needs Trivy's database
+`# syntax=` frontend (`docker/dockerfile:1.28.0`, pinned by digest) first. `ci:docker` also needs Trivy's database
 registry whenever its cached database has passed its `NextUpdate`, a day after it was
 built. A resolver that cannot answer therefore fails those gates at their first build
 (`resolve image config for docker-image://docker.io/docker/dockerfile:…`, then `failed
