@@ -31,6 +31,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { MUTATION_DIFF_FLOOR } from '../../../scripts/ci/lib/mutation-scope.mjs';
+import { expectOnlyLocalGitConfig, hermeticGitEnv } from './gitFixture.js';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 
@@ -102,8 +103,16 @@ const LIBS = [
   'stryker-config',
 ];
 
+/** Every fixture git call, the gate under test, and the isolation check run under this. */
+const GIT_ENV = hermeticGitEnv();
+
 const git = (cwd: string, ...args: string[]): string =>
-  execFileSync('git', args, { cwd, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  execFileSync('git', args, {
+    cwd,
+    env: GIT_ENV,
+    encoding: 'utf-8',
+    stdio: ['ignore', 'pipe', 'ignore'],
+  }).trim();
 
 /** A repository whose `main` holds `base`, with `change` applied in the working tree. */
 function workspace(options: {
@@ -152,7 +161,7 @@ function workspace(options: {
   git(dir, 'init', '-q', '-b', options.branch === null ? 'trunk' : 'main');
   git(dir, 'config', 'user.email', 'test@localhost');
   git(dir, 'config', 'user.name', 'test');
-  git(dir, 'config', 'commit.gpgsign', 'false');
+  expectOnlyLocalGitConfig(dir, GIT_ENV);
   git(dir, 'add', '-A');
   git(dir, 'commit', '-q', '-m', 'base');
   for (const [rel, text] of Object.entries(options.change ?? {})) {
@@ -178,7 +187,7 @@ function runGate(dir: string, env: Record<string, string> = {}): GateRun {
     {
       cwd: dir,
       encoding: 'utf-8',
-      env: { ...process.env, FORCE_COLOR: '0', HVAULT_FAKE_LOG: log, ...env },
+      env: { ...GIT_ENV, FORCE_COLOR: '0', HVAULT_FAKE_LOG: log, ...env },
     },
   );
   const reportFile = path.join(dir, '.testfortress', 'reports', 'mutation-diff.json');

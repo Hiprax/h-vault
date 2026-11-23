@@ -36,6 +36,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { expectOnlyLocalGitConfig, hermeticGitEnv } from './gitFixture.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..', '..', '..');
@@ -113,11 +114,18 @@ const entry = (over: Partial<LedgerEntry> & { id: string; rule: string }): Ledge
   ...over,
 });
 
+/**
+ * The fixtures' git, the scanner run over them (which enumerates with
+ * `git ls-files`), and the isolation check. `the real repository` below scans
+ * with the developer's own environment on purpose: it is the gate as it runs.
+ */
+const GIT_ENV = hermeticGitEnv();
+
 function runScanner(dir: string): ScanResult {
   const proc = spawnSync(process.execPath, [SCANNER, '--json'], {
     cwd: dir,
     encoding: 'utf-8',
-    env: { ...process.env, FORCE_COLOR: '0' },
+    env: { ...GIT_ENV, FORCE_COLOR: '0' },
   });
   const parsed = JSON.parse(proc.stdout) as Omit<ScanResult, 'exitCode' | 'hits' | 'stderr'>;
   const report = JSON.parse(
@@ -143,7 +151,8 @@ function runScanner(dir: string): ScanResult {
 function scan(files: Record<string, string>, options: FixtureOptions = {}): ScanResult {
   const dir = mkdtempSync(path.join(tmpdir(), 'hv-integrity-'));
   dirs.push(dir);
-  execFileSync('git', ['init', '-q'], { cwd: dir });
+  execFileSync('git', ['init', '-q'], { cwd: dir, env: GIT_ENV });
+  expectOnlyLocalGitConfig(dir, GIT_ENV);
 
   const write = (rel: string, contents: string): void => {
     const p = path.join(dir, rel);
@@ -1038,7 +1047,8 @@ describe('the blind spots are pinned rather than trusted', () => {
   it('fails when the baseline pins no fingerprints at all', () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'hv-integrity-'));
     dirs.push(dir);
-    execFileSync('git', ['init', '-q'], { cwd: dir });
+    execFileSync('git', ['init', '-q'], { cwd: dir, env: GIT_ENV });
+    expectOnlyLocalGitConfig(dir, GIT_ENV);
     mkdirSync(path.join(dir, '.testfortress'), { recursive: true });
     writeFileSync(path.join(dir, 'src.ts'), 'export const a = 1;\n');
     writeFileSync(
@@ -1053,7 +1063,8 @@ describe('the blind spots are pinned rather than trusted', () => {
   it('fails when the ledger grows past the count recorded in the baseline', () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'hv-integrity-'));
     dirs.push(dir);
-    execFileSync('git', ['init', '-q'], { cwd: dir });
+    execFileSync('git', ['init', '-q'], { cwd: dir, env: GIT_ENV });
+    expectOnlyLocalGitConfig(dir, GIT_ENV);
     mkdirSync(path.join(dir, '.testfortress'), { recursive: true });
     writeFileSync(path.join(dir, 'a.test.ts'), `it${m('.sk', 'ip(')}'x', () => {});\n`);
     writeFileSync(

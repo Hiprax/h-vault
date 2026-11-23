@@ -23,6 +23,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { expectOnlyLocalGitConfig, hermeticGitEnv } from './gitFixture.js';
 import {
   MUTATION_DIFF_BUDGETS,
   MUTATION_DIFF_FLOOR,
@@ -143,10 +144,14 @@ interface Fixture {
   args?: string[];
 }
 
+/** The fixture's git, the ratchet it runs (which reads git itself), and the isolation check. */
+const GIT_ENV = hermeticGitEnv();
+
 function ratchet(fixture: Fixture): RatchetResult & { dir: string } {
   const dir = mkdtempSync(path.join(tmpdir(), 'hv-ratchet-'));
   dirs.push(dir);
-  execFileSync('git', ['init', '-q'], { cwd: dir });
+  execFileSync('git', ['init', '-q'], { cwd: dir, env: GIT_ENV });
+  expectOnlyLocalGitConfig(dir, GIT_ENV);
 
   const write = (rel: string, contents: string): void => {
     const p = path.join(dir, rel);
@@ -172,6 +177,7 @@ function ratchet(fixture: Fixture): RatchetResult & { dir: string } {
 
   const proc = spawnSync(process.execPath, [RATCHET, '--json', ...(fixture.args ?? [])], {
     cwd: dir,
+    env: GIT_ENV,
     encoding: 'utf-8',
   });
   const parsed = proc.stdout.trim()

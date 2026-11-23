@@ -33,6 +33,7 @@ import {
   packageOfPath,
 } from '../../../scripts/ci/lib/coverage-scope.mjs';
 import { parseLcov, pct } from '../../../scripts/ci/lib/lcov.mjs';
+import { expectOnlyLocalGitConfig, hermeticGitEnv } from './gitFixture.js';
 import { MUTATION_LEGS, PRESENTATIONAL_EXCLUDE } from '../../../scripts/ci/lib/mutation-scope.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
@@ -264,10 +265,18 @@ describe('the changed-line diff the coverage gate measures', () => {
     while (scratch.length > 0) rmSync(scratch.pop()!, { recursive: true, force: true });
   });
 
+  /** Every fixture git call here, and the isolation check, run under this. */
+  const GIT_ENV = hermeticGitEnv();
+
   /** A GitResult-shaped runner bound to one directory, as the gate injects. */
   function gitIn(dir: string) {
     return (args: string[]) => {
-      const result = spawnSync('git', args, { cwd: dir, encoding: 'utf8', maxBuffer: 64 << 20 });
+      const result = spawnSync('git', args, {
+        cwd: dir,
+        env: GIT_ENV,
+        encoding: 'utf8',
+        maxBuffer: 64 << 20,
+      });
       return {
         status: result.error ? 127 : (result.status ?? 1),
         stdout: result.stdout ?? '',
@@ -286,9 +295,8 @@ describe('the changed-line diff the coverage gate measures', () => {
   }
 
   /**
-   * A commit that does not depend on the machine's git identity or signing
-   * config — a developer with `commit.gpgsign` on would otherwise fail every
-   * fixture here with an error about a missing key.
+   * A commit with the fixture's own identity. Signing needs no opt-out here:
+   * `GIT_ENV` hides the machine's configuration as a whole (`gitFixture.ts`).
    */
   function commitAll(dir: string, message: string): void {
     mustGit(dir, [
@@ -296,8 +304,6 @@ describe('the changed-line diff the coverage gate measures', () => {
       'user.email=fixture@localhost',
       '-c',
       'user.name=fixture',
-      '-c',
-      'commit.gpgsign=false',
       'commit',
       '-qam',
       message,
@@ -324,6 +330,7 @@ describe('the changed-line diff the coverage gate measures', () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'hvault-changed-diff-'));
     scratch.push(dir);
     mustGit(dir, ['init', '-q', '-b', 'main']);
+    expectOnlyLocalGitConfig(dir, GIT_ENV);
     mkdirSync(path.join(dir, 'src'), { recursive: true });
     writeFileSync(path.join(dir, 'src', 'a.ts'), 'base1\nbase2\nbase3\nbase4\nbase5\nbase6\n');
     mustGit(dir, ['add', '-A']);
@@ -404,6 +411,7 @@ describe('the changed-line diff the coverage gate measures', () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'hvault-changed-diff-'));
     scratch.push(dir);
     mustGit(dir, ['init', '-q', '-b', 'main']);
+    expectOnlyLocalGitConfig(dir, GIT_ENV);
     mkdirSync(path.join(dir, 'src'), { recursive: true });
     writeFileSync(path.join(dir, 'src', 'old.ts'), 'one\ntwo\nthree\n');
     mustGit(dir, ['add', '-A']);
@@ -467,6 +475,7 @@ describe('the changed-line diff the coverage gate measures', () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'hvault-changed-diff-'));
     scratch.push(dir);
     mustGit(dir, ['init', '-q', '-b', 'main']);
+    expectOnlyLocalGitConfig(dir, GIT_ENV);
     mkdirSync(path.join(dir, 'src'), { recursive: true });
     // No trailing newline, on purpose: that is what makes git emit the marker.
     writeFileSync(path.join(dir, 'src', 'tail.ts'), 'alpha\nbeta');

@@ -36,6 +36,7 @@ import {
   strykerRange,
 } from '../../../scripts/ci/lib/mutation-diff.mjs';
 import { resolveDiffBase } from '../../../scripts/ci/lib/diff-base.mjs';
+import { expectOnlyLocalGitConfig, hermeticGitEnv } from './gitFixture.js';
 import { buildStrykerConfig } from '../../../scripts/ci/lib/stryker-config.mjs';
 import {
   MUTATION_DIFF_REPORT,
@@ -619,23 +620,13 @@ describe('the Stryker configuration, in both modes', () => {
 });
 
 describe('the diff base, against real repositories', () => {
-  // The machine's own git configuration is out of reach of every call here.
-  // GIT_CONFIG_GLOBAL and GIT_CONFIG_NOSYSTEM hide ~/.gitconfig,
-  // $XDG_CONFIG_HOME/git/config and the system file; dropping every inherited
-  // GIT_* variable removes the `git -c` settings a parent git passes down
-  // (GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT) and the location variables a hook
-  // exports (GIT_DIR, GIT_INDEX_FILE), which would aim these commands at the
-  // real repository. Opting out one key at a time is what let a global
-  // `tag.gpgSign` through after `commit.gpgSign` had been handled.
-  const hermeticEnv: NodeJS.ProcessEnv = {
-    ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_'))),
-    GIT_CONFIG_GLOBAL: '/dev/null',
-    GIT_CONFIG_NOSYSTEM: '1',
-  };
+  // The machine's own git configuration is out of reach of every call here
+  // (`gitFixture.ts`); a global `tag.gpgSign` once failed `git tag` below.
+  const GIT_ENV = hermeticGitEnv();
   const run = (cwd: string, ...args: string[]): string =>
     execFileSync('git', args, {
       cwd,
-      env: hermeticEnv,
+      env: GIT_ENV,
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'ignore'],
     }).trim();
@@ -654,14 +645,7 @@ describe('the diff base, against real repositories', () => {
     run(dir, 'init', '-q', '-b', 'main');
     run(dir, 'config', 'user.email', 'test@localhost');
     run(dir, 'config', 'user.name', 'test');
-    // The isolation, asserted rather than assumed: every setting git sees here is
-    // one this fixture wrote. A machine's global `tag.gpgSign` once failed
-    // `git tag` below, and its `init.defaultBranch`, hooks or templates would
-    // change these repositories from one machine to the next.
-    const scopes = run(dir, 'config', '--list', '--show-scope')
-      .split('\n')
-      .map((line) => line.split('\t')[0]);
-    expect(new Set(scopes)).toEqual(new Set(['local']));
+    expectOnlyLocalGitConfig(dir, GIT_ENV);
     return dir;
   }
   const commit = (dir: string, file: string, text: string): string => {

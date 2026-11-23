@@ -42,6 +42,7 @@ import {
 import { evaluateDenominator } from '../../../scripts/ci/lib/scan-denominator.mjs';
 import { PUBLISHED_IMAGES, imageRepository } from '../../../scripts/ci/lib/images.mjs';
 import { extractRelease } from '../../../scripts/ci/changelog-extract.mjs';
+import { expectOnlyLocalGitConfig, hermeticGitEnv } from './gitFixture.js';
 import {
   OSV_EXIT,
   OsvLedgerError,
@@ -1484,22 +1485,6 @@ describe('secret-scan denominator: zero scanned files has three causes, not one'
  * than the modules the scanner imports today, so a new import turns this into a
  * test of the scanner rather than a test of a module-resolution error.
  */
-/**
- * The variables through which git tells a child process WHERE the repository is.
- * `githooks(5)` requires clearing them before invoking git "in a foreign
- * repository or in a different working tree", which is precisely what the
- * harness below does.
- */
-const GIT_LOCATION_VARIABLES = new Set([
-  'GIT_DIR',
-  'GIT_WORK_TREE',
-  'GIT_INDEX_FILE',
-  'GIT_OBJECT_DIRECTORY',
-  'GIT_ALTERNATE_OBJECT_DIRECTORIES',
-  'GIT_COMMON_DIR',
-  'GIT_NAMESPACE',
-  'GIT_CEILING_DIRECTORIES',
-]);
 
 function runScannerOn(
   files: Record<string, string>,
@@ -1521,7 +1506,9 @@ function runScannerOn(
       writeFileSync(target, contents);
     }
 
-    // git's own variables are STRIPPED, not inherited. `githooks(5)` is explicit
+    // git's own variables are STRIPPED, not inherited, and the machine's git
+    // configuration is hidden with them (`hermeticGitEnv`, `gitFixture.ts`).
+    // `githooks(5)` is explicit
     // that a hook invoking git "in a foreign repository or in a different
     // working tree" must clear these, and this harness is exactly that: with
     // `GIT_DIR` inherited, `git init` silently re-initialises the REAL
@@ -1531,9 +1518,7 @@ function runScannerOn(
     // no hook on this version exports `GIT_DIR`, so nothing leaks today; forcing
     // it reproduces the overwrite exactly, which is why this does not rely on
     // which variables a given git version happens to export.
-    const env = Object.fromEntries(
-      Object.entries(process.env).filter(([key]) => !GIT_LOCATION_VARIABLES.has(key)),
-    );
+    const env = hermeticGitEnv();
 
     const git = (...args: string[]): string => {
       const result = spawnSync('git', args, { cwd: dir, env, encoding: 'utf-8' });
@@ -1554,6 +1539,7 @@ function runScannerOn(
     expect(gitDir, `scanner harness escaped its temp repo: ${gitDir}`).toContain(
       path.basename(dir),
     );
+    expectOnlyLocalGitConfig(dir, env);
 
     const staged = options.stage ?? [];
     if (staged.length > 0) git('add', ...staged);
