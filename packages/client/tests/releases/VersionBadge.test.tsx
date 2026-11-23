@@ -26,8 +26,10 @@ describe('VersionBadge', () => {
         onOpen={onOpen}
       />,
     );
-    const button = screen.getByRole('button', { name: "H-Vault 0.15.0. Open what's new" });
+    const button = screen.getByRole('button', { name: "H-Vault v0.15.0. Open what's new" });
     expect(button).toHaveTextContent('v0.15.0');
+    // Label in name (WCAG 2.5.3): the visible text leads the accessible name.
+    expect(button.textContent?.trim()).toBe('v0.15.0');
     expect(button).not.toHaveAttribute('title');
     expect(screen.queryByTestId('release-unseen-dot')).toBeNull();
     fireEvent.click(button);
@@ -45,7 +47,7 @@ describe('VersionBadge', () => {
     expect(screen.getByTestId('release-unseen-dot')).toHaveClass('release-unseen-dot');
     expect(
       screen.getByRole('button', {
-        name: "H-Vault 0.15.0. 3 new releases to read. Open what's new",
+        name: "H-Vault v0.15.0. 3 new releases to read. Open what's new",
       }),
     ).toBeInTheDocument();
   });
@@ -58,8 +60,10 @@ describe('VersionBadge', () => {
     const { rerender } = render(<VersionBadge expanded status={available} onOpen={vi.fn()} />);
     expect(screen.getByText('New release')).toBeInTheDocument();
     expect(screen.getByRole('button')).toHaveAccessibleName(
-      "H-Vault 0.15.0. 1 new release to read. Version 0.16.0 is available. Open what's new",
+      "H-Vault v0.15.0 New release: version 0.16.0 is available. 1 new release to read. Open what's new",
     );
+    // The visible text, in order and spaced as rendered, sits verbatim in the name.
+    expect(screen.getByRole('button').textContent).toBe('v0.15.0 New release');
     rerender(
       <VersionBadge expanded status={makeStatus({ update: makeUpdate() })} onOpen={vi.fn()} />,
     );

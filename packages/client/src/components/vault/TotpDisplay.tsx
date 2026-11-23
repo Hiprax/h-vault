@@ -179,7 +179,7 @@ export function TotpDisplay({ secret }: { secret: string }) {
           type="button"
           onClick={() => void handleCopy()}
           className="group flex items-center gap-2 rounded px-1 py-0.5 hover:bg-[hsl(var(--accent))] transition-colors"
-          aria-label="Copy TOTP code"
+          aria-label={`Copy TOTP code ${groupCode(code)}`}
         >
           <span className="font-mono text-2xl font-bold tracking-widest text-[hsl(var(--foreground))]">
             {groupCode(code)}

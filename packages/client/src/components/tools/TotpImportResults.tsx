@@ -128,7 +128,7 @@ function EntryCard({
         <button
           type="button"
           onClick={() => void copySecret()}
-          aria-label={`Copy secret key for ${title}`}
+          aria-label={`Copy key for ${title}`}
           className="inline-flex items-center gap-1.5 rounded-md border border-[hsl(var(--input))] px-2.5 py-1.5 text-xs text-[hsl(var(--foreground))] hover:bg-[hsl(var(--accent))]"
         >
           {copied ? (

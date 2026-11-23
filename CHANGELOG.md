@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 - **Express 5.3.0, Nodemailer 10.6.0, @hiprax/logger 1.3.1 and the S3 client 3.1169.0 (server)**; a document segment whose storage stream stalls is now logged as a socket inactivity timeout rather than a bare "aborted", and the S3 client uses its newer default retry delays (still three attempts); the logger escapes control characters in its own error line (CWE-117); Express brings content-type 2 and content-disposition 2 underneath; the server's own download headers are unchanged.
 - Patch-level dependency updates: React and React DOM 19.3.1, Vite 8.3.8 (Rolldown 1.2.19), Tailwind CSS 4.3.5, dotenv 18.0.10, express-rate-limit 8.7.4, @hiprax/crypto 1.9.1, fake-indexeddb 6.2.8 and concurrently 10.0.7.
 
+### Fixed
+
+- **Accessible names now contain the text the controls show** (WCAG 2.5.3, label in name), so speech input and screen readers match what is on screen: the sidebar version badge's name starts with its visible "v<version>" (and "New release" when one exists), the TOTP copy button is named with the code it displays, and the authenticator import's copy button reads "Copy key for <account>".
+
 ### Security
 
 - **The web image is built on nginx 1.30.7 from the maintained `nginx/nginx-unprivileged` repository** (digest-pinned in `docker/Dockerfile`), nginx's security release of 2026-11-18 for CVE-2026-113425, CVE-2026-118899, CVE-2026-121810, CVE-2026-123007, CVE-2026-123633 and CVE-2026-123634 among others. The image's publisher moved it from `nginxinc/nginx-unprivileged` on 2026-10-20; that repository stopped at 1.30.6 and receives no further fixes. It reaches deployments with the next release image.

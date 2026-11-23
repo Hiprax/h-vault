@@ -771,7 +771,7 @@ test.describe('accessibility: every primary view and modal', () => {
       });
 
       await test.step('what is new dialog', async () => {
-        await page.getByRole('button', { name: /^H-Vault \d+\.\d+\.\d+\./ }).click();
+        await page.getByRole('button', { name: /^H-Vault v\d+\.\d+\.\d+[ .]/ }).click();
         const dialog = page.getByRole('dialog', { name: /What's new in H-Vault/ });
         await expect(dialog).toBeVisible({ timeout: 60_000 });
         await expect(dialog.getByRole('button', { name: 'Done' })).toBeVisible();

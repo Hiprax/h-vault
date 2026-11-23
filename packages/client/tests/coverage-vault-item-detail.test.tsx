@@ -314,15 +314,18 @@ describe('VaultItemDetail / TotpDisplay', () => {
 
     const codes = expectedCodes(SECRET);
     await waitFor(() => {
-      const rendered = screen.getByLabelText('Copy TOTP code').textContent ?? '';
+      const rendered = screen.getByLabelText(/^Copy TOTP code /).textContent ?? '';
       const digits = rendered.replace(/\s/g, '');
       expect(digits).not.toBe('------');
       expect(codes).toContain(digits);
     });
 
     // The display groups the six digits as "123 456".
-    const shown = screen.getByLabelText('Copy TOTP code').textContent ?? '';
+    const shown = screen.getByLabelText(/^Copy TOTP code /).textContent ?? '';
     expect(shown).toMatch(/\d{3}\s\d{3}/);
+    // Label in name (WCAG 2.5.3): the button is named with the code it shows, so a
+    // screen reader hears the digits a sighted user reads.
+    expect(screen.getByRole('button', { name: `Copy TOTP code ${shown}` })).toBeInTheDocument();
   });
 
   it('normalises a lower-case, space-separated secret before generating', async () => {
@@ -330,7 +333,10 @@ describe('VaultItemDetail / TotpDisplay', () => {
 
     const codes = expectedCodes(SECRET);
     await waitFor(() => {
-      const digits = (screen.getByLabelText('Copy TOTP code').textContent ?? '').replace(/\s/g, '');
+      const digits = (screen.getByLabelText(/^Copy TOTP code /).textContent ?? '').replace(
+        /\s/g,
+        '',
+      );
       expect(codes).toContain(digits);
     });
   });
@@ -340,12 +346,12 @@ describe('VaultItemDetail / TotpDisplay', () => {
 
     await waitFor(() => {
       expect(
-        (screen.getByLabelText('Copy TOTP code').textContent ?? '').replace(/\s/g, ''),
+        (screen.getByLabelText(/^Copy TOTP code /).textContent ?? '').replace(/\s/g, ''),
       ).not.toBe('------');
     });
 
     await act(async () => {
-      fireEvent.click(screen.getByLabelText('Copy TOTP code'));
+      fireEvent.click(screen.getByLabelText(/^Copy TOTP code /));
     });
 
     const written = (navigator.clipboard.writeText as ReturnType<typeof vi.fn>).mock
@@ -365,12 +371,12 @@ describe('VaultItemDetail / TotpDisplay', () => {
 
     await waitFor(() => {
       expect(
-        (screen.getByLabelText('Copy TOTP code').textContent ?? '').replace(/\s/g, ''),
+        (screen.getByLabelText(/^Copy TOTP code /).textContent ?? '').replace(/\s/g, ''),
       ).not.toBe('------');
     });
 
     await act(async () => {
-      fireEvent.click(screen.getByLabelText('Copy TOTP code'));
+      fireEvent.click(screen.getByLabelText(/^Copy TOTP code /));
     });
 
     expect(mockToast).toHaveBeenCalledWith(
@@ -382,7 +388,7 @@ describe('VaultItemDetail / TotpDisplay', () => {
     renderDetail(totpItem('JBSWY3DP2'));
 
     expect(await screen.findByText('Invalid TOTP secret (not valid base32)')).toBeInTheDocument();
-    expect(screen.queryByLabelText('Copy TOTP code')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/^Copy TOTP code/)).not.toBeInTheDocument();
   });
 
   it('rejects a secret containing non-base32 characters', async () => {
@@ -400,7 +406,7 @@ describe('VaultItemDetail / TotpDisplay', () => {
     renderDetail(totpItem('    '));
 
     expect(await screen.findByText('No TOTP secret is set')).toBeInTheDocument();
-    expect(screen.queryByLabelText('Copy TOTP code')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/^Copy TOTP code/)).not.toBeInTheDocument();
   });
 
   // -------------------------------------------------------------------------
@@ -416,21 +422,21 @@ describe('VaultItemDetail / TotpDisplay', () => {
     expect(
       await screen.findByText('Counter-based (HOTP) codes are not generated here'),
     ).toBeInTheDocument();
-    expect(screen.queryByLabelText('Copy TOTP code')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/^Copy TOTP code/)).not.toBeInTheDocument();
   });
 
   it('refuses an otpauth:// URI that carries no secret', async () => {
     renderDetail(totpItem('otpauth://totp/Acme:alice?issuer=Acme'));
 
     expect(await screen.findByText('This TOTP link carries no secret')).toBeInTheDocument();
-    expect(screen.queryByLabelText('Copy TOTP code')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/^Copy TOTP code/)).not.toBeInTheDocument();
   });
 
   it('refuses an otpauth:// URI whose secret is not base32', async () => {
     renderDetail(totpItem('otpauth://totp/Acme:alice?secret=not-base32-at-all!'));
 
     expect(await screen.findByText('Invalid TOTP secret (not valid base32)')).toBeInTheDocument();
-    expect(screen.queryByLabelText('Copy TOTP code')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/^Copy TOTP code/)).not.toBeInTheDocument();
   });
 
   it('refuses an algorithm it cannot generate instead of falling back to SHA1', async () => {
@@ -441,7 +447,7 @@ describe('VaultItemDetail / TotpDisplay', () => {
     expect(
       await screen.findByText('This TOTP uses a hash algorithm this app cannot generate'),
     ).toBeInTheDocument();
-    expect(screen.queryByLabelText('Copy TOTP code')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/^Copy TOTP code/)).not.toBeInTheDocument();
   });
 
   // -------------------------------------------------------------------------
@@ -462,7 +468,7 @@ describe('VaultItemDetail / TotpDisplay', () => {
 
     const codes = expectedCodes(secret16);
     await waitFor(() => {
-      const rendered = screen.getByLabelText('Copy TOTP code').textContent ?? '';
+      const rendered = screen.getByLabelText(/^Copy TOTP code /).textContent ?? '';
       const digits = rendered.replace(/\s/g, '');
       expect(digits).not.toBe('------');
       expect(codes).toContain(digits);
@@ -492,7 +498,7 @@ describe('VaultItemDetail / TotpDisplay', () => {
     ];
 
     await waitFor(() => {
-      const rendered = screen.getByLabelText('Copy TOTP code').textContent ?? '';
+      const rendered = screen.getByLabelText(/^Copy TOTP code /).textContent ?? '';
       const digits = rendered.replace(/\s/g, '');
       expect(digits).toHaveLength(8);
       expect(codes).toContain(digits);

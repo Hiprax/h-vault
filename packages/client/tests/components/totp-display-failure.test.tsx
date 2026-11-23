@@ -35,6 +35,6 @@ describe('TotpDisplay when generation fails', () => {
     expect(await screen.findByText('Failed to generate TOTP code')).toBeInTheDocument();
     // No button, because there is nothing to copy: a copy control beside an
     // error would put a row of dashes on the clipboard.
-    expect(screen.queryByLabelText('Copy TOTP code')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/^Copy TOTP code/)).not.toBeInTheDocument();
   });
 });

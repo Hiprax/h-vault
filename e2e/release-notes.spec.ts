@@ -21,14 +21,15 @@ import {
 /** Every test here signs in (two derivations) and most lock and unlock again. */
 const RELEASE_NOTES_TEST_TIMEOUT_MS = 420_000;
 
-const versionBadge = (page: Page) => page.getByRole('button', { name: /^H-Vault \d+\.\d+\.\d+\./ });
+const versionBadge = (page: Page) =>
+  page.getByRole('button', { name: /^H-Vault v\d+\.\d+\.\d+[ .]/ });
 const whatsNew = (page: Page) => page.getByRole('dialog', { name: /What's new in H-Vault/ });
 
 /** The version the server runs, as the sidebar badge states it. */
 async function runningVersion(page: Page): Promise<string> {
   await expect(versionBadge(page)).toBeVisible();
   const name = (await versionBadge(page).getAttribute('aria-label')) ?? '';
-  const match = /^H-Vault (\d+\.\d+\.\d+)\./.exec(name);
+  const match = /^H-Vault v(\d+\.\d+\.\d+)[ .]/.exec(name);
   expect(match, name).not.toBeNull();
   return match![1]!;
 }

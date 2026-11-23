@@ -325,7 +325,7 @@ describe('the key itself', () => {
     await screen.findByText('Acme');
 
     await act(async () => {
-      fireEvent.click(screen.getAllByRole('button', { name: /Copy secret key for Acme/ })[0]!);
+      fireEvent.click(screen.getAllByRole('button', { name: /Copy key for Acme/ })[0]!);
     });
 
     expect(mockCopySecret).toHaveBeenCalledTimes(1);
@@ -341,7 +341,7 @@ describe('the key itself', () => {
     await renderFlow();
     await readExport();
     await screen.findByText('Acme');
-    const button = screen.getAllByRole('button', { name: /Copy secret key for Acme/ })[0]!;
+    const button = screen.getAllByRole('button', { name: /Copy key for Acme/ })[0]!;
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     try {
       await act(async () => {
@@ -373,7 +373,7 @@ describe('the key itself', () => {
     await screen.findByText('Acme');
 
     await act(async () => {
-      fireEvent.click(screen.getAllByRole('button', { name: /Copy secret key for Acme/ })[0]!);
+      fireEvent.click(screen.getAllByRole('button', { name: /Copy key for Acme/ })[0]!);
     });
 
     await waitFor(() => {
@@ -393,7 +393,7 @@ describe('the key itself', () => {
 
     endScanSession();
     await act(async () => {
-      fireEvent.click(screen.getAllByRole('button', { name: /Copy secret key for Acme/ })[0]!);
+      fireEvent.click(screen.getAllByRole('button', { name: /Copy key for Acme/ })[0]!);
     });
 
     expect(mockToast).toHaveBeenCalledWith(

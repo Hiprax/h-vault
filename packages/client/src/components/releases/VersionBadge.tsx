@@ -14,10 +14,14 @@ interface VersionBadgeProps {
 export function versionBadgeLabel(status: ReleaseStatus): string {
   const unseen = status.releaseNotes.unseenCount;
   const newer = status.update?.state === 'available' ? status.update.latestVersion : null;
+  // The badge's visible text ("v<version>", then "New release" when one exists)
+  // leads the name verbatim, so speech input and screen readers hear what is shown
+  // (WCAG 2.5.3, label in name).
   return [
-    `H-Vault ${status.version}.`,
+    newer === null
+      ? `H-Vault v${status.version}.`
+      : `H-Vault v${status.version} New release: version ${newer} is available.`,
     unseen > 0 ? `${String(unseen)} new ${unseen === 1 ? 'release' : 'releases'} to read.` : null,
-    newer === null ? null : `Version ${newer} is available.`,
     "Open what's new",
   ]
     .filter((part) => part !== null)
@@ -67,7 +71,7 @@ export function VersionBadge({ expanded, status, onOpen }: VersionBadgeProps) {
           expanded ? 'opacity-100' : 'w-0 overflow-hidden opacity-0',
         )}
       >
-        <span className="tabular-nums">v{status.version}</span>
+        <span className="tabular-nums">v{status.version}</span>{' '}
         {newer && (
           <span className="rounded-full bg-[hsl(var(--sidebar-accent))] px-2 py-0.5 text-[11px] font-semibold text-[hsl(var(--sidebar-accent-foreground))]">
             New release
