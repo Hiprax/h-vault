@@ -93,9 +93,7 @@ applyMongoKernelCompat();
  * (Windows, whose range starts at `49152`), Linux's default is used, which keeps
  * the pool far below Windows' too.
  */
-export function readEphemeralPortFloor(
-  rangeFile = '/proc/sys/net/ipv4/ip_local_port_range',
-): number {
+function readEphemeralPortFloor(rangeFile = '/proc/sys/net/ipv4/ip_local_port_range'): number {
   if (!existsSync(rangeFile)) return 32_768;
   const text = readFileSync(rangeFile, 'utf8');
   const floor = Number(text.trim().split(/\s+/)[0]);
