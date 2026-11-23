@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router';
 import {
-  AlertTriangle,
+  TriangleExclamationPoint,
   ArrowLeft,
   Download,
   FileText,
-  FileWarning,
+  FileExclamationPoint,
   FolderOpen,
   Loader2,
   Maximize2,
@@ -792,7 +792,11 @@ export function DocumentDetail({ document: doc, isTrashed }: DocumentDetailProps
               : 'bg-[hsl(var(--primary)/0.1)] text-[hsl(var(--primary))]',
           )}
         >
-          {degraded ? <FileWarning className="h-5 w-5" /> : <FileText className="h-5 w-5" />}
+          {degraded ? (
+            <FileExclamationPoint className="h-5 w-5" />
+          ) : (
+            <FileText className="h-5 w-5" />
+          )}
         </span>
         <div className="min-w-0 flex-1">
           <h1 className="truncate text-xl font-semibold text-[hsl(var(--foreground))]">
@@ -816,7 +820,7 @@ export function DocumentDetail({ document: doc, isTrashed }: DocumentDetailProps
           data-testid="document-purge-pending"
           className="flex items-start gap-2 rounded-md border border-amber-400 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-100"
         >
-          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+          <TriangleExclamationPoint className="mt-0.5 h-4 w-4 shrink-0" />
           <span>{PURGE_PENDING_HINT}</span>
         </p>
       )}
@@ -826,7 +830,7 @@ export function DocumentDetail({ document: doc, isTrashed }: DocumentDetailProps
           data-testid="document-trashed-note"
           className="flex items-start gap-2 rounded-md border border-[hsl(var(--border))] p-3 text-sm text-[hsl(var(--muted-foreground))]"
         >
-          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+          <TriangleExclamationPoint className="mt-0.5 h-4 w-4 shrink-0" />
           <span>
             This document is in the trash. It still occupies storage and still counts against your
             allowance until it is deleted for good.

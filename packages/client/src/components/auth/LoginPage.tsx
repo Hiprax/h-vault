@@ -4,7 +4,7 @@ import { useForm } from 'react-hook-form';
 import { isAxiosError } from 'axios';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from '@hvault/shared/zod';
-import { Eye, EyeOff, CheckCircle, AlertTriangle } from 'lucide-react';
+import { Eye, EyeOff, CheckCircle, TriangleExclamationPoint } from 'lucide-react';
 import { BrandLogo } from '../ui/BrandLogo';
 import { useAuthStore } from '../../stores/authStore';
 import { getApiErrorMessage } from '../../lib/utils';
@@ -266,7 +266,7 @@ export function LoginPage() {
                 role="status"
                 className="flex items-center gap-2 rounded-md border border-yellow-500/30 bg-yellow-50 p-3 text-sm text-yellow-800 dark:bg-yellow-950/30 dark:text-yellow-200"
               >
-                <AlertTriangle className="h-4 w-4 shrink-0" />
+                <TriangleExclamationPoint className="h-4 w-4 shrink-0" />
                 <span>Your session has expired. Please sign in again.</span>
               </div>
             )}
@@ -288,7 +288,7 @@ export function LoginPage() {
                 role="alert"
                 className="flex items-start gap-2 rounded-md border border-yellow-500/30 bg-yellow-50 p-3 text-sm text-yellow-800 dark:bg-yellow-950/30 dark:text-yellow-200"
               >
-                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                <TriangleExclamationPoint className="mt-0.5 h-4 w-4 shrink-0" />
                 <span>
                   Account created, but we could not send the verification email. Please use
                   &ldquo;Resend verification&rdquo; from the login error or contact support.

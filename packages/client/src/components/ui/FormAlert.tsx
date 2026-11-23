@@ -1,4 +1,4 @@
-import { AlertCircle } from 'lucide-react';
+import { CircleExclamationPoint } from 'lucide-react';
 
 interface FormAlertProps {
   /** The sentence to show. */
@@ -20,7 +20,7 @@ export function FormAlert({ message }: FormAlertProps) {
       role="alert"
       className="flex items-center gap-2 rounded-md border border-[hsl(var(--destructive)/0.3)] bg-[hsl(var(--destructive)/0.05)] p-3 text-sm text-[hsl(var(--destructive))]"
     >
-      <AlertCircle className="h-4 w-4 shrink-0" />
+      <CircleExclamationPoint className="h-4 w-4 shrink-0" />
       <span>{message}</span>
     </div>
   );

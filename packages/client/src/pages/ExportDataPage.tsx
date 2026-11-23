@@ -32,7 +32,13 @@
 
 import { useCallback, useRef, useState } from 'react';
 import { Link } from 'react-router';
-import { AlertTriangle, ChevronLeft, Download, Loader2, ShieldAlert } from 'lucide-react';
+import {
+  TriangleExclamationPoint,
+  ChevronLeft,
+  Download,
+  Loader2,
+  ShieldExclamationPoint,
+} from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../components/ui/Card';
 import {
   Dialog,
@@ -218,7 +224,7 @@ export default function ExportDataPage() {
           <ChevronLeft className="h-4 w-4" /> Back to Settings
         </Link>
         <h1 className="flex items-center gap-2 text-2xl font-bold text-[hsl(var(--foreground))]">
-          <ShieldAlert className="h-6 w-6 text-amber-500" />
+          <ShieldExclamationPoint className="h-6 w-6 text-amber-500" />
           Leave H-Vault
         </h1>
         <p className="text-sm text-[hsl(var(--muted-foreground))]">
@@ -246,7 +252,8 @@ export default function ExportDataPage() {
             fix rather than a gate finding, and the shade must not be walked back
             on the grounds that the sweep is green. */}
         <p className="flex items-center gap-2 font-semibold text-red-700 dark:text-red-400">
-          <AlertTriangle className="h-5 w-5 shrink-0" /> This file is UNENCRYPTED plaintext
+          <TriangleExclamationPoint className="h-5 w-5 shrink-0" /> This file is UNENCRYPTED
+          plaintext
         </p>
         <ul className="list-disc space-y-1 pl-5">
           <li>
@@ -414,7 +421,8 @@ export default function ExportDataPage() {
         <DialogContent className="max-w-md" onClose={handleCancelConfirm}>
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2 text-red-600 dark:text-red-400">
-              <AlertTriangle className="h-5 w-5 shrink-0" /> Download unencrypted plaintext?
+              <TriangleExclamationPoint className="h-5 w-5 shrink-0" /> Download unencrypted
+              plaintext?
             </DialogTitle>
             <DialogDescription>
               You are about to download <strong>{confirm?.exportCount ?? 0}</strong> item

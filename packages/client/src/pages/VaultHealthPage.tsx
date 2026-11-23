@@ -4,9 +4,9 @@ import { List } from 'react-window';
 import type { RowComponentProps } from 'react-window';
 import {
   Shield,
-  ShieldAlert,
+  ShieldExclamationPoint,
   ShieldCheck,
-  AlertTriangle,
+  TriangleExclamationPoint,
   Copy,
   Clock,
   Key,
@@ -184,7 +184,7 @@ function ScoreCard({
         />
       ) : failed ? (
         // Analysis could not complete — show a warning, never a (misleading) zero.
-        <AlertTriangle
+        <TriangleExclamationPoint
           className="my-1 h-6 w-6 text-yellow-600 dark:text-yellow-400"
           aria-label={`${label} analysis failed`}
         />
@@ -278,8 +278,8 @@ function HealthSection({
             </p>
           ) : analysisFailed ? (
             <p className="flex items-center gap-2 text-sm text-yellow-700 dark:text-yellow-400">
-              <AlertTriangle className="h-4 w-4 shrink-0" /> Could not analyze password strength.
-              Reload the page to try again.
+              <TriangleExclamationPoint className="h-4 w-4 shrink-0" /> Could not analyze password
+              strength. Reload the page to try again.
             </p>
           ) : (
             <p className="text-sm text-green-600 dark:text-green-400">No issues found</p>
@@ -600,7 +600,8 @@ export default function VaultHealthPage() {
       : healthScore >= 50
         ? 'text-yellow-600 dark:text-yellow-400'
         : 'text-[hsl(var(--destructive))]';
-  const ScoreIcon = healthScore >= 80 ? ShieldCheck : healthScore >= 50 ? Shield : ShieldAlert;
+  const ScoreIcon =
+    healthScore >= 80 ? ShieldCheck : healthScore >= 50 ? Shield : ShieldExclamationPoint;
 
   // Breach check handler — deduplicates passwords, checks them in batches with a
   // determinate progress indicator, and reports any that could NOT be checked
@@ -735,7 +736,7 @@ export default function VaultHealthPage() {
       <div className="space-y-3">
         <HealthSection
           title="Weak Passwords"
-          icon={ShieldAlert}
+          icon={ShieldExclamationPoint}
           items={weakPasswords}
           severity="critical"
           onItemClick={handleItemClick}
@@ -768,7 +769,7 @@ export default function VaultHealthPage() {
         <div className="rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--card))]">
           <div className="flex items-center justify-between p-4">
             <div className="flex items-center gap-3">
-              <AlertTriangle className="h-5 w-5 text-[hsl(var(--destructive))]" />
+              <TriangleExclamationPoint className="h-5 w-5 text-[hsl(var(--destructive))]" />
               <span className="font-medium text-[hsl(var(--card-foreground))]">
                 Breached Passwords
               </span>
@@ -841,7 +842,7 @@ export default function VaultHealthPage() {
           {!checkingBreaches && breachResult && breachResult.failedCount > 0 && (
             <div className="border-t border-[hsl(var(--border))] p-4">
               <p className="flex items-center gap-2 text-sm text-yellow-700 dark:text-yellow-400">
-                <AlertTriangle className="h-4 w-4 shrink-0" />
+                <TriangleExclamationPoint className="h-4 w-4 shrink-0" />
                 {breachResult.failedCount.toLocaleString()} password(s) could not be checked. Run a
                 fresh check to verify them.
               </p>

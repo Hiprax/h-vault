@@ -11,7 +11,7 @@
  * sanctioned path (`copySecretToClipboard`) that arms the app-wide erase deadline.
  */
 import { useCallback, useEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
-import { AlertTriangle, Check, Copy, Download, Eye, EyeOff, Trash2 } from 'lucide-react';
+import { TriangleExclamationPoint, Check, Copy, Download, Eye, EyeOff, Trash2 } from 'lucide-react';
 import { formatBackupCodes } from '@hvault/shared';
 import { cn } from '../../lib/utils';
 import { downloadText } from '../../lib/download';
@@ -255,7 +255,7 @@ export function BackupCodeList({
       {allowDownload && confirmDownload && (
         <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-yellow-300 bg-yellow-50 px-3 py-2 text-xs text-yellow-800 dark:border-yellow-700 dark:bg-yellow-900/20 dark:text-yellow-300">
           <span className="flex items-center gap-2">
-            <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+            <TriangleExclamationPoint className="h-3.5 w-3.5 shrink-0" />
             The downloaded file is not encrypted. Anyone who can read it can use these codes.
           </span>
           <span className="flex shrink-0 items-center gap-2">
@@ -279,7 +279,7 @@ export function BackupCodeList({
 
       {runningLow && (
         <p className="flex items-center gap-2 text-xs text-yellow-700 dark:text-yellow-400">
-          <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+          <TriangleExclamationPoint className="h-3.5 w-3.5 shrink-0" />
           {codes.length === 1
             ? 'Only one code left. Generate a fresh set at the provider.'
             : `Only ${codes.length} codes left. Generate a fresh set at the provider.`}

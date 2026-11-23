@@ -5,7 +5,14 @@ import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from '@hvault/shared/zod';
 import type zxcvbnType from 'zxcvbn';
 import { getZxcvbn } from '../lib/lazyZxcvbn';
-import { ArrowLeft, CheckCircle, AlertCircle, AlertTriangle, Eye, EyeOff } from 'lucide-react';
+import {
+  ArrowLeft,
+  CheckCircle,
+  CircleExclamationPoint,
+  TriangleExclamationPoint,
+  Eye,
+  EyeOff,
+} from 'lucide-react';
 import { BrandLogo } from '../components/ui/BrandLogo';
 import { resetPasswordApi } from '../services/api/authApi';
 import { cn, getApiErrorMessage } from '../lib/utils';
@@ -159,7 +166,7 @@ export default function ResetPasswordPage() {
         <Card className="w-full max-w-md">
           <CardHeader className="items-center text-center">
             <div className="flex h-12 w-12 items-center justify-center rounded-full bg-red-100 dark:bg-red-950">
-              <AlertCircle className="h-6 w-6 text-red-600 dark:text-red-400" />
+              <CircleExclamationPoint className="h-6 w-6 text-red-600 dark:text-red-400" />
             </div>
             <CardTitle as="h1">Invalid Link</CardTitle>
             <CardDescription>
@@ -228,7 +235,7 @@ export default function ResetPasswordPage() {
               role="alert"
               className="flex items-start gap-2 rounded-md border border-yellow-300 bg-yellow-50 p-3 text-sm text-yellow-800 dark:border-yellow-700 dark:bg-yellow-950 dark:text-yellow-200"
             >
-              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+              <TriangleExclamationPoint className="mt-0.5 h-4 w-4 shrink-0" />
               <span>
                 Resetting your password creates a new encryption key, so what your vault holds can
                 no longer be opened with it. If you set up encrypted backups before this, your

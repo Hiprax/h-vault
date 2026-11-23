@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { AlertTriangle, Upload, X } from 'lucide-react';
+import { TriangleExclamationPoint, Upload, X } from 'lucide-react';
 import {
   MAX_DOCUMENT_EXT_LENGTH,
   MAX_DOCUMENT_NAME_LENGTH,
@@ -756,7 +756,7 @@ export function DocumentUploadPanel({
         data-testid="upload-lock-note"
         className="flex items-start gap-2 text-xs text-[hsl(var(--muted-foreground))]"
       >
-        <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+        <TriangleExclamationPoint className="mt-0.5 h-3.5 w-3.5 shrink-0" />
         <span>
           Locking the vault cancels an upload in progress. Uploading is not activity, so the
           auto-lock countdown keeps running while a transfer is underway.

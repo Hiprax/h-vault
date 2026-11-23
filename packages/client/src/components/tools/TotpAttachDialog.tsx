@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { AlertTriangle, Search } from 'lucide-react';
+import { TriangleExclamationPoint, Search } from 'lucide-react';
 import { useVaultStore, type DecryptedVaultItem } from '../../stores/vaultStore';
 import { isUndecodableData } from '../../lib/vaultData';
 import { parseTotpValue } from '../../lib/totp';
@@ -158,7 +158,7 @@ export function TotpAttachDialog({ entry, onCancel, onConfirm }: TotpAttachDialo
       {existingTotp !== null && (
         <div className="space-y-2 rounded-lg border border-amber-500/40 bg-amber-500/5 p-3">
           <p className="flex items-center gap-2 text-sm font-medium text-[hsl(var(--foreground))]">
-            <AlertTriangle className="h-4 w-4 text-amber-500" />
+            <TriangleExclamationPoint className="h-4 w-4 text-amber-500" />
             That login already has a code
           </p>
           <p className="text-xs text-[hsl(var(--muted-foreground))]">

@@ -3,7 +3,7 @@ import { Link } from 'react-router';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from '@hvault/shared/zod';
-import { ArrowLeft, CheckCircle, AlertTriangle } from 'lucide-react';
+import { ArrowLeft, CheckCircle, TriangleExclamationPoint } from 'lucide-react';
 import { BrandLogo } from '../ui/BrandLogo';
 import { forgotPasswordApi } from '../../services/api/authApi';
 import { getApiErrorMessage } from '../../lib/utils';
@@ -79,7 +79,7 @@ export function ForgotPasswordPage() {
             ) : (
               <>
                 <div className="flex h-12 w-12 items-center justify-center rounded-full bg-yellow-100 dark:bg-yellow-950">
-                  <AlertTriangle className="h-6 w-6 text-yellow-600 dark:text-yellow-400" />
+                  <TriangleExclamationPoint className="h-6 w-6 text-yellow-600 dark:text-yellow-400" />
                 </div>
                 <CardTitle as="h1">Email Could Not Be Sent</CardTitle>
                 <CardDescription>

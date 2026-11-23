@@ -3,9 +3,9 @@ import { Link } from 'react-router';
 import { List } from 'react-window';
 import type { RowComponentProps } from 'react-window';
 import {
-  AlertTriangle,
+  TriangleExclamationPoint,
   FileText,
-  FileWarning,
+  FileExclamationPoint,
   Folder,
   RefreshCw,
   Star,
@@ -153,7 +153,7 @@ const DocumentRow = memo(function DocumentRow({
               : 'bg-sky-100 text-sky-800 dark:bg-sky-900/30 dark:text-sky-300',
         )}
       >
-        {degraded ? <FileWarning className="h-5 w-5" /> : <FileText className="h-5 w-5" />}
+        {degraded ? <FileExclamationPoint className="h-5 w-5" /> : <FileText className="h-5 w-5" />}
       </span>
 
       <span className="flex min-w-0 flex-1 flex-col gap-1">
@@ -306,7 +306,7 @@ function ErrorState({ message, onRetry }: { message: string; onRetry: () => void
       data-testid="documents-error"
       className="flex flex-col items-center justify-center gap-3 rounded-lg border border-red-300 bg-red-50 py-12 text-center dark:border-red-700 dark:bg-red-900/20"
     >
-      <AlertTriangle className="h-8 w-8 text-red-700 dark:text-red-300" />
+      <TriangleExclamationPoint className="h-8 w-8 text-red-700 dark:text-red-300" />
       <p className="max-w-sm text-sm text-red-800 dark:text-red-200">{message}</p>
       <button
         type="button"

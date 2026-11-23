@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { MailWarning } from 'lucide-react';
+import { MailExclamationPoint } from 'lucide-react';
 import {
   CRITICAL_SECURITY_NOTIFICATION_EVENTS,
   SECURITY_NOTIFICATION_PREFERENCE_EVENTS,
@@ -135,7 +135,7 @@ export function SecurityNotificationsCard({ email, initial }: SecurityNotificati
     <Card>
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
-          <MailWarning className="h-5 w-5" />
+          <MailExclamationPoint className="h-5 w-5" />
           Security emails
         </CardTitle>
         <CardDescription>

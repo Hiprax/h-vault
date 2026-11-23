@@ -14,7 +14,7 @@ import {
   Activity,
   Wifi,
   WifiOff,
-  AlertTriangle,
+  TriangleExclamationPoint,
   RefreshCw,
   PanelLeftClose,
   PanelLeftOpen,
@@ -516,7 +516,7 @@ export function AppLayout() {
         {/* Degraded storage warning */}
         {storageDegraded && (
           <div className="mx-4 mt-2 flex items-center gap-2 rounded-md border border-yellow-300 bg-yellow-50 px-4 py-2 text-sm text-yellow-800 dark:border-yellow-700 dark:bg-yellow-900/20 dark:text-yellow-300 lg:mx-6">
-            <AlertTriangle className="h-4 w-4 flex-shrink-0" />
+            <TriangleExclamationPoint className="h-4 w-4 flex-shrink-0" />
             <span>
               Your browser does not support secure storage. Data is stored unencrypted. Use HTTPS
               for full security.
@@ -550,7 +550,7 @@ export function AppLayout() {
               data-testid="offline-cache-banner"
               className="flex items-center gap-2 rounded-md border border-yellow-300 bg-yellow-50 px-4 py-2 text-sm text-yellow-800 dark:border-yellow-700 dark:bg-yellow-900/20 dark:text-yellow-300"
             >
-              <AlertTriangle className="h-4 w-4 flex-shrink-0" />
+              <TriangleExclamationPoint className="h-4 w-4 flex-shrink-0" />
               <span className="flex-1">{OFFLINE_CACHE_NOTICES[offlineCacheNotice]}</span>
               <button
                 type="button"
@@ -597,7 +597,7 @@ export function AppLayout() {
             data-testid="stale-vault-key-banner"
             className="mx-4 mt-2 flex items-center gap-2 rounded-md border border-red-300 bg-red-50 px-4 py-2 text-sm text-red-800 dark:border-red-700 dark:bg-red-900/20 dark:text-red-300 lg:mx-6"
           >
-            <AlertTriangle className="h-4 w-4 flex-shrink-0" />
+            <TriangleExclamationPoint className="h-4 w-4 flex-shrink-0" />
             <span className="flex-1">
               Your vault key was changed on another device, so changes from this tab can no longer
               be saved. Sign in again to continue.
@@ -628,7 +628,7 @@ export function AppLayout() {
             data-testid="interrupted-rotation-banner"
             className="mx-4 mt-2 flex items-center gap-2 rounded-md border border-amber-300 bg-amber-50 px-4 py-2 text-sm text-amber-900 dark:border-amber-700 dark:bg-amber-900/20 dark:text-amber-200 lg:mx-6"
           >
-            <AlertTriangle className="h-4 w-4 flex-shrink-0" />
+            <TriangleExclamationPoint className="h-4 w-4 flex-shrink-0" />
             <span className="flex-1">
               A vault key rotation was interrupted, so some entries are sealed under the key it was
               moving to. Open Settings and choose Finish Rotation.
@@ -649,7 +649,7 @@ export function AppLayout() {
             data-testid="decryption-failure-banner"
             className="mx-4 mt-2 flex items-center gap-2 rounded-md border border-red-300 bg-red-50 px-4 py-2 text-sm text-red-800 dark:border-red-700 dark:bg-red-900/20 dark:text-red-300 lg:mx-6"
           >
-            <AlertTriangle className="h-4 w-4 flex-shrink-0" />
+            <TriangleExclamationPoint className="h-4 w-4 flex-shrink-0" />
             <span className="flex-1">
               {decryptionFailureCount} item(s) could not be decrypted. This may indicate data
               corruption or a key mismatch.

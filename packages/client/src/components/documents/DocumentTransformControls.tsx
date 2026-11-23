@@ -1,4 +1,4 @@
-import { AlertTriangle, FileText, Loader2 } from 'lucide-react';
+import { TriangleExclamationPoint, FileText, Loader2 } from 'lucide-react';
 import {
   MAX_FORMATTABLE_SIZE_BYTES,
   canRepairSyntax,
@@ -390,7 +390,7 @@ export function TransformFailurePanel({
       className="space-y-2 rounded-md border border-red-400 bg-red-50 p-3 text-red-900 dark:border-red-700 dark:bg-red-950 dark:text-red-100"
     >
       <p className="flex items-start gap-2 text-sm font-medium">
-        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+        <TriangleExclamationPoint className="mt-0.5 h-4 w-4 shrink-0" />
         <span>This file was not uploaded: it could not be repaired or formatted.</span>
       </p>
       <p data-testid="transform-failure-message" className="text-xs">

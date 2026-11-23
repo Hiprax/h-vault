@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, Loader2, Trash2, WifiOff } from 'lucide-react';
+import { TriangleExclamationPoint, Loader2, Trash2, WifiOff } from 'lucide-react';
 import { formatBytes } from '@hvault/shared';
 import type { DocumentUsageResponse } from '@hvault/shared';
 import { getApiErrorMessage } from '../lib/utils';
@@ -316,7 +316,7 @@ function DocumentsView({ config }: DocumentsViewProps) {
               data-testid="documents-degraded"
               className="flex items-start gap-2 rounded-md border border-amber-400 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-100"
             >
-              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+              <TriangleExclamationPoint className="mt-0.5 h-4 w-4 shrink-0" />
               {/* Counted over the list this mode reads, and it says so: in a
                   folder or favorites view those rows may not be on screen at all,
                   so claiming they are "listed below" would be wrong. */}

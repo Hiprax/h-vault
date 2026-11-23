@@ -1,4 +1,4 @@
-import { FileWarning } from 'lucide-react';
+import { FileExclamationPoint } from 'lucide-react';
 
 /**
  * What a user sees on a documents route when this server has no object storage
@@ -20,7 +20,7 @@ export function StorageUnavailable() {
       data-testid="documents-unavailable"
       className="mx-auto max-w-xl rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--card))] p-6 text-center"
     >
-      <FileWarning className="mx-auto h-8 w-8 text-[hsl(var(--muted-foreground))]" />
+      <FileExclamationPoint className="mx-auto h-8 w-8 text-[hsl(var(--muted-foreground))]" />
       <h1 className="mt-3 text-lg font-semibold text-[hsl(var(--foreground))]">
         Documents are not available on this server
       </h1>

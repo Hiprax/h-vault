@@ -17,7 +17,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type zxcvbnType from 'zxcvbn';
-import { AlertTriangle, FileUp, Loader2, Lock, X } from 'lucide-react';
+import { TriangleExclamationPoint, FileUp, Loader2, Lock, X } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { downloadBlob } from '../../lib/download';
 import { getZxcvbn } from '../../lib/lazyZxcvbn';
@@ -152,7 +152,7 @@ export function FileEncryptPanel() {
           role="note"
           className="flex items-start gap-3 rounded-md border border-yellow-400 bg-yellow-50 p-3 text-sm text-yellow-900 dark:border-yellow-700 dark:bg-yellow-950 dark:text-yellow-100"
         >
-          <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0" />
+          <TriangleExclamationPoint className="mt-0.5 h-5 w-5 shrink-0" />
           <p>
             <strong>There is no password recovery.</strong> If you lose or forget this password, the
             encrypted file can never be opened again. There is no reset and no backdoor.

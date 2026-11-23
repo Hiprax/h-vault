@@ -23,7 +23,7 @@ import {
   Eye,
   EyeOff,
   Undo2,
-  AlertTriangle,
+  TriangleExclamationPoint,
 } from 'lucide-react';
 import { cn, getApiErrorMessage } from '../../lib/utils';
 import { hasAnyValue, isUndecodableData } from '../../lib/vaultData';
@@ -1955,7 +1955,7 @@ function CardNumberField({ control, showWarning }: CardNumberFieldProps) {
           id="field-number-warning"
           className="mt-1 flex items-center gap-1 text-xs text-amber-700 dark:text-amber-300"
         >
-          <AlertTriangle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+          <TriangleExclamationPoint className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
           This number fails the standard card check. Check it for a typo; you can still save it.
         </p>
       )}
@@ -2831,7 +2831,7 @@ export function VaultItemForm({
             />
             {untouchedTotpFailure !== null && (
               <p className="flex items-center gap-1 text-xs text-amber-700 dark:text-amber-300">
-                <AlertTriangle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                <TriangleExclamationPoint className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                 {`${untouchedTotpFailure}, so no codes can be generated from it.`}
               </p>
             )}
@@ -2952,7 +2952,7 @@ export function VaultItemForm({
           </div>
           {secretExpiryPassed && (
             <p className="flex items-center gap-1 text-xs text-amber-700 dark:text-amber-300">
-              <AlertTriangle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+              <TriangleExclamationPoint className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
               This date has passed, so the secret will show as expired.
             </p>
           )}

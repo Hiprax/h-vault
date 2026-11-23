@@ -25,7 +25,7 @@ import {
   Lock,
   CheckCircle,
   XCircle,
-  AlertTriangle,
+  TriangleExclamationPoint,
   LogOut,
   EyeOff,
   Info,
@@ -3767,7 +3767,7 @@ export default function SettingsPage() {
               className="space-y-3 rounded-lg border border-[hsl(var(--warning,45_93%_47%))/0.5] bg-[hsl(var(--warning,45_93%_47%))/0.05] p-4"
             >
               <div className="flex items-start gap-2">
-                <AlertTriangle className="h-5 w-5 shrink-0 text-amber-500 mt-0.5" />
+                <TriangleExclamationPoint className="h-5 w-5 shrink-0 text-amber-500 mt-0.5" />
                 <div className="space-y-2 text-sm text-[hsl(var(--foreground))]">
                   <p className="font-medium">Important: Export Limitations</p>
                   <p>
@@ -4042,7 +4042,7 @@ export default function SettingsPage() {
             className="flex items-center justify-between rounded-lg border border-amber-500/40 bg-amber-500/5 p-3 transition-colors hover:bg-amber-500/10"
           >
             <div className="flex items-center gap-3">
-              <AlertTriangle className="h-5 w-5 shrink-0 text-amber-500" />
+              <TriangleExclamationPoint className="h-5 w-5 shrink-0 text-amber-500" />
               <div>
                 <p className="text-sm font-medium text-[hsl(var(--foreground))]">
                   Export to another manager

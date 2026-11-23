@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, Navigate, useParams } from 'react-router';
-import { AlertTriangle, Loader2 } from 'lucide-react';
+import { TriangleExclamationPoint, Loader2 } from 'lucide-react';
 import { getApiErrorMessage } from '../lib/utils';
 import { useDocumentsConfig } from '../hooks/useDocumentsConfig';
 import { useDocumentsStore } from '../stores/documentsStore';
@@ -94,7 +94,7 @@ export default function DocumentPage() {
         data-testid="document-load-error"
         className="mx-auto max-w-md py-20 text-center"
       >
-        <AlertTriangle className="mx-auto h-8 w-8 text-red-700 dark:text-red-300" />
+        <TriangleExclamationPoint className="mx-auto h-8 w-8 text-red-700 dark:text-red-300" />
         <h1 className="mt-3 text-xl font-semibold text-[hsl(var(--foreground))]">
           This document could not be loaded
         </h1>

@@ -7,7 +7,7 @@ import { MAX_INVITATION_TOKEN_LENGTH } from '@hvault/shared';
 import type { RegistrationMode } from '@hvault/shared';
 import type zxcvbnType from 'zxcvbn';
 import { getZxcvbn } from '../../lib/lazyZxcvbn';
-import { Eye, EyeOff, AlertTriangle } from 'lucide-react';
+import { Eye, EyeOff, TriangleExclamationPoint } from 'lucide-react';
 import { BrandLogo } from '../ui/BrandLogo';
 import { useAuthStore } from '../../stores/authStore';
 import { cn, getApiErrorMessage } from '../../lib/utils';
@@ -387,7 +387,7 @@ export function RegisterPage() {
 
             {/* Warning */}
             <div className="flex gap-2 rounded-md border border-yellow-500/30 bg-yellow-50 p-3 dark:bg-yellow-950/30">
-              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-yellow-600 dark:text-yellow-400" />
+              <TriangleExclamationPoint className="mt-0.5 h-4 w-4 shrink-0 text-yellow-600 dark:text-yellow-400" />
               <p className="text-xs text-yellow-800 dark:text-yellow-200">
                 Your master password cannot be recovered if you forget it. Please store it in a safe
                 place. There is no password reset for your vault.

@@ -6,7 +6,7 @@
  * `VaultItemForm` and makes this component testable on its own.
  */
 import { useCallback, useMemo, useRef, useState } from 'react';
-import { AlertCircle, Check } from 'lucide-react';
+import { CircleExclamationPoint, Check } from 'lucide-react';
 import {
   BACKUP_CODES_INPUT_FORMATS,
   MAX_LOGIN_BACKUP_CODES,
@@ -91,7 +91,7 @@ function ParseErrorStrip({ raw, issue }: { raw: string; issue: BackupCodesIssue 
   return (
     <div className="rounded-md border border-[hsl(var(--destructive)/0.3)] bg-[hsl(var(--destructive)/0.05)] px-3 py-2">
       <p className="flex items-start gap-2 text-xs text-[hsl(var(--destructive))]">
-        <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+        <CircleExclamationPoint className="mt-0.5 h-3.5 w-3.5 shrink-0" />
         <span>
           {issue.message}
           {issue.hint !== undefined && <span className="opacity-80"> {issue.hint}</span>}

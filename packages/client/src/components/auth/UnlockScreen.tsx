@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from '@hvault/shared/zod';
-import { Lock, Eye, EyeOff, LogOut, AlertCircle, Shield, Clock } from 'lucide-react';
+import { Lock, Eye, EyeOff, LogOut, CircleExclamationPoint, Shield, Clock } from 'lucide-react';
 import { verifyUnlockResultSchema } from '@hvault/shared';
 import type { VerifyUnlockResult } from '@hvault/shared';
 import { useAuthStore } from '../../stores/authStore';
@@ -475,7 +475,7 @@ export function UnlockScreen() {
                 role="status"
                 className="flex items-center gap-2 rounded-md border border-[hsl(var(--warning,40_96%_40%)/0.3)] bg-[hsl(var(--warning,40_96%_40%)/0.05)] p-3 text-sm text-[hsl(var(--warning,40_96%_40%))]"
               >
-                <AlertCircle className="h-4 w-4 shrink-0" />
+                <CircleExclamationPoint className="h-4 w-4 shrink-0" />
                 <span>
                   Your vault key was changed in another session, so this vault locked itself. Unlock
                   to load it with the current key.
@@ -488,7 +488,7 @@ export function UnlockScreen() {
                 role="status"
                 className="flex items-center gap-2 rounded-md border border-[hsl(var(--warning,40_96%_40%)/0.3)] bg-[hsl(var(--warning,40_96%_40%)/0.05)] p-3 text-sm text-[hsl(var(--warning,40_96%_40%))]"
               >
-                <AlertCircle className="h-4 w-4 shrink-0" />
+                <CircleExclamationPoint className="h-4 w-4 shrink-0" />
                 <span>
                   {MAX_ATTEMPTS_BEFORE_LOCKOUT - failedAttempts} attempt
                   {MAX_ATTEMPTS_BEFORE_LOCKOUT - failedAttempts === 1 ? '' : 's'} remaining before

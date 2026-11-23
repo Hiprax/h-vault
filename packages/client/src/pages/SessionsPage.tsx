@@ -7,7 +7,7 @@ import {
   Trash2,
   Globe,
   Loader2,
-  ShieldAlert,
+  ShieldExclamationPoint,
   ShieldCheck,
   RefreshCw,
   Info,
@@ -199,7 +199,7 @@ export default function SessionsPage() {
             disabled={revokingAll}
             className="inline-flex items-center gap-2 rounded-md border border-[hsl(var(--destructive)/0.3)] px-3 py-2 text-sm font-medium text-[hsl(var(--destructive))] hover:bg-[hsl(var(--destructive)/0.1)] transition-colors disabled:opacity-50"
           >
-            <ShieldAlert className="h-4 w-4" />
+            <ShieldExclamationPoint className="h-4 w-4" />
             {revokingAll ? 'Revoking...' : 'Revoke All Other Sessions'}
           </button>
         </div>
@@ -318,7 +318,7 @@ export default function SessionsPage() {
               disabled={revokingAllTrusted}
               className="inline-flex items-center gap-2 rounded-md border border-[hsl(var(--destructive)/0.3)] px-3 py-2 text-sm font-medium text-[hsl(var(--destructive))] hover:bg-[hsl(var(--destructive)/0.1)] transition-colors disabled:opacity-50"
             >
-              <ShieldAlert className="h-4 w-4" />
+              <ShieldExclamationPoint className="h-4 w-4" />
               Revoke All Trusted Devices
             </button>
           )}
@@ -431,7 +431,7 @@ export default function SessionsPage() {
         >
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2 text-[hsl(var(--destructive))]">
-              <ShieldAlert className="h-5 w-5 shrink-0" /> Revoke all trusted devices?
+              <ShieldExclamationPoint className="h-5 w-5 shrink-0" /> Revoke all trusted devices?
             </DialogTitle>
             <DialogDescription>
               Every trusted device will need to complete two-factor authentication again on its next
@@ -457,7 +457,7 @@ export default function SessionsPage() {
               {revokingAllTrusted ? (
                 <Loader2 className="h-4 w-4 animate-spin" />
               ) : (
-                <ShieldAlert className="h-4 w-4" />
+                <ShieldExclamationPoint className="h-4 w-4" />
               )}
               {revokingAllTrusted ? 'Revoking...' : 'Revoke all'}
             </button>

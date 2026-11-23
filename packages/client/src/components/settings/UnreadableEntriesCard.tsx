@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { isAxiosError } from 'axios';
 import { Link, useLocation } from 'react-router';
-import { FileWarning } from 'lucide-react';
+import { FileExclamationPoint } from 'lucide-react';
 import type { IUserProfile } from '@hvault/shared';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../ui/Card';
 import { Button } from '../ui/Button';
@@ -269,7 +269,7 @@ export function UnreadableEntriesCard({
     <Card id={UNREADABLE_ENTRIES_ANCHOR}>
       <CardHeader>
         <CardTitle ref={titleRef} tabIndex={-1} className="flex items-center gap-2">
-          <FileWarning className="h-5 w-5" /> Unreadable Entries
+          <FileExclamationPoint className="h-5 w-5" /> Unreadable Entries
         </CardTitle>
         <CardDescription>
           Entries your current vault key cannot open, such as those sealed before a master password

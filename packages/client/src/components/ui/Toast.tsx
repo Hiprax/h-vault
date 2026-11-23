@@ -7,7 +7,13 @@ import {
   useEffect,
   type ReactNode,
 } from 'react';
-import { X, CheckCircle, AlertCircle, AlertTriangle, Info } from 'lucide-react';
+import {
+  X,
+  CheckCircle,
+  CircleExclamationPoint,
+  TriangleExclamationPoint,
+  Info,
+} from 'lucide-react';
 import { cn } from '../../lib/utils';
 
 /* -------------------------------------------------------------------------- */
@@ -57,8 +63,8 @@ const typeStyles: Record<ToastType, string> = {
 
 const iconMap: Record<ToastType, typeof CheckCircle> = {
   success: CheckCircle,
-  error: AlertCircle,
-  warning: AlertTriangle,
+  error: CircleExclamationPoint,
+  warning: TriangleExclamationPoint,
   info: Info,
 };
 
