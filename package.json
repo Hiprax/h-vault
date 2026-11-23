@@ -113,7 +113,7 @@
   },
   "overrides": {
     "brace-expansion": ">=5.0.11",
-    "follow-redirects": "^1.16.1",
+    "follow-redirects": "^1.16.2",
     "ip-address": "^10.7.4",
     "lodash": ">=4.17.24",
     "path-to-regexp": ">=8.3.1",
