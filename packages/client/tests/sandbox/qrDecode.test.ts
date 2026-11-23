@@ -131,11 +131,14 @@ describe('a real QR round trip, across two independent implementations', () => {
     }
   });
 
-  it('FAILS on a mirrored image, which is why the capture is never mirrored', () => {
-    // The preview is mirrored so aiming feels right, and the capture must not
-    // be: QR layout is chirality-dependent. This turns that comment into a fact
-    // somebody would have to delete a passing test to ignore.
-    expect(tryDecode(mirror(rasterise(ONE_ACCOUNT, 6)))).toBeNull();
+  it('decodes a mirrored image too, so the mirrored preview can never be what breaks a scan', () => {
+    // The preview is mirrored so aiming feels right; the capture is drawn in the
+    // camera's true orientation. Until qr 0.7.1 that was load-bearing, because QR
+    // layout is chirality-dependent and the decoder returned nothing for a
+    // mirrored raster (this test used to pin exactly that). qr 0.7.1 reads
+    // mirror-image codes, so a frame mirrored at the source still decodes, and to
+    // the same payload: this keeps the comment in TotpScanPanel.tsx true.
+    expect(tryDecode(mirror(rasterise(ONE_ACCOUNT, 6)))).toBe(ONE_ACCOUNT);
   });
 });
 

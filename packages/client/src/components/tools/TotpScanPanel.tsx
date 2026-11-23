@@ -365,9 +365,9 @@ export function TotpScanPanel({ onDecoded, onError, status }: TotpScanPanelProps
           while the camera light stayed on. */}
       <div className={cameraOn ? 'space-y-2' : 'hidden'}>
         <div className="relative mx-auto aspect-square w-full max-w-sm overflow-hidden rounded-lg bg-black">
-          {/* Mirrored for aiming only. The CAPTURE is never mirrored: QR
-                layout is chirality-dependent and a mirrored raster does not
-                decode. */}
+          {/* Mirrored for aiming only. The CAPTURE is drawn in the camera's
+                true orientation; the decoder also reads a mirrored raster
+                (tests/sandbox/qrDecode.test.ts), so this is not load-bearing. */}
           <video
             ref={videoRef}
             playsInline
