@@ -362,55 +362,55 @@
       "area": "the mutation oracle's floor",
       "detail": "The `shared` leg holds a floor (mutation.legs.shared: 88.64% of 2,633 mutants, banked 2026-09-24 from a from-scratch run), and `test:mutation:diff` holds every push to 85% on the mutants its lines own. The `client` leg (about 24,000 mutants, roughly twenty hours from scratch) and the `server` leg (about 12,900, 41% static, 120-130 hours on four cores) are unbanked, so `test:mutation` still exits 1 naming them as UNBANKED and `npm run verify:full` does not pass. Neither fits the ten-hour window an unattended session is given, and neither may be measured beside other work, because a CPU-starved timeout is recorded as a kill. The tier-0 and tier-1 surface that the pre-push hook and the release workflow run is unaffected.",
       "ledger": ["SUP-0044"],
-      "review": "2026-11-11"
+      "review": "2027-02-21"
     },
     {
       "area": "cross-browser end-to-end: WebKit",
-      "detail": "playwright.config.ts now declares two engine projects: Chromium over every spec, and Firefox over the two whose answers depend on the engine (clipboard-hygiene, auto-lock), attributed in the JUnit report by project name. That leg drives a GENUINE transient-activation refusal on Gecko and the gesture-scoped retry that follows it, so the clipboard guard is no longer verified only by unit tests with simulated refusals. What is still asserted about one engine only: WebKit, and the other nineteen specs \u2014 the latter deliberately, because they assert application behaviour that does not vary by engine. One engine-dependent claim is Chromium-only as well: `test:sandbox` and the Nginx leg of `test:deploy` render the isolated document under the production policy in Chromium alone, and enforcing a Content-Security-Policy is engine behaviour, so Gecko's and WebKit's reading of that policy is unmeasured. Nor does either leg go through the operator's outer, TLS-terminating host Nginx, which adds a header floor of its own: the inner Nginx is the last layer a browser here renders behind.",
+      "detail": "playwright.config.ts now declares two engine projects: Chromium over every spec, and Firefox over the two whose answers depend on the engine (clipboard-hygiene, auto-lock), attributed in the JUnit report by project name. That leg drives a GENUINE transient-activation refusal on Gecko and the gesture-scoped retry that follows it, so the clipboard guard is no longer verified only by unit tests with simulated refusals. What is still asserted about one engine only: WebKit, and the other twenty-eight specs \u2014 the latter deliberately, because they assert application behaviour that does not vary by engine. One engine-dependent claim is Chromium-only as well: `test:sandbox` and the Nginx leg of `test:deploy` render the isolated document under the production policy in Chromium alone, and enforcing a Content-Security-Policy is engine behaviour, so Gecko's and WebKit's reading of that policy is unmeasured. Nor does either leg go through the operator's outer, TLS-terminating host Nginx, which adds a header floor of its own: the inner Nginx is the last layer a browser here renders behind.",
       "ledger": ["SUP-0042"],
-      "review": "2026-11-11"
+      "review": "2027-02-21"
     },
     {
       "area": "non-functional load and performance",
-      "detail": "No benchmark, load, stress, spike or soak testing. `test:resource` holds eleven measured scenarios to committed time and memory ceilings \u2014 seven over a 10,000-item vault (`RESOURCE_SCENARIOS` in `scripts/ci/lib/resource-budgets.mjs` is the list), plus a document at the configured maximum size delivered part by part, a document list walked at MAX_DOCUMENTS_PER_USER, nine accounts downloading a 22 MB backup at once and a vault list walked at ~90 MB pages \u2014 but its noise band is 2.4-50 percent (SUP-0027; the nine-download RSS growth, a few megabytes at most runs, spreads further), so it sees a step change and nothing smaller. There is no concurrent-user SLO for a single-tenant self-hosted deployment to test against.",
+      "detail": "No benchmark, load, stress, spike or soak testing. `test:resource` runs eleven scenarios, eight of them held to committed time and memory ceilings \u2014 five over a 10,000-item vault, a background-job index-plan check over 5,000 rows and a restore body-limit check (`RESOURCE_SCENARIOS` in `scripts/ci/lib/resource-budgets.mjs` is the list), plus a document at the configured maximum size delivered part by part, a document list walked at MAX_DOCUMENTS_PER_USER, nine accounts downloading a 22 MB backup at once and a vault list walked at ~90 MB pages \u2014 but its noise band is 2.4-50 percent (SUP-0027; the nine-download RSS growth, a few megabytes at most runs, spreads further), so it sees a step change and nothing smaller. There is no concurrent-user SLO for a single-tenant self-hosted deployment to test against.",
       "ledger": ["SUP-0032", "SUP-0033", "SUP-0034", "SUP-0035", "SUP-0036", "SUP-0039"],
-      "review": "2026-11-11"
+      "review": "2027-02-21"
     },
     {
       "area": "dynamic application security testing",
       "detail": "No DAST pass. The classes a baseline scan finds are covered statically and by direct assertion \u2014 security headers and CSP per response, the cross-user authorization matrix over every id-taking route, a CSRF suite, and the CodeQL security-and-quality suite over the source \u2014 but nothing probes the running stack from outside. The target already exists: `test:deploy` stands the whole Compose stack up.",
       "ledger": ["SUP-0041"],
-      "review": "2026-11-11"
+      "review": "2027-02-21"
     },
     {
       "area": "supply-chain provenance",
-      "detail": "No SBOM is produced or published. The dependency surface is gated three ways (`audit:deps` advisories, `audit:licenses` allowlist, Trivy over all three images), but none of them emits a bill of materials a downstream consumer could read.",
+      "detail": "No SBOM is produced or published. The three release images are published to a public registry with a signed build-provenance attestation per index, but with no bill of materials beside it. The dependency surface is gated three ways (`audit:deps` advisories, `audit:licenses` allowlist, Trivy over all three images), but none of them emits a bill of materials a downstream consumer could read.",
       "ledger": ["SUP-0030"],
-      "review": "2026-11-11"
+      "review": "2026-12-23"
     },
     {
       "area": "rendered-output and degraded-network testing",
       "detail": "No visual-regression baseline and no deliberate latency injection. Function is covered by axe over forty-one views, the component suites and the E2E journeys; the offline path is covered by the IndexedDB cache and service-worker tests.",
       "ledger": ["SUP-0031", "SUP-0037"],
-      "review": "2026-11-11"
+      "review": "2027-02-21"
     },
     {
       "area": "fault injection beyond process death",
-      "detail": "No chaos testing. The topology offers little surface \u2014 one datastore, no service mesh, no inter-service RPC to sever \u2014 and the failure modes that do exist are driven directly by `test:recovery`, which SIGKILLs a real process at eight injection points.",
+      "detail": "No chaos testing. The topology now has two stateful services (MongoDB and the Garage object store) and no service mesh. The failure modes driven today are process death and refusal: `test:recovery` SIGKILLs a real process at eight injection points over the vault and three over the document store, and the storage circuit breaker has its own suite. Nothing injects a partition, added latency or a stalled peer between the application and either service.",
       "ledger": ["SUP-0038"],
-      "review": "2026-11-11"
+      "review": "2026-12-23"
     },
     {
       "area": "platform matrix",
       "detail": "Node 24 is pinned in .nvmrc, in engines.node and in every image, so no supported matrix exists to test across; the dropped Node 22 leg is recorded in the README as a known gap on the same grounds. The Windows leg cannot run on the maintainer's machine.",
       "ledger": ["SUP-0040"],
-      "review": "2026-11-11"
+      "review": "2027-02-21"
     },
     {
       "area": "accessibility below the blocking threshold, and the dark theme",
       "detail": "`test:a11y` blocks on axe impacts `moderate`, `serious` and `critical` (and on a violation axe could not grade), and `ratchet-check.mjs` holds `a11y.moderate`, `a11y.serious` and `a11y.critical` at zero beside `a11y.viewsScanned`. Only `minor` findings are recorded without blocking across the forty-one scanned views (the counts are in `a11y.json`, and are deliberately not repeated here: nothing would keep them true). What remains is a gap in COVERAGE, not in the threshold: a check axe could not decide is recorded as undecided and never gated, and the scan runs in the light theme only, so the dark palette is unmeasured; the one dark-theme defect already known is ledgered as SUP-0043.",
       "ledger": ["SUP-0043"],
-      "review": "2026-11-11"
+      "review": "2027-02-21"
     }
   ],
   "deferred": {

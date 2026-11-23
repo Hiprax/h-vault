@@ -28,11 +28,11 @@
       "file": "packages/client/src/components/ui/Dialog.tsx",
       "symbol": "no-non-null-assertion -- length > 0 checked above",
       "maxHits": 3,
-      "reason": "Focus-trap arithmetic over the focusable-element list. Each assertion is guarded by an explicit `length > 0` check on the line above; TypeScript cannot carry that narrowing across the index expression.",
+      "reason": "Focus-trap arithmetic over the focusable-element list. Each assertion is guarded by an explicit length check: the keydown handler's two by its `focusableElements.length === 0` early return, the dialog's initial-focus one by `if (focusable.length > 0)`; TypeScript cannot carry that narrowing across the index expression. Re-justified 2026-11-23: the code is unchanged; the guard sentence above was corrected that day (it said every guard was a `length > 0` check on the line above).",
       "owner": "maintainer",
       "created": "2026-08-12",
-      "expires": "2026-11-10",
-      "approvedBy": ["judge:readonly"]
+      "expires": "2027-02-21",
+      "approvedBy": ["maintainer"]
     },
     {
       "id": "SUP-0005",
@@ -41,11 +41,11 @@
       "file": "packages/client/src/components/ui/Dialog.tsx",
       "symbol": "no-non-null-assertion -- length > 0 checked above",
       "maxHits": 1,
-      "reason": "The fourth occurrence of the focus-trap assertion described in SUP-0004; policy.maxHitsPerEntry caps one entry at three, and splitting is the intended behaviour rather than raising the cap.",
+      "reason": "The fourth occurrence of the focus-trap assertion described in SUP-0004; policy.maxHitsPerEntry caps one entry at three, and splitting is the intended behaviour rather than raising the cap. Re-justified 2026-11-23: unchanged; the fourth occurrence is the initial-focus effect inside `useInlineDialog`, `focusable[0]!.focus()` inside `if (focusable.length > 0)`.",
       "owner": "maintainer",
       "created": "2026-08-12",
-      "expires": "2026-11-10",
-      "approvedBy": ["judge:readonly"]
+      "expires": "2027-02-21",
+      "approvedBy": ["maintainer"]
     },
     {
       "id": "SUP-0007",
@@ -54,11 +54,11 @@
       "file": "packages/client/src/components/vault/VaultItemForm.tsx",
       "symbol": "security/detect-non-literal-regexp",
       "maxHits": 1,
-      "reason": "Deliberate: the form compiles the user's own URI match pattern to check that it compiles at all, exactly as the stored schema does on read-back. Rejecting a pattern the schema would accept is the defect this avoids.",
+      "reason": "Deliberate: the form compiles the user's own URI match pattern to check that it compiles at all, exactly as the stored schema does on read-back. Rejecting a pattern the schema would accept is the defect this avoids. Re-justified 2026-11-23: unchanged; `new RegExp(entry.uri)` is still a compile-only check inside try/catch in the URI entry's regex refine, and the shared schema still makes the same check (SUP-0016).",
       "owner": "maintainer",
       "created": "2026-08-12",
-      "expires": "2026-11-10",
-      "approvedBy": ["judge:readonly"]
+      "expires": "2027-02-21",
+      "approvedBy": ["maintainer"]
     },
     {
       "id": "SUP-0008",
@@ -67,11 +67,11 @@
       "file": "packages/client/src/components/vault/VaultItemForm.tsx",
       "symbol": "@typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-explicit-any",
       "maxHits": 2,
-      "reason": "Pairs with SUP-0002: the runtime-selected resolver and control have no single static type, so the assignment cannot be proven safe without one resolver per item type.",
+      "reason": "Pairs with SUP-0002: the runtime-selected resolver and control have no single static type, so the assignment cannot be proven safe without one resolver per item type. Re-justified 2026-11-23: unchanged; the two casts are still the resolver passed to `useForm` and the control handed to the field arrays, with the schema still chosen from the item type at runtime.",
       "owner": "maintainer",
       "created": "2026-08-12",
-      "expires": "2026-11-10",
-      "approvedBy": ["judge:readonly"]
+      "expires": "2027-02-21",
+      "approvedBy": ["maintainer"]
     },
     {
       "id": "SUP-0009",
@@ -80,11 +80,11 @@
       "file": "packages/client/src/components/vault/VaultItemForm.tsx",
       "symbol": "dynamic form control type from zodResolver",
       "maxHits": 1,
-      "reason": "One block-scoped disable over the custom-field row loop, written once instead of four identical line-scoped ones, for the same runtime-typed control as SUP-0008.",
+      "reason": "One block-scoped disable over the three `useFieldArray` hooks (URIs, custom fields, phones), written once instead of a line-scoped disable per hook, for the same runtime-typed control as SUP-0008. Re-justified 2026-11-23: unchanged; the block disable still spans only the field-array hooks and is closed by its matching `eslint-enable`. Its first sentence was corrected that day (it named a custom-field row loop and four disables).",
       "owner": "maintainer",
       "created": "2026-08-12",
-      "expires": "2026-11-10",
-      "approvedBy": ["judge:readonly"]
+      "expires": "2027-02-21",
+      "approvedBy": ["maintainer"]
     },
     {
       "id": "SUP-0011",
@@ -93,24 +93,11 @@
       "file": "packages/client/src/stores/vaultStore.ts",
       "symbol": "no-non-null-assertion",
       "maxHits": 1,
-      "reason": "The index is in bounds because `mapWithConcurrency` preserves length and order, which the comment on the line above states. TypeScript cannot see that invariant across the helper.",
+      "reason": "The index is in bounds because `mapWithConcurrency` preserves length and order, which the comment on the line above states. TypeScript cannot see that invariant across the helper. Re-justified 2026-11-23: unchanged; the assertion is still `response.items[index]!` in the rejected-result arm of the map over `mapWithConcurrency`'s results.",
       "owner": "maintainer",
       "created": "2026-08-12",
-      "expires": "2026-11-10",
-      "approvedBy": ["judge:readonly"]
-    },
-    {
-      "id": "SUP-0012",
-      "rule": "LINT-SUPPRESS",
-      "kind": "lint-suppression",
-      "file": "packages/client/tests/setup.ts",
-      "symbol": "no-require-imports",
-      "maxHits": 1,
-      "reason": "The jsdom Web Crypto polyfill must be installed synchronously before any module under test reads `globalThis.crypto`, which an ESM import cannot guarantee inside a setup file.",
-      "owner": "maintainer",
-      "created": "2026-08-12",
-      "expires": "2026-11-10",
-      "approvedBy": ["judge:readonly"]
+      "expires": "2027-02-21",
+      "approvedBy": ["maintainer"]
     },
     {
       "id": "SUP-0016",
@@ -119,11 +106,11 @@
       "file": "packages/shared/src/schemas/vault.ts",
       "symbol": "security/detect-non-literal-regexp",
       "maxHits": 1,
-      "reason": "The stored schema compiles the user's own URI match pattern to validate that it compiles; this is the server-side half of SUP-0007 and the two must agree or an item becomes undecodable on read-back.",
+      "reason": "The stored schema compiles the user's own URI match pattern to validate that it compiles; this is the server-side half of SUP-0007 and the two must agree or an item becomes undecodable on read-back. Re-justified 2026-11-23: unchanged; still the compile-only check in the login URI entry's regex refine, inside try/catch, agreeing with SUP-0007.",
       "owner": "maintainer",
       "created": "2026-08-12",
-      "expires": "2026-11-10",
-      "approvedBy": ["judge:readonly"]
+      "expires": "2027-02-21",
+      "approvedBy": ["maintainer"]
     },
     {
       "id": "SUP-0017",
@@ -132,11 +119,11 @@
       "file": "packages/shared/src/schemas/vault.ts",
       "symbol": "security/detect-unsafe-regex",
       "maxHits": 1,
-      "reason": "An anchored ISO 8601 regex over an input the schema has already capped at 100 characters, so the backtracking the rule warns about is bounded.",
+      "reason": "An anchored ISO 8601 pattern whose backtracking is LINEAR in the input: no quantified group repeats another quantifier over the same characters, so a failing match costs one pass over the digit run plus a constant. CORRECTED 2026-11-23: this entry used to say the input was already capped at 100 characters. It is not, in the sense that mattered: zod 4 checks are continuable, so the refine still runs after `.max(100)` has failed. Measured that day on zod 4.6.7: a 200,021-character value produced the too_big issue AND the issues of two of its three refines (ISO shape and time component) in 4.3 ms, and the pattern alone over 10,000, 100,000 and 1,000,000 digits took 0.21, 2.13 and 19.3 ms, which is linear. The suppression stands on linearity, not on the length bound.",
       "owner": "maintainer",
       "created": "2026-08-12",
-      "expires": "2026-11-10",
-      "approvedBy": ["judge:readonly"]
+      "expires": "2027-02-21",
+      "approvedBy": ["maintainer"]
     },
     {
       "id": "SUP-0020",
@@ -145,11 +132,11 @@
       "file": "e2e/critical-flows.spec.ts",
       "symbol": "setTimeout(r, 1100)",
       "maxHits": 2,
-      "reason": "TWO waits in an end-to-end spec, each buying a strictly later clock second after a password change so the token minted next is accepted: the `iat` vs `passwordChangedAt` comparison in middleware/auth.ts ceils a millisecond timestamp to the next second while a JWT `iat` has one-second precision, so a token minted in the same second is legitimately rejected. Both are load-bearing, measured: removing the first turned 'revoke refresh tokens after password change' red in 2 of 3 repeats, and removing the second turned 'preserve vault items after password change' red in 1 of 4. A THIRD occurrence was removed in Phase 19 rather than ledgered: 'change password and authenticate with new password' ends at the login response and never presents the token it mints, so the comparison never runs there - 3 of 3 repeats green without it. REMOVAL CONDITION CORRECTED IN PHASE 19. This entry used to name the injectable clock as its removal condition, alongside SUP-0021 to SUP-0024. That was wrong, and those four are now gone precisely because the clock DID reach them: they are vitest tests whose server runs in the same worker, so freezing Date there is seen by the code under test. These two are not. They are Playwright specs driving APIRequestContext, and the clock that must advance belongs to the API server in a SEPARATE PROCESS; no vitest fake reaches it, and page.clock fakes only the browser. The alternatives are worse than the debt: flooring passwordChangedAt to the second would open a one-second window in which a token issued before a password change is still accepted, which is a security regression, and a test phase may not change production behaviour. These are real waits on a real production property rather than concealed flakiness. Removed by an injectable clock the SERVER can be started with, or by an end-to-end harness able to advance the server's clock; neither exists today.",
+      "reason": "TWO waits in an end-to-end spec, each buying a strictly later clock second after a password change so the token minted next is accepted: the `iat` vs `passwordChangedAt` comparison in middleware/auth.ts ceils a millisecond timestamp to the next second while a JWT `iat` has one-second precision, so a token minted in the same second is legitimately rejected. Both are load-bearing, measured: removing the first turned 'revoke refresh tokens after password change' red in 2 of 3 repeats, and removing the second turned 'preserve vault items after password change' red in 1 of 4. A THIRD occurrence was removed in Phase 19 rather than ledgered: 'change password and authenticate with new password' ends at the login response and never presents the token it mints, so the comparison never runs there - 3 of 3 repeats green without it. REMOVAL CONDITION CORRECTED IN PHASE 19. This entry used to name the injectable clock as its removal condition, alongside SUP-0021 to SUP-0024. That was wrong, and those four are now gone precisely because the clock DID reach them: they are vitest tests whose server runs in the same worker, so freezing Date there is seen by the code under test. These two are not. They are Playwright specs driving APIRequestContext, and the clock that must advance belongs to the API server in a SEPARATE PROCESS; no vitest fake reaches it, and page.clock fakes only the browser. The alternatives are worse than the debt: flooring passwordChangedAt to the second would open a one-second window in which a token issued before a password change is still accepted, which is a security regression, and a test phase may not change production behaviour. These are real waits on a real production property rather than concealed flakiness. Removed by an injectable clock the SERVER can be started with, or by an end-to-end harness able to advance the server's clock; neither exists today. Re-justified 2026-11-23: both waits unchanged; `middleware/auth.ts` still ceils `passwordChangedAt` to the next second, and neither a server-side injectable clock nor a harness that can advance the server clock exists.",
       "owner": "maintainer",
       "created": "2026-08-12",
-      "expires": "2026-11-11",
-      "approvedBy": ["judge:readonly"]
+      "expires": "2027-02-21",
+      "approvedBy": ["maintainer"]
     },
     {
       "id": "SUP-0025",
@@ -158,24 +145,11 @@
       "file": "playwright.config.ts",
       "symbol": "workers: 1",
       "maxHits": 1,
-      "reason": "Workers do NOT race on ports, and the reason this entry used to give was wrong on the facts. Playwright's `webServer` is a per-RUN facility, so every worker shares the ONE dev server, the ONE mongod on the fixed 27017 and the ONE storage container that `e2e/start-server.ts` stands up; no per-worker port band would help, and the `mongoHarness.ts` analogy does not transfer because a vitest fork spawns its own datastore while a Playwright worker cannot. THE BINDING CONSTRAINT IS ACCOUNT MINTING, AND IT FAILS OPEN. `e2e/helpers.ts`'s `testEmail()` draws from a MODULE-LEVEL counter and a mulberry32 stream seeded from the run-wide `SEED` that `playwright.config.ts`'s `process.env['SEED']` assignment pins into the environment, so a second worker PROCESS restarts both at their initial values and the only entropy left between two workers is `Date.now()` at millisecond granularity. A collision is silent rather than loud: a duplicate registration answers 201 with an identical body and creates nothing (`authController.ts`'s `register`, deliberate anti-enumeration, never 409), and BOTH helpers sign in with a CONSTANT credential ('e2e-test-auth-hash' in `createAuthenticatedUser`; `E2E_STRONG_PASSWORD` in `registerAndSignInViaUI`, salted with the email) - so the auth hash is identical too and the second worker signs into the FIRST worker's account. Two workers then drive one vault and the run fails later in an unrelated list/count/trash assertion. `zero-knowledge.spec.ts`'s `RUN_ID` has the same shape at MODULE scope for `RUN_ID`. A SECOND RACE, confined to one configuration and NOT live today: `writeA11yScans` (`helpers.ts`) truncates one fixed path, and that WOULD become concurrent the moment the worker count is raised, under `playwright.flake.config.ts`'s `repeatEach: 3`, because Playwright keys dispatch groups on project id + pool digest + repeatEachIndex (`common/index.js`'s `test._workerHash`), so `fullyParallel: false` does NOT serialize repeat indices. At `workers: 1` nothing overlaps, which is exactly why this costs nothing to leave standing and everything to forget. TWO CHANGE-MANAGEMENT COSTS, not races, but they are why a raise is not a one-character diff: `playwright.a11y.config.ts` and `playwright.flake.config.ts` INHERIT `workers` through their spread, so one edit here converts THREE gates and not one; and `gate-surface.test.ts` pins the count as the executable premise of the Firefox leg's design, which would have to be re-argued rather than renumbered. MEASURED 2026-09-08 on the reference machine (4 cores): `--workers=2` ran 218/218 green in 6.8 min against 10.6 min at one worker, and `test:flake:e2e` at two workers ran 654/654 green in 20.7 min. Both are reported as green and NEITHER clears this: three passes give a millisecond-wide collision window almost no power, the flake run is also the first concurrent execution of `writeA11yScans` so it is a confound rather than a control, and both sampled only the idle regime while the load average reached 9.5 on four cores. The gain buys no gate either - `scripts/ci/lib/tiers.mjs` states that the tier budgets are DESIGN budgets and are not enforced. So the constraint remains, and it is now a shared-state defect with a named fix rather than an unknown. REMOVAL CONDITION, all six, in one change: (1) `testEmail()` and `zero-knowledge.spec.ts`'s `RUN_ID` fold `TEST_WORKER_INDEX` (Playwright sets it in the WorkerMain constructor, before any spec module loads) into the IDENTIFIER rather than only the seed, pinned by a test asserting that two generators built with DIFFERENT worker indices produce DISJOINT addresses at equal counter values and an equal frozen `Date.now()` - that last clause is what gives the test failure power; (2) `writeA11yScans` no longer truncates one fixed path from concurrent executions (a per-worker filename merged by the gate), OR `playwright.flake.config.ts` pins `workers: 1` on its own; (3) `playwright.a11y.config.ts` states `workers` explicitly instead of inheriting it, so the raise is one gate at a time; (4) `gate-surface.test.ts` and `playwright.config.ts`'s FIREFOX_PROJECT comment are re-argued, because 'no two Playwright runs in flight' stops implying 'no shared-state race' once two workers share one stack; (5) then, at the new count on an idle machine and with durations recorded: `npm run ci` green - NOT `test:e2e` and `test:a11y` on their own, because the field that has to hold for the a11y half is `a11y.viewsScanned` and the gate that compares it is `audit:ratchet:full`, which is tier 1 and runs last inside `ci` - and `npm run test:flake` green, the WHOLE gate rather than its `test:flake:e2e` leg, because a bare Playwright run writes no `flake.json` and the flake fields are DEFERRABLE, so a ratchet run that follows one records them as `deferred` and enforces nothing. The bar is a PROPERTY, not a number: no view left the scan, no execution left the sample, no new failure, each compared against whatever `baseline.json` holds on the day. THIS CLAUSE USED TO CARRY COPIES OF THOSE NUMBERS - `a11y.viewsScanned` still 32 and `flake.e2eExecutions` at least 609 - and both were superseded inside the same plan, at 33 and 654; the first had become UNSATISFIABLE (the field ratchets `higher`, so a run reporting 32 fails) and the second was 45 executions BELOW the enforced floor, which is a removal condition quietly asking for a gate to be weakened; (6) this entry DELETED in the same change, because `integrity-scan.mjs` raises LEDGER-STALE once the marker is gone. Item 5 is the evidence and is NOT sufficient on its own - it has now been produced twice and cleared nothing. CITED BY SYMBOL RATHER THAN BY LINE, deliberately: this entry's `e2e/helpers.ts` line numbers went stale inside a single round when that file gained the shared lock-screen locator and the clipboard-permission helper, and a ledger entry whose evidence pointers are wrong is the drift `SUP-0046` exists to record. Working notes, both transcripts and the full surface enumeration are in `.testfortress/phase-logs/e2e-worker-measurements.md` (gitignored; this entry is self-sufficient without it).",
+      "reason": "Workers do NOT race on ports, and the reason this entry used to give was wrong on the facts. Playwright's `webServer` is a per-RUN facility, so every worker shares the ONE dev server, the ONE mongod on the fixed 27017 and the ONE storage container that `e2e/start-server.ts` stands up; no per-worker port band would help, and the `mongoHarness.ts` analogy does not transfer because a vitest fork spawns its own datastore while a Playwright worker cannot. THE BINDING CONSTRAINT IS ACCOUNT MINTING, AND IT FAILS OPEN. `e2e/helpers.ts`'s `testEmail()` draws from a MODULE-LEVEL counter and a mulberry32 stream seeded from the run-wide `SEED` that `playwright.config.ts`'s `process.env['SEED']` assignment pins into the environment, so a second worker PROCESS restarts both at their initial values and the only entropy left between two workers is `Date.now()` at millisecond granularity. A collision is silent rather than loud: a duplicate registration answers 201 with an identical body and creates nothing (`authController.ts`'s `register`, deliberate anti-enumeration, never 409), and BOTH helpers sign in with a CONSTANT credential ('e2e-test-auth-hash' in `createAuthenticatedUser`; `E2E_STRONG_PASSWORD` in `registerAndSignInViaUI`, salted with the email) - so the auth hash is identical too and the second worker signs into the FIRST worker's account. Two workers then drive one vault and the run fails later in an unrelated list/count/trash assertion. `zero-knowledge.spec.ts`'s `RUN_ID` has the same shape at MODULE scope for `RUN_ID`. A SECOND RACE, confined to one configuration and NOT live today: `writeA11yScans` (`helpers.ts`) truncates one fixed path, and that WOULD become concurrent the moment the worker count is raised, under `playwright.flake.config.ts`'s `repeatEach: 3`, because Playwright keys dispatch groups on project id + pool digest + repeatEachIndex (`common/index.js`'s `test._workerHash`), so `fullyParallel: false` does NOT serialize repeat indices. At `workers: 1` nothing overlaps, which is exactly why this costs nothing to leave standing and everything to forget. TWO CHANGE-MANAGEMENT COSTS, not races, but they are why a raise is not a one-character diff: `playwright.a11y.config.ts` and `playwright.flake.config.ts` INHERIT `workers` through their spread, so one edit here converts THREE gates and not one; and `gate-surface.test.ts` pins the count as the executable premise of the Firefox leg's design, which would have to be re-argued rather than renumbered. MEASURED 2026-09-08 on the reference machine (4 cores): `--workers=2` ran 218/218 green in 6.8 min against 10.6 min at one worker, and `test:flake:e2e` at two workers ran 654/654 green in 20.7 min. Both are reported as green and NEITHER clears this: three passes give a millisecond-wide collision window almost no power, the flake run is also the first concurrent execution of `writeA11yScans` so it is a confound rather than a control, and both sampled only the idle regime while the load average reached 9.5 on four cores. The gain buys no gate either - `scripts/ci/lib/tiers.mjs` states that the tier budgets are DESIGN budgets and are not enforced. So the constraint remains, and it is now a shared-state defect with a named fix rather than an unknown. REMOVAL CONDITION, all six, in one change: (1) `testEmail()` and `zero-knowledge.spec.ts`'s `RUN_ID` fold `TEST_WORKER_INDEX` (Playwright sets it in the WorkerMain constructor, before any spec module loads) into the IDENTIFIER rather than only the seed, pinned by a test asserting that two generators built with DIFFERENT worker indices produce DISJOINT addresses at equal counter values and an equal frozen `Date.now()` - that last clause is what gives the test failure power; (2) `writeA11yScans` no longer truncates one fixed path from concurrent executions (a per-worker filename merged by the gate), OR `playwright.flake.config.ts` pins `workers: 1` on its own; (3) `playwright.a11y.config.ts` states `workers` explicitly instead of inheriting it, so the raise is one gate at a time; (4) `gate-surface.test.ts` and `playwright.config.ts`'s FIREFOX_PROJECT comment are re-argued, because 'no two Playwright runs in flight' stops implying 'no shared-state race' once two workers share one stack; (5) then, at the new count on an idle machine and with durations recorded: `npm run ci` green - NOT `test:e2e` and `test:a11y` on their own, because the field that has to hold for the a11y half is `a11y.viewsScanned` and the gate that compares it is `audit:ratchet:full`, which is tier 1 and runs last inside `ci` - and `npm run test:flake` green, the WHOLE gate rather than its `test:flake:e2e` leg, because a bare Playwright run writes no `flake.json` and the flake fields are DEFERRABLE, so a ratchet run that follows one records them as `deferred` and enforces nothing. The bar is a PROPERTY, not a number: no view left the scan, no execution left the sample, no new failure, each compared against whatever `baseline.json` holds on the day. THIS CLAUSE USED TO CARRY COPIES OF THOSE NUMBERS - `a11y.viewsScanned` still 32 and `flake.e2eExecutions` at least 609 - and both were superseded inside the same plan, at 33 and 654; the first had become UNSATISFIABLE (the field ratchets `higher`, so a run reporting 32 fails) and the second was 45 executions BELOW the enforced floor, which is a removal condition quietly asking for a gate to be weakened; (6) this entry DELETED in the same change, because `integrity-scan.mjs` raises LEDGER-STALE once the marker is gone. Item 5 is the evidence and is NOT sufficient on its own - it has now been produced twice and cleared nothing. CITED BY SYMBOL RATHER THAN BY LINE, deliberately: this entry's `e2e/helpers.ts` line numbers went stale inside a single round when that file gained the shared lock-screen locator and the clipboard-permission helper, and a ledger entry whose evidence pointers are wrong is the drift `SUP-0046` exists to record. Working notes, both transcripts and the full surface enumeration are in `.testfortress/phase-logs/e2e-worker-measurements.md` (gitignored; this entry is self-sufficient without it). Re-justified 2026-11-23 for THIRTY days, the doctrine's quarantine loan: `workers` is still 1 and removal step (1) is still undone. `testEmail()` in `e2e/helpers.ts` still builds its address from `Date.now()`, a module-level counter and the seeded noise stream with no `TEST_WORKER_INDEX`, and `zero-knowledge.spec.ts`'s `RUN_ID` still has the same shape.",
       "owner": "maintainer",
       "created": "2026-08-12",
-      "expires": "2026-11-07",
-      "approvedBy": ["judge:readonly"]
-    },
-    {
-      "id": "SUP-0026",
-      "rule": "BASELINE-REDUCTION",
-      "kind": "known-gap",
-      "file": ".testfortress/baseline.json",
-      "symbol": "packages/client coverage.linesTotal 7038 -> 7037",
-      "maxHits": 1,
-      "reason": "Phase 12 fixed an axe nested-interactive defect in VaultList: the row card carried role=\"button\" with the selection checkbox INSIDE it, which makes the checkbox presentational and unreachable for assistive technology. Moving the activator to be a child of the card left the label a sibling of it, so the label's onClick={(e) => e.stopPropagation()} now stops propagation to nothing and was deleted. That arrow function is the one instrumentable line. The coverage scope is unchanged (packages/client/vitest.config.ts untouched), the measured file set is unchanged at 120 files, and no coverage percentage moved: line 98.69, branch 92.45, function 97.95 before and after. Keeping the handler purely to hold the denominator at 7038 would be dead code retained to satisfy a metric, which is the move this ledger exists to make visible.",
-      "owner": "maintainer",
-      "created": "2026-08-12",
-      "expires": "2026-11-09",
-      "approvedBy": ["judge:readonly"]
+      "expires": "2026-12-23",
+      "approvedBy": ["maintainer"]
     },
     {
       "id": "SUP-0027",
@@ -184,10 +158,10 @@
       "file": "scripts/ci/lib/resource-budgets.mjs",
       "symbol": "RESOURCE_BUDGETS time and memory ceilings",
       "maxHits": 1,
-      "reason": "test:resource's time and memory budgets can see a STEP CHANGE and nothing smaller, and this records how much smaller. Measured over five consecutive runs of the whole suite on an idle reference machine, the good runs themselves vary by 2.4-50 percent: rotation-volume rssGrowthMb spans 66.68-126.05 MB (50 percent of its median), backup-streaming durationMs spans 268-443 ms (49.7 percent), backup-full-vault durationMs 439-724 ms (47.1 percent), while the tightest, documents-part-upload durationMs, spans 790-809 ms (2.4 percent). Every ceiling is therefore set at 1.6x-11x the observed maximum, which means a real regression smaller than roughly 1.7x on memory or 3x on time passes unseen. Shipping tighter numbers would produce a gate that fires on a loaded laptop, and a gate that fires for reasons unrelated to the code is a gate that gets deleted. FOUR metrics are exempt from this gap, and each is exempt because its regression band was measured too: backup-streaming rssGrowthMb, whose good band (43.43-58.11 MB over eleven runs) and regression band (118.54-156.41 MB over three runs of the find().lean() rewrite) do not overlap, so the 95 MB ceiling sits clear of both; backup-streaming documentsDelivered, which measured 3320 of 10000 in eleven out of eleven runs against 10003 for the regression, with no spread at all; documents-part-upload rssGrowthMb, whose good band (82.28-86.39 MB over six runs) and regression band (148.6-167.43 MB over five runs of a storage double made to retain each part) leave the 120 MB ceiling 1.39x above one and 0.81x below the other; and documents-list-volume deliveredFraction, which measured 1.01 in five out of five runs against 25.01 in three out of three of the skip-and-limit rewrite, again with no spread. The gap is closed either by a metric with no noise band (a counter read from the server, as documentsDelivered is) or by a dedicated benchmark harness that controls for machine load; adding either is worth more than tightening these numbers.",
+      "reason": "test:resource's time and memory budgets can see a STEP CHANGE and nothing smaller, and this records how much smaller. Measured over five consecutive runs of the whole suite on an idle reference machine, the good runs of the first scenarios vary by 2.4-50 percent (the two F-25 scenarios added later were measured over three runs each, and backup-download-concurrency rssGrowthMb spreads 772 percent, 2.0-51.72 MB, which is why that metric is judged by its regression band below): rotation-volume rssGrowthMb spans 66.68-126.05 MB (50 percent of its median), backup-streaming durationMs spans 268-443 ms (49.7 percent), backup-full-vault durationMs 439-724 ms (47.1 percent), while the tightest, documents-part-upload durationMs, spans 790-809 ms (2.4 percent). Every ceiling is therefore set at 1.4x-11.3x the observed maximum (recomputed 2026-11-23 over the noise bands of the eight measured scenarios; the other three of the eleven are `measured: false`: 1.75x-2.9x on memory and 3.6x-11.3x on time for the metrics this gap covers), which means a real regression smaller than roughly 1.75x on memory or 3.5x on time passes unseen. Shipping tighter numbers would produce a gate that fires on a loaded laptop, and a gate that fires for reasons unrelated to the code is a gate that gets deleted. SEVEN metrics are exempt from this gap, and each is exempt because its regression band was measured too: backup-streaming rssGrowthMb, whose good band (43.43-58.11 MB over eleven runs) and regression band (118.54-156.41 MB over three runs of the find().lean() rewrite) do not overlap, so the 95 MB ceiling sits clear of both; backup-streaming documentsDelivered, which measured 3320 of 10000 in eleven out of eleven runs against 10003 for the regression, with no spread at all; documents-part-upload rssGrowthMb, whose good band (82.28-86.39 MB over six runs) and regression band (148.6-167.43 MB over five runs of a storage double made to retain each part) leave the 120 MB ceiling 1.39x above one and 0.81x below the other; and documents-list-volume deliveredFraction, which measured 1.01 in five out of five runs against 25.01 in three out of three of the skip-and-limit rewrite, again with no spread; and three measured after this entry was first written: documents-list-volume documentsDelivered (5050 of 5000 in five out of five runs against 125050 for the same rewrite), backup-download-concurrency rssGrowthMb (good band up to 51.72 MB against 334.08 MB for the code before F-25, one regression run, under a 150 MB ceiling) and vault-list-volume rssGrowthMb (good band up to 92.14 MB against 241.08-258.31 MB over two regression runs, under a 170 MB ceiling). The gap is closed either by a metric with no noise band (a counter read from the server, as documentsDelivered is) or by a dedicated benchmark harness that controls for machine load; adding either is worth more than tightening these numbers. Re-justified 2026-11-23: the gap is unchanged in kind. No counter metric has replaced a noisy one and no load-controlled benchmark harness exists; the figures above were recomputed from `RESOURCE_BUDGETS` and `NOISE_BAND` that day.",
       "owner": "maintainer",
       "created": "2026-08-13",
-      "expires": "2026-11-11",
+      "expires": "2027-02-21",
       "approvedBy": ["maintainer"]
     },
     {
@@ -197,10 +171,10 @@
       "file": "packages/shared/src/schemas/auth.ts",
       "symbol": "emailSchema's .trim() and its 'must have a TLD' refine",
       "maxHits": 1,
-      "reason": "Twenty mutants in lines 1-27 of auth.ts are BEHAVIOURALLY EQUIVALENT rather than unasserted, and the reason is that the code they mutate is unreachable as a decider. emailSchema is z.email().max(254).toLowerCase().trim().refine(hasTld). The refine's own comment says zod accepts user@host, and that was true of the zod version it was written against; the installed zod 4 rejects it in z.email() itself, along with every other input the refine rejects. Its regex is anchored, admits no whitespace, forbids consecutive dots, requires each host label to start alphanumeric and requires a 2-or-more-letter TLD, so host.length === 0, host.startsWith('.'), host.endsWith('.'), labels.length < 2, an empty label and a label containing whitespace or an at sign are all already impossible by the time the refine runs. The same argument covers .trim(): a value with leading or trailing whitespace never reaches it. Verified structurally AND empirically - 1,248 addresses built from 6 local parts x 13 hosts x 4 leading x 4 trailing padding characters, comparing z.email().max(254).toLowerCase() against the full schema, produced ZERO disagreements in acceptance or in output. The code is KEPT rather than deleted, as defense-in-depth against a future loosening of zod's email format, on the same footing as toolsController's assertImportFieldLengths (which the project's maintainer notes record as deliberately uncovered for the same reason). Removal condition: this entry goes away if zod's email check is ever replaced or loosened, at which point the refine becomes reachable and every one of these mutants becomes a missing assertion. What IS asserted, in tests/schema-bounds.test.ts, is the one transform that does change a value that reaches it: .toLowerCase(), which matters because the email is the PBKDF2 salt.",
+      "reason": "Twenty mutants in `emailSchema` (lines 1-27 of auth.ts when this entry was written, lines 11-34 since an import block was added above it) are BEHAVIOURALLY EQUIVALENT rather than unasserted, and the reason is that the code they mutate is unreachable as a decider. emailSchema is z.email().max(254).toLowerCase().trim().refine(hasTld). The refine's own comment says zod accepts user@host, and that was true of the zod version it was written against; the installed zod 4 rejects it in z.email() itself, along with every other input the refine rejects. Its regex is anchored, admits no whitespace, forbids consecutive dots, requires each host label to start alphanumeric and requires a 2-or-more-letter TLD, so host.length === 0, host.startsWith('.'), host.endsWith('.'), labels.length < 2, an empty label and a label containing whitespace or an at sign are all already impossible by the time the refine runs. The same argument covers .trim(): a value with leading or trailing whitespace never reaches it. Verified structurally AND empirically - 1,248 addresses built from 6 local parts x 13 hosts x 4 leading x 4 trailing padding characters, comparing z.email().max(254).toLowerCase() against the full schema, produced ZERO disagreements in acceptance or in output. The code is KEPT rather than deleted, as defense-in-depth against a future loosening of zod's email format, on the same footing as toolsController's assertImportFieldLengths (which the project's maintainer notes record as deliberately uncovered for the same reason). Removal condition: this entry goes away if zod's email check is ever replaced or loosened, at which point the refine becomes reachable and every one of these mutants becomes a missing assertion. What IS asserted, in tests/schema-bounds.test.ts, is the one transform that does change a value that reaches it: .toLowerCase(), which matters because the email is the PBKDF2 salt. Re-justified 2026-11-23: `emailSchema` is unchanged, but zod moved from 4.4.3 to 4.6.7 after the comparison above, so it was re-run on 4.6.7: 1,248 addresses (6 local parts x 13 hosts x 4 leading x 4 trailing paddings), ZERO disagreements in acceptance or output, and `z.email()` still rejects user@host.",
       "owner": "maintainer",
       "created": "2026-08-13",
-      "expires": "2026-11-11",
+      "expires": "2027-02-21",
       "approvedBy": ["maintainer"]
     },
     {
@@ -210,10 +184,10 @@
       "file": "packages/shared/src/utils/index.ts",
       "symbol": "formatBytes guards, normalizeUri optional-s, and the noUncheckedIndexedAccess fallbacks",
       "maxHits": 1,
-      "reason": "Seven survivors in utils/index.ts are behaviourally equivalent, verified by REIMPLEMENTING each mutant beside the original and comparing outputs rather than by reading the code. (1) formatBytes line 12, 'bytes < 0' becoming 'bytes <= 0': zero is returned as '0 B' by the very next line either way. (2) formatBytes line 13, the 'bytes === 0' early return deleted: Math.log(0) is -Infinity, which the Math.max(...,0) clamp on line 21 turns into exponent 0, so the function still returns '0 B'. Both compared over 334 values - every power of two from 2^-40 to 2^63 and its neighbours, plus 0, -0, negatives, Infinity, NaN, Number.MIN_VALUE, Number.EPSILON and each unit boundary - with ZERO disagreements. The early return is kept because it states the intent at the top rather than leaving it to a clamp four lines down. (3) normalizeUri line 32, '/^(https?:|mailto:)/i' becoming '/^(https:|mailto:)/i': an http: URI that stops matching the first guard is caught by the SECOND guard on line 34 ('some other scheme, leave it alone') and returned unchanged, so the two are indistinguishable from outside; compared over 15 scheme shapes with zero disagreements. What is NOT equivalent, and is now asserted in tests/utils.test.ts, is either ANCHOR being dropped from either pattern. (4) Three NoCoverage mutants on the '?? ' and \"?? 'B'\" fallbacks at lines 6, 7 and 22: these exist to satisfy noUncheckedIndexedAccess and are unreachable - local[0] and local[local.length-1] are defined whenever atIndex > 0, and sizes[i] is defined because i is clamped to the array's own length. The maintainer notes already record this class as deliberately uncovered ('noUncheckedIndexedAccess nullish guards'), and lighting them up would need a contrived mock of an index operation. Removal condition: (1)-(3) go away if the guards they duplicate are removed; (4) goes away if the compiler stops requiring the fallback.",
+      "reason": "Seven survivors in utils/index.ts are behaviourally equivalent, verified by REIMPLEMENTING each mutant beside the original and comparing outputs rather than by reading the code. (1) formatBytes line 23, 'bytes < 0' becoming 'bytes <= 0': zero is returned as '0 B' by the very next line either way. (2) formatBytes line 24, the 'bytes === 0' early return deleted: Math.log(0) is -Infinity, which the Math.max(...,0) clamp on line 32 turns into exponent 0, so the function still returns '0 B'. Both compared over 334 values - every power of two from 2^-40 to 2^63 and its neighbours, plus 0, -0, negatives, Infinity, NaN, Number.MIN_VALUE, Number.EPSILON and each unit boundary - with ZERO disagreements. The early return is kept because it states the intent at the top rather than leaving it to a clamp eight lines down. (3) normalizeUri line 43, '/^(https?:|mailto:)/i' becoming '/^(https:|mailto:)/i': an http: URI that stops matching the first guard is caught by the SECOND guard on line 45 ('some other scheme, leave it alone') and returned unchanged, so the two are indistinguishable from outside; compared over 15 scheme shapes with zero disagreements. What is NOT equivalent, and is now asserted in tests/utils.test.ts, is either ANCHOR being dropped from either pattern. (4) Three NoCoverage mutants on the '?? ' and \"?? 'B'\" fallbacks at lines 17, 18 and 33: these exist to satisfy noUncheckedIndexedAccess and are unreachable - local[0] and local[local.length-1] are defined whenever atIndex > 0, and sizes[i] is defined because i is clamped to the array's own length. The maintainer notes already record this class as deliberately uncovered ('noUncheckedIndexedAccess nullish guards'), and lighting them up would need a contrived mock of an index operation. Removal condition: (1)-(3) go away if the guards they duplicate are removed; (4) goes away if the compiler stops requiring the fallback. Re-justified 2026-11-23: the code is byte-identical; an import block added above it moved every line cited here by 11, corrected in place. Re-run that day by the same method: formatBytes over 340 values, 0 disagreements for mutants (1) and (2); normalizeUri over 15 scheme shapes, 0 for mutant (3).",
       "owner": "maintainer",
       "created": "2026-08-13",
-      "expires": "2026-11-11",
+      "expires": "2027-02-21",
       "approvedBy": ["maintainer"]
     },
     {
@@ -223,10 +197,10 @@
       "file": "package.json",
       "symbol": "S12 SBOM",
       "maxHits": 1,
-      "reason": "Testing-matrix row S12 (software bill of materials) is APPLICABLE \u2014 this project ships a deployed artifact \u2014 and is deferred on marginal value rather than on relevance. The dependency surface is already gated three ways: `audit:deps` fails on any advisory at moderate or above across the production tree, `audit:licenses` holds every production dependency to `.licenses-allowlist.json`, and `audit:image` runs Trivy over all three images. An SBOM would add provenance and downstream consumability, neither of which has a consumer for a self-hosted single-image application today. Removal condition: this entry goes away when a published SBOM has a consumer \u2014 a distribution channel, a compliance requirement, or a downstream packager \u2014 at which point `syft`/`cyclonedx` output belongs in the release workflow beside the GitHub Release.",
+      "reason": "Testing-matrix row S12 (software bill of materials) is APPLICABLE and still deferred. CORRECTED 2026-11-23: the reason this entry first gave, that an SBOM had no consumer for a self-hosted single-image application and that provenance had none either, stopped being true at 0.20.0. Three images (hvault-app, hvault-web, hvault-bootstrap) are now published to a public registry for anyone to pull, and the release workflow attaches a signed build-provenance attestation to each index. What is still missing is the bill of materials itself: `scripts/ci/lib/release-images.mjs` passes `--sbom=false` to the bake so BuildKit adds no extra manifests to the index, and nothing else emits one. The dependency surface is still gated three ways (`audit:deps`, `audit:licenses`, Trivy over the images), none of which produces a document a downstream consumer could read. A public distribution channel is the consumer the original removal condition named, so this is renewed for thirty days only, to force a decision rather than a quiet re-date. Removal condition: an SBOM produced for each published image and attached to its index beside the provenance attestation, or a written decision that the row does not apply.",
       "owner": "maintainer",
       "created": "2026-08-14",
-      "expires": "2026-11-11",
+      "expires": "2026-12-23",
       "approvedBy": ["maintainer"]
     },
     {
@@ -236,10 +210,10 @@
       "file": "playwright.config.ts",
       "symbol": "B9 visual regression",
       "maxHits": 1,
-      "reason": "Testing-matrix row B9 (visual regression) is APPLICABLE in principle to any UI, so a 'not applicable' would not be earned by a fact. It is deferred because there is no protected design contract to regress against, and because function \u2014 the thing a screenshot diff is a proxy for \u2014 is already covered directly: `test:a11y` runs axe over forty-one views and asserts the keyboard invariants, the component suites assert rendered output, and the E2E suite drives the real journeys. A pixel baseline added now would mostly report intended CSS churn. Removal condition: a stable design system, or a recurrence of a defect that only a rendered diff would have caught.",
+      "reason": "Testing-matrix row B9 (visual regression) is APPLICABLE in principle to any UI, so a 'not applicable' would not be earned by a fact. It is deferred because there is no protected design contract to regress against, and because function \u2014 the thing a screenshot diff is a proxy for \u2014 is already covered directly: `test:a11y` runs axe over forty-one views and asserts the keyboard invariants, the component suites assert rendered output, and the E2E suite drives the real journeys. A pixel baseline added now would mostly report intended CSS churn. Removal condition: a stable design system, or a recurrence of a defect that only a rendered diff would have caught. Re-justified 2026-11-23: unchanged; no screenshot or pixel assertion exists in the end-to-end suite, and `test:a11y` still scans forty-one views (`a11y.viewsScanned` in the baseline).",
       "owner": "maintainer",
       "created": "2026-08-14",
-      "expires": "2026-11-11",
+      "expires": "2027-02-21",
       "approvedBy": ["maintainer"]
     },
     {
@@ -249,10 +223,10 @@
       "file": "scripts/ci/resource-gate.mjs",
       "symbol": "N1 performance benchmarking",
       "maxHits": 1,
-      "reason": "Testing-matrix row N1 (performance) is deferred on SCOPE, and the honest statement is that its noise band is UNKNOWN rather than too wide \u2014 no benchmark was run during the audit, and the doctrine licenses a noise-based deferral only after five or more runs with the spread recorded. What exists instead is `test:resource`, which holds four volume scenarios over a 10,000-item vault to committed time and memory ceilings; SUP-0027 records exactly how coarse those ceilings are and why. Removal condition: a dedicated benchmark harness that controls for machine load, which SUP-0027 also names as the better of the two ways to close its own gap.",
+      "reason": "Testing-matrix row N1 (performance) is deferred on SCOPE, and the honest statement is that its noise band is UNKNOWN rather than too wide \u2014 no benchmark was run during the audit, and the doctrine licenses a noise-based deferral only after five or more runs with the spread recorded. What exists instead is `test:resource`, which now runs eleven scenarios (`RESOURCE_SCENARIOS`), eight of them `measured: true` and held to committed time and memory ceilings; SUP-0027 records exactly how coarse those ceilings are and why. Removal condition: a dedicated benchmark harness that controls for machine load, which SUP-0027 also names as the better of the two ways to close its own gap. Re-justified 2026-11-23: unchanged in kind; no benchmark harness exists in the tracked tree. The scenario count above was corrected that day (it read four).",
       "owner": "maintainer",
       "created": "2026-08-14",
-      "expires": "2026-11-11",
+      "expires": "2027-02-21",
       "approvedBy": ["maintainer"]
     },
     {
@@ -262,10 +236,10 @@
       "file": "scripts/ci/resource-gate.mjs",
       "symbol": "N2 load testing",
       "maxHits": 1,
-      "reason": "Testing-matrix row N2 (load) is deferred because H-Vault is a self-hosted, single-tenant deployment and no concurrent-user SLO exists to test against. A load test with no target measures the machine it runs on. Removal condition: a multi-tenant or hosted deployment mode, which would create the SLO this row needs in order to mean anything.",
+      "reason": "Testing-matrix row N2 (load) is deferred because H-Vault is a self-hosted, single-tenant deployment and no concurrent-user SLO exists to test against. A load test with no target measures the machine it runs on. Removal condition: a multi-tenant or hosted deployment mode, which would create the SLO this row needs in order to mean anything. Re-justified 2026-11-23: unchanged; no load tooling exists in the tracked tree and the deployment is still single-tenant and self-hosted, with no concurrent-user SLO.",
       "owner": "maintainer",
       "created": "2026-08-14",
-      "expires": "2026-11-11",
+      "expires": "2027-02-21",
       "approvedBy": ["maintainer"]
     },
     {
@@ -275,10 +249,10 @@
       "file": "scripts/ci/resource-gate.mjs",
       "symbol": "N3 stress testing",
       "maxHits": 1,
-      "reason": "Testing-matrix row N3 (stress) is deferred for the same reason as N2: single-tenant self-hosted deployment, no concurrent-user SLO, therefore no defined breaking point to drive toward. The per-user ceilings that DO bound this application \u2014 MAX_ITEMS_PER_USER, MAX_FOLDERS_PER_USER, the body-size limits \u2014 are exercised at their maximum by `test:resource` and by the schema bounds suites. Removal condition: as N2.",
+      "reason": "Testing-matrix row N3 (stress) is deferred for the same reason as N2: single-tenant self-hosted deployment, no concurrent-user SLO, therefore no defined breaking point to drive toward. The per-user ceilings that DO bound this application \u2014 MAX_ITEMS_PER_USER, MAX_FOLDERS_PER_USER, the body-size limits \u2014 are exercised at their maximum by `test:resource` and by the schema bounds suites. Removal condition: as N2. Re-justified 2026-11-23: unchanged, on the same facts as SUP-0033.",
       "owner": "maintainer",
       "created": "2026-08-14",
-      "expires": "2026-11-11",
+      "expires": "2027-02-21",
       "approvedBy": ["maintainer"]
     },
     {
@@ -288,10 +262,10 @@
       "file": "scripts/ci/resource-gate.mjs",
       "symbol": "N4 spike testing",
       "maxHits": 1,
-      "reason": "Testing-matrix row N4 (spike) is deferred for the same reason as N2 and N3. The one burst-shaped behaviour that does have a defined contract \u2014 the rate limiters \u2014 is asserted directly against a real MongoDB-backed store rather than by traffic generation, including the fail-closed path and the IPv6 /64 aggregation. Removal condition: as N2.",
+      "reason": "Testing-matrix row N4 (spike) is deferred for the same reason as N2 and N3. The one burst-shaped behaviour that does have a defined contract \u2014 the rate limiters \u2014 is asserted directly against a real MongoDB-backed store rather than by traffic generation, including the fail-closed path and the IPv6 /64 aggregation. Removal condition: as N2. Re-justified 2026-11-23: unchanged, on the same facts as SUP-0033.",
       "owner": "maintainer",
       "created": "2026-08-14",
-      "expires": "2026-11-11",
+      "expires": "2027-02-21",
       "approvedBy": ["maintainer"]
     },
     {
@@ -301,10 +275,10 @@
       "file": "scripts/ci/resource-gate.mjs",
       "symbol": "N5 soak testing",
       "maxHits": 1,
-      "reason": "Testing-matrix row N5 (soak) is deferred on scope rather than on an established noise band, exactly as N1 is: no long-running measurement was taken, so no leak rate is known. `test:resource` records RSS growth per scenario, which is a single-operation reading and not a substitute for a multi-hour soak. Removal condition: the same benchmark harness N1 needs, run over a long window.",
+      "reason": "Testing-matrix row N5 (soak) is deferred on scope rather than on an established noise band, exactly as N1 is: no long-running measurement was taken, so no leak rate is known. `test:resource` records RSS growth per scenario, which is a single-operation reading and not a substitute for a multi-hour soak. Removal condition: the same benchmark harness N1 needs, run over a long window. Re-justified 2026-11-23: unchanged; no long-running measurement has been taken and the harness N1 needs does not exist.",
       "owner": "maintainer",
       "created": "2026-08-14",
-      "expires": "2026-11-11",
+      "expires": "2027-02-21",
       "approvedBy": ["maintainer"]
     },
     {
@@ -314,10 +288,10 @@
       "file": "playwright.config.ts",
       "symbol": "N10 network-condition testing",
       "maxHits": 1,
-      "reason": "Testing-matrix row N10 (degraded network) is deferred because the behaviour it targets is already covered where it matters: the offline path has direct tests over the IndexedDB cache and the PWA service worker, and the Axios layer's retry, refresh-serialisation and session-failure branches are unit-tested against injected failures rather than against injected latency. Deliberate latency injection adds little for an application whose primary deployment is a LAN or a single host. Removal condition: a hosted deployment mode, or a defect traced to timing that only throttling would reproduce.",
+      "reason": "Testing-matrix row N10 (degraded network) is deferred because the behaviour it targets is already covered where it matters: the offline path has direct tests over the IndexedDB cache and the PWA service worker, and the Axios layer's retry, refresh-serialisation and session-failure branches are unit-tested against injected failures rather than against injected latency. Deliberate latency injection adds little for an application whose primary deployment is a LAN or a single host. Removal condition: a hosted deployment mode, or a defect traced to timing that only throttling would reproduce. Re-justified 2026-11-23: unchanged; the specs toggle `setOffline` for the offline paths but inject no latency or bandwidth limit.",
       "owner": "maintainer",
       "created": "2026-08-14",
-      "expires": "2026-11-11",
+      "expires": "2027-02-21",
       "approvedBy": ["maintainer"]
     },
     {
@@ -327,10 +301,10 @@
       "file": "scripts/ci/recovery-gate.mjs",
       "symbol": "R2 chaos engineering",
       "maxHits": 1,
-      "reason": "Testing-matrix row R2 (chaos) is deferred because the topology has no surface for it: one datastore, no service mesh, no inter-service RPC to sever. The failure modes that DO exist here are tested directly and violently by `test:recovery`, which SIGKILLs a real process at five injection points around the key rotation and the import, and reaps the transactions the dead process left open. Removal condition: a second stateful service, or any deployment topology with a network partition worth injecting.",
+      "reason": "Testing-matrix row R2 (chaos engineering) is deferred. CORRECTED 2026-11-23: this entry deferred the row because the topology had one datastore, and named 'a second stateful service' as its removal condition. That condition is now met: the document store added `hvault-s3` (Garage), a second stateful service the application reaches over the internal network. What covers its failure modes today is process death and refusal, not partition: `tests/recovery/document-crash.test.ts` SIGKILLs a real process mid-transfer, mid-completion and mid-purge and runs the collector over what is left; `storage-breaker.test.ts` pins the circuit breaker every bulk walk over the bucket shares; and `test:storage` runs the storage port's conformance suite against the stack's own Garage image. `crash-consistency.test.ts` holds eight crash tests over the vault. Nothing injects a partition, added latency or a stalled peer between the application and either service. Renewed for thirty days only, to force a decision rather than a quiet re-date. Removal condition: a fault-injection leg that severs or delays the application's path to the storage service (and to the database) while a document operation is in flight, asserting the end states the crash suite asserts, or a written decision that the row does not apply.",
       "owner": "maintainer",
       "created": "2026-08-14",
-      "expires": "2026-11-11",
+      "expires": "2026-12-23",
       "approvedBy": ["maintainer"]
     },
     {
@@ -340,10 +314,10 @@
       "file": "scripts/ci/recovery-gate.mjs",
       "symbol": "R6 reliability engineering",
       "maxHits": 1,
-      "reason": "Testing-matrix row R6 (reliability: MTBF/MTTR measurement) folds into N5 and is deferred with it \u2014 both need a long-running observation window that has never been run. The recoverability half of reliability, which is the half that matters for a password manager, is covered by `test:recovery`'s backup-restore drill onto a second database and by `test:deploy`'s restart-and-re-sign-in check. Removal condition: as N5.",
+      "reason": "Testing-matrix row R6 (reliability: MTBF/MTTR measurement) folds into N5 and is deferred with it \u2014 both need a long-running observation window that has never been run. The recoverability half of reliability, which is the half that matters for a password manager, is covered by `test:recovery`'s backup-restore drill onto a second database and by `test:deploy`'s restart-and-re-sign-in check. Removal condition: as N5. Re-justified 2026-11-23: unchanged; it still folds into N5 (SUP-0036), and no long observation window has been run.",
       "owner": "maintainer",
       "created": "2026-08-14",
-      "expires": "2026-11-11",
+      "expires": "2027-02-21",
       "approvedBy": ["maintainer"]
     },
     {
@@ -353,10 +327,10 @@
       "file": ".nvmrc",
       "symbol": "D6 platform compatibility",
       "maxHits": 1,
-      "reason": "Testing-matrix row D6 (compatibility) is deferred because the runtime is pinned rather than ranged: Node 24 in `.nvmrc`, in `engines.node` (>=24.0.0) and in every image, so there is no supported matrix to test across. The README records the dropped Node 22 leg as a known gap on the same grounds. The Windows leg cannot run on this machine at all. Removal condition: widening `engines.node`, or publishing support for a second platform \u2014 either creates the matrix this row is about.",
+      "reason": "Testing-matrix row D6 (compatibility) is deferred because the runtime is pinned rather than ranged: Node 24 in `.nvmrc`, in `engines.node` (>=24.0.0) and in every image, so there is no supported matrix to test across. The README records the dropped Node 22 leg as a known gap on the same grounds. The Windows leg cannot run on this machine at all. Removal condition: widening `engines.node`, or publishing support for a second platform \u2014 either creates the matrix this row is about. Re-justified 2026-11-23: unchanged; `.nvmrc` is 24 and `engines.node` is `>=24.0.0`.",
       "owner": "maintainer",
       "created": "2026-08-14",
-      "expires": "2026-11-11",
+      "expires": "2027-02-21",
       "approvedBy": ["maintainer"]
     },
     {
@@ -366,10 +340,10 @@
       "file": "scripts/ci/deploy-drill.mjs",
       "symbol": "X2 DAST",
       "maxHits": 1,
-      "reason": "Testing-matrix row X2 (dynamic application security testing) is deferred on value ordering, not on relevance: a ZAP baseline against the local stack is feasible \u2014 `test:deploy` already stands the whole Compose stack up and drives a journey through its single published port, so the target exists. It sits below the matrix because the classes a baseline scan finds are covered statically and by direct assertion here: the security headers and CSP are asserted per response, the cross-user authorization matrix covers every id-taking route, CSRF is constant-time double-submit with its own suite, and `audit:sast` runs the CodeQL security-and-quality suite over the source. Removal condition: this is the strongest remaining candidate of the deferred rows \u2014 wire ZAP baseline into the deploy drill once the stack is already up.",
+      "reason": "Testing-matrix row X2 (dynamic application security testing) is deferred on value ordering, not on relevance: a ZAP baseline against the local stack is feasible \u2014 `test:deploy` already stands the whole Compose stack up and drives a journey through its single published port, so the target exists. It sits below the matrix because the classes a baseline scan finds are covered statically and by direct assertion here: the security headers and CSP are asserted per response, the cross-user authorization matrix covers every id-taking route, CSRF is constant-time double-submit with its own suite, and `audit:sast` runs the CodeQL security-and-quality suite over the source. Removal condition: this is the strongest remaining candidate of the deferred rows \u2014 wire ZAP baseline into the deploy drill once the stack is already up. Re-justified 2026-11-23: unchanged; no ZAP or other dynamic scanner is wired into the deploy drill.",
       "owner": "maintainer",
       "created": "2026-08-14",
-      "expires": "2026-11-11",
+      "expires": "2027-02-21",
       "approvedBy": ["maintainer"]
     },
     {
@@ -379,10 +353,10 @@
       "file": "playwright.config.ts",
       "symbol": "B10 cross-browser E2E (WebKit)",
       "maxHits": 1,
-      "reason": "Testing-matrix row B10 is the one row the audit UPGRADED from DEFERRED to 'APPLICABLE: missing' on review, and its Firefox half has now been taken; this entry is re-dated rather than removed because two of its three clauses are still true. WHAT NOW EXISTS: `playwright.config.ts` declares a `firefox` project (`FIREFOX_SUITE`) over `clipboard-hygiene.spec.ts` and `auto-lock.spec.ts`, sharing the harness's single stack and attributed in `junit-e2e.xml` by project name (`includeProjectInTestName`), measured green. It runs the guard against a second, independent set of platform rules and asserts three things: a copy issued inside a real click is ACCEPTED (the deadline is only armed after the write resolves, so the countdown the spec asserts is unreachable on a refusal); locking erases the clipboard from inside the keypress that requested it; and the DEADLINE erase is genuinely REFUSED, shows the overdue notice, and is landed by the next gesture. The refusal turned out NOT to be Gecko-only: Chromium refuses it too, with the clipboard permission granted and `document.hasFocus()` asserted true in the same test, so this entry's own earlier premise - that Chromium is the permissive engine - was wrong, and only a second engine could have shown it. Which rule each engine applies is deliberately not claimed; the refusal and the guard's response to it are. That last one is no longer a simulated refusal, which is exactly what this entry's previous reason said was missing. It needed one measured fact to be possible: every Playwright protocol call refreshes transient user activation on BOTH engines (navigator.userActivation.isActive was never observed false while a poll ran), so a refusal is only observable from a wait that runs INSIDE the page and makes no protocol call - `waitForDeadlineErase` is that wait, and `page.clock` cannot substitute for it because the activation deadline is native rather than one of the JS clocks it fakes. WHAT REMAINS: WebKit. No `webkit` project is declared, so Safari's behaviour is asserted nowhere, and WebKit-on-Linux is not Safari - it shares the engine and not the platform integration, so a green Linux run is weaker evidence about Safari than it looks. The other nineteen specs also stay Chromium-only, deliberately: they assert application behaviour that does not vary by engine, and duplicating them would triple the gate for nothing. Removal condition: a `webkit` project running at minimum the same two specs as its own attributed leg, with the WebKit-is-not-Safari residue either closed or restated as a permanent boundary in `verify.json`'s gaps rather than as a dated promise.",
+      "reason": "Testing-matrix row B10 is the one row the audit UPGRADED from DEFERRED to 'APPLICABLE: missing' on review, and its Firefox half has now been taken; this entry is re-dated rather than removed because two of its three clauses are still true. WHAT NOW EXISTS: `playwright.config.ts` declares a `firefox` project (`FIREFOX_SUITE`) over `clipboard-hygiene.spec.ts` and `auto-lock.spec.ts`, sharing the harness's single stack and attributed in `junit-e2e.xml` by project name (`includeProjectInTestName`), measured green. It runs the guard against a second, independent set of platform rules and asserts three things: a copy issued inside a real click is ACCEPTED (the deadline is only armed after the write resolves, so the countdown the spec asserts is unreachable on a refusal); locking erases the clipboard from inside the keypress that requested it; and the DEADLINE erase is genuinely REFUSED, shows the overdue notice, and is landed by the next gesture. The refusal turned out NOT to be Gecko-only: Chromium refuses it too, with the clipboard permission granted and `document.hasFocus()` asserted true in the same test, so this entry's own earlier premise - that Chromium is the permissive engine - was wrong, and only a second engine could have shown it. Which rule each engine applies is deliberately not claimed; the refusal and the guard's response to it are. That last one is no longer a simulated refusal, which is exactly what this entry's previous reason said was missing. It needed one measured fact to be possible: every Playwright protocol call refreshes transient user activation on BOTH engines (navigator.userActivation.isActive was never observed false while a poll ran), so a refusal is only observable from a wait that runs INSIDE the page and makes no protocol call - `waitForDeadlineErase` is that wait, and `page.clock` cannot substitute for it because the activation deadline is native rather than one of the JS clocks it fakes. WHAT REMAINS: WebKit. No `webkit` project is declared, so Safari's behaviour is asserted nowhere, and WebKit-on-Linux is not Safari - it shares the engine and not the platform integration, so a green Linux run is weaker evidence about Safari than it looks. The other twenty-eight specs also stay Chromium-only, deliberately: they assert application behaviour that does not vary by engine, and duplicating them would triple the gate for nothing. Removal condition: a `webkit` project running at minimum the same two specs as its own attributed leg, with the WebKit-is-not-Safari residue either closed or restated as a permanent boundary in `verify.json`'s gaps rather than as a dated promise. Re-justified 2026-11-23: unchanged; `playwright.config.ts` declares the `chromium` and `firefox` projects only. The Chromium-only count was corrected that day from nineteen: `e2e/` holds thirty specs, two of which also run on Firefox.",
       "owner": "maintainer",
       "created": "2026-08-14",
-      "expires": "2026-11-11",
+      "expires": "2027-02-21",
       "approvedBy": ["maintainer"]
     },
     {
@@ -392,10 +366,10 @@
       "file": "packages/client/src/styles/globals.css",
       "symbol": ".dark --destructive, and test:a11y's light-theme-only scan",
       "maxHits": 1,
-      "reason": "`test:a11y` scans the LIGHT theme only, so the dark palette is unmeasured, and one defect in it is already known and reproduced: dark `--destructive` (0 62.8% 30.6%) is a dark red that cannot reach 4.5:1 as TEXT on the near-black `--background` (222.2 84% 4.9%). It is used 83 times across 25 client files, 65 of those as text and 8 as a solid button background under the near-white `--destructive-foreground` \u2014 two roles that pull the lightness in opposite directions, so no single token can satisfy both and the repair is a second, text-only token plus 65 call-site edits. The light theme was fixed with measured ratios and is verified by `e2e/a11y.spec.ts`; the comment above the token in globals.css records the dark case rather than half-fixing it. This is deliberately NOT being taken during release preparation: extending the scan to the dark theme first is the correct order, and it is expected to surface further palette failures beyond this one (the audit notes `text-*-600` in roughly thirty more places), each needing a design decision rather than a token tweak. Removal condition: a dark-theme leg added to the a11y gate, and the token split that makes it pass.",
+      "reason": "`test:a11y` scans the LIGHT theme only, so the dark palette is unmeasured, and one defect in it is already known and reproduced: dark `--destructive` (0 62.8% 30.6%) is a dark red that cannot reach 4.5:1 as TEXT on the near-black `--background` (222.2 84% 4.9%). It is used 135 times across 35 client files (recounted 2026-11-23; it read 83 across 25), 70 of those as text plus 5 as hover text and 11 as a solid background under the near-white `--destructive-foreground` \u2014 two roles that pull the lightness in opposite directions, so no single token can satisfy both and the repair is a second, text-only token plus a call-site edit at every text use. The light theme was fixed with measured ratios and is verified by `e2e/a11y.spec.ts`; the comment above the token in globals.css records the dark case rather than half-fixing it. This is deliberately NOT being taken during release preparation: extending the scan to the dark theme first is the correct order, and it is expected to surface further palette failures beyond this one (the audit notes `text-*-600` in roughly thirty more places), each needing a design decision rather than a token tweak. Removal condition: a dark-theme leg added to the a11y gate, and the token split that makes it pass. Re-justified 2026-11-23: unchanged in kind; the dark token is still `0 62.8% 30.6%` and `e2e/a11y.spec.ts` still scans the light theme only.",
       "owner": "maintainer",
       "created": "2026-08-14",
-      "expires": "2026-11-11",
+      "expires": "2027-02-21",
       "approvedBy": ["maintainer"]
     },
     {
@@ -405,10 +379,10 @@
       "file": ".testfortress/baseline.json",
       "symbol": "the unbanked `client` and `server` mutation legs and the merged floor, and the verify:full run that fails without them",
       "maxHits": 1,
-      "reason": "UPDATED 2026-09-24 (Phase 27, mutation-oracle): per-leg floors now exist. `test:mutation` banks and holds each leg on its own (`mutation.legs.<leg>`), so the `shared` leg was banked from a from-scratch run on an idle four-core host: 88.64% of 2,633 mutants in 17m14s, 23 timeouts, every one a genuine loop or cursor hang in `packages/shared/src/utils/backupCodes.ts`. What remains is the gap this entry now covers: the `client` leg (about 24,000 mutants on Stryker 10, roughly twenty hours from scratch; its last complete run, 15,322 mutants before the document store, took 12h35m) and the `server` leg (about 12,900 mutants, 41% static, each run against every covering test file that boots a real mongod, measured at 120-130 hours) are unbanked, so `test:mutation` exits 1 naming them UNBANKED, the merged floor cannot exist yet, and `npm run verify:full` and `npm run ci:local` cannot pass. A client run was started in the Phase 27 session and stopped after 25 seconds: the orchestrated session is capped at ten hours, and a leg left running under the following phases' pipelines would bank a score inflated by their load. The per-change half of the oracle, `test:mutation:diff`, runs on every push at tier 1 and is unaffected, as is everything the pre-push hook and the release workflow run. REMOVAL CONDITION: on an otherwise idle machine, `npm run test:mutation -- --leg=client --full`, then `npm run audit:ratchet:full`, then `node scripts/ci/ratchet-check.mjs --accept --seed mutation.legs.client --reason \"...\"`; the same for `--leg=server`; and once all three legs complete in one `npm run test:mutation -- --full`, seed the merged figures with `--seed mutation.overall,mutation.totalMutants,mutation.filesMutated,mutation.modules`. The ratchet refuses a floor from any run that was not from scratch, and checking the Timeout population before accepting is still required.",
+      "reason": "UPDATED 2026-09-24 (Phase 27, mutation-oracle): per-leg floors now exist. `test:mutation` banks and holds each leg on its own (`mutation.legs.<leg>`), so the `shared` leg was banked from a from-scratch run on an idle four-core host: 88.64% of 2,633 mutants in 17m14s, 23 timeouts, every one a genuine loop or cursor hang in `packages/shared/src/utils/backupCodes.ts`. What remains is the gap this entry now covers: the `client` leg (about 24,000 mutants on Stryker 10, roughly twenty hours from scratch; its last complete run, 15,322 mutants before the document store, took 12h35m) and the `server` leg (about 12,900 mutants, 41% static, each run against every covering test file that boots a real mongod, measured at 120-130 hours) are unbanked, so `test:mutation` exits 1 naming them UNBANKED, the merged floor cannot exist yet, and `npm run verify:full` and `npm run ci:local` cannot pass. A client run was started in the Phase 27 session and stopped after 25 seconds: the orchestrated session is capped at ten hours, and a leg left running under the following phases' pipelines would bank a score inflated by their load. The per-change half of the oracle, `test:mutation:diff`, runs on every push at tier 1 and is unaffected, as is everything the pre-push hook and the release workflow run. REMOVAL CONDITION: on an otherwise idle machine, `npm run test:mutation -- --leg=client --full`, then `npm run audit:ratchet:full`, then `node scripts/ci/ratchet-check.mjs --accept --seed mutation.legs.client --reason \"...\"`; the same for `--leg=server`; and once all three legs complete in one `npm run test:mutation -- --full`, seed the merged figures with `--seed mutation.overall,mutation.totalMutants,mutation.filesMutated,mutation.modules`. The ratchet refuses a floor from any run that was not from scratch, and checking the Timeout population before accepting is still required. Re-justified 2026-11-23: unchanged; `baseline.json` banks `mutation.legs.shared` only, and neither the client nor the server leg has had the idle window its from-scratch run needs.",
       "owner": "maintainer",
       "created": "2026-08-15",
-      "expires": "2026-11-11",
+      "expires": "2027-02-21",
       "approvedBy": ["maintainer"]
     },
     {

@@ -91,16 +91,6 @@ afterEach(() => {
   );
 });
 
-// Ensure Web Crypto API is available in jsdom environment
-if (!globalThis.crypto?.subtle) {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { webcrypto } = require('node:crypto');
-  Object.defineProperty(globalThis, 'crypto', {
-    value: webcrypto,
-    writable: true,
-  });
-}
-
 // Polyfill scrollIntoView for jsdom, which implements no layout and therefore
 // ships no implementation of it. Any component that keeps a keyboard-active row
 // inside a scrollport calls it (the saved-address picker does), and without this
