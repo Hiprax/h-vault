@@ -137,6 +137,8 @@ export default tseslint.config(
       'security/detect-child-process': 'warn',
       'security/detect-disable-mustache-escape': 'warn',
       'security/detect-eval-with-expression': 'warn',
+      // Hangul filler characters (U+3164, U+FFA0) render as nothing and can hide code.
+      'security/detect-invisible-characters': 'warn',
       'security/detect-new-buffer': 'warn',
       'security/detect-no-csrf-before-method-override': 'warn',
       'security/detect-non-literal-fs-filename': 'warn',
