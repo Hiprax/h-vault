@@ -355,17 +355,42 @@ describe('the production block mounts the client and the isolated document', () 
     });
 
     // The other half of the measurement, and the half that keeps the four above
-    // honest. Express normalises DOT SEGMENTS before matching, so these two DO
-    // reach the route — which means "the document is unreachable" is not what is
-    // being asserted, and a fix that simply broke `/sandbox.html` for everybody
-    // would fail here rather than read as an improvement above.
+    // honest. DOT SEGMENTS are resolved by the CLIENT, not by Express: a browser
+    // parses the URL before sending it and puts `/sandbox.html` on the wire for
+    // both spellings, so in practice they DO reach the route. That means "the
+    // document is unreachable" is not what is being asserted, and a fix that simply
+    // broke `/sandbox.html` for everybody would fail here rather than read as an
+    // improvement above. These cases used to send the spellings through supertest
+    // and lean on superagent normalising them; superagent 10.4 sends a path as
+    // given, which is what showed that Express itself never did.
     for (const spelling of ['/./sandbox.html', '/foo/../sandbox.html']) {
-      it(`serves ${spelling} from the route, with the whole policy`, async () => {
-        const response = await request(app).get(spelling);
+      const browserPath = new URL(spelling, 'https://vault.invalid').pathname;
+
+      it(`serves ${spelling} from the route, with the whole policy, as a browser sends it`, async () => {
+        expect(browserPath).toBe('/sandbox.html');
+        const response = await request(app).get(browserPath);
 
         expect(response.status).toBe(200);
         expect(response.text).toContain(SANDBOX_DOCUMENT_MARKER);
         expect(response.headers['content-security-policy']).toBe(SANDBOX_CSP_HEADER);
+      });
+
+      // A client that sends the dot segments RAW (curl --path-as-is, superagent
+      // 10.4 and later) is not normalised by Express: the spelling misses the route
+      // and is answered like the four above, the shell under helmet's policy and
+      // never the document.
+      it(`answers the raw ${spelling} request line without handing out the sandbox document`, async () => {
+        const response = await request(app).get(spelling);
+
+        // The dot segments really were on the wire, so this cannot pass because a
+        // client normalised them away.
+        expect((response as unknown as { req: { path: string } }).req.path).toBe(spelling);
+        expect(response.text).not.toContain(SANDBOX_DOCUMENT_MARKER);
+        expect(response.status).toBe(200);
+        expect(response.text).toMatch(/<script nonce="[^"]+"/);
+        const policy = String(response.headers['content-security-policy']);
+        expect(policy).toContain("frame-src 'self'");
+        expect(policy).not.toContain("connect-src 'none'");
       });
     }
   });
