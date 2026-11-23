@@ -18,11 +18,12 @@ import { httpErrors } from '@hiprax/errors';
  * Why after `hppx`: it is not only a duplicate-collapser. It EXPANDS dotted and
  * bracketed keys into nested objects, in the query (Express 5's own "simple"
  * parser leaves `folderId[$ne]` as one literal key) and in a urlencoded body (whose
- * parser leaves `email.$ne` as one literal key). Those keys start with no `$`, so a
- * filter that ran first passed them, and `hppx` then turned them into
- * `{ folderId: { $ne: … } }` and `{ email: { $ne: … } }` on the way to the
- * routes. An earlier version of this comment said query strings could not carry an
- * operator under Express 5; through `hppx` they could.
+ * parser leaves `email.$ne` as one literal key). Up to hppx 0.4 that expansion
+ * created operators: a filter that ran first passed the flat keys, and `hppx` then
+ * turned them into `{ folderId: { $ne: … } }` and `{ email: { $ne: … } }`. Since
+ * 0.5 it drops any key whose expanded path has a `$` segment, but operators still
+ * reach this point another way (qs-nested urlencoded bodies, JSON, a flat
+ * `$where`), so the order stays: this filter runs last.
  *
  * The second kind of mount was missing once too: both 30 MB routes reached their
  * controllers unfiltered while the comment here claimed every body was covered,

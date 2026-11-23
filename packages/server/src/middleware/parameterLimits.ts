@@ -12,8 +12,8 @@ import { httpErrors } from '@hiprax/errors';
  * comes out of the middleware is a real failure and passes through untouched.
  *
  * The limit errors are recognised by their exact text, because that is all `hppx`
- * gives them (0.4.0: `dist/index.mjs` builds them at `:119`, `:196`, `:213`, `:383`
- * and `:388`, and forwards them from its one `catch` at `:676-686`). Only a PLAIN
+ * gives them (0.5.0: `dist/index.mjs` builds them at `:122`, `:213`, `:230`, `:414`
+ * and `:419`, and forwards them from its one `catch` at `:696`). Only a PLAIN
  * `Error` carrying one of those two sentences is mapped. If a later release
  * rewords them, the end-to-end tests in `tests/input-filter-order.test.ts` drive
  * the real middleware past both bounds and fail.

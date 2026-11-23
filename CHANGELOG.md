@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ### Changed
 
+- **Behaviour change: a query or form parameter whose expanded name has a `$` segment is now ignored instead of refused.** The parameter-pollution filter (hppx 0.5.0) drops keys such as `folderId[$ne]` or `email.$ne` before any route sees them, so `GET /api/v1/vault/items?folderId[$ne]=x`, for example, now lists the caller's own items (200) where it answered 400. No MongoDB operator reaches a query either way; operators sent by other means (JSON bodies, bracketed form fields, a top-level `$where`) are still stripped by the input filter that runs after it.
+
 - **The host nginx examples in `docker/nginx/` are re-rendered from the current policy.** Both site files also list WebAssembly and `.ico` among the compressible types (the sites keep `--gzip off`), and `00-newapp-http.conf` changes only in a comment. Re-install them on the host as before.
 - **Document format-and-repair uses Prettier 3.10.1** in the isolated document viewer, so formatted Markdown, YAML and JavaScript follow that release's output (for example a `$` in Markdown text is no longer read as math, and YAML block scalars keep trailing whitespace); new formatted documents record Prettier 3.10.1 as the tool that produced them.
 - **The authenticator import scanner also reads mirror-image QR codes** (qr 0.7.2), for example a frame from a camera that mirrors at the source; decoding is also faster on camera frames.

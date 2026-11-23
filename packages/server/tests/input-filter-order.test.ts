@@ -3,11 +3,13 @@
  * the body, and a parameter-limit refusal is the client's error.
  *
  * `hppx` does more than collapse duplicates: it EXPANDS dotted and bracketed keys
- * into nested objects (`folderId[$ne]=x` and `email.$ne=` become
- * `{ folderId: { $ne: 'x' } }` and `{ email: { $ne: '' } }`). Any filter that runs
- * before it judges the flat key, which carries no leading `$`, and lets the
- * operator through. So the filter has to run after the expansion, and over
- * `req.query` as well as `req.body`.
+ * into nested objects. Up to 0.4 it expanded operator segments too
+ * (`folderId[$ne]=x` and `email.$ne=` became `{ folderId: { $ne: 'x' } }` and
+ * `{ email: { $ne: '' } }`); since 0.5 it drops a key whose expanded path has a
+ * `$` segment before writing anything. Operators still arrive by other ways
+ * (qs-nested urlencoded bodies, JSON, a flat `$where`), and any filter that runs
+ * before the expansion judges flat keys only. So the filter still runs after it,
+ * and over `req.query` as well as `req.body`.
  *
  * Everything here drives the REAL `app`. What the routes are handed is observed by
  * a probe spliced into the real stack immediately in front of the first route, so
@@ -128,11 +130,14 @@ describe('F-13: what the routes are handed has no operator key, from the query o
 
     const handed = onlySeen();
     expect(forbiddenKeysIn(handed.query)).toEqual([]);
-    // The whole query, not a spot check: the operator is gone and the field is left
-    // as the empty object validation then refuses.
-    expect(handed.query).toStrictEqual({ folderId: {} });
-    expect(res.status).toBe(400);
-    expect(res.body).toMatchObject({ success: false, statusCode: 400 });
+    // The whole query, not a spot check: hppx (0.5+) drops a key whose expanded
+    // path has a `$` segment, so the route is handed no `folderId` at all. With the
+    // field optional, that is an ordinary listing of the caller's own (here empty)
+    // vault: the operator neither filters nor widens it. Up to hppx 0.4 the field
+    // arrived as `{}` and validation answered 400.
+    expect(handed.query).toStrictEqual({});
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ success: true, data: [] });
   });
 
   it('a dotted operator in the QUERY (`folderId.$ne=x`) reaches no route', async () => {
@@ -140,7 +145,8 @@ describe('F-13: what the routes are handed has no operator key, from the query o
 
     const handed = onlySeen();
     expect(forbiddenKeysIn(handed.query)).toEqual([]);
-    expect(handed.query).toStrictEqual({ folderId: {}, keep: '1' });
+    // Dropped by hppx, not emptied: no `folderId` key reaches the route at all.
+    expect(handed.query).toStrictEqual({ keep: '1' });
   });
 
   it('a top-level operator key in the QUERY (`$where=1`) reaches no route', async () => {
@@ -174,9 +180,11 @@ describe('F-13: what the routes are handed has no operator key, from the query o
 
     const handed = onlySeen();
     expect(forbiddenKeysIn(handed.body)).toEqual([]);
-    expect(handed.body).toStrictEqual({ email: {}, authHash: 'guess' });
-    // Refused by validation: an empty object is not an address, so no account was
-    // looked up and no session was issued.
+    // qs does not parse dots, so `email.$ne` stays one flat key until hppx, which
+    // (0.5+) drops it because its expanded path has a `$` segment.
+    expect(handed.body).toStrictEqual({ authHash: 'guess' });
+    // Refused by validation: there is no address, so no account was looked up and
+    // no session was issued.
     expect(res.status).toBe(400);
     expect(res.headers['set-cookie'] ?? []).not.toEqual(
       expect.arrayContaining([expect.stringMatching(/^refreshToken=/)]),

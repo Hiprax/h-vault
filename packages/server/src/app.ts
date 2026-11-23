@@ -224,7 +224,8 @@ app.use(cookieParser());
 
 // HTTP Parameter Pollution protection. Besides collapsing a repeated parameter to its
 // last value, `hppx` EXPANDS dotted and bracketed keys (`a[b]=`, `a.b=`) into nested
-// objects, in the query and in a urlencoded body. Past its bounds (20 levels, 5,000
+// objects, in the query and in a urlencoded body, and (since 0.5) drops a key whose
+// expanded path has a `$` segment. Past its bounds (20 levels, 5,000
 // keys) it throws; `refuseParameterLimitErrors` answers exactly those as the 400 they
 // are and passes every other error on (`middleware/parameterLimits.ts`).
 app.use(
@@ -239,8 +240,9 @@ app.use(
 
 // MongoDB operator injection and prototype-pollution prevention, over the query and
 // every body the global parsers produced. It runs AFTER `hppx`, never before: the
-// expansion above is what turns `folderId[$ne]=x` into an operator, and a filter
-// that ran first judged the flat key and let it through. This mount does NOT cover
+// expansion above turned `folderId[$ne]=x` into an operator up to hppx 0.4, a filter
+// that ran first judged the flat key and let it through, and operators still arrive
+// by qs nesting, JSON and flat `$` keys. This mount does NOT cover
 // the routes in `CUSTOM_BODY_LIMIT_PATHS`: their body is still unparsed here, so
 // each of them mounts the same middleware again straight after its own parser, and
 // `tests/route-table.test.ts` fails any route-level JSON parser that is not followed
