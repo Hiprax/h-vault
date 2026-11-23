@@ -22,11 +22,14 @@ afterAll(() => {
 });
 
 /**
- * A temp world whose global git configuration is hostile, whatever this machine's
- * own is: `~/.gitconfig` turns tag signing on and names a user, the XDG file turns
- * on `core.autocrlf`, and the inherited environment carries a parent's
- * `git -c commit.gpgSign=true`. `GIT_DIR` is added only by the case about it,
- * because with it set no git command reaches `repo` at all.
+ * A temp world whose system and global git configuration are hostile, whatever
+ * this machine's own are: its own system file (`GIT_CONFIG_SYSTEM`, which also
+ * keeps the machine's `/etc/gitconfig` out, so the scopes git lists are the same
+ * on a developer machine with none and on a CI runner with one) sets
+ * `core.excludesFile`, `~/.gitconfig` turns tag signing on and names a user, the
+ * XDG file turns on `core.autocrlf`, and the inherited environment carries a
+ * parent's `git -c commit.gpgSign=true`. `GIT_DIR` is added only by the case about
+ * it, because with it set no git command reaches `repo` at all.
  */
 function hostileWorld(options: { gitDir?: boolean } = {}) {
   const root = mkdtempSync(path.join(tmpdir(), 'hv-hermetic-git-'));
@@ -35,9 +38,11 @@ function hostileWorld(options: { gitDir?: boolean } = {}) {
   const xdg = path.join(root, 'xdg');
   const repo = path.join(root, 'repo');
   const elsewhere = path.join(root, 'elsewhere.git');
+  const system = path.join(root, 'system-gitconfig');
   mkdirSync(path.join(xdg, 'git'), { recursive: true });
   mkdirSync(home);
   mkdirSync(repo);
+  writeFileSync(system, `[core]\n\texcludesFile = ${path.join(root, 'hostile-excludes')}\n`);
   writeFileSync(
     path.join(home, '.gitconfig'),
     '[tag]\n\tgpgSign = true\n[user]\n\tname = leaked\n',
@@ -47,6 +52,7 @@ function hostileWorld(options: { gitDir?: boolean } = {}) {
     PATH: process.env['PATH'],
     HOME: home,
     XDG_CONFIG_HOME: xdg,
+    GIT_CONFIG_SYSTEM: system,
     KEEP_ME: 'kept',
     GIT_CONFIG_PARAMETERS: "'commit.gpgsign'='true'",
     ...(options.gitDir ? { GIT_DIR: elsewhere } : {}),
@@ -58,22 +64,29 @@ const git = (cwd: string, env: NodeJS.ProcessEnv, ...args: string[]) =>
   spawnSync('git', args, { cwd, env, encoding: 'utf-8' });
 
 describe('hermeticGitEnv', () => {
-  it('hides the global and XDG configuration and a parent git -c, leaving only the repository', () => {
+  it('hides the system, global and XDG configuration and a parent git -c, leaving only the repository', () => {
     const { repo, base } = hostileWorld();
     const env = hermeticGitEnv(base);
     execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repo, env });
 
     // The premise, so a green result means something: inherited as-is, git in this
-    // world DOES see the hostile global file and the parent's -c setting.
+    // world DOES see the hostile system and global files and the parent's -c setting.
     const leaky = gitConfigScopes(repo, base);
+    expect(leaky).toContain('system');
     expect(leaky).toContain('global');
     expect(leaky).toContain('command');
     expect(git(repo, base, 'config', '--get', 'tag.gpgsign').stdout.trim()).toBe('true');
 
     // Hermetic: nothing but what `git init` wrote.
     expect(new Set(gitConfigScopes(repo, env))).toEqual(new Set(['local']));
-    // Negative: none of the three hostile settings is visible (`--get` exits 1 on unset).
-    for (const key of ['tag.gpgsign', 'commit.gpgsign', 'core.autocrlf', 'user.name']) {
+    // Negative: none of the hostile settings is visible (`--get` exits 1 on unset).
+    for (const key of [
+      'core.excludesfile',
+      'tag.gpgsign',
+      'commit.gpgsign',
+      'core.autocrlf',
+      'user.name',
+    ]) {
       const read = git(repo, env, 'config', '--get', key);
       expect({ key, status: read.status, value: read.stdout }).toEqual({
         key,
@@ -128,11 +141,13 @@ describe('gitConfigScopes', () => {
     const scopes = gitConfigScopes(repo, base);
 
     expect(scopes).toHaveLength(entries.length);
-    // The hostile files are read first (global, in file order), the parent's -c last.
-    expect(scopes[0]).toBe('global');
-    expect(scopes.at(-1)).toBe('command');
-    expect(scopes.every((scope) => ['global', 'local', 'command', 'system'].includes(scope))).toBe(
-      true,
-    );
+    // git reads its files in a fixed order (git-config(1), FILES): system, global (the
+    // XDG file, then ~/.gitconfig), the repository's own, and the parent's -c last.
+    // This world owns every one of them, so the order is exact on any machine.
+    const runs = scopes.filter((scope, index) => scope !== scopes[index - 1]);
+    expect(runs).toEqual(['system', 'global', 'local', 'command']);
+    expect(scopes.filter((scope) => scope === 'system')).toHaveLength(1);
+    expect(scopes.filter((scope) => scope === 'global')).toHaveLength(3);
+    expect(scopes.filter((scope) => scope === 'command')).toHaveLength(1);
   });
 });
