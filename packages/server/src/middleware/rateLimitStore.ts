@@ -113,6 +113,8 @@ export class MongoRateLimitStore implements Store {
     if (this.ttlIndexAttempts >= MAX_TTL_INDEX_ATTEMPTS) return;
 
     this.ttlIndexReady ??= this.collection()
+      // Three arguments only to reach mongodb 7.8's non-deprecated overload; with no
+      // command options the driver behaves exactly as for the two-argument call.
       .createIndex({ expirationDate: 1 }, { expireAfterSeconds: 0 }, undefined)
       .then(() => undefined)
       .catch((error: unknown) => {

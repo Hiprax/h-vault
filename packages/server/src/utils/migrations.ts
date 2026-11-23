@@ -112,6 +112,10 @@ const VAULT_QUOTA_BACKFILL_AGGREGATE_MAX_TIME_MS = 10_000;
 async function migrateVaultQuotaCounter(): Promise<void> {
   const users = mongoose.connection.collection('users');
   try {
+    // The trailing `undefined` (command options) selects mongodb 7.8's non-deprecated
+    // three-argument overload; with no command options the driver takes the same
+    // combined-options path as the old one- and two-argument calls (collection.js), so
+    // every `createIndex` here behaves exactly as before.
     await users.createIndex({ quotaRecountedAt: 1 }, undefined, undefined);
   } catch (error: unknown) {
     if (!hasCode(error, INDEX_OPTIONS_CONFLICT) && !hasCode(error, INDEX_KEY_SPECS_CONFLICT)) {
