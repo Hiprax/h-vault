@@ -1687,3 +1687,24 @@ describe('Breach-cache bounds (F-06)', () => {
     expect(HIBP_MAX_MISSES_PER_USER_PER_DAY).toBe(30_000);
   });
 });
+
+describe('the hand-pinned tool labels', () => {
+  // JSONREPAIR_VERSION and PRETTIER_VERSION are sealed into a transformed
+  // document's encrypted metadata as the record of what rewrote it, so they
+  // must name the releases actually installed. The client suite checks this
+  // too; it lives here as well because these constants are this package's,
+  // and a dependency bump that forgets them should fail where they are defined.
+  const installedVersion = (pkg: string): string => {
+    const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
+    return (
+      JSON.parse(
+        readFileSync(path.join(repoRoot, 'node_modules', pkg, 'package.json'), 'utf-8'),
+      ) as { version: string }
+    ).version;
+  };
+
+  it('names the jsonrepair and prettier releases actually installed', () => {
+    expect(JSONREPAIR_VERSION).toBe(installedVersion('jsonrepair'));
+    expect(PRETTIER_VERSION).toBe(installedVersion('prettier'));
+  });
+});
