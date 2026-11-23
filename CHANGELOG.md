@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 - **The host nginx examples in `docker/nginx/` are re-rendered from the current policy.** Both site files also list WebAssembly and `.ico` among the compressible types (the sites keep `--gzip off`), and `00-newapp-http.conf` changes only in a comment. Re-install them on the host as before.
 - **The authenticator import scanner also reads mirror-image QR codes** (qr 0.7.2), for example a frame from a camera that mirrors at the source; decoding is also faster on camera frames.
-- **Express 5.3.0, Nodemailer 10.6.0 and @hiprax/logger 1.3.1 (server)**; the logger escapes control characters in its own error line (CWE-117); Express brings content-type 2 and content-disposition 2 underneath; the server's own download headers are unchanged.
+- **Express 5.3.0, Nodemailer 10.6.0, @hiprax/logger 1.3.1 and the S3 client 3.1169.0 (server)**; a document segment whose storage stream stalls is now logged as a socket inactivity timeout rather than a bare "aborted", and the S3 client uses its newer default retry delays (still three attempts); the logger escapes control characters in its own error line (CWE-117); Express brings content-type 2 and content-disposition 2 underneath; the server's own download headers are unchanged.
 - Patch-level dependency updates: React and React DOM 19.3.1, Vite 8.3.8 (Rolldown 1.2.19), Tailwind CSS 4.3.5, dotenv 18.0.10, express-rate-limit 8.7.4, @hiprax/crypto 1.9.1, fake-indexeddb 6.2.8 and concurrently 10.0.7.
 
 ### Security
