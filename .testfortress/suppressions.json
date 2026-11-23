@@ -748,6 +748,19 @@
       "created": "2026-10-17",
       "expires": "2027-01-15",
       "approvedBy": ["maintainer"]
+    },
+    {
+      "id": "SUP-0074",
+      "rule": "BASELINE-REDUCTION",
+      "kind": "known-gap",
+      "file": ".testfortress/baseline.json",
+      "symbol": "duplication.percentage 0.85 -> 0.93, duplication.duplicatedLines 1029 -> 1121",
+      "maxHits": 1,
+      "reason": "Dependency upgrade jscpd 5.3.1 -> 5.4.3 (operator-approved re-baseline, 2026-11-23). A MEASUREMENT change, not new duplication: jscpd 5.3.2 makes the duplicated-line TOTAL inclusive (its release notes: every clone was one line short, totals rise by about one line per clone); per-clone spans were already inclusive and sum to 1121 in both reports, and 5.3.1 summed end - start (1121 - 92 = 1029). Measured on the SAME tree (HEAD 0fa2c85 plus the version bump only) with the repo .jscpd.json: 5.3.1 reported 92 clones, 1029 duplicated lines, 0.8525 % of 120708 lines over 401 sources; 5.4.3 reported 92 clones, 1121 duplicated lines, 0.9287 % of the same 120708 lines and 401 sources. The 92 clone pairs are identical (same files and start lines, none only in one report) and the total rose by exactly 92, one line per clone. No source changed between the two runs. Both fields ratchet lower and --accept cannot loosen a field (ratchet-check.mjs decision (g)), so the two baselines move to the new tool measurement: percentage 0.85 -> 0.93 and duplicatedLines 1029 -> 1121. clones 92, the 2.89 % ceiling in .jscpd.json and every other field are unchanged. Removal condition: none; this records a one-off change of instrument, and the floors keep ratcheting from the new values.",
+      "owner": "maintainer",
+      "created": "2026-11-23",
+      "expires": "2027-02-21",
+      "approvedBy": ["operator", "judge:readonly"]
     }
   ]
 }
