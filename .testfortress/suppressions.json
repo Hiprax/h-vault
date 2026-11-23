@@ -813,6 +813,19 @@
       "created": "2026-11-23",
       "expires": "2027-02-21",
       "approvedBy": ["operator", "judge:readonly"]
+    },
+    {
+      "id": "SUP-0079",
+      "rule": "BASELINE-REDUCTION",
+      "kind": "known-gap",
+      "file": ".testfortress/baseline.json",
+      "symbol": "packages.packages/server.coverage.linesTotal 6770 -> 6768, packages.packages/server.coverage.branchesTotal 3769 -> 3767",
+      "maxHits": 1,
+      "reason": "Dependency-upgrade run 2026-11-23, optional unit U39 (operator-chosen): otpauth 9.6 lets TOTP validate() refuse a step at or before afterCounter, so verifySecondFactor passes lastTotpTimestamp as afterCounter and the hand-written replay comparison it replaces was deleted (it would otherwise be dead code). DELETED CODE, not a narrowed scope. Evidence: server coverage measured twice in one clean worktree of HEAD 8b97a30, once with packages/server/src as committed and once with packages/server/src reset to the run's base commit cdec99f (same node_modules, same tests; 6222/6222 passed both times). Both runs cover the same 129 files; the base totals are LF 6770 / BRF 3769, equal to the stored baseline; the only per-file difference is src/utils/secondFactor.ts, LF 55 -> 53 and BRF 49 -> 47, fully covered before and after (LH = LF, BRH = BRF). Three existing replay tests go red when afterCounter is removed. Both fields ratchet higher and --accept cannot loosen a field (ratchet-check.mjs decision (g)), so the two denominators move by exactly the deleted lines and branches. No other field changes. Removal condition: none; the floors keep ratcheting from the new values.",
+      "owner": "maintainer",
+      "created": "2026-11-23",
+      "expires": "2027-02-21",
+      "approvedBy": ["judge:readonly"]
     }
   ]
 }

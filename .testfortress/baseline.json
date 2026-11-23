@@ -60,8 +60,8 @@
         "line": 99.41,
         "branch": 94.96,
         "function": 99,
-        "linesTotal": 6770,
-        "branchesTotal": 3769,
+        "linesTotal": 6768,
+        "branchesTotal": 3767,
         "filesMeasured": [
           "src/app.ts",
           "src/cli/invite.ts",
