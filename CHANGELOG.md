@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-11-23
+
 ### Changed
 
 - **Behaviour change: a query or form parameter whose expanded name has a `$` segment is now ignored instead of refused.** The parameter-pollution filter (hppx 0.5.0) drops keys such as `folderId[$ne]` or `email.$ne` before any route sees them, so `GET /api/v1/vault/items?folderId[$ne]=x`, for example, now lists the caller's own items (200) where it answered 400. No MongoDB operator reaches a query either way; operators sent by other means (JSON bodies, bracketed form fields, a top-level `$where`) are still stripped by the input filter that runs after it.
@@ -1164,7 +1166,8 @@ First public release.
 - Progressive Web App with offline read access via IndexedDB, dark/light/system themes, keyboard shortcuts, virtualized lists and WAI-ARIA-conformant components.
 - Local CI pipeline (`npm run ci`) running eleven gates — including container builds with Trivy scanning and CodeQL — from the `pre-push` hook.
 
-[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.22.0...HEAD
+[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.23.0...HEAD
+[0.23.0]: https://github.com/Hiprax/h-vault/compare/v0.22.0...v0.23.0
 [0.22.0]: https://github.com/Hiprax/h-vault/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/Hiprax/h-vault/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/Hiprax/h-vault/compare/v0.19.0...v0.20.0

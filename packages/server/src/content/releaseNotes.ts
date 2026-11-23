@@ -2,6 +2,62 @@ import type { ReleaseNote } from '@hvault/shared';
 
 export const RELEASE_NOTES: readonly ReleaseNote[] = [
   {
+    version: '0.23.0',
+    date: '2026-11-23',
+    title: 'Mirrored QR codes, clearer control names and security updates',
+    summary:
+      'The authenticator import now reads mirror-image QR codes, controls are named with the text they show for speech input and screen readers, and the server receives security updates.',
+    highlights: [
+      {
+        icon: 'scan',
+        title: 'Mirror-image QR codes scan too',
+        body: 'The authenticator import scanner now also reads a QR code seen mirror-image, for example from a camera that flips its picture, and reads camera frames faster.',
+      },
+      {
+        icon: 'eye',
+        title: 'Controls named by the text they show',
+        body: 'Speech input and screen readers now match controls to the words on screen: the version badge in the sidebar starts with the version it shows, the copy button beside a two-factor code is named with that code, and the copy button in the authenticator import names its account.',
+      },
+      {
+        icon: 'shield',
+        title: 'Security updates for the server and its images',
+        body: 'The web image moves to nginx 1.30.7, a security release, from its maintained source, and the server updates its database library and driver to fix several published security issues. Pull the new images to apply them.',
+        audience: 'administrators',
+      },
+    ],
+    changes: [
+      {
+        kind: 'changed',
+        text: 'Formatting a Markdown, YAML or JavaScript document follows the newer release of the formatter: for example, a dollar sign in Markdown text is no longer read as math, and YAML block text keeps its trailing spaces.',
+      },
+      {
+        kind: 'changed',
+        text: 'A query or form parameter whose name has a segment starting with a dollar sign, the way database operators are written, is now ignored instead of refused. No database operator reaches a query either way.',
+        audience: 'administrators',
+      },
+      {
+        kind: 'changed',
+        text: 'The logging library escapes control characters in the one line it writes when logging a request fails.',
+        audience: 'administrators',
+      },
+      {
+        kind: 'improved',
+        text: 'A document transfer to storage that stalls is now logged as a timeout rather than an abort, and the storage client uses its newer default delays between retries, still three attempts.',
+        audience: 'administrators',
+      },
+      {
+        kind: 'changed',
+        text: 'The application images are built on a refreshed Node.js 24 base.',
+        audience: 'administrators',
+      },
+      {
+        kind: 'changed',
+        text: 'The example host web server configuration files are refreshed from the current policy. Install them on the host as before.',
+        audience: 'administrators',
+      },
+    ],
+  },
+  {
     version: '0.22.0',
     date: '2026-10-24',
     title: 'A full backup with your documents, and more phone numbers',
