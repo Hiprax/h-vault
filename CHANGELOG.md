@@ -16,7 +16,7 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 - **The web image is built on nginx 1.30.7 from the maintained `nginx/nginx-unprivileged` repository** (digest-pinned in `docker/Dockerfile`), nginx's security release of 2026-11-18 for CVE-2026-113425, CVE-2026-118899, CVE-2026-121810, CVE-2026-123007, CVE-2026-123633 and CVE-2026-123634 among others. The image's publisher moved it from `nginxinc/nginx-unprivileged` on 2026-10-20; that repository stopped at 1.30.6 and receives no further fixes. It reaches deployments with the next release image.
 - **Mongoose 9.12.1 (server)**, fixing GHSA-gg4r-jv3p-qx3c, GHSA-wr5m-5jph-8m96, GHSA-8332-j7wj-wjw4 and GHSA-6972-9mcm-vhwj (fixed in 9.11.4: connection-level `sanitizeFilter`, discriminator keys and inherited properties during hydration, `Schema.prototype.virtual()`). It brings the MongoDB driver 7.8.0; the root `mongodb` development dependency moves to the same line so one driver is installed, and the server's index builds use the driver's three-argument `createIndex` form (identical at runtime).
 - **follow-redirects 1.16.3**, fixing GHSA-mrwp-f3q8-3g9p (cross-realm `sensitiveHeaders` and custom credentials on redirects). The root `overrides` floor moves from `^1.16.1` to `^1.16.2`; the server's own outbound requests already refuse redirects.
-- **Development toolchain moved off vulnerable glob matchers**: ESLint 10.15.0 (minimatch 11, GHSA-g3hv-75wg-m249). Development-only; nothing here ships in an image.
+- **Development toolchain moved off vulnerable glob matchers**: ESLint 10.15.0 (minimatch 11, GHSA-g3hv-75wg-m249) and rimraf 6.1.4 (glob 14, GHSA-3g3m-2fjr-6pw4). Development-only; nothing here ships in an image.
 
 ## [0.22.0] - 2026-10-24
 
