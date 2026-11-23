@@ -147,7 +147,7 @@
     "lint-staged": "^17.5.1",
     "mongodb": "~7.8.0",
     "mongodb-memory-server": "^11.3.0",
-    "otpauth": "^9.5.2",
+    "otpauth": "^9.6.0",
     "prettier": "^3.9.8",
     "rimraf": "^6.1.4",
     "tsx": "^4.23.15",
