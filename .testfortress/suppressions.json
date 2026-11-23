@@ -761,6 +761,58 @@
       "created": "2026-11-23",
       "expires": "2027-02-21",
       "approvedBy": ["operator", "judge:readonly"]
+    },
+    {
+      "id": "SUP-0075",
+      "rule": "VULN-ACCEPT",
+      "kind": "vulnerability-acceptance",
+      "file": "package-lock.json",
+      "maxHits": 1,
+      "symbol": "GHSA-3g3m-2fjr-6pw4 glob@11.1.0",
+      "reason": "Dependency-upgrade run 2026-11-23 (the operator chose acceptance for advisories no released parent can fix). Moderate: an AbortSignal-cancelled glob walk keeps traversing. Only path: vite-plugin-pwa 2.0.0 (dev, build time) -> workbox-build 7.4.1, the newest release, which requires glob ^11.0.1; workbox globs the trusted local dist directory with fixed patterns and no AbortSignal, so nothing attacker-controlled reaches it. Absent from the app image (production dependencies only, --omit=dev); present but never executed in the published hvault-bootstrap image, which inherits the build stage full dev tree (docker/Dockerfile:142-156, :220) and runs only tsx scripts/create-indexes.ts. glob 14.0.2 fixes it but is a major workbox-build did not declare. Removal condition: a workbox-build (or vite-plugin-pwa) release that depends on glob >= 14.0.2. Re-check npm and OSV before any renewal.",
+      "owner": "maintainer",
+      "created": "2026-11-23",
+      "expires": "2026-12-23",
+      "approvedBy": ["operator", "judge:readonly"]
+    },
+    {
+      "id": "SUP-0076",
+      "rule": "VULN-ACCEPT",
+      "kind": "vulnerability-acceptance",
+      "file": "package-lock.json",
+      "maxHits": 1,
+      "symbol": "GHSA-3g3m-2fjr-6pw4 glob@13.0.6",
+      "reason": "Dependency-upgrade run 2026-11-23 (the operator chose acceptance). Moderate: an AbortSignal-cancelled glob walk keeps traversing. Only path: license-checker-rseidelsohn 5.0.1 (dev, the newest release, behind the licenses gate) pins @npmcli/arborist 9.6.0 EXACTLY, whose cacache, @npmcli/map-workspaces and @npmcli/package-json require glob ^13; it walks the installed tree of this repository with fixed patterns and no AbortSignal, so nothing attacker-controlled reaches it. Absent from the app image (production dependencies only, --omit=dev); present but never executed in the published hvault-bootstrap image, which inherits the build stage full dev tree (docker/Dockerfile:142-156, :220) and runs only tsx scripts/create-indexes.ts. Removal condition: a license-checker-rseidelsohn release on an arborist whose chain requires glob >= 14.0.2. Re-check npm and OSV before any renewal.",
+      "owner": "maintainer",
+      "created": "2026-11-23",
+      "expires": "2026-12-23",
+      "approvedBy": ["operator", "judge:readonly"]
+    },
+    {
+      "id": "SUP-0077",
+      "rule": "VULN-ACCEPT",
+      "kind": "vulnerability-acceptance",
+      "file": "package-lock.json",
+      "maxHits": 1,
+      "symbol": "GHSA-g3hv-75wg-m249 minimatch@10.2.6",
+      "reason": "Dependency-upgrade run 2026-11-23 (the operator chose acceptance). Moderate: globparts amplification DoS that needs an attacker-supplied pattern. Paths, all dev tooling: @typescript-eslint/typescript-estree 8.72.2 (^10.2.2; 8.73.0 and later (latest 8.74.0) move to ^11.0.1 but declare an optional @typescript/native >= 7.1.0-dev peer that the installed 7.0.2 does not satisfy, so it is held), @stryker-mutator/core 10.1.1 (~10.2.4, the newest), and the license-checker chain (@npmcli/arborist 9.6.0 pinned, @tufjs/models, ignore-walk) plus the glob 11 and 13 copies above. Every pattern comes from the configuration of this repository (ESLint files, Stryker mutate globs, package files), never from a request. Absent from the app image (production dependencies only, --omit=dev); present but never executed in the published hvault-bootstrap image, which inherits the build stage full dev tree (docker/Dockerfile:142-156, :220) and runs only tsx scripts/create-indexes.ts. ESLint and rimraf already moved to minimatch 11 in this run. Removal condition: typescript-eslint >= 8.73 adoptable, a Stryker core on minimatch >= 11.0.1, and the license-checker chain updated. Re-check npm and OSV before any renewal.",
+      "owner": "maintainer",
+      "created": "2026-11-23",
+      "expires": "2026-12-23",
+      "approvedBy": ["operator", "judge:readonly"]
+    },
+    {
+      "id": "SUP-0078",
+      "rule": "BASELINE-REDUCTION",
+      "kind": "known-gap",
+      "file": ".testfortress/baseline.json",
+      "symbol": "suppressions.count 30 -> 32, suppressions.totalHits 39 -> 41, osv.accepted 0 -> 3",
+      "maxHits": 1,
+      "reason": "Dependency-upgrade run 2026-11-23. The operator chose acceptance for the advisories that no released parent can fix, so three VULN-ACCEPT entries were added (SUP-0075 glob@11.1.0 and SUP-0076 glob@13.0.6 for GHSA-3g3m-2fjr-6pw4, SUP-0077 minimatch@10.2.6 for GHSA-g3hv-75wg-m249), each exact to one advisory and version, maxHits 1, expiring 2026-12-23. Every fixable advisory was fixed by upgrades in the same run (mongoose 9.12.1, follow-redirects 1.16.3, ESLint 10.15.0, rimraf 6.1.4), and the osv gate now reports 0 unaccepted and exactly these 3 accepted. The ledger had already shrunk to 29 counted entries covering 38 occurrences against the baseline 30 / 39 (an improvement never banked), so the three additions measure 32 entries and 41 occurrences: suppressions.count 30 -> 32 and suppressions.totalHits 39 -> 41; the 32 entries stay under policy.maxTotal 39 (which bounds entries, not occurrences), and the policy is unchanged. osv.accepted ratchets lower and --accept cannot loosen it (ratchet-check.mjs decision (g)), so it moves 0 -> 3 by this entry. No existing entry changed. Removal condition: when SUP-0075..SUP-0077 are removed under their own conditions, osv.accepted and the suppression counts ratchet back down.",
+      "owner": "maintainer",
+      "created": "2026-11-23",
+      "expires": "2027-02-21",
+      "approvedBy": ["operator", "judge:readonly"]
     }
   ]
 }

@@ -21,8 +21,8 @@
     "moderate": 0
   },
   "suppressions": {
-    "count": 30,
-    "totalHits": 39
+    "count": 32,
+    "totalHits": 41
   },
   "packages": {
     "packages/shared": {
@@ -828,7 +828,7 @@
     "unignored": 0
   },
   "osv": {
-    "accepted": 0,
+    "accepted": 3,
     "vulnerabilities": 0
   }
 }
