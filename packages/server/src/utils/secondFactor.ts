@@ -154,32 +154,36 @@ export async function verifySecondFactor(
       secret: Secret.fromBase32(secret),
     });
     // window: 1 allows ±1 time step (±30s) to tolerate minor clock drift.
-    const delta = totp.validate({ token: code, window: 1, timestamp: now.getTime() });
+    // afterCounter: a step at or before the last one accepted is a replay, already
+    // spent, and the library refuses it (otpauth 9.6+). The compare-and-set below
+    // still decides two requests racing with the same fresh code.
+    const delta = totp.validate({
+      token: code,
+      window: 1,
+      timestamp: now.getTime(),
+      afterCounter: user.lastTotpTimestamp ?? null,
+    });
     if (delta !== null) {
       const step = Math.floor(now.getTime() / 1000 / TOTP_PERIOD_SECONDS) + delta;
-      // A step at or before the last one accepted is a replay: already spent.
-      const spent = user.lastTotpTimestamp != null && step <= user.lastTotpTimestamp;
-      if (!spent) {
-        verdict = {
-          ok: true,
-          kind: 'totp',
-          casFilter: {
-            // Bound to the exact secret the code was checked against, so a
-            // disable (which removes it) or a re-enrolment (which replaces it)
-            // landing between this check and the caller's write refuses the write.
-            ...(enrolment
-              ? { twoFactorEnabled: false, pendingTwoFactorSecret: secretCiphertext }
-              : { twoFactorEnabled: true, twoFactorSecret: secretCiphertext }),
-            // The replay compare-and-set: only a step strictly after the stored one.
-            $or: [
-              { lastTotpTimestamp: { $exists: false } },
-              { lastTotpTimestamp: null },
-              { lastTotpTimestamp: { $lt: step } },
-            ],
-          },
-          casUpdate: { $set: { lastTotpTimestamp: step } },
-        };
-      }
+      verdict = {
+        ok: true,
+        kind: 'totp',
+        casFilter: {
+          // Bound to the exact secret the code was checked against, so a
+          // disable (which removes it) or a re-enrolment (which replaces it)
+          // landing between this check and the caller's write refuses the write.
+          ...(enrolment
+            ? { twoFactorEnabled: false, pendingTwoFactorSecret: secretCiphertext }
+            : { twoFactorEnabled: true, twoFactorSecret: secretCiphertext }),
+          // The replay compare-and-set: only a step strictly after the stored one.
+          $or: [
+            { lastTotpTimestamp: { $exists: false } },
+            { lastTotpTimestamp: null },
+            { lastTotpTimestamp: { $lt: step } },
+          ],
+        },
+        casUpdate: { $set: { lastTotpTimestamp: step } },
+      };
     }
   }
 
