@@ -1952,7 +1952,13 @@ describe('Docker deployment', () => {
       ) as {
         packages: Record<
           string,
-          { version?: string; link?: boolean; resolved?: string; integrity?: string }
+          {
+            version?: string;
+            link?: boolean;
+            resolved?: string;
+            integrity?: string;
+            inBundle?: boolean;
+          }
         >;
       };
 
@@ -1968,8 +1974,16 @@ describe('Docker deployment', () => {
       // assertion stopped covering them, silently, while still passing. The
       // supply-chain claim is about every downloaded tarball, so the predicate has
       // to be about every downloaded tarball too, wherever npm decided to put it.
+      //
+      // A BUNDLED dependency (`inBundle`) is not a downloaded tarball: its bytes
+      // ship inside the tarball of the package that bundles it, which `npm ci`
+      // verifies, and npm never records a hash for it. Measured: Tailwind 4.3.4
+      // made `@tailwindcss/oxide-wasm32-wasi` install on every platform, and its
+      // six bundled children appeared with no `integrity`. They are left out here
+      // and covered below, through the tarball that carries them.
       const registryPackages = Object.entries(lockfile.packages).filter(
-        ([name, entry]) => name.includes('node_modules/') && !entry.link && entry.version,
+        ([name, entry]) =>
+          name.includes('node_modules/') && !entry.link && entry.version && !entry.inBundle,
       );
       expect(registryPackages.length).toBeGreaterThan(500);
 
@@ -1979,6 +1993,24 @@ describe('Docker deployment', () => {
       expect(registryPackages.filter(([, entry]) => !entry.resolved).map(([name]) => name)).toEqual(
         [],
       );
+
+      // Every bundled entry is carried by a verified tarball: its nearest enclosing
+      // package that is not itself bundled has both a pinned URL and a hash.
+      const carrierOf = (name: string): string => {
+        let carrier = name.slice(0, name.lastIndexOf('/node_modules/'));
+        while (lockfile.packages[carrier]?.inBundle) {
+          carrier = carrier.slice(0, carrier.lastIndexOf('/node_modules/'));
+        }
+        return carrier;
+      };
+      const unverifiedCarriers = Object.entries(lockfile.packages)
+        .filter(([, entry]) => entry.inBundle)
+        .map(([name]) => carrierOf(name))
+        .filter((carrier) => {
+          const entry = lockfile.packages[carrier];
+          return !entry?.integrity || !entry.resolved;
+        });
+      expect(unverifiedCarriers).toEqual([]);
     });
 
     it('bounds nginx worker_processes to the CPU limit instead of the host core count', () => {
