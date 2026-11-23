@@ -39,8 +39,10 @@ compiler: it owns `tsc` and runs every build and `npm run type-check`. The packa
 server suites import, because TypeScript 7 ships no JavaScript API. Leave both as they are:
 `packages/server/tests/toolchain-resolution.test.ts` fails if `tsc` stops being TypeScript 7 or
 `typescript` leaves the range the linter supports. Vitest is held at 4.1.x for a similar reason:
-on Vitest 5 the mutation runner selects no test inside a `describe` block, so every mutant would
-be reported as surviving, and the same test file goes red on that upgrade.
+the mutation runner has to select each test by the name Vitest matches, and the same test file
+pins that naming. Runner 10.1 joins names with `' > '` on Vitest 5 (older runners selected no test
+inside a `describe` block there, so every mutant "survived"), but that is not yet proven on this
+repository's suites, so the test also fails on a Vitest 5 upgrade until it is revisited.
 
 Dependency install scripts have a recorded review policy: the root `package.json` `allowScripts`
 field approves each one pinned to the version that was reviewed, and denies the rest. When a

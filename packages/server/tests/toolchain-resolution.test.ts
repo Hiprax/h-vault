@@ -169,7 +169,7 @@ describe('the test toolchain', () => {
  * runner that changes how it builds them.
  */
 describe('the mutation runner and Vitest agree on test names', () => {
-  it('selects a nested test by the name the Stryker runner builds for it, and nothing else', () => {
+  it('selects a nested test by the name the Stryker runner builds for it, and nothing else', async () => {
     const runnerDir = path.dirname(
       requireFromRoot.resolve('@stryker-mutator/vitest-runner/package.json'),
     );
@@ -190,7 +190,29 @@ describe('the mutation runner and Vitest agree on test names', () => {
       expect(match, `collectTestName not found in ${file}`).not.toBeNull();
       return (match as RegExpExecArray)[0].replace(/\s+/g, ' ');
     };
-    expect(functionSource('stryker-setup.js')).toBe(functionSource('test-helpers.js'));
+    // Since runner 10.1 the separator is a parameter: the sandbox copy is handed the
+    // one the runner filters with (`inject('testNameSeparator')`), while the exported
+    // twin defaults to the legacy one. That default, and only that, may differ.
+    const LEGACY_DEFAULT = ' = VITEST_LEGACY_TEST_NAME_SEPARATOR';
+    const exported = functionSource('test-helpers.js');
+    expect(exported).toContain(`separator${LEGACY_DEFAULT})`);
+    expect(functionSource('stryker-setup.js')).toBe(exported.replace(LEGACY_DEFAULT, ''));
+
+    // The runner joins with ' ' below Vitest 5 and with ' > ' from 5 on
+    // (`#testNameSeparator` in vitest-test-runner.js). The fixture records names with
+    // the exported default, which is the runner's choice only while Vitest is held
+    // below 5: lifting the hold must revisit this test, so it says so.
+    const helpers = (await import(collectTestNameUrl.href)) as {
+      VITEST_LEGACY_TEST_NAME_SEPARATOR: string;
+      VITEST_MODERN_TEST_NAME_SEPARATOR: string;
+    };
+    expect(helpers.VITEST_LEGACY_TEST_NAME_SEPARATOR).toBe(' ');
+    expect(helpers.VITEST_MODERN_TEST_NAME_SEPARATOR).toBe(' > ');
+    const vitestVersion = (requireFromRoot('vitest/package.json') as { version: string }).version;
+    expect(
+      majorOf(vitestVersion),
+      'Vitest 5 makes the runner filter with the " > " separator: record names with it here',
+    ).toBeLessThan(5);
 
     const root = createTestTempDir('hv-runner-names-');
     mkdirSync(path.join(root, 't'));
@@ -251,7 +273,13 @@ describe('the mutation runner and Vitest agree on test names', () => {
     const { escapeRegExp } = fromRunner('@stryker-mutator/util') as {
       escapeRegExp: (input: string) => string;
     };
-    const filtered = runVitest(['--testNamePattern', escapeRegExp(runnerName as string)]);
+    // The runner's own pattern since 10.1: names joined by `|`, end-anchored and
+    // allowing the trailing whitespace a full name keeps (vitest-test-runner.js
+    // `run`), so "calc add" no longer also selects "calc add negative".
+    const filtered = runVitest([
+      '--testNamePattern',
+      `(?:${escapeRegExp(runnerName as string)})\\s*$`,
+    ]);
     expect(
       filtered.ran.map((entry) => entry.test),
       'The Stryker vitest-runner builds test names this Vitest does not match, so every ' +
