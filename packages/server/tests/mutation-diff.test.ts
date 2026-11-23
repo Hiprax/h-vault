@@ -619,9 +619,23 @@ describe('the Stryker configuration, in both modes', () => {
 });
 
 describe('the diff base, against real repositories', () => {
+  // The machine's own git configuration is out of reach of every call here.
+  // GIT_CONFIG_GLOBAL and GIT_CONFIG_NOSYSTEM hide ~/.gitconfig,
+  // $XDG_CONFIG_HOME/git/config and the system file; dropping every inherited
+  // GIT_* variable removes the `git -c` settings a parent git passes down
+  // (GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT) and the location variables a hook
+  // exports (GIT_DIR, GIT_INDEX_FILE), which would aim these commands at the
+  // real repository. Opting out one key at a time is what let a global
+  // `tag.gpgSign` through after `commit.gpgSign` had been handled.
+  const hermeticEnv: NodeJS.ProcessEnv = {
+    ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_'))),
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_NOSYSTEM: '1',
+  };
   const run = (cwd: string, ...args: string[]): string =>
     execFileSync('git', args, {
       cwd,
+      env: hermeticEnv,
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'ignore'],
     }).trim();
@@ -640,7 +654,14 @@ describe('the diff base, against real repositories', () => {
     run(dir, 'init', '-q', '-b', 'main');
     run(dir, 'config', 'user.email', 'test@localhost');
     run(dir, 'config', 'user.name', 'test');
-    run(dir, 'config', 'commit.gpgsign', 'false');
+    // The isolation, asserted rather than assumed: every setting git sees here is
+    // one this fixture wrote. A machine's global `tag.gpgSign` once failed
+    // `git tag` below, and its `init.defaultBranch`, hooks or templates would
+    // change these repositories from one machine to the next.
+    const scopes = run(dir, 'config', '--list', '--show-scope')
+      .split('\n')
+      .map((line) => line.split('\t')[0]);
+    expect(new Set(scopes)).toEqual(new Set(['local']));
     return dir;
   }
   const commit = (dir: string, file: string, text: string): string => {
