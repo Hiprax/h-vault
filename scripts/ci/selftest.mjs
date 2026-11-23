@@ -60,6 +60,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, sep } from 'node:path';
+import { gitConfigScopes, hermeticGitEnv } from './lib/hermetic-git.mjs';
 import { hasExe } from './lib/proc.mjs';
 import { DEFECTS } from './lib/selftest-defects.mjs';
 
@@ -94,6 +95,16 @@ const fatal = (msg) => {
 };
 
 const posix = (p) => p.split(sep).join('/');
+
+/**
+ * The environment for git in the WORKSPACE copy, and for every gate run there
+ * (several run git themselves: secret-scan, gitleaks, coverage, mutation-diff).
+ * The machine's own git configuration and every inherited `GIT_*` variable are
+ * kept out of it; `lib/hermetic-git.mjs` says what that hides and why. The
+ * enumeration of the REAL checkout below keeps the developer's environment on
+ * purpose: it must list what the real gates see.
+ */
+const GIT_ENV = hermeticGitEnv();
 
 // ---------------------------------------------------------------------------
 // prerequisites a case needs from the world
@@ -313,7 +324,7 @@ function prepareWorkspace() {
   // a planted file is a CHANGE rather than the entire world. The other cases are
   // unaffected — they were already comparing nothing — and `buryInHistory` still
   // works, its two commits now simply having a parent.
-  const git = (args) => execFileSync('git', args, { cwd: dir, stdio: 'ignore' });
+  const git = (args) => execFileSync('git', args, { cwd: dir, env: GIT_ENV, stdio: 'ignore' });
   const asSelftest = (...args) => [
     '-c',
     'user.email=selftest@localhost',
@@ -322,6 +333,18 @@ function prepareWorkspace() {
     ...args,
   ];
   git(['init', '-q', '-b', 'main']);
+  // Asserted, not assumed: a copy whose git reads the machine's configuration
+  // signs (or fails to sign) its commits, rewrites line endings on `add` and
+  // hides files from the gates' `git ls-files`, so a case's verdict would depend
+  // on whose machine ran it.
+  const foreign = [...new Set(gitConfigScopes(dir, GIT_ENV))].filter((scope) => scope !== 'local');
+  if (foreign.length > 0) {
+    rmSync(dir, { recursive: true, force: true });
+    fatal(
+      `the workspace's git reads configuration it did not write (${foreign.join(', ')} scope); ` +
+        'its git must run under hermeticGitEnv() from lib/hermetic-git.mjs',
+    );
+  }
   git(asSelftest('add', '-A'));
   git(asSelftest('commit', '-q', '-m', 'selftest: baseline'));
   mkdirSync(join(dir, '.testfortress', 'reports'), { recursive: true });
@@ -425,7 +448,7 @@ for (const task of selected) {
   // fail" about a gate that is working exactly as designed. Staging makes the
   // planted defect what it claims to be: a change about to be committed.
   try {
-    execFileSync('git', ['add', '-A'], { cwd: workspace, stdio: 'ignore' });
+    execFileSync('git', ['add', '-A'], { cwd: workspace, env: GIT_ENV, stdio: 'ignore' });
   } catch {
     /* a gate that does not read the index does not care */
   }
@@ -455,7 +478,7 @@ for (const task of selected) {
           '-m',
           message,
         ],
-        { cwd: workspace, stdio: 'ignore' },
+        { cwd: workspace, env: GIT_ENV, stdio: 'ignore' },
       );
     };
     try {
@@ -463,7 +486,7 @@ for (const task of selected) {
       for (const rel of Object.keys(defect.create ?? {})) {
         rmSync(join(workspace, rel), { force: true });
       }
-      execFileSync('git', ['add', '-A'], { cwd: workspace, stdio: 'ignore' });
+      execFileSync('git', ['add', '-A'], { cwd: workspace, env: GIT_ENV, stdio: 'ignore' });
       commit('selftest: remove the planted file');
     } catch (error) {
       results.push({
@@ -482,7 +505,7 @@ for (const task of selected) {
     cwd: workspace,
     shell: true,
     encoding: 'utf8',
-    env: { ...process.env, ...(manifest.env ?? {}), FORCE_COLOR: '0' },
+    env: { ...GIT_ENV, ...(manifest.env ?? {}), FORCE_COLOR: '0' },
     maxBuffer: 64 << 20,
     // Optional, and declared per case rather than globally. One gate needs it:
     // `test:mutation` fails its planted defect in a PRE-FLIGHT that costs
@@ -507,7 +530,7 @@ for (const task of selected) {
   }
   for (const rel of created) rmSync(join(workspace, rel), { force: true });
   try {
-    execFileSync('git', ['add', '-A'], { cwd: workspace, stdio: 'ignore' });
+    execFileSync('git', ['add', '-A'], { cwd: workspace, env: GIT_ENV, stdio: 'ignore' });
   } catch {
     /* the working tree is restored either way; the index only mirrors it */
   }
