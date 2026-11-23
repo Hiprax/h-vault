@@ -606,7 +606,7 @@ export const secretDataSchema = z.object({
     .max(100)
     .refine(
       (val) =>
-        // eslint-disable-next-line security/detect-unsafe-regex -- anchored ISO 8601 regex on bounded input (max 100 chars)
+        // eslint-disable-next-line security/detect-unsafe-regex -- anchored ISO 8601 regex whose backtracking is linear (one unbounded \d+); not bounded by .max(100), since zod 4 runs refines past a failed check
         /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})?)?$/.test(val),
       { message: 'expiresAt must be a valid ISO 8601 date or datetime string' },
     )
