@@ -109,7 +109,7 @@ export const CHROMIUM_PROJECT = {
  * `test:a11y` already is one — so it is a constraint on the shape rather than a
  * proof. The two reasons are proportionality and cost: standing the whole stack up
  * a second time (a bring-up this config budgets 420 s for) to re-run two of
- * thirty specs on another engine buys nothing, and a new gate id obliges a
+ * thirty-one specs on another engine buys nothing, and a new gate id obliges a
  * `verify:selftest` defect case, a README gate-table row checked in both
  * directions, and a `gate-surface.test.ts` entry — machinery for a leg that is
  * already attributable without any of it.

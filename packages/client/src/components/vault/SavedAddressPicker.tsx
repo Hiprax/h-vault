@@ -24,11 +24,11 @@ import { matchesSearchQuery } from '../../lib/address';
  *
  * Both mount sites of the item form put it inside a scroll container — the
  * create dialog's overlay is `fixed inset-0 overflow-y-auto` and the item page
- * scrolls the document — and neither gives the form a fixed height. An
- * absolutely-positioned list would be clipped by that overlay exactly when the
- * card form is long enough to matter, which is always. A panel that expands in
- * flow cannot be clipped, needs no portal, no positioning maths and no resize
- * observer, and is what makes this behave identically on a phone.
+ * scrolls inside the app shell's `<main>` — and neither gives the form a fixed
+ * height. An absolutely-positioned list would be clipped by that overlay
+ * exactly when the card form is long enough to matter, which is always. A panel
+ * that expands in flow cannot be clipped, needs no portal, no positioning maths
+ * and no resize observer, and is what makes this behave identically on a phone.
  *
  * ## Escape must not escape
  *
@@ -390,7 +390,10 @@ export function SavedAddressPicker({
             // means a press on a row cannot disturb the caret in the field the
             // user is still typing into.
             onMouseDown={(event) => event.preventDefault()}
-            className="max-h-64 space-y-0.5 overflow-y-auto p-1"
+            // `relative`: the list scrolls, so it is the containing block of the
+            // `sr-only` "Currently applied" mark inside it. Otherwise the mark
+            // escapes the list and lengthens whatever scrolls around the form.
+            className="relative max-h-64 space-y-0.5 overflow-y-auto p-1"
           >
             {visible.map((option, index) => {
               const isActive = index === activeIndex;

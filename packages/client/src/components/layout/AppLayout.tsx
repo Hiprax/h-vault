@@ -689,8 +689,19 @@ export function AppLayout() {
         {/* The newer-release notice, and "What's new" (a portal) */}
         <ReleaseNotesHost />
 
-        {/* Page content */}
-        <main className="flex-1 overflow-y-auto p-4 lg:p-6">
+        {/* Page content — the shell's ONE scroller, and `relative` so that it is
+            also the containing block of every absolutely positioned element
+            inside it. Without that, an element with no positioned ancestor (every
+            `sr-only` label and live region is `position: absolute`) resolved
+            against the viewport: it escaped this scroller and the
+            `overflow-hidden` shell and extended the DOCUMENT, which then scrolled
+            under the shell as a second scrollbar, sliding the whole layout up
+            past the end of a long page. Never add `z-index`, `transform`,
+            `filter`, `contain` or `will-change` here: each would trap the `fixed`
+            overlays rendered inside it (the document full screen, the create
+            dialog, the folder dialogs). `e2e/app-shell-scroll.spec.ts` pins this
+            on every signed-in page. */}
+        <main className="relative flex-1 overflow-y-auto p-4 lg:p-6">
           <Outlet />
         </main>
 

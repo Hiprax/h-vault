@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "recordedAt": "2026-10-24",
-  "commit": "a59047b",
+  "recordedAt": "2026-11-25",
+  "commit": "beda891",
   "tests": {
-    "count": 15104
+    "count": 15124
   },
   "coverage": {
     "diff": 100
@@ -52,7 +52,7 @@
         ]
       },
       "tests": {
-        "count": 1626
+        "count": 1627
       }
     },
     "packages/server": {
@@ -195,7 +195,7 @@
         ]
       },
       "tests": {
-        "count": 6210
+        "count": 6226
       }
     },
     "packages/client": {
@@ -203,8 +203,8 @@
         "line": 99.49,
         "branch": 95.3,
         "function": 99.19,
-        "linesTotal": 13895,
-        "branchesTotal": 10270,
+        "linesTotal": 13896,
+        "branchesTotal": 10268,
         "filesMeasured": [
           "src/App.tsx",
           "src/components/auth/ForgotPasswordPage.tsx",
@@ -479,7 +479,7 @@
     },
     "e2e": {
       "tests": {
-        "count": 254
+        "count": 257
       }
     }
   },
@@ -713,7 +713,7 @@
       "spectral": 1
     }
   },
-  "reason": "0.22.0 release run (npm run ci, 33/33 green on 2026-10-24): full backup, document upload Cancel and identity phones add tests, a11y view backup-full-backup (41 views), coverage over the new files, fewer clones and suppressions, and the VULN-ACCEPT entry retired by the dependency updates",
+  "reason": "App-shell scroll fix (0.23.1): bank the measured improvements of a fully green run on this tree - three new e2e tests (app-shell-scroll.spec.ts, 254 -> 257), client linesTotal 13895 -> 13896 (the railToggleLabel line), and the test counts earlier commits left unbanked (total 15104 -> 15124, server 6210 -> 6226, shared 1626 -> 1627).",
   "bundle": {
     "budgetKb": {
       "VaultItemForm": 230,

@@ -9,10 +9,11 @@ interface RailLayoutProps {
    */
   rail: (close: () => void) => ReactNode;
   /**
-   * The bar above the pane — the search field, and on the documents route the
-   * trash controls beside it. When absent the bar still renders on small screens
-   * because it carries the drawer trigger, but it is hidden on desktop rather
-   * than left as an empty bordered strip.
+   * What the bar above the pane holds after the rail's own control — the search
+   * field, and on the documents route the trash controls beside it. The bar is
+   * drawn at every width with or without it, because it always carries the
+   * rail's control: the collapse toggle on a large screen, the drawer trigger on
+   * a small one.
    */
   toolbar?: ReactNode;
   children: ReactNode;
@@ -30,19 +31,12 @@ export function RailLayout({ rail, toolbar, children }: RailLayoutProps) {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const closeMobileSidebar = (): void => setMobileSidebarOpen(false);
+  // One string for the toggle's accessible name and its tooltip, so the two
+  // cannot drift apart.
+  const railToggleLabel = sidebarOpen ? 'Close sidebar' : 'Open sidebar';
 
   return (
     <div className="flex h-full -m-4 lg:-m-6">
-      {/* Desktop sidebar toggle */}
-      <button
-        type="button"
-        onClick={() => setSidebarOpen((p) => !p)}
-        className="absolute left-2 top-2 z-10 hidden rounded-md p-1.5 text-[hsl(var(--muted-foreground))] hover:bg-[hsl(var(--accent))] hover:text-[hsl(var(--foreground))] lg:block"
-        aria-label={sidebarOpen ? 'Close sidebar' : 'Open sidebar'}
-      >
-        {sidebarOpen ? <PanelLeftClose className="h-4 w-4" /> : <PanelLeft className="h-4 w-4" />}
-      </button>
-
       {/* Mobile sidebar overlay */}
       {mobileSidebarOpen && (
         <button
@@ -83,13 +77,27 @@ export function RailLayout({ rail, toolbar, children }: RailLayoutProps) {
 
       {/* Main content */}
       <div className="flex flex-1 flex-col overflow-hidden">
-        {/* Top bar */}
-        <div
-          className={cn(
-            'flex items-center gap-3 border-b border-[hsl(var(--border))] p-4',
-            toolbar === undefined && 'lg:hidden',
-          )}
-        >
+        {/* Top bar — drawn at every width, because its first slot always holds
+            the rail's control. */}
+        <div className="flex items-center gap-3 border-b border-[hsl(var(--border))] p-4">
+          {/* Desktop rail toggle, IN the bar's flow. It used to be `absolute`
+              with no positioned ancestor, so it resolved against the viewport
+              and sat hidden under the application sidebar: never visible and
+              never clickable on a large screen, yet still a tab stop. */}
+          <button
+            type="button"
+            onClick={() => setSidebarOpen((p) => !p)}
+            className="hidden cursor-pointer rounded-md p-2 text-[hsl(var(--muted-foreground))] hover:bg-[hsl(var(--accent))] hover:text-[hsl(var(--foreground))] lg:inline-flex"
+            aria-label={railToggleLabel}
+            title={railToggleLabel}
+          >
+            {sidebarOpen ? (
+              <PanelLeftClose className="h-4 w-4" />
+            ) : (
+              <PanelLeft className="h-4 w-4" />
+            )}
+          </button>
+
           {/* Mobile sidebar trigger */}
           <button
             type="button"
@@ -102,7 +110,11 @@ export function RailLayout({ rail, toolbar, children }: RailLayoutProps) {
           {toolbar}
         </div>
 
-        <div className="flex-1 overflow-y-auto p-4 lg:p-6">{children}</div>
+        {/* The pane is the scroller on `/vault` and `/documents`, and
+            `relative` so that it is also the containing block of the absolutely
+            positioned elements inside it (the lists' `sr-only` live regions):
+            otherwise they escape it and lengthen `<main>` or the document. */}
+        <div className="relative flex-1 overflow-y-auto p-4 lg:p-6">{children}</div>
       </div>
     </div>
   );

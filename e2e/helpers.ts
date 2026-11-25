@@ -3,6 +3,7 @@ import {
   type BrowserContext,
   type Frame,
   type FrameLocator,
+  type Locator,
   type Page,
   type APIRequestContext,
   expect,
@@ -58,7 +59,7 @@ export const PBKDF2_STEP_TIMEOUT_MS = 90_000;
  * contended machine, which is the class the constants in this file exist to
  * prevent.
  */
-const LAZY_ROUTE_TIMEOUT_MS = 60_000;
+export const LAZY_ROUTE_TIMEOUT_MS = 60_000;
 
 /**
  * Floor for the enclosing test's own timeout when a helper performs derivations.
@@ -1147,6 +1148,56 @@ export async function disableSaveFilePicker(page: Page): Promise<void> {
     // had it. Assigning `undefined` reproduces a browser that has it and broke.
     delete (window as unknown as Record<string, unknown>)['showSaveFilePicker'];
   });
+}
+
+/**
+ * Returns to Settings through the sub-page's own back control.
+ *
+ * Never `page.goto('/settings')`: that is a full document load, the vault key
+ * lives only in memory, and the walk would land on the unlock screen with the
+ * rest of the authenticated list still to scan.
+ */
+export async function backToSettings(page: Page): Promise<void> {
+  await page.getByRole('button', { name: 'Back to settings' }).click();
+  await expect(page).toHaveURL(/\/settings$/);
+  await expect(page.getByRole('heading', { name: /^settings$/i })).toBeVisible({
+    timeout: 60_000,
+  });
+}
+
+/** Back to the vault list via the sidebar (SPA navigation keeps the vault open). */
+export async function gotoVault(page: Page): Promise<void> {
+  await page.getByRole('link', { name: 'Vault', exact: true }).click();
+  await expect(page).toHaveURL(/\/vault$/);
+}
+
+/**
+ * Opens the create dialog.
+ *
+ * The alternation is `address-fields.spec.ts`'s: an empty vault renders only the
+ * empty state's button, and once items exist the floating one is mounted too.
+ */
+export async function openCreateDialog(page: Page): Promise<Locator> {
+  await page
+    .getByRole('button', { name: /^create (new )?item$/i })
+    .first()
+    .click();
+  const dialog = page.getByRole('dialog', { name: /create new vault item/i });
+  await expect(dialog).toBeVisible();
+  return dialog;
+}
+
+/** An identity with a postal address — the fixture the saved-address picker needs. */
+export async function createIdentityWithAddress(page: Page): Promise<void> {
+  const dialog = await openCreateDialog(page);
+  await dialog.getByRole('tab', { name: 'Identity' }).click();
+  await dialog.getByPlaceholder('Item name').fill('Home address');
+  await dialog.getByPlaceholder('First name').fill('Ada');
+  await dialog.getByPlaceholder('Last name').fill('Lovelace');
+  await dialog.locator('#field-street').fill('1 Main St');
+  await dialog.locator('#field-city').fill('London');
+  await dialog.getByRole('button', { name: 'Create' }).click();
+  await expect(dialog).toBeHidden();
 }
 
 /**

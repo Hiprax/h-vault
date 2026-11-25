@@ -1,10 +1,14 @@
 import { test, expect, type Page } from '@playwright/test';
 import {
+  backToSettings,
+  createIdentityWithAddress,
   describeA11y,
   disableSaveFilePicker,
   documentFixture,
   documentFixtureBytes,
   gotoDocuments,
+  gotoVault,
+  openCreateDialog,
   openDocument,
   registerAndSignInViaUI,
   renderInSandboxDirectly,
@@ -879,56 +883,6 @@ async function seedAuditHistory(email: string): Promise<void> {
     timestamp: new Date(now - index * 60_000),
   }));
   await db.collection('audit_logs').insertMany(rows);
-}
-
-/**
- * Returns to Settings through the sub-page's own back control.
- *
- * Never `page.goto('/settings')`: that is a full document load, the vault key
- * lives only in memory, and the walk would land on the unlock screen with the
- * rest of the authenticated list still to scan.
- */
-async function backToSettings(page: Page): Promise<void> {
-  await page.getByRole('button', { name: 'Back to settings' }).click();
-  await expect(page).toHaveURL(/\/settings$/);
-  await expect(page.getByRole('heading', { name: /^settings$/i })).toBeVisible({
-    timeout: 60_000,
-  });
-}
-
-/** Back to the vault list via the sidebar (SPA navigation keeps the vault open). */
-async function gotoVault(page: Page): Promise<void> {
-  await page.getByRole('link', { name: 'Vault', exact: true }).click();
-  await expect(page).toHaveURL(/\/vault$/);
-}
-
-/**
- * Opens the create dialog.
- *
- * The alternation is `address-fields.spec.ts`'s: an empty vault renders only the
- * empty state's button, and once items exist the floating one is mounted too.
- */
-async function openCreateDialog(page: Page) {
-  await page
-    .getByRole('button', { name: /^create (new )?item$/i })
-    .first()
-    .click();
-  const dialog = page.getByRole('dialog', { name: /create new vault item/i });
-  await expect(dialog).toBeVisible();
-  return dialog;
-}
-
-/** An identity with a postal address — the fixture the saved-address picker needs. */
-async function createIdentityWithAddress(page: Page): Promise<void> {
-  const dialog = await openCreateDialog(page);
-  await dialog.getByRole('tab', { name: 'Identity' }).click();
-  await dialog.getByPlaceholder('Item name').fill('Home address');
-  await dialog.getByPlaceholder('First name').fill('Ada');
-  await dialog.getByPlaceholder('Last name').fill('Lovelace');
-  await dialog.locator('#field-street').fill('1 Main St');
-  await dialog.locator('#field-city').fill('London');
-  await dialog.getByRole('button', { name: 'Create' }).click();
-  await expect(dialog).toBeHidden();
 }
 
 /** A login item, so the list, the detail view and the health checks have content. */

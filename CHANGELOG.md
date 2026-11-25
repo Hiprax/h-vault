@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+### Fixed
+
+- **A screen-reader-only label low on a page no longer makes the browser window scrollable underneath the app**, which showed a second scrollbar and, once a page was scrolled to its end, slid the sidebar and the page up over an empty band that stayed until the page was scrolled back to its top. Backup Settings was the worst case (685 px at 1280×720 for an account without backup encryption), and Documents could scroll a few pixels the same way. The page area, the Vault and Documents list pane and the saved-address list now contain what they hold, so only the page scrolls.
+- **The folder panel's show/hide button on Vault and Documents now appears on a wide screen**, in the toolbar beside the search field, with a tooltip. It had always been placed against the browser window, hidden under the app sidebar, where it could not be seen or clicked but still took keyboard focus.
+
 ## [0.23.0] - 2026-11-23
 
 ### Changed
