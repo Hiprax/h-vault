@@ -2,6 +2,26 @@ import type { ReleaseNote } from '@hvault/shared';
 
 export const RELEASE_NOTES: readonly ReleaseNote[] = [
   {
+    version: '0.23.1',
+    date: '2026-11-25',
+    title: 'Steadier scrolling and a folder panel button you can reach',
+    summary:
+      'Scrolling past the end of a long page such as Backup Settings no longer slides the sidebar and the page up over an empty space, and the button that hides the folder panel on Vault and Documents now shows on a wide screen.',
+    highlights: [
+      {
+        icon: 'wrench',
+        title: 'Scrolling stays inside the page',
+        body: 'On long pages such as Backup Settings, scrolling past the end no longer slides the sidebar and the page up over an empty space, and only one scrollbar shows.',
+      },
+    ],
+    changes: [
+      {
+        kind: 'fixed',
+        text: 'On Vault and Documents, the button that hides and shows the folder panel on a wide screen now sits in the toolbar beside the search field, with a tooltip. Before, it was hidden under the sidebar.',
+      },
+    ],
+  },
+  {
     version: '0.23.0',
     date: '2026-11-23',
     title: 'Mirrored QR codes, clearer control names and security updates',

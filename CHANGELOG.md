@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+## [0.23.1] - 2026-11-25
+
 ### Fixed
 
 - **A screen-reader-only label low on a page no longer makes the browser window scrollable underneath the app**, which showed a second scrollbar and, once a page was scrolled to its end, slid the sidebar and the page up over an empty band that stayed until the page was scrolled back to its top. Backup Settings was the worst case (685 px at 1280×720 for an account without backup encryption), and Documents could scroll a few pixels the same way. The page area, the Vault and Documents list pane and the saved-address list now contain what they hold, so only the page scrolls.
@@ -1171,7 +1173,8 @@ First public release.
 - Progressive Web App with offline read access via IndexedDB, dark/light/system themes, keyboard shortcuts, virtualized lists and WAI-ARIA-conformant components.
 - Local CI pipeline (`npm run ci`) running eleven gates — including container builds with Trivy scanning and CodeQL — from the `pre-push` hook.
 
-[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.23.0...HEAD
+[Unreleased]: https://github.com/Hiprax/h-vault/compare/v0.23.1...HEAD
+[0.23.1]: https://github.com/Hiprax/h-vault/compare/v0.23.0...v0.23.1
 [0.23.0]: https://github.com/Hiprax/h-vault/compare/v0.22.0...v0.23.0
 [0.22.0]: https://github.com/Hiprax/h-vault/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/Hiprax/h-vault/compare/v0.20.0...v0.21.0
